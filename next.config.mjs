@@ -25,9 +25,7 @@ const nextConfig = {
     root: tracingRoot
   },
   outputFileTracingRoot: tracingRoot,
-  outputFileTracingExcludes: {
-    "*": ["./gitbook/**/*"]
-  },
+  outputFileTracingExcludes: {},
   images: {
     unoptimized: true
   },
