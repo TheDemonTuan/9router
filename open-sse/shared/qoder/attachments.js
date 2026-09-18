@@ -13,7 +13,7 @@
  */
 
 import { createHash } from "crypto";
-import { v4 as uuidv4 } from "uuid";
+import { randomUUID } from "node:crypto";
 
 import { proxyAwareFetch } from "../../utils/proxyFetch.js";
 import { parseDataUri } from "../../translator/concerns/image.js";
@@ -83,7 +83,7 @@ function extractUrlFromUploadResponse(json) {
 }
 
 async function defaultUploadImage({ buffer, mediaType, credentials, proxyOptions, signal }) {
-  const requestId = uuidv4();
+  const requestId = randomUUID();
   const url = `${qoderInferenceBase(credentials)}${`/algo${QODER_IMAGE_UPLOAD_SIG_PATH}`}?request_id=${requestId}`;
   const { boundary, body } = buildMultipartFile(buffer, {
     fileName: `image.${mimeExt(mediaType)}`,

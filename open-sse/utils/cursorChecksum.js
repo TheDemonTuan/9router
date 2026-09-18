@@ -6,7 +6,8 @@
  */
 
 import crypto from "crypto";
-import { v5 as uuidv5 } from "uuid";
+
+const DNS_NAMESPACE_BYTES = Buffer.from("6ba7b8109dad11d180b400c04fd430c8", "hex");
 
 /**
  * Generate SHA-256 hash like generateHashed64Hex
@@ -24,7 +25,11 @@ export function generateHashed64Hex(input, salt = "") {
  * @returns {string} - UUID string
  */
 export function generateSessionId(authToken) {
-  return uuidv5(authToken, uuidv5.DNS);
+  const hash = crypto.createHash("sha1").update(DNS_NAMESPACE_BYTES).update(authToken).digest();
+  hash[6] = (hash[6] & 0x0f) | 0x50;
+  hash[8] = (hash[8] & 0x3f) | 0x80;
+  const hex = hash.toString("hex", 0, 16);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 
 /**

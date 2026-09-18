@@ -220,12 +220,22 @@ if [[ "$cmd" == "--rollback" ]]; then
   exit 0
 fi
 
+if [[ "$cmd" == "--setup-host" ]]; then
+  configure_docker_concurrency
+  exit 0
+fi
+
+if [[ "$cmd" == "--diagnostics" ]]; then
+  run_diagnostics
+  exit 0
+fi
+
 IMAGE_REF="${1:-}"
 if [[ -z "$IMAGE_REF" ]]; then
   if [[ -f "$DEPLOYED_IMAGE_FILE" ]]; then
     IMAGE_REF="$(cat "$DEPLOYED_IMAGE_FILE")"
   else
-    die "Usage: $0 <IMAGE_REF> | --rollback | --status"
+    die "Usage: $0 <IMAGE_REF> | --rollback | --status | --setup-host | --diagnostics"
   fi
 fi
 export IMAGE_REF
@@ -340,32 +350,40 @@ configure_docker_concurrency() {
   fi
 }
 
+PULL_TIMEOUT="${PULL_TIMEOUT:-300}"
+PULL_ATTEMPTS="${PULL_ATTEMPTS:-2}"
+
 pull_image() {
   if docker image inspect "$IMAGE_REF" >/dev/null 2>&1; then
     log "Image already cached locally: $IMAGE_REF"
     return 0
   fi
 
-  for attempt in 1 2 3; do
-    log "Pull attempt $attempt/3 for $IMAGE_REF..."
-    local start_ts
+  local attempt rc start_ts duration
+  for ((attempt=1; attempt<=PULL_ATTEMPTS; attempt++)); do
+    log "Pull attempt $attempt/$PULL_ATTEMPTS for $IMAGE_REF..."
     start_ts="$(date +%s)"
-    if timeout 300 docker pull "$IMAGE_REF"; then
-      local duration=$(( $(date +%s) - start_ts ))
+    if timeout "$PULL_TIMEOUT" docker pull "$IMAGE_REF"; then
+      duration=$(( $(date +%s) - start_ts ))
       log "Pull completed in ${duration}s"
-      docker pull "$IMAGE_REF" 2>/dev/null || true
       return 0
+    else
+      rc=$?
     fi
-    sleep $((attempt * 5))
+
+    if [[ "$rc" -eq 124 ]]; then
+      log "Pull attempt $attempt timed out after ${PULL_TIMEOUT}s"
+    else
+      log "Pull attempt $attempt failed with exit code $rc"
+    fi
+    (( attempt < PULL_ATTEMPTS )) && sleep $((attempt * 5))
   done
 
-  die "Unable to pull image after 3 attempts: $IMAGE_REF"
+  die "Unable to pull image: $IMAGE_REF"
 }
 
 # Pull and start target slot
 export IMAGE_REF
-run_diagnostics
-configure_docker_concurrency
 pull_image
 
 log "Starting target container: 9router-$TARGET_SLOT"

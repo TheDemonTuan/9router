@@ -6,10 +6,11 @@ import { getRefreshLeadMs } from "open-sse/services/tokenRefresh.js";
 import { getCredentialExpiryMs } from "open-sse/services/oauthCredentialManager.js";
 import crypto from "node:crypto";
 
-const INSTANCE_ID =
-  process.env.HOSTNAME ||
-  process.env.INSTANCE_ID ||
-  `inst-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
+const INSTANCE_ID = [
+  process.env.HOSTNAME || "9router",
+  process.pid,
+  crypto.randomUUID(),
+].join(":");
 const LEASE_NAME = "background_token_refresh";
 const LEASE_TTL_MS = 60_000;
 

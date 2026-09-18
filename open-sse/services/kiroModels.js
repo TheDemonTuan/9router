@@ -19,7 +19,7 @@
  * "format of value 'os/win/10 lang/js ...' is invalid").
  */
 
-import { v4 as uuidv4 } from "uuid";
+import { randomUUID } from "node:crypto";
 import { createHash } from "crypto";
 import { refreshKiroToken } from "./tokenRefresh.js";
 
@@ -87,7 +87,7 @@ function buildKiroFingerprintHeaders(credentials) {
     "x-amzn-kiro-agent-mode": "vibe",
     "x-amzn-codewhisperer-optout": "true",
     "amz-sdk-request": "attempt=1; max=1",
-    "amz-sdk-invocation-id": uuidv4(),
+    "amz-sdk-invocation-id": randomUUID(),
     "Accept": "application/json"
   };
 }

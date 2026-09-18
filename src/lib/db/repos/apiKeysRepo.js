@@ -1,4 +1,4 @@
-import { v4 as uuidv4 } from "uuid";
+import { randomUUID } from "node:crypto";
 import { getAdapter } from "../driver.js";
 
 function rowToKey(row) {
@@ -31,7 +31,7 @@ export async function createApiKey(name, machineId) {
   const { generateApiKeyWithMachine } = await import("@/shared/utils/apiKey");
   const result = generateApiKeyWithMachine(machineId);
   const apiKey = {
-    id: uuidv4(),
+    id: randomUUID(),
     name,
     key: result.key,
     machineId,

@@ -21,6 +21,7 @@ permissions:
 jobs:
   build:
     name: Build & Push Native Image
+    timeout-minutes: 10
     runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
     outputs:
       image_ref: ${{ steps.meta.outputs.image_ref }}
@@ -58,7 +59,7 @@ jobs:
             ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
             ${{ steps.meta.outputs.image }}:latest
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min,ignore-error=true
           platforms: ${{ vars.DEPLOY_PLATFORM || 'linux/arm64' }}
           provenance: false
           sbom: false
@@ -93,8 +94,54 @@ jobs:
             "\(.digest)  \(((.size / 1024 / 1024) * 100 | floor) / 100) MiB"
           ' /tmp/image-manifest.json
 
+      - name: Runtime smoke test image
+        env:
+          IMAGE_REF: ${{ steps.meta.outputs.image_ref }}
+        run: |
+          set -euo pipefail
+          echo "Pulling freshly built image for runtime smoke test..."
+          docker pull "$IMAGE_REF"
+
+          cid="$(docker run -d \
+            -e DATA_DIR=/tmp/9router-smoke \
+            "$IMAGE_REF")"
+
+          echo "Container ID: $cid"
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+
+          echo "Waiting for health check (max 30s)..."
+          healthy=false
+          for i in $(seq 1 30); do
+            if docker exec "$cid" wget -qO- http://127.0.0.1:20128/api/health 2>/dev/null | grep -q '"ok":true'; then
+              healthy=true
+              echo "Health check passed in ${i}s."
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "$healthy" != "true" ]; then
+            echo "Health check failed!"
+            docker logs "$cid"
+            exit 1
+          fi
+
+          echo "Waiting 12s for initial background token refresh tick..."
+          sleep 12
+
+          logs="$(docker logs "$cid" 2>&1)"
+          printf '%s\n' "$logs"
+
+          if printf '%s\n' "$logs" | grep -E "Cannot find package|ERR_MODULE_NOT_FOUND|MODULE_NOT_FOUND|BG_TOKEN_REFRESH.*Tick failed"; then
+            echo "Runtime smoke test failed: detected missing package or background refresh tick failure!"
+            exit 1
+          fi
+
+          echo "Runtime smoke test passed cleanly."
+
   deploy:
     name: Deploy to VPS (Blue/Green)
+    timeout-minutes: 15
     needs: build
     if: github.event_name == 'push' || !inputs.skip_deploy
     runs-on: ubuntu-latest
@@ -123,9 +170,13 @@ jobs:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/opt/9router' }}
         run: |
           set -euo pipefail
-          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" \
+            -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+            -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o TCPKeepAlive=yes \
             "$VPS_USER@$VPS_HOST" "mkdir -p '$DEPLOY_PATH'"
-          scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+          scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" \
+            -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+            -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o TCPKeepAlive=yes \
             docker-compose.prod.yml deploy.sh \
             "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/"
 
@@ -139,7 +190,9 @@ jobs:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" \
+            -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+            -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o TCPKeepAlive=yes \
             "$VPS_USER@$VPS_HOST" "
               set -euo pipefail
               chmod +x '$DEPLOY_PATH/deploy.sh'
