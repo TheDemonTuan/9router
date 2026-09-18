@@ -254,13 +254,29 @@ ensure_network
 # Start headroom helper service if not already up
 docker compose -f "$COMPOSE_FILE" up -d headroom
 
+pull_image() {
+  if docker image inspect "$IMAGE_REF" >/dev/null 2>&1; then
+    log "Image already cached locally: $IMAGE_REF"
+    return 0
+  fi
+
+  for attempt in 1 2 3; do
+    log "Pull attempt $attempt/3 for $IMAGE_REF..."
+    if timeout 300 docker pull --quiet "$IMAGE_REF"; then
+      return 0
+    fi
+    sleep $((attempt * 5))
+  done
+
+  die "Unable to pull image after 3 attempts: $IMAGE_REF"
+}
+
 # Pull and start target slot
 export IMAGE_REF
-log "Pulling target image..."
-docker compose -f "$COMPOSE_FILE" pull "9router-$TARGET_SLOT"
+pull_image
 
 log "Starting target container: 9router-$TARGET_SLOT"
-docker compose -f "$COMPOSE_FILE" up -d --no-deps "9router-$TARGET_SLOT"
+docker compose -f "$COMPOSE_FILE" up -d --no-deps --pull never "9router-$TARGET_SLOT"
 
 # Healthcheck candidate slot
 if ! wait_healthy "$TARGET_SLOT"; then
