@@ -66,6 +66,10 @@ export {
 export {
   saveRequestDetail, getRequestDetails, getRequestDetailById, getDistinctProviders,
 } from "./repos/requestDetailsRepo.js";
+// Runtime leases
+export {
+  acquireLease, releaseLease, renewLease,
+} from "./repos/runtimeLeasesRepo.js";
 
 // Export/import full DB
 export async function exportDb() {

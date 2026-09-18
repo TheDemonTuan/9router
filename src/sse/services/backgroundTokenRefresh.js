@@ -4,6 +4,14 @@
 import * as log from "../utils/logger.js";
 import { getRefreshLeadMs } from "open-sse/services/tokenRefresh.js";
 import { getCredentialExpiryMs } from "open-sse/services/oauthCredentialManager.js";
+import crypto from "node:crypto";
+
+const INSTANCE_ID =
+  process.env.HOSTNAME ||
+  process.env.INSTANCE_ID ||
+  `inst-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
+const LEASE_NAME = "background_token_refresh";
+const LEASE_TTL_MS = 60_000;
 
 /** Refresh when expiry is within 30 minutes (or the provider on-request lead, whichever larger). */
 export const BACKGROUND_REFRESH_LEAD_MS = 30 * 60 * 1000;
@@ -91,6 +99,24 @@ export async function runBackgroundTokenRefreshTick(deps = {}) {
   if (tickRunning) return;
   tickRunning = true;
   try {
+    if (deps.acquireLease) {
+      const ok = await deps.acquireLease(LEASE_NAME, INSTANCE_ID, LEASE_TTL_MS);
+      if (!ok) return;
+    } else {
+      try {
+        const { acquireLease } = await import("../../lib/db/repos/runtimeLeasesRepo.js");
+        const ok = await acquireLease(LEASE_NAME, INSTANCE_ID, LEASE_TTL_MS);
+        if (!ok) {
+          log.info("BG_TOKEN_REFRESH", "Lease held by another instance, skipping tick", {
+            instance: INSTANCE_ID,
+          });
+          return;
+        }
+      } catch {
+        // Fail-open: if DB is unavailable or non-Bun test environment, proceed
+      }
+    }
+
     const load = deps.loadConnections || loadActiveConnections;
     const refresh = deps.refreshConnection || refreshOne;
     const sleep = deps.sleep || ((ms) => new Promise((res) => setTimeout(res, ms)));
@@ -181,4 +207,9 @@ export function stopBackgroundTokenRefresh() {
   if (started) {
     started = false;
   }
+  try {
+    import("../../lib/db/repos/runtimeLeasesRepo.js")
+      .then(({ releaseLease }) => releaseLease(LEASE_NAME, INSTANCE_ID))
+      .catch(() => {});
+  } catch {}
 }
