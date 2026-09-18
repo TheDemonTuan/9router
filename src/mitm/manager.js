@@ -54,11 +54,11 @@ let mitmIsRestarting = false;
 function resolveBundledServerPath() {
   if (process.env.MITM_SERVER_PATH) return process.env.MITM_SERVER_PATH;
   const sibling = path.join(__dirname, "server.js");
-  if (fs.existsSync(sibling)) return sibling;
+  if (fs.existsSync(/* turbopackIgnore: true */ sibling)) return sibling;
   const fromCwd = path.join(process.cwd(), "src", "mitm", "server.js");
-  if (fs.existsSync(fromCwd)) return fromCwd;
+  if (fs.existsSync(/* turbopackIgnore: true */ fromCwd)) return fromCwd;
   const fromNext = path.join(process.cwd(), "..", "src", "mitm", "server.js");
-  if (fs.existsSync(fromNext)) return fromNext;
+  if (fs.existsSync(/* turbopackIgnore: true */ fromNext)) return fromNext;
   return fromCwd;
 }
 
@@ -66,7 +66,7 @@ function resolveBundledServerPath() {
 // (prevents EBUSY on `npm i -g 9router@latest` while MITM is running).
 function ensureRuntimeServer(bundledPath) {
   try {
-    if (!bundledPath || !fs.existsSync(bundledPath)) return bundledPath;
+    if (!bundledPath || !fs.existsSync(/* turbopackIgnore: true */ bundledPath)) return bundledPath;
 
     // Dev mode: source file has relative requires (./logger, ./config...),
     // only the bundled file inside node_modules is self-contained + safe to copy.
@@ -78,14 +78,14 @@ function ensureRuntimeServer(bundledPath) {
     const runtimeServer = path.join(runtimeDir, "server.js");
 
     // Skip copy if sizes match (bundle unchanged since last run)
-    if (fs.existsSync(runtimeServer)) {
+    if (fs.existsSync(/* turbopackIgnore: true */ runtimeServer)) {
       try {
-        if (fs.statSync(bundledPath).size === fs.statSync(runtimeServer).size) return runtimeServer;
+        if (fs.statSync(/* turbopackIgnore: true */ bundledPath).size === fs.statSync(/* turbopackIgnore: true */ runtimeServer).size) return runtimeServer;
       } catch { /* recopy */ }
     }
 
-    fs.mkdirSync(runtimeDir, { recursive: true });
-    fs.copyFileSync(bundledPath, runtimeServer);
+    fs.mkdirSync(/* turbopackIgnore: true */ runtimeDir, { recursive: true });
+    fs.copyFileSync(/* turbopackIgnore: true */ bundledPath, runtimeServer);
     return runtimeServer;
   } catch (e) {
     try { log(`[MITM] runtime copy failed: ${e.message}`); } catch { /* ignore */ }
@@ -319,13 +319,13 @@ async function killLeftoverMitm(sudoPassword) {
     serverPid = null;
   }
   try {
-    if (fs.existsSync(PID_FILE)) {
-      const savedPid = parseInt(fs.readFileSync(PID_FILE, "utf-8").trim(), 10);
+    if (fs.existsSync(/* turbopackIgnore: true */ PID_FILE)) {
+      const savedPid = parseInt(fs.readFileSync(/* turbopackIgnore: true */ PID_FILE, "utf-8").trim(), 10);
       if (savedPid && isProcessAlive(savedPid)) {
         killProcess(savedPid, true, sudoPassword);
         await new Promise(r => setTimeout(r, 500));
       }
-      fs.unlinkSync(PID_FILE);
+      fs.unlinkSync(/* turbopackIgnore: true */ PID_FILE);
     }
   } catch { /* ignore */ }
   if (!IS_WIN && SERVER_PATH) {
@@ -378,13 +378,13 @@ async function getMitmStatus() {
 
   if (!running) {
     try {
-      if (fs.existsSync(PID_FILE)) {
-        const savedPid = parseInt(fs.readFileSync(PID_FILE, "utf-8").trim(), 10);
+      if (fs.existsSync(/* turbopackIgnore: true */ PID_FILE)) {
+        const savedPid = parseInt(fs.readFileSync(/* turbopackIgnore: true */ PID_FILE, "utf-8").trim(), 10);
         if (savedPid && isProcessAlive(savedPid)) {
           running = true;
           pid = savedPid;
         } else {
-          fs.unlinkSync(PID_FILE);
+          fs.unlinkSync(/* turbopackIgnore: true */ PID_FILE);
         }
       }
     } catch { /* ignore */ }
@@ -471,8 +471,8 @@ async function killPort443Owner(owner, sudoPassword) {
 async function startServer(apiKey, sudoPassword, forceKillPort443 = false) {
   if (!serverProcess || serverProcess.killed) {
     try {
-      if (fs.existsSync(PID_FILE)) {
-        const savedPid = parseInt(fs.readFileSync(PID_FILE, "utf-8").trim(), 10);
+      if (fs.existsSync(/* turbopackIgnore: true */ PID_FILE)) {
+        const savedPid = parseInt(fs.readFileSync(/* turbopackIgnore: true */ PID_FILE, "utf-8").trim(), 10);
         if (savedPid && isProcessAlive(savedPid)) {
           serverPid = savedPid;
           log(`♻️ Reusing existing process (PID: ${savedPid})`);
@@ -480,7 +480,7 @@ async function startServer(apiKey, sudoPassword, forceKillPort443 = false) {
           if (sudoPassword) setCachedPassword(sudoPassword);
           return { running: true, pid: savedPid };
         } else {
-          fs.unlinkSync(PID_FILE);
+          fs.unlinkSync(/* turbopackIgnore: true */ PID_FILE);
         }
       }
     } catch { /* ignore */ }
@@ -700,7 +700,7 @@ async function startServer(apiKey, sudoPassword, forceKillPort443 = false) {
       log(`Server exited (code: ${code})`);
       serverProcess = null;
       serverPid = null;
-      try { fs.unlinkSync(PID_FILE); } catch { /* ignore */ }
+      try { fs.unlinkSync(/* turbopackIgnore: true */ PID_FILE); } catch { /* ignore */ }
       try { fs.unlinkSync(LOCK_FILE); } catch { /* ignore */ }
       // Auto-restart on unexpected exit
       if (code !== 0 && !mitmIsRestarting) scheduleMitmRestart(apiKey);
@@ -753,7 +753,7 @@ async function stopServer(sudoPassword) {
   const proc = serverProcess;
   const pidToKill = proc && !proc.killed
     ? proc.pid
-    : (() => { try { return parseInt(fs.readFileSync(PID_FILE, "utf-8").trim(), 10); } catch { return null; } })();
+    : (() => { try { return parseInt(fs.readFileSync(/* turbopackIgnore: true */ PID_FILE, "utf-8").trim(), 10); } catch { return null; } })();
 
   if (pidToKill && isProcessAlive(pidToKill)) {
     log(`Killing server (PID: ${pidToKill})...`);
@@ -809,7 +809,7 @@ async function stopServer(sudoPassword) {
     });
   }
 
-  try { fs.unlinkSync(PID_FILE); } catch { /* ignore */ }
+  try { fs.unlinkSync(/* turbopackIgnore: true */ PID_FILE); } catch { /* ignore */ }
   try { fs.unlinkSync(LOCK_FILE); } catch { /* ignore */ }
   await saveMitmSettings(false, null);
   mitmIsRestarting = false;

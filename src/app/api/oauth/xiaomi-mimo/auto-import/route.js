@@ -56,7 +56,7 @@ export async function GET() {
     let authPath = null;
     for (const candidate of candidates) {
       try {
-        await access(candidate, constants.R_OK);
+        await access(/* turbopackIgnore: true */ candidate, constants.R_OK);
         authPath = candidate;
         break;
       } catch {
@@ -71,7 +71,7 @@ export async function GET() {
       });
     }
 
-    const raw = await readFile(authPath, "utf-8");
+    const raw = await readFile(/* turbopackIgnore: true */ authPath, "utf-8");
     let auth;
     try {
       auth = JSON.parse(raw);

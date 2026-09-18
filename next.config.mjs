@@ -25,7 +25,16 @@ const nextConfig = {
     root: tracingRoot
   },
   outputFileTracingRoot: tracingRoot,
-  outputFileTracingExcludes: {},
+  outputFileTracingExcludes: {
+    "*": [
+      "./tests/**/*",
+      "./docs/**/*",
+      "./cli/**/*",
+      "./.git/**/*",
+      "./.github/**/*",
+      "./i18n/**/*",
+    ],
+  },
   images: {
     unoptimized: true
   },

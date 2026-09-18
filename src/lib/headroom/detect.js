@@ -51,7 +51,7 @@ export const DEFAULT_HEADROOM_URL = process.env.HEADROOM_URL || "http://localhos
 // Detect whether the headroom CLI is installed and where its binary lives.
 export function findHeadroomBinary() {
   try {
-    const out = execSync(`${WHICH_CMD} headroom`, {
+    const out = execSync(/* turbopackIgnore: true */ `${WHICH_CMD} headroom`, {
       stdio: ["ignore", "pipe", "ignore"],
       windowsHide: true,
       env: { ...process.env, PATH: EXTENDED_PATH },
@@ -92,7 +92,7 @@ export function findPython310() {
   let fallback = null;
   for (const candidate of pythonCandidates()) {
     try {
-      const ver = execSync(`${candidate} --version`, {
+      const ver = execSync(/* turbopackIgnore: true */ `${candidate} --version`, {
         stdio: ["ignore", "pipe", "ignore"],
         windowsHide: true,
         env: { ...process.env, PATH: EXTENDED_PATH },
@@ -103,7 +103,7 @@ export function findPython310() {
       if (!(major > MIN_VERSION[0] || (major === MIN_VERSION[0] && minor >= MIN_VERSION[1]))) continue;
       if (!fallback) fallback = candidate;
       try {
-        execFileSync(candidate, ["-m", "pip", "show", "headroom-ai"], {
+        execFileSync(/* turbopackIgnore: true */ candidate, ["-m", "pip", "show", "headroom-ai"], {
           stdio: ["ignore", "pipe", "ignore"],
           windowsHide: true,
           timeout: HEADROOM_PIP_TIMEOUT_MS,
@@ -170,7 +170,7 @@ export function getInstalledHeadroomExtras(python) {
   const py = python || findPython310();
   if (!py) return { installed: false, version: null, extras: { code: false, ml: false } };
   try {
-    const out = execFileSync(py, ["-m", "pip", "list", "--format=json", "--disable-pip-version-check"], {
+    const out = execFileSync(/* turbopackIgnore: true */ py, ["-m", "pip", "list", "--format=json", "--disable-pip-version-check"], {
       stdio: ["ignore", "pipe", "ignore"],
       windowsHide: true,
       timeout: HEADROOM_PIP_TIMEOUT_MS,

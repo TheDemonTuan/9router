@@ -46,9 +46,9 @@ const loggedInCache = { value: false, fetchedAt: 0, refreshing: false };
 const funnelUrlCache = { value: null, port: null, fetchedAt: 0, refreshing: false };
 
 function fallbackBin() {
-  if (fs.existsSync(TAILSCALE_BIN)) return TAILSCALE_BIN;
-  if (IS_WINDOWS && fs.existsSync(WINDOWS_TAILSCALE_BIN)) return WINDOWS_TAILSCALE_BIN;
-  if (!IS_WINDOWS) return UNIX_TAILSCALE_CANDIDATES.find((p) => fs.existsSync(p)) || null;
+  if (fs.existsSync(/* turbopackIgnore: true */ TAILSCALE_BIN)) return TAILSCALE_BIN;
+  if (IS_WINDOWS && fs.existsSync(/* turbopackIgnore: true */ WINDOWS_TAILSCALE_BIN)) return WINDOWS_TAILSCALE_BIN;
+  if (!IS_WINDOWS) return UNIX_TAILSCALE_CANDIDATES.find((p) => fs.existsSync(/* turbopackIgnore: true */ p)) || null;
   return null;
 }
 
@@ -73,10 +73,10 @@ export function getTailscaleBin() {
   if (Date.now() - binCache.fetchedAt > PROBE_TTL_MS) bgRefreshBin();
   // First call: synchronously probe common install paths (no exec, no event-loop block)
   if (binCache.value === undefined) {
-    if (fs.existsSync(TAILSCALE_BIN)) binCache.value = TAILSCALE_BIN;
-    else if (IS_WINDOWS && fs.existsSync(WINDOWS_TAILSCALE_BIN)) binCache.value = WINDOWS_TAILSCALE_BIN;
+    if (fs.existsSync(/* turbopackIgnore: true */ TAILSCALE_BIN)) binCache.value = TAILSCALE_BIN;
+    else if (IS_WINDOWS && fs.existsSync(/* turbopackIgnore: true */ WINDOWS_TAILSCALE_BIN)) binCache.value = WINDOWS_TAILSCALE_BIN;
     else if (!IS_WINDOWS) {
-      const found = UNIX_TAILSCALE_CANDIDATES.find((p) => fs.existsSync(p));
+      const found = UNIX_TAILSCALE_CANDIDATES.find((p) => fs.existsSync(/* turbopackIgnore: true */ p));
       binCache.value = found || null;
     } else binCache.value = null;
   }
@@ -204,7 +204,7 @@ export async function isTailscaleRunningStrict() {
 
 // Check if a system-level tailscaled is running (uses system socket, not 9Router's custom one).
 export function isSystemDaemonRunning() {
-  if (IS_WINDOWS || !SYSTEM_TAILSCALE_SOCKET || !fs.existsSync(SYSTEM_TAILSCALE_SOCKET)) return false;
+  if (IS_WINDOWS || !SYSTEM_TAILSCALE_SOCKET || !fs.existsSync(/* turbopackIgnore: true */ SYSTEM_TAILSCALE_SOCKET)) return false;
   const bin = getTailscaleBin();
   if (!bin) return false;
   try {
@@ -387,11 +387,11 @@ async function installTailscaleLinux(sudoPassword, log) {
       // Persist script to temp file → exec by path (NOT via stdin) → sh never reads attacker-controlled stdin
       const tmpScript = path.join(os.tmpdir(), `tailscale-install-${crypto.randomBytes(8).toString("hex")}.sh`);
       try {
-        fs.writeFileSync(tmpScript, scriptContent, { mode: 0o700 });
+        fs.writeFileSync(/* turbopackIgnore: true */ tmpScript, scriptContent, { mode: 0o700 });
       } catch (e) {
         return reject(new Error(`Failed to write install script: ${e.message}`));
       }
-      const cleanup = () => { try { fs.unlinkSync(tmpScript); } catch {} };
+      const cleanup = () => { try { fs.unlinkSync(/* turbopackIgnore: true */ tmpScript); } catch {} };
       const child = spawn("sudo", ["-S", "sh", tmpScript], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
       let stderr = "";
       child.stdout.on("data", (d) => {
@@ -452,7 +452,7 @@ async function installTailscaleWindows(log) {
     ], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     child.stderr.on("data", (d) => { const l = d.toString().trim(); if (l) log(l); });
     child.on("close", (c) => {
-      try { fs.unlinkSync(msiPath); } catch { /* ignore */ }
+      try { fs.unlinkSync(/* turbopackIgnore: true */ msiPath); } catch { /* ignore */ }
       c === 0 ? resolve() : reject(new Error(`msiexec failed (code ${c})`));
     });
     child.on("error", reject);
@@ -463,7 +463,7 @@ async function installTailscaleWindows(log) {
   const maxWait = 10000;
   const start = Date.now();
   while (Date.now() - start < maxWait) {
-    if (fs.existsSync(WINDOWS_TAILSCALE_BIN)) {
+    if (fs.existsSync(/* turbopackIgnore: true */ WINDOWS_TAILSCALE_BIN)) {
       log("Installation complete.");
       return;
     }
@@ -476,8 +476,8 @@ async function installTailscaleWindows(log) {
 // reclaim ownership recursively so the user-mode daemon can read/write state files.
 async function ensureUserOwnedDir(dir) {
   try {
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
+    if (!fs.existsSync(/* turbopackIgnore: true */ dir)) {
+      fs.mkdirSync(/* turbopackIgnore: true */ dir, { recursive: true });
       return;
     }
     const uid = process.getuid();
@@ -489,10 +489,10 @@ async function ensureUserOwnedDir(dir) {
       while (stack.length) {
         const cur = stack.pop();
         try {
-          const st = fs.statSync(cur);
+          const st = fs.statSync(/* turbopackIgnore: true */ cur);
           if (st.uid !== uid) return true;
           if (st.isDirectory()) {
-            for (const name of fs.readdirSync(cur)) stack.push(path.join(cur, name));
+            for (const name of fs.readdirSync(/* turbopackIgnore: true */ cur)) stack.push(path.join(cur, name));
           }
         } catch { /* ignore */ }
       }
@@ -602,7 +602,7 @@ export async function startDaemonWithPassword(sudoPassword) {
     child.stdin.end();
     child.unref();
   } else {
-    const child = spawn(tailscaledBin, daemonArgs, {
+    const child = spawn(/* turbopackIgnore: true */ tailscaledBin, daemonArgs, {
       detached: true,
       stdio: "ignore",
       cwd: os.tmpdir(),
@@ -655,7 +655,7 @@ export function startLogin(hostname) {
 
     const args = tsArgs("up", "--accept-routes");
     if (hostname) args.push(`--hostname=${hostname}`);
-    const child = spawn(bin, args, {
+    const child = spawn(/* turbopackIgnore: true */ bin, args, {
       stdio: ["ignore", "pipe", "pipe"],
       detached: true,
       windowsHide: true
@@ -746,7 +746,7 @@ export async function startFunnel(port) {
   try { execSync(`"${bin}" ${SOCKET_FLAG.join(" ")} funnel --bg reset`, { stdio: "ignore", windowsHide: true }); } catch (e) { /* ignore */ }
 
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, tsArgs("funnel", "--bg", `${port}`), {
+    const child = spawn(/* turbopackIgnore: true */ bin, tsArgs("funnel", "--bg", `${port}`), {
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true
     });
@@ -820,7 +820,7 @@ export async function provisionCert(hostname) {
   const bin = getTailscaleBin();
   if (!bin || !hostname) return;
   const certsDir = path.join(TAILSCALE_DIR, "certs");
-  fs.mkdirSync(certsDir, { recursive: true });
+  fs.mkdirSync(/* turbopackIgnore: true */ certsDir, { recursive: true });
   const certFile = path.join(certsDir, `${hostname}.crt`);
   const keyFile = path.join(certsDir, `${hostname}.key`);
   try {

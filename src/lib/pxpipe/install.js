@@ -21,7 +21,7 @@ const EXTENDED_PATH = [...EXTRA_BINS, process.env.PATH || ""].filter(Boolean).jo
 let installInFlight = null;
 
 function ensureDir() {
-  if (!fs.existsSync(PXPIPE_DIR)) fs.mkdirSync(PXPIPE_DIR, { recursive: true });
+  if (!fs.existsSync(/* turbopackIgnore: true */ PXPIPE_DIR)) fs.mkdirSync(/* turbopackIgnore: true */ PXPIPE_DIR, { recursive: true });
 }
 
 export function packageRoot() {
@@ -49,10 +49,10 @@ export function findNpm() {
 export function getInstallInfo() {
   try {
     const pkgJson = path.join(packageRoot(), "package.json");
-    if (!fs.existsSync(pkgJson) || !fs.existsSync(libraryEntry())) {
+    if (!fs.existsSync(/* turbopackIgnore: true */ pkgJson) || !fs.existsSync(/* turbopackIgnore: true */ libraryEntry())) {
       return { installed: false, version: null, path: null };
     }
-    const pkg = JSON.parse(fs.readFileSync(pkgJson, "utf8"));
+    const pkg = JSON.parse(fs.readFileSync(/* turbopackIgnore: true */ pkgJson, "utf8"));
     return { installed: true, version: pkg.version || null, path: packageRoot() };
   } catch {
     return { installed: false, version: null, path: null };
@@ -81,15 +81,15 @@ async function runInstall() {
 
   ensureDir();
   const pkgJson = path.join(PXPIPE_DIR, "package.json");
-  if (!fs.existsSync(pkgJson)) {
-    fs.writeFileSync(pkgJson, JSON.stringify({ name: "9router-pxpipe-host", private: true }, null, 2));
+  if (!fs.existsSync(/* turbopackIgnore: true */ pkgJson)) {
+    fs.writeFileSync(/* turbopackIgnore: true */ pkgJson, JSON.stringify({ name: "9router-pxpipe-host", private: true }, null, 2));
   }
 
-  const outFd = fs.openSync(INSTALL_LOG, "a");
+  const outFd = fs.openSync(/* turbopackIgnore: true */ INSTALL_LOG, "a");
   fs.writeSync(outFd, `\n[${new Date().toISOString()}] npm install ${PXPIPE_PACKAGE}@latest\n`);
 
   await new Promise((resolve, reject) => {
-    const child = spawn(npm, ["install", `${PXPIPE_PACKAGE}@latest`, "--no-audit", "--no-fund", "--omit=dev"], {
+    const child = spawn(/* turbopackIgnore: true */ npm, ["install", `${PXPIPE_PACKAGE}@latest`, "--no-audit", "--no-fund", "--omit=dev"], {
       cwd: PXPIPE_DIR,
       stdio: ["ignore", outFd, outFd],
       windowsHide: true,
@@ -114,8 +114,8 @@ async function runInstall() {
 
 export function getInstallLogTail(maxLines = 200) {
   try {
-    if (!fs.existsSync(INSTALL_LOG)) return "";
-    const lines = fs.readFileSync(INSTALL_LOG, "utf8").split(/\r?\n/).filter(Boolean);
+    if (!fs.existsSync(/* turbopackIgnore: true */ INSTALL_LOG)) return "";
+    const lines = fs.readFileSync(/* turbopackIgnore: true */ INSTALL_LOG, "utf8").split(/\r?\n/).filter(Boolean);
     return lines.slice(-maxLines).join("\n");
   } catch {
     return "";

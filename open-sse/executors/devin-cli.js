@@ -56,7 +56,7 @@ function resolveDevinBin() {
       "/usr/bin/devin",
     ];
   for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) return candidate;
+    if (fs.existsSync(/* turbopackIgnore: true */ candidate)) return candidate;
   }
 
   // 3. Fallback — rely on process.env.PATH
@@ -107,7 +107,7 @@ rl.on("line", (line) => {
 function ensureClientToolsScript() {
   const scriptPath = path.join(os.tmpdir(), "9router-devin-client-tools.mjs");
   // Always rewrite so script upgrades land without a process restart.
-  fs.writeFileSync(scriptPath, CLIENT_TOOLS_MCP_SCRIPT);
+  fs.writeFileSync(/* turbopackIgnore: true */ scriptPath, CLIENT_TOOLS_MCP_SCRIPT);
   return scriptPath;
 }
 
@@ -237,7 +237,7 @@ function resolveWorkspaceCwd(body) {
 
   for (const c of candidates) {
     try {
-      if (path.isAbsolute(c) && fs.existsSync(c) && fs.statSync(c).isDirectory()) {
+      if (path.isAbsolute(c) && fs.existsSync(/* turbopackIgnore: true */ c) && fs.statSync(/* turbopackIgnore: true */ c).isDirectory()) {
         return c;
       }
     } catch {
@@ -368,11 +368,11 @@ export class DevinCliExecutor extends BaseExecutor {
     }
     if (Object.keys(mcpServers).length) {
       try {
-        mcpConfigDir = fs.mkdtempSync(path.join(os.tmpdir(), "devin-mcp-"));
+        mcpConfigDir = fs.mkdtempSync(/* turbopackIgnore: true */ path.join(os.tmpdir(), "devin-mcp-"));
         const cfgDev = path.join(mcpConfigDir, "devin");
-        fs.mkdirSync(cfgDev, { recursive: true });
+        fs.mkdirSync(/* turbopackIgnore: true */ cfgDev, { recursive: true });
         fs.writeFileSync(
-          path.join(cfgDev, "config.json"),
+          /* turbopackIgnore: true */ path.join(cfgDev, "config.json"),
           JSON.stringify({ mcpServers })
         );
         log?.info?.("DEVIN", `mcp config written → ${mcpConfigDir}`);
@@ -384,7 +384,7 @@ export class DevinCliExecutor extends BaseExecutor {
     const cleanupMcp = () => {
       if (!mcpConfigDir) return;
       try {
-        fs.rmSync(mcpConfigDir, { recursive: true, force: true });
+        fs.rmSync(/* turbopackIgnore: true */ mcpConfigDir, { recursive: true, force: true });
       } catch {
         /* ignore */
       }
@@ -420,7 +420,7 @@ export class DevinCliExecutor extends BaseExecutor {
         // Spawn in the client workspace cwd (from <cwd> env context) so built-in
         // file tools create/delete relative paths in the user's project.
         // MCP config still comes from XDG_CONFIG_HOME (throwaway), not project .devin/.
-        const child = spawn(devinBin, acpArgs, {
+        const child = spawn(/* turbopackIgnore: true */ devinBin, acpArgs, {
           env,
           cwd: workspaceCwd,
           stdio: ["pipe", "pipe", "pipe"],

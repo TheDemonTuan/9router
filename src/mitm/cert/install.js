@@ -20,7 +20,7 @@ const LINUX_CERT_PATHS = [
 
 function getLinuxCertConfig() {
   for (const config of LINUX_CERT_PATHS) {
-    if (fs.existsSync(config.dir)) {
+    if (fs.existsSync(/* turbopackIgnore: true */ config.dir)) {
       return config;
     }
   }
@@ -31,7 +31,7 @@ const ROOT_CA_CN = "9Router MITM Root CA";
 
 // Get SHA1 fingerprint from cert file using Node.js crypto
 function getCertFingerprint(certPath) {
-  const pem = fs.readFileSync(certPath, "utf-8");
+  const pem = fs.readFileSync(/* turbopackIgnore: true */ certPath, "utf-8");
   const der = Buffer.from(pem.replace(/-----[^-]+-----/g, "").replace(/\s/g, ""), "base64");
   return crypto.createHash("sha1").update(der).digest("hex").toUpperCase().match(/.{2}/g).join(":");
 }
@@ -84,7 +84,7 @@ function checkCertInstalledWindows(certPath) {
  * Install SSL certificate to system trust store
  */
 async function installCert(sudoPassword, certPath) {
-  if (!fs.existsSync(certPath)) {
+  if (!fs.existsSync(/* turbopackIgnore: true */ certPath)) {
     throw new Error(`Certificate file not found: ${certPath}`);
   }
 
@@ -176,7 +176,7 @@ async function uninstallCertWindows() {
 function checkCertInstalledLinux() {
   const config = getLinuxCertConfig();
   const certFile = `${config.dir}/9router-root-ca.crt`;
-  return Promise.resolve(fs.existsSync(certFile));
+  return Promise.resolve(fs.existsSync(/* turbopackIgnore: true */ certFile));
 }
 
 async function updateNssDatabases(certPath, action = 'add') {

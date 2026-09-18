@@ -15,7 +15,7 @@ export async function GET() {
 
     let files;
     try {
-      files = await readdir(cachePath);
+      files = await readdir(/* turbopackIgnore: true */ cachePath);
     } catch (error) {
       return NextResponse.json({
         found: false,
@@ -31,7 +31,7 @@ export async function GET() {
     const kiroTokenFile = "kiro-auth-token.json";
     if (files.includes(kiroTokenFile)) {
       try {
-        const content = await readFile(join(cachePath, kiroTokenFile), "utf-8");
+        const content = await readFile(/* turbopackIgnore: true */ join(cachePath, kiroTokenFile), "utf-8");
         const data = JSON.parse(content);
         if (data.refreshToken && data.refreshToken.startsWith("aorAAAAAG")) {
           refreshToken = data.refreshToken;
@@ -48,7 +48,7 @@ export async function GET() {
       for (const file of files) {
         if (!file.endsWith(".json")) continue;
         try {
-          const content = await readFile(join(cachePath, file), "utf-8");
+          const content = await readFile(/* turbopackIgnore: true */ join(cachePath, file), "utf-8");
           const data = JSON.parse(content);
           if (data.refreshToken && data.refreshToken.startsWith("aorAAAAAG")) {
             refreshToken = data.refreshToken;
@@ -79,7 +79,7 @@ export async function GET() {
     if (tokenData?.clientIdHash) {
       const clientFile = `${tokenData.clientIdHash}.json`;
       try {
-        const clientContent = await readFile(join(cachePath, clientFile), "utf-8");
+        const clientContent = await readFile(/* turbopackIgnore: true */ join(cachePath, clientFile), "utf-8");
         const clientData = JSON.parse(clientContent);
         if (clientData.clientId && clientData.clientSecret) {
           clientId = clientData.clientId;
@@ -100,7 +100,7 @@ export async function GET() {
     ];
     for (const profilePath of kiroProfilePaths) {
       try {
-        const profileContent = await readFile(profilePath, "utf-8");
+        const profileContent = await readFile(/* turbopackIgnore: true */ profilePath, "utf-8");
         const profileData = JSON.parse(profileContent);
         if (profileData.arn) {
           // Normalize region to us-east-1 for the runtime gateway

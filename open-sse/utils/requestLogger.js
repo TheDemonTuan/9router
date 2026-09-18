@@ -39,8 +39,8 @@ async function createLogSession(sourceFormat, targetFormat, model) {
   if (!fs || !LOGS_DIR) return null;
   
   try {
-    if (!fs.existsSync(LOGS_DIR)) {
-      fs.mkdirSync(LOGS_DIR, { recursive: true });
+    if (!fs.existsSync(/* turbopackIgnore: true */ LOGS_DIR)) {
+      fs.mkdirSync(/* turbopackIgnore: true */ LOGS_DIR, { recursive: true });
     }
     
     const timestamp = formatTimestamp();
@@ -48,7 +48,7 @@ async function createLogSession(sourceFormat, targetFormat, model) {
     const folderName = `${sourceFormat}_${targetFormat}_${safeModel}_${timestamp}`;
     const sessionPath = path.join(LOGS_DIR, folderName);
     
-    fs.mkdirSync(sessionPath, { recursive: true });
+    fs.mkdirSync(/* turbopackIgnore: true */ sessionPath, { recursive: true });
     
     return sessionPath;
   } catch (err) {
@@ -63,7 +63,7 @@ function writeJsonFile(sessionPath, filename, data) {
   
   try {
     const filePath = path.join(sessionPath, filename);
-    fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+    fs.writeFileSync(/* turbopackIgnore: true */ filePath, JSON.stringify(data, null, 2));
   } catch (err) {
     console.log(`[LOG] Failed to write ${filename}:`, err.message);
   }
@@ -180,7 +180,7 @@ export async function createRequestLogger(sourceFormat, targetFormat, model) {
       if (!fs || !sessionPath) return;
       try {
         const filePath = path.join(sessionPath, "5_res_provider.txt");
-        fs.appendFileSync(filePath, chunk);
+        fs.appendFileSync(/* turbopackIgnore: true */ filePath, chunk);
       } catch (err) {
         // Ignore append errors
       }
@@ -191,7 +191,7 @@ export async function createRequestLogger(sourceFormat, targetFormat, model) {
       if (!fs || !sessionPath) return;
       try {
         const filePath = path.join(sessionPath, "6_res_openai.txt");
-        fs.appendFileSync(filePath, chunk);
+        fs.appendFileSync(/* turbopackIgnore: true */ filePath, chunk);
       } catch (err) {
         // Ignore append errors
       }
@@ -210,7 +210,7 @@ export async function createRequestLogger(sourceFormat, targetFormat, model) {
       if (!fs || !sessionPath) return;
       try {
         const filePath = path.join(sessionPath, "7_res_client.txt");
-        fs.appendFileSync(filePath, chunk);
+        fs.appendFileSync(/* turbopackIgnore: true */ filePath, chunk);
       } catch (err) {
         // Ignore append errors
       }
@@ -235,8 +235,8 @@ export function logError(provider, { error, url, model, requestBody }) {
   if (!fs || !LOGS_DIR) return;
   
   try {
-    if (!fs.existsSync(LOGS_DIR)) {
-      fs.mkdirSync(LOGS_DIR, { recursive: true });
+    if (!fs.existsSync(/* turbopackIgnore: true */ LOGS_DIR)) {
+      fs.mkdirSync(/* turbopackIgnore: true */ LOGS_DIR, { recursive: true });
     }
     
     const date = new Date().toISOString().split("T")[0];
@@ -253,7 +253,7 @@ export function logError(provider, { error, url, model, requestBody }) {
       requestBody
     };
     
-    fs.appendFileSync(logPath, JSON.stringify(logEntry) + "\n");
+    fs.appendFileSync(/* turbopackIgnore: true */ logPath, JSON.stringify(logEntry) + "\n");
   } catch (err) {
     console.log("[LOG] Failed to write error log:", err.message);
   }
