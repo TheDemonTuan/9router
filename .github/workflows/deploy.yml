@@ -20,15 +20,12 @@ permissions:
 
 jobs:
   build:
-    name: Build & Push Multi-Arch Image
-    runs-on: ubuntu-latest
+    name: Build & Push Native Image
+    runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
     outputs:
       image_ref: ${{ steps.meta.outputs.image_ref }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -47,7 +44,7 @@ jobs:
         run: |
           owner_lc="$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')"
           image="ghcr.io/${owner_lc}/9router"
-          tag="${{ github.sha }}"
+          tag="sha-${{ github.sha }}"
           echo "image_ref=${image}:${tag}" >> "$GITHUB_OUTPUT"
           echo "image=${image}" >> "$GITHUB_OUTPUT"
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
@@ -62,7 +59,7 @@ jobs:
             ${{ steps.meta.outputs.image }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ vars.DEPLOY_PLATFORM || 'linux/arm64' }}
           provenance: false
           sbom: false
 
