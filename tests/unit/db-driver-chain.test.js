@@ -1,4 +1,4 @@
-// Verify 3-tier driver fallback: better-sqlite3 → node:sqlite → sql.js
+// Verify DB driver selection (Bun-first: bun:sqlite only)
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -22,38 +22,14 @@ afterEach(() => {
   else process.env.DATA_DIR = originalDataDir;
 });
 
-describe("Driver fallback chain", () => {
-  it("default → picks better-sqlite3 when available", async () => {
+describe("DB driver initialization", () => {
+  it("uses bun:sqlite under Bun or fails fast under other runtimes", async () => {
     const { getAdapter } = await import("@/lib/db/driver.js");
-    const db = await getAdapter();
-    expect(["better-sqlite3", "node:sqlite", "sql.js"]).toContain(db.driver);
-  });
-
-  it("falls back to node:sqlite when better-sqlite3 unavailable", async () => {
-    // Mock the better-sqlite3 adapter to throw
-    vi.doMock("@/lib/db/adapters/betterSqliteAdapter.js", () => {
-      throw new Error("simulated unavailable");
-    });
-    const { getAdapter } = await import("@/lib/db/driver.js");
-    const db = await getAdapter();
-    // Node 22.5+ should give node:sqlite, else sql.js
-    const [maj, min] = process.versions.node.split(".").map(Number);
-    if (maj > 22 || (maj === 22 && min >= 5)) {
-      expect(db.driver).toBe("node:sqlite");
+    if (process.versions.bun) {
+      const db = await getAdapter();
+      expect(db.driver).toBe("bun:sqlite");
     } else {
-      expect(db.driver).toBe("sql.js");
+      await expect(getAdapter()).rejects.toThrow(/bun:sqlite requires Bun runtime/);
     }
-  });
-
-  it("falls back to sql.js when both native drivers unavailable", async () => {
-    vi.doMock("@/lib/db/adapters/betterSqliteAdapter.js", () => {
-      throw new Error("simulated unavailable");
-    });
-    vi.doMock("@/lib/db/adapters/nodeSqliteAdapter.js", () => {
-      throw new Error("simulated unavailable");
-    });
-    const { getAdapter } = await import("@/lib/db/driver.js");
-    const db = await getAdapter();
-    expect(db.driver).toBe("sql.js");
   });
 });
