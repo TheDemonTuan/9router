@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getSettings, validateApiKey } from "@/lib/localDb";
 import { getConsistentMachineId } from "@/shared/utils/machineId";
 import { verifyDashboardAuthToken } from "@/lib/auth/dashboardSession";
+import { verifyCloudflareAccessJwt } from "@/lib/auth/cloudflareAccess";
 import { hasTrustedPeerHeaders } from "@/lib/auth/trustedPeer";
 
 const CLI_TOKEN_HEADER = "x-9r-cli-token";
@@ -167,7 +168,10 @@ async function canAccessLocalOnlyRoute(request) {
 
 async function hasValidToken(request) {
   const token = request.cookies.get("auth_token")?.value;
-  return await verifyDashboardAuthToken(token);
+  if (token && await verifyDashboardAuthToken(token)) return true;
+  const cfJwt = request.headers.get("cf-access-jwt-assertion") || request.cookies.get("CF_Authorization")?.value;
+  if (cfJwt && await verifyCloudflareAccessJwt(cfJwt)) return true;
+  return false;
 }
 
 // Read settings directly from DB to avoid self-fetch deadlock in proxy
@@ -201,6 +205,19 @@ export const __test__ = {
 
 export async function proxy(request) {
   const { pathname } = request.nextUrl;
+  const host = request.headers.get("host");
+
+  // Split-domain hardening (OmniRoute architecture):
+  // When API_HOST is defined and the request lands on it, ONLY allow model-serving APIs.
+  const apiHost = process.env.API_HOST?.trim().toLowerCase();
+  if (apiHost && host) {
+    const reqHost = host.split(":")[0].toLowerCase();
+    if (reqHost === apiHost || reqHost.endsWith(`.${apiHost}`)) {
+      if (!isPublicLlmApi(pathname) && pathname !== "/api/health" && pathname !== "/api/version") {
+        return NextResponse.json({ error: "Endpoint not available on API domain" }, { status: 404 });
+      }
+    }
+  }
 
   // Local-only gate for spawn-capable / host-secret routes.
   if (LOCAL_ONLY_PATHS.some((p) => pathname.startsWith(p))) {
