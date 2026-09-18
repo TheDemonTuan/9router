@@ -254,6 +254,92 @@ ensure_network
 # Start headroom helper service if not already up
 docker compose -f "$COMPOSE_FILE" up -d headroom
 
+run_diagnostics() {
+  log "=== [DIAG] Docker disk/cache ==="
+  docker system df -v 2>/dev/null || true
+
+  log "=== [DIAG] Cached images for 9router ==="
+  docker image ls --digests "ghcr.io/*" 2>/dev/null || true
+
+  if docker image inspect "$IMAGE_REF" >/dev/null 2>&1; then
+    log "[DIAG] EXACT IMAGE CACHED: $IMAGE_REF"
+  else
+    log "[DIAG] EXACT IMAGE NOT CACHED: $IMAGE_REF"
+  fi
+
+  log "=== [DIAG] Docker daemon config ==="
+  cat /etc/docker/daemon.json 2>/dev/null || true
+
+  log "=== [DIAG] Registry DNS ==="
+  getent ahosts ghcr.io 2>/dev/null || true
+  getent ahosts pkg-containers.githubusercontent.com 2>/dev/null || true
+
+  log "=== [DIAG] IPv4 connectivity ==="
+  curl -4 -sS \
+    --connect-timeout 5 \
+    -o /dev/null \
+    -w 'ghcr ipv4: connect=%{time_connect}s total=%{time_total}s code=%{http_code}\n' \
+    https://ghcr.io/v2/ 2>&1 || echo "ghcr ipv4 FAILED"
+
+  curl -4 -sS \
+    --connect-timeout 5 \
+    -o /dev/null \
+    -w 'blob ipv4: connect=%{time_connect}s total=%{time_total}s code=%{http_code}\n' \
+    https://pkg-containers.githubusercontent.com/ 2>&1 || echo "blob ipv4 FAILED"
+
+  log "=== [DIAG] IPv6 connectivity ==="
+  curl -6 -sS \
+    --connect-timeout 5 \
+    -o /dev/null \
+    -w 'ghcr ipv6: connect=%{time_connect}s total=%{time_total}s code=%{http_code}\n' \
+    https://ghcr.io/v2/ 2>&1 || echo "ghcr ipv6 FAILED"
+
+  curl -6 -sS \
+    --connect-timeout 5 \
+    -o /dev/null \
+    -w 'blob ipv6: connect=%{time_connect}s total=%{time_total}s code=%{http_code}\n' \
+    https://pkg-containers.githubusercontent.com/ 2>&1 || echo "blob ipv6 FAILED"
+}
+
+configure_docker_concurrency() {
+  local daemon_json="/etc/docker/daemon.json"
+  local sudo_cmd=""
+  if [[ $(id -u) -ne 0 ]]; then
+    if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+      sudo_cmd="sudo"
+    else
+      log "Running as non-root without passwordless sudo; skipping daemon.json edit"
+      return 0
+    fi
+  fi
+
+  if grep -q '"max-concurrent-downloads"[[:space:]]*:[[:space:]]*1' "$daemon_json" 2>/dev/null; then
+    log "Docker max-concurrent-downloads already set to 1"
+    return 0
+  fi
+
+  log "Testing max-concurrent-downloads=1 in $daemon_json..."
+  local new_cfg=""
+  if [[ -f "$daemon_json" ]]; then
+    if command -v jq >/dev/null 2>&1; then
+      new_cfg="$($sudo_cmd jq '. + {"max-concurrent-downloads": 1}' "$daemon_json" 2>/dev/null || true)"
+    elif command -v python3 >/dev/null 2>&1; then
+      new_cfg="$($sudo_cmd python3 -c 'import json; d = json.load(open("'"$daemon_json"'")); d["max-concurrent-downloads"]=1; print(json.dumps(d, indent=2))' 2>/dev/null || true)"
+    fi
+  else
+    $sudo_cmd mkdir -p /etc/docker 2>/dev/null || true
+    new_cfg='{
+  "max-concurrent-downloads": 1
+}'
+  fi
+
+  if [[ -n "$new_cfg" ]]; then
+    printf '%s\n' "$new_cfg" | $sudo_cmd tee "$daemon_json" >/dev/null 2>&1 || true
+    log "Reloading Docker daemon..."
+    $sudo_cmd systemctl reload docker >/dev/null 2>&1 || $sudo_cmd kill -SIGHUP "$(pidof dockerd 2>/dev/null || true)" >/dev/null 2>&1 || true
+  fi
+}
+
 pull_image() {
   if docker image inspect "$IMAGE_REF" >/dev/null 2>&1; then
     log "Image already cached locally: $IMAGE_REF"
@@ -262,7 +348,12 @@ pull_image() {
 
   for attempt in 1 2 3; do
     log "Pull attempt $attempt/3 for $IMAGE_REF..."
-    if timeout 300 docker pull --quiet "$IMAGE_REF"; then
+    local start_ts
+    start_ts="$(date +%s)"
+    if timeout 300 docker pull "$IMAGE_REF"; then
+      local duration=$(( $(date +%s) - start_ts ))
+      log "Pull completed in ${duration}s"
+      docker pull "$IMAGE_REF" 2>/dev/null || true
       return 0
     fi
     sleep $((attempt * 5))
@@ -273,6 +364,8 @@ pull_image() {
 
 # Pull and start target slot
 export IMAGE_REF
+run_diagnostics
+configure_docker_concurrency
 pull_image
 
 log "Starting target container: 9router-$TARGET_SLOT"
