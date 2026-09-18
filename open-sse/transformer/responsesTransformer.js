@@ -6,6 +6,12 @@
 
 import fs from "fs";
 import path from "path";
+import {
+  buildResponseSnapshot,
+  buildOutputArray,
+  normalizeResponseId,
+  normalizeResponsesUsage
+} from "./responsesBuilder.js";
 
 // Create log directory for responses (Node.js only)
 export function createResponsesLogger(model, logsDir = null) {
@@ -51,12 +57,42 @@ export function createResponsesLogger(model, logsDir = null) {
  * @param {Object} logger - Optional logger instance
  * @returns {TransformStream}
  */
-export function createResponsesApiTransformStream(logger = null) {
+export function createResponsesApiTransformStream(optsOrLogger = null, modelArg = null) {
+  let logger = null;
+  let model = null;
+  let requestBody = null;
+
+  if (optsOrLogger && typeof optsOrLogger === "object" && typeof optsOrLogger.logOutput !== "function") {
+    logger = optsOrLogger.logger || null;
+    model = optsOrLogger.model || null;
+    requestBody = optsOrLogger.requestBody || null;
+  } else {
+    logger = optsOrLogger;
+    model = modelArg;
+  }
+
   const state = {
     seq: 0,
+    nextOutputIndex: 0,
+    msgOutputIndex: {},
+    funcOutputIndex: {},
     responseId: `resp_${Date.now()}`,
     created: Math.floor(Date.now() / 1000),
     started: false,
+    finished: false,
+    model: model || requestBody?.model || null,
+    instructions: requestBody?.instructions ?? null,
+    parallelToolCalls: requestBody?.parallel_tool_calls ?? true,
+    previousResponseId: requestBody?.previous_response_id ?? null,
+    reasoning: requestBody?.reasoning ?? { effort: null, summary: null },
+    store: requestBody?.store ?? false,
+    text: requestBody?.text ?? { format: { type: "text" } },
+    toolChoice: requestBody?.tool_choice ?? "auto",
+    tools: requestBody?.tools ?? [],
+    truncation: requestBody?.truncation ?? "disabled",
+    metadata: requestBody?.metadata ?? {},
+    usage: null,
+    outputItems: new Map(),
     msgTextBuf: {},
     msgItemAdded: {},
     msgContentAdded: {},
@@ -90,14 +126,15 @@ export function createResponsesApiTransformStream(logger = null) {
   const startReasoning = (controller, idx) => {
     if (!state.reasoningId) {
       state.reasoningId = `rs_${state.responseId}_${idx}`;
-      state.reasoningIndex = idx;
+      state.reasoningIndex = state.nextOutputIndex++;
       
       emit(controller, "response.output_item.added", {
         type: "response.output_item.added",
-        output_index: idx,
+        output_index: state.reasoningIndex,
         item: {
           id: state.reasoningId,
           type: "reasoning",
+          status: "in_progress",
           summary: []
         }
       });
@@ -105,7 +142,7 @@ export function createResponsesApiTransformStream(logger = null) {
       emit(controller, "response.reasoning_summary_part.added", {
         type: "response.reasoning_summary_part.added",
         item_id: state.reasoningId,
-        output_index: idx,
+        output_index: state.reasoningIndex,
         summary_index: 0,
         part: { type: "summary_text", text: "" }
       });
@@ -145,14 +182,18 @@ export function createResponsesApiTransformStream(logger = null) {
         part: { type: "summary_text", text: state.reasoningBuf }
       });
 
+      const item = {
+        id: state.reasoningId,
+        type: "reasoning",
+        status: "completed",
+        summary: [{ type: "summary_text", text: state.reasoningBuf }]
+      };
+      state.outputItems.set(state.reasoningIndex, item);
+
       emit(controller, "response.output_item.done", {
         type: "response.output_item.done",
         output_index: state.reasoningIndex,
-        item: {
-          id: state.reasoningId,
-          type: "reasoning",
-          summary: [{ type: "summary_text", text: state.reasoningBuf }]
-        }
+        item
       });
     }
   };
@@ -162,11 +203,12 @@ export function createResponsesApiTransformStream(logger = null) {
       state.msgItemDone[idx] = true;
       const fullText = state.msgTextBuf[idx] || "";
       const msgId = `msg_${state.responseId}_${idx}`;
+      const outIdx = state.msgOutputIndex[idx] ?? parseInt(idx);
 
       emit(controller, "response.output_text.done", {
         type: "response.output_text.done",
         item_id: msgId,
-        output_index: parseInt(idx),
+        output_index: outIdx,
         content_index: 0,
         text: fullText,
         logprobs: []
@@ -175,20 +217,24 @@ export function createResponsesApiTransformStream(logger = null) {
       emit(controller, "response.content_part.done", {
         type: "response.content_part.done",
         item_id: msgId,
-        output_index: parseInt(idx),
+        output_index: outIdx,
         content_index: 0,
         part: { type: "output_text", annotations: [], logprobs: [], text: fullText }
       });
 
+      const item = {
+        id: msgId,
+        type: "message",
+        status: "completed",
+        content: [{ type: "output_text", annotations: [], logprobs: [], text: fullText }],
+        role: "assistant"
+      };
+      state.outputItems.set(outIdx, item);
+
       emit(controller, "response.output_item.done", {
         type: "response.output_item.done",
-        output_index: parseInt(idx),
-        item: {
-          id: msgId,
-          type: "message",
-          content: [{ type: "output_text", annotations: [], logprobs: [], text: fullText }],
-          role: "assistant"
-        }
+        output_index: outIdx,
+        item
       });
     }
   };
@@ -197,24 +243,29 @@ export function createResponsesApiTransformStream(logger = null) {
     const callId = state.funcCallIds[idx];
     if (callId && !state.funcItemDone[idx]) {
       const args = state.funcArgsBuf[idx] || "{}";
+      const outIdx = state.funcOutputIndex[idx] ?? parseInt(idx);
       
       emit(controller, "response.function_call_arguments.done", {
         type: "response.function_call_arguments.done",
         item_id: `fc_${callId}`,
-        output_index: parseInt(idx),
+        output_index: outIdx,
         arguments: args
       });
 
+      const item = {
+        id: `fc_${callId}`,
+        type: "function_call",
+        status: "completed",
+        arguments: args,
+        call_id: callId,
+        name: state.funcNames[idx] || ""
+      };
+      state.outputItems.set(outIdx, item);
+
       emit(controller, "response.output_item.done", {
         type: "response.output_item.done",
-        output_index: parseInt(idx),
-        item: {
-          id: `fc_${callId}`,
-          type: "function_call",
-          arguments: args,
-          call_id: callId,
-          name: state.funcNames[idx] || ""
-        }
+        output_index: outIdx,
+        item
       });
 
       state.funcItemDone[idx] = true;
@@ -227,14 +278,11 @@ export function createResponsesApiTransformStream(logger = null) {
       state.completedSent = true;
       emit(controller, "response.completed", {
         type: "response.completed",
-        response: {
-          id: state.responseId,
-          object: "response",
-          created_at: state.created,
+        response: buildResponseSnapshot(state, {
           status: "completed",
-          background: false,
-          error: null
-        }
+          output: buildOutputArray(state.outputItems),
+          usage: state.usage
+        })
       });
     }
   };
@@ -255,7 +303,10 @@ export function createResponsesApiTransformStream(logger = null) {
         if (!dataMatch) continue;
 
         const dataStr = dataMatch[1].trim();
-        if (dataStr === "[DONE]") continue;
+        if (dataStr === "[DONE]") {
+          sendCompleted(controller);
+          continue;
+        }
 
         let parsed;
         try {
@@ -264,40 +315,50 @@ export function createResponsesApiTransformStream(logger = null) {
           continue;
         }
 
-        if (!parsed.choices?.length) continue;
-        
-        const choice = parsed.choices[0];
-        const idx = choice.index || 0;
-        const delta = choice.delta || {};
+        if (parsed.model && !state.model) {
+          state.model = parsed.model;
+        }
+
+        if (parsed.usage) {
+          state.usage = normalizeResponsesUsage(parsed.usage);
+        }
 
         // Emit initial events
         if (!state.started) {
           state.started = true;
-          state.responseId = parsed.id ? `resp_${parsed.id}` : state.responseId;
+          if (parsed.id) {
+            state.responseId = normalizeResponseId(parsed.id);
+          }
           
           emit(controller, "response.created", {
             type: "response.created",
-            response: {
-              id: state.responseId,
-              object: "response",
-              created_at: state.created,
+            response: buildResponseSnapshot(state, {
               status: "in_progress",
-              background: false,
-              error: null,
-              output: []
-            }
+              output: [],
+              usage: null
+            })
           });
 
           emit(controller, "response.in_progress", {
             type: "response.in_progress",
-            response: {
-              id: state.responseId,
-              object: "response",
-              created_at: state.created,
-              status: "in_progress"
-            }
+            response: buildResponseSnapshot(state, {
+              status: "in_progress",
+              output: [],
+              usage: null
+            })
           });
         }
+
+        if (!parsed.choices?.length) {
+          if (state.finished && !state.completedSent && state.usage) {
+            sendCompleted(controller);
+          }
+          continue;
+        }
+        
+        const choice = parsed.choices[0];
+        const idx = choice.index || 0;
+        const delta = choice.delta || {};
 
         // Handle reasoning_content (OpenAI native format)
         if (delta.reasoning_content) {
@@ -335,14 +396,20 @@ export function createResponsesApiTransformStream(logger = null) {
           if (content) {
             if (!state.msgItemAdded[idx]) {
               state.msgItemAdded[idx] = true;
+              if (state.msgOutputIndex[idx] === undefined) {
+                state.msgOutputIndex[idx] = state.nextOutputIndex++;
+              }
+              const outIdx = state.msgOutputIndex[idx];
               const msgId = `msg_${state.responseId}_${idx}`;
               
               emit(controller, "response.output_item.added", {
                 type: "response.output_item.added",
-                output_index: idx,
-                item: { id: msgId, type: "message", content: [], role: "assistant" }
+                output_index: outIdx,
+                item: { id: msgId, type: "message", status: "in_progress", content: [], role: "assistant" }
               });
             }
+
+            const outIdx = state.msgOutputIndex[idx];
 
             if (!state.msgContentAdded[idx]) {
               state.msgContentAdded[idx] = true;
@@ -350,7 +417,7 @@ export function createResponsesApiTransformStream(logger = null) {
               emit(controller, "response.content_part.added", {
                 type: "response.content_part.added",
                 item_id: `msg_${state.responseId}_${idx}`,
-                output_index: idx,
+                output_index: outIdx,
                 content_index: 0,
                 part: { type: "output_text", annotations: [], logprobs: [], text: "" }
               });
@@ -359,7 +426,7 @@ export function createResponsesApiTransformStream(logger = null) {
             emit(controller, "response.output_text.delta", {
               type: "response.output_text.delta",
               item_id: `msg_${state.responseId}_${idx}`,
-              output_index: idx,
+              output_index: outIdx,
               content_index: 0,
               delta: content,
               logprobs: []
@@ -383,13 +450,18 @@ export function createResponsesApiTransformStream(logger = null) {
 
             if (!state.funcCallIds[tcIdx] && newCallId) {
               state.funcCallIds[tcIdx] = newCallId;
+              if (state.funcOutputIndex[tcIdx] === undefined) {
+                state.funcOutputIndex[tcIdx] = state.nextOutputIndex++;
+              }
+              const outIdx = state.funcOutputIndex[tcIdx];
               
               emit(controller, "response.output_item.added", {
                 type: "response.output_item.added",
-                output_index: tcIdx,
+                output_index: outIdx,
                 item: {
                   id: `fc_${newCallId}`,
                   type: "function_call",
+                  status: "in_progress",
                   arguments: "",
                   call_id: newCallId,
                   name: state.funcNames[tcIdx] || ""
@@ -401,11 +473,12 @@ export function createResponsesApiTransformStream(logger = null) {
 
             if (tc.function?.arguments) {
               const refCallId = state.funcCallIds[tcIdx] || newCallId;
+              const outIdx = state.funcOutputIndex[tcIdx] ?? tcIdx;
               if (refCallId) {
                 emit(controller, "response.function_call_arguments.delta", {
                   type: "response.function_call_arguments.delta",
                   item_id: `fc_${refCallId}`,
-                  output_index: tcIdx,
+                  output_index: outIdx,
                   delta: tc.function.arguments
                 });
               }
@@ -416,10 +489,13 @@ export function createResponsesApiTransformStream(logger = null) {
 
         // Handle finish_reason
         if (choice.finish_reason) {
+          state.finished = true;
           for (const i in state.msgItemAdded) closeMessage(controller, i);
           closeReasoning(controller);
           for (const i in state.funcCallIds) closeToolCall(controller, i);
-          sendCompleted(controller);
+          if (state.usage) {
+            sendCompleted(controller);
+          }
         }
       }
     },

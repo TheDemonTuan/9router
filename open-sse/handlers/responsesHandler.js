@@ -57,6 +57,9 @@ export async function handleResponsesCore({ body, modelInfo, credentials, log, o
   if (!clientRequestedStreaming && contentType.includes("text/event-stream")) {
     try {
       const jsonResponse = await convertResponsesStreamToJson(response.body);
+      if (!jsonResponse.model && (modelInfo?.model || body?.model)) {
+        jsonResponse.model = modelInfo?.model || body?.model;
+      }
 
       return {
         success: true,
@@ -81,7 +84,11 @@ export async function handleResponsesCore({ body, modelInfo, credentials, log, o
 
   // Case 2: Client wants streaming, got SSE - transform it
   if (clientRequestedStreaming && contentType.includes("text/event-stream")) {
-    const transformStream = createResponsesApiTransformStream(null);
+    const transformStream = createResponsesApiTransformStream({
+      logger: null,
+      model: modelInfo?.model || body?.model,
+      requestBody: body
+    });
     const transformedBody = response.body.pipeThrough(transformStream);
 
     return {

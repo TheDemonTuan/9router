@@ -4,6 +4,12 @@
  * Used when client requests non-streaming but provider forces streaming (e.g., Codex)
  */
 
+import {
+  buildResponseSnapshot,
+  buildOutputArray,
+  normalizeResponsesUsage
+} from "./responsesBuilder.js";
+
 /**
  * Process a single SSE message and update state accordingly.
  */
@@ -22,24 +28,39 @@ function processSSEMessage(msg, state) {
   try { parsed = JSON.parse(dataStr); }
   catch { return; }
 
-  if (eventType === "response.created") {
-    state.responseId = parsed.response?.id || state.responseId;
-    state.created = parsed.response?.created_at || state.created;
-  } else if (eventType === "response.output_item.done") {
-    state.items.set(parsed.output_index ?? 0, parsed.item);
+  const r = parsed.response;
+  if (r && typeof r === "object") {
+    if (r.id) state.responseId = r.id;
+    if (r.created_at) state.created = r.created_at;
+    if (r.model) state.model = r.model;
+    if (r.instructions !== undefined) state.instructions = r.instructions;
+    if (r.parallel_tool_calls !== undefined) state.parallelToolCalls = r.parallel_tool_calls;
+    if (r.previous_response_id !== undefined) state.previousResponseId = r.previous_response_id;
+    if (r.reasoning !== undefined) state.reasoning = r.reasoning;
+    if (r.store !== undefined) state.store = r.store;
+    if (r.text !== undefined) state.text = r.text;
+    if (r.tool_choice !== undefined) state.toolChoice = r.tool_choice;
+    if (r.tools !== undefined) state.tools = r.tools;
+    if (r.truncation !== undefined) state.truncation = r.truncation;
+    if (r.metadata !== undefined) state.metadata = r.metadata;
+    if (r.error !== undefined) state.error = r.error;
+    if (r.status) state.status = r.status;
+    if (r.usage) state.usage = normalizeResponsesUsage(r.usage);
+    if (Array.isArray(r.output) && r.output.length > 0) {
+      r.output.forEach((item, idx) => {
+        state.items.set(idx, item);
+      });
+    }
+  }
+
+  if (eventType === "response.output_item.done") {
+    state.items.set(parsed.output_index ?? state.items.size, parsed.item);
   } else if (eventType === "response.completed" || eventType === "response.done") {
     state.status = "completed";
-    if (parsed.response?.usage) {
-      state.usage.input_tokens = parsed.response.usage.input_tokens || 0;
-      state.usage.output_tokens = parsed.response.usage.output_tokens || 0;
-      state.usage.total_tokens = parsed.response.usage.total_tokens || 0;
-    }
   } else if (eventType === "response.failed") {
     state.status = "failed";
   }
 }
-
-const EMPTY_RESPONSE = { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
 
 /**
  * Convert Responses API SSE stream to single JSON response
@@ -48,7 +69,14 @@ const EMPTY_RESPONSE = { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
  */
 export async function convertResponsesStreamToJson(stream) {
   if (!stream || typeof stream.getReader !== "function") {
-    return { id: `resp_${Date.now()}`, object: "response", created_at: Math.floor(Date.now() / 1000), status: "failed", output: [], usage: { ...EMPTY_RESPONSE } };
+    return buildResponseSnapshot({
+      responseId: `resp_${Date.now()}`,
+      created: Math.floor(Date.now() / 1000),
+      status: "failed",
+      error: { type: "stream_error", message: "Invalid or empty stream" },
+      output: [],
+      usage: null
+    });
   }
 
   const reader = stream.getReader();
@@ -59,7 +87,8 @@ export async function convertResponsesStreamToJson(stream) {
     responseId: "",
     created: Math.floor(Date.now() / 1000),
     status: "in_progress",
-    usage: { ...EMPTY_RESPONSE },
+    model: null,
+    usage: null,
     items: new Map()
   };
 
@@ -85,19 +114,9 @@ export async function convertResponsesStreamToJson(stream) {
     reader.releaseLock();
   }
 
-  // Build output array from accumulated items (ordered by index)
-  const output = [];
-  const maxIndex = state.items.size > 0 ? Math.max(...state.items.keys()) : -1;
-  for (let i = 0; i <= maxIndex; i++) {
-    output.push(state.items.get(i) || { type: "message", content: [], role: "assistant" });
-  }
-
-  return {
-    id: state.responseId || `resp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    object: "response",
-    created_at: state.created,
-    status: state.status || "completed",
-    output,
+  return buildResponseSnapshot(state, {
+    output: buildOutputArray(state.items),
+    status: state.status === "in_progress" ? "completed" : (state.status || "completed"),
     usage: state.usage
-  };
+  });
 }
