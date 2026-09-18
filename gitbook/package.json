@@ -2,11 +2,12 @@
   "name": "9router-docs",
   "version": "0.1.0",
   "type": "module",
+  "packageManager": "bun@1.4.2",
   "scripts": {
-    "dev": "next dev -p 3001",
-    "build": "next build",
-    "start": "next start -p 3001",
-    "deploy": "npm run build && npx wrangler pages deploy out --project-name=9router-docs --commit-dirty=true"
+    "dev": "bun --bun next dev -p 3001",
+    "build": "bun --bun next build",
+    "start": "bun --bun next start -p 3001",
+    "deploy": "bun run build && bunx wrangler pages deploy out --project-name=9router-docs --commit-dirty=true"
   },
   "dependencies": {
     "lucide-react": "^0.563.0",

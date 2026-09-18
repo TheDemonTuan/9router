@@ -3,18 +3,16 @@
   "version": "0.5.81",
   "description": "9Router web dashboard",
   "private": true,
+  "packageManager": "bun@1.4.2",
   "scripts": {
-    "dev": "next dev --port 20127",
-    "dev:webpack": "next dev --webpack --port 20127",
-    "build": "next build --webpack",
-    "postbuild": "node scripts/copy-standalone-assets.mjs",
-    "postbuild:bun": "node scripts/copy-standalone-assets.mjs",
-    "start": "node custom-server.js --port 20127",
-    "dev:bun": "bun --bun next dev --webpack --port 20127",
-    "build:bun": "bun --bun next build --webpack",
-    "start:bun": "bun ./.next/standalone/custom-server.js",
-    "cli:pack": "npm --prefix cli run pack:cli",
-    "cli:publish": "npm --prefix cli run publish:cli"
+    "dev": "bun --bun next dev --webpack --port 20127",
+    "dev:webpack": "bun --bun next dev --webpack --port 20127",
+    "build": "bun --bun next build --webpack",
+    "postbuild": "bun scripts/copy-standalone-assets.mjs",
+    "start": "bun custom-server.js --port 20127",
+    "start:standalone": "bun ./.next/standalone/custom-server.js",
+    "cli:pack": "bun --prefix cli run pack:cli",
+    "cli:publish": "bun --prefix cli run publish:cli"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
