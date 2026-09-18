@@ -63,6 +63,36 @@ jobs:
           provenance: false
           sbom: false
 
+      - name: Inspect image size and layers
+        env:
+          IMAGE_REF: ${{ steps.meta.outputs.image_ref }}
+        run: |
+          docker buildx imagetools inspect \
+            --raw "$IMAGE_REF" > /tmp/image-manifest.json
+
+          if jq -e '.manifests' /tmp/image-manifest.json >/dev/null 2>&1; then
+            platform_digest="$(jq -r '.manifests[0].digest' /tmp/image-manifest.json)"
+            image_base="${IMAGE_REF%%:*}"
+            docker buildx imagetools inspect \
+              --raw "${image_base}@${platform_digest}" > /tmp/image-manifest.json
+          fi
+
+          echo "=== Image Summary ==="
+          jq '
+            [.layers[].size] |
+            {
+              layers: length,
+              compressed_bytes: add,
+              compressed_mib: (((add / 1024 / 1024) * 100 | floor) / 100)
+            }
+          ' /tmp/image-manifest.json
+
+          echo "=== Layer Breakdown ==="
+          jq -r '
+            .layers[] |
+            "\(.digest)  \(((.size / 1024 / 1024) * 100 | floor) / 100) MiB"
+          ' /tmp/image-manifest.json
+
   deploy:
     name: Deploy to VPS (Blue/Green)
     needs: build

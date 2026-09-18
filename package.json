@@ -7,8 +7,8 @@
   "scripts": {
     "dev": "bun --bun next dev --port 20127",
     "dev:webpack": "bun --bun next dev --webpack --port 20127",
-    "build": "bun --bun next build",
-    "build:webpack": "bun --bun next build --webpack",
+    "build": "bun --bun next build --webpack",
+    "build:turbopack": "bun --bun next build",
     "postbuild": "bun scripts/copy-standalone-assets.mjs",
     "start": "bun custom-server.js --port 20127",
     "start:standalone": "bun ./.next/standalone/custom-server.js",

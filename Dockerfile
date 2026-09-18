@@ -9,6 +9,10 @@ RUN --mount=type=cache,target=/root/.bun/install/cache \
 COPY . ./
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN bun run build
+RUN echo "=== Standalone size ===" && \
+  du -sh /app/.next/standalone && \
+  echo "=== Largest dirs ===" && \
+  du -h -d 2 /app/.next/standalone 2>/dev/null | sort -h 2>/dev/null | tail -n 30 || true
 FROM ${BUN_IMAGE} AS runner
 WORKDIR /app
 LABEL org.opencontainers.image.title="9router"
