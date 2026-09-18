@@ -29,6 +29,7 @@ services:
       PORT: "20128"
       HOSTNAME: "0.0.0.0"
       NODE_ENV: production
+      INITIAL_PASSWORD: ${INITIAL_PASSWORD:-123456}
       HEADROOM_URL: http://9router-headroom:8787
       PUBLIC_URL: ${PUBLIC_URL:-https://${DASHBOARD_HOST:-9router.tuannguyenviet.site}}
       NEXT_PUBLIC_BASE_URL: ${PUBLIC_URL:-https://${DASHBOARD_HOST:-9router.tuannguyenviet.site}}
@@ -69,6 +70,7 @@ services:
       PORT: "20128"
       HOSTNAME: "0.0.0.0"
       NODE_ENV: production
+      INITIAL_PASSWORD: ${INITIAL_PASSWORD:-123456}
       HEADROOM_URL: http://9router-headroom:8787
       PUBLIC_URL: ${PUBLIC_URL:-https://${DASHBOARD_HOST:-9router.tuannguyenviet.site}}
       NEXT_PUBLIC_BASE_URL: ${PUBLIC_URL:-https://${DASHBOARD_HOST:-9router.tuannguyenviet.site}}
