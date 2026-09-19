@@ -238,6 +238,13 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
     delete result.max_output_tokens;
   }
 
+  // Convert Responses text.format to Chat response_format
+  const responseFormat = responsesTextFormatToChatResponseFormat(body.text);
+  if (responseFormat) {
+    result.response_format = responseFormat;
+  }
+  delete result.text;
+
   delete result.input;
   delete result.instructions;
   delete result.include;
@@ -250,6 +257,43 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
   delete result.client_metadata;
 
   return result;
+}
+
+/**
+ * Convert Responses API text.format to Chat Completions response_format
+ */
+export function responsesTextFormatToChatResponseFormat(text) {
+  const format = text?.format;
+  if (!format || typeof format !== "object") return null;
+
+  if (format.type === "json_schema") {
+    return {
+      type: "json_schema",
+      json_schema: {
+        name: format.name || "response",
+        ...(format.description ? { description: format.description } : {}),
+        strict: format.strict ?? true,
+        schema: format.schema || {
+          type: "object",
+          properties: {},
+        },
+      },
+    };
+  }
+
+  if (format.type === "json_object") {
+    return {
+      type: "json_object",
+    };
+  }
+
+  if (format.type === "text") {
+    return {
+      type: "text",
+    };
+  }
+
+  return null;
 }
 
 /**

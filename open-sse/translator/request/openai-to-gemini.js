@@ -59,6 +59,20 @@ function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG
     result.generationConfig.maxOutputTokens = body.max_tokens;
   }
 
+  // Response format / structured outputs
+  const rf = body.response_format;
+  if (rf && typeof rf === "object") {
+    if (rf.type === "json_schema") {
+      result.generationConfig.responseMimeType = "application/json";
+      const schema = rf.json_schema?.schema || rf.schema;
+      if (schema && typeof schema === "object") {
+        result.generationConfig.responseSchema = cleanJSONSchemaForAntigravity(structuredClone(schema));
+      }
+    } else if (rf.type === "json_object") {
+      result.generationConfig.responseMimeType = "application/json";
+    }
+  }
+
   // Build tool_call_id -> name map
   const tcID2Name = {};
   if (body.messages && Array.isArray(body.messages)) {
@@ -297,7 +311,7 @@ function wrapInCloudCodeEnvelope(model, geminiCLI, credentials = null, isAntigra
 }
 
 // Wrap Claude format in Cloud Code envelope for Antigravity
-function wrapInCloudCodeEnvelopeForClaude(model, claudeRequest, credentials = null, signature = DEFAULT_THINKING_AG_SIGNATURE) {
+function wrapInCloudCodeEnvelopeForClaude(model, claudeRequest, credentials = null, signature = DEFAULT_THINKING_AG_SIGNATURE, responseFormat = null) {
   const projectId = credentials?.projectId || generateProjectId();
 
   const envelope = {
@@ -315,6 +329,18 @@ function wrapInCloudCodeEnvelopeForClaude(model, claudeRequest, credentials = nu
       }
     }
   };
+
+  if (responseFormat && typeof responseFormat === "object") {
+    if (responseFormat.type === "json_schema") {
+      envelope.request.generationConfig.responseMimeType = "application/json";
+      const schema = responseFormat.json_schema?.schema || responseFormat.schema;
+      if (schema && typeof schema === "object") {
+        envelope.request.generationConfig.responseSchema = cleanJSONSchemaForAntigravity(structuredClone(schema));
+      }
+    } else if (responseFormat.type === "json_object") {
+      envelope.request.generationConfig.responseMimeType = "application/json";
+    }
+  }
 
   // Build tool_use id -> name map so functionResponse can use the correct name
   const toolUseIdToName = {};
@@ -438,7 +464,7 @@ function isClaudeModel(model) {
 export function openaiToAntigravityRequest(model, body, stream, credentials = null) {
   if (isClaudeModel(model)) {
     const claudeRequest = openaiToClaudeRequestForAntigravity(model, body, stream);
-    return wrapInCloudCodeEnvelopeForClaude(model, claudeRequest, credentials);
+    return wrapInCloudCodeEnvelopeForClaude(model, claudeRequest, credentials, DEFAULT_THINKING_AG_SIGNATURE, body.response_format);
   }
 
   const geminiCLI = openaiToGeminiCLIRequest(model, body, stream);
