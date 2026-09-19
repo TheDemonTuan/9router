@@ -43,7 +43,7 @@ const CODEX_PASSTHROUGH_TOOL_TYPES = new Set(["custom"]);
 const RESPONSES_API_ALLOWLIST = new Set([
   "model", "input", "instructions", "tools", "tool_choice", "stream", "store",
   "reasoning", "service_tier", "include", "prompt_cache_key", "client_metadata",
-  "text"
+  "text", "parallel_tool_calls", "stream_options", "access_programs"
 ]);
 
 // Convert role=system → role=developer in body.input (keeps content in cacheable prefix)
@@ -483,7 +483,6 @@ export class CodexExecutor extends BaseExecutor {
     delete body.user; // Cursor sends this but Codex doesn't support it
     delete body.prompt_cache_retention; // Cursor sends this but Codex doesn't support it
     delete body.metadata; // Cursor sends this but Codex doesn't support it
-    delete body.stream_options; // Cursor sends this but Codex doesn't support it
     delete body.safety_identifier; // Droid CLI sends this but Codex doesn't support it
     delete body.previous_response_id; // store=false → backend can't resolve previous resp; avoid 404
 

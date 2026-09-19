@@ -4,7 +4,7 @@ import { createSSETransformStreamWithLogger, createPassthroughStreamWithLogger }
 import { pipeWithDisconnect } from "../../utils/streamHandler.js";
 import { PROVIDERS } from "../../config/providers.js";
 import { HTTP_STATUS, STREAM_STALL_TIMEOUT_MS } from "../../config/runtimeConfig.js";
-import { buildAbortedResponsesTerminalBytes } from "../../utils/responsesStreamHelpers.js";
+import { buildAbortedResponsesTerminalBytes, isOpenAIResponsesTerminalEvent, parseOpenAIResponsesSSERecord, formatIncompleteOpenAIResponsesStreamFailure } from "../../utils/responsesStreamHelpers.js";
 import { buildStreamErrorBytes } from "../../utils/streamHelpers.js";
 import { buildRequestDetail, extractRequestConfig, saveUsageStats, formatDoneLine } from "./requestDetail.js";
 import { saveRequestDetail } from "@/lib/usageDb.js";
@@ -23,11 +23,37 @@ const CODEX_SOURCE_TO_TARGET = {
 /**
  * Determine which SSE transform stream to use based on provider/format.
  */
-function buildTransformStream({ provider, sourceFormat, targetFormat, userAgent, reqLogger, toolNameMap, customToolNames, model, connectionId, body, onStreamComplete, apiKey, credentials }) {
-  const isDroidCLI = userAgent?.toLowerCase().includes("droid") || userAgent?.toLowerCase().includes("codex-cli");
-  // Responses-API providers (e.g. codex) emit Responses SSE → translate into client format
+export function buildTransformStream({ provider, sourceFormat, targetFormat, userAgent, reqLogger, toolNameMap, customToolNames, model, connectionId, body, onStreamComplete, apiKey, credentials }) {
+  // Native Responses streams are protocol data, not Chat SSE. Preserve every
+  // upstream byte, including data-only and future event types.
+  if (sourceFormat === FORMATS.OPENAI_RESPONSES && targetFormat === FORMATS.OPENAI_RESPONSES) {
+    let buffer = "";
+    let terminal = false;
+    const decoder = new TextDecoder();
+    return new TransformStream({
+      transform(chunk, controller) {
+        controller.enqueue(chunk);
+        buffer += decoder.decode(chunk, { stream: true });
+        const records = buffer.split(/\r?\n\r?\n|\r\r/);
+        buffer = records.pop() || "";
+        for (const record of records) {
+          const parsed = parseOpenAIResponsesSSERecord(record);
+          if (parsed?.data && isOpenAIResponsesTerminalEvent(parsed.type, parsed.data)) terminal = true;
+        }
+      },
+      flush(controller) {
+        if (buffer.trim()) {
+          const parsed = parseOpenAIResponsesSSERecord(buffer);
+          if (parsed?.data && isOpenAIResponsesTerminalEvent(parsed.type, parsed.data)) terminal = true;
+        }
+        if (!terminal) controller.enqueue(new TextEncoder().encode(formatIncompleteOpenAIResponsesStreamFailure({ model })));
+      }
+    });
+  }
+
+  // Responses-API providers (e.g. codex) emit Responses SSE → translate into client format.
   const isResponsesProvider = PROVIDERS[provider]?.format === FORMATS.OPENAI_RESPONSES;
-  const needsCodexTranslation = isResponsesProvider && targetFormat === FORMATS.OPENAI_RESPONSES && !isDroidCLI;
+  const needsCodexTranslation = isResponsesProvider && targetFormat === FORMATS.OPENAI_RESPONSES;
 
   if (needsCodexTranslation) {
     const codexTarget = CODEX_SOURCE_TO_TARGET[sourceFormat] || FORMATS.OPENAI;
@@ -88,7 +114,7 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
   // format gets the OpenAI error frame + [DONE], or `event: error` for Claude.
   const isResponsesPassthrough = sourceFormat === FORMATS.OPENAI_RESPONSES && targetFormat === FORMATS.OPENAI_RESPONSES;
   const onAbortTerminal = isResponsesPassthrough
-    ? buildAbortedResponsesTerminalBytes
+    ? (message) => buildAbortedResponsesTerminalBytes({ model, message })
     : (message) => buildStreamErrorBytes(HTTP_STATUS.GATEWAY_TIMEOUT, message, sourceFormat);
   const stallTimeoutMs = PROVIDERS[provider]?.stallTimeoutMs || STREAM_STALL_TIMEOUT_MS;
   const transformedBody = pipeWithDisconnect(providerResponse, transformStream, streamController, onAbortTerminal, stallTimeoutMs);

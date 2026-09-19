@@ -26,12 +26,21 @@ export async function OPTIONS() {
  */
 export async function POST(request) {
   await ensureInitialized();
-  const body = await request.json();
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return new Response(JSON.stringify({ error: { message: "Invalid JSON body", type: "invalid_request_error", code: "" } }), {
+      status: 400,
+      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+    });
+  }
   body._compact = true;
   const newRequest = new Request(request.url, {
     method: "POST",
     headers: request.headers,
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
+    signal: request.signal,
   });
   return await handleChat(newRequest);
 }

@@ -256,7 +256,33 @@ describe("Canonical Responses builder & transformers", () => {
     });
   });
 
-  it("9. empty content / stop finishes cleanly without throwing", async () => {
+  it("9. collects data-only CRLF frames and uses terminal output as authoritative", async () => {
+    const encoder = new TextEncoder();
+    const source = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"type":"response.output_text.delta","delta":"lost?"}\r\n\r\n'));
+        controller.enqueue(encoder.encode('data: {"type":"response.completed","response":{"id":"resp_data","status":"completed","model":"gpt","output":[],"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}}\r\n\r\n'));
+        controller.close();
+      }
+    });
+    const json = await convertResponsesStreamToJson(source);
+    expect(json).toMatchObject({ id: "resp_data", status: "completed", output: [] });
+    expect(json.usage).toMatchObject({ input_tokens: 1 });
+  });
+
+  it("10. marks EOF before terminal as failed instead of completed", async () => {
+    const source = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: {"type":"response.output_text.delta","delta":"partial"}\n\n'));
+        controller.close();
+      }
+    });
+    const json = await convertResponsesStreamToJson(source);
+    expect(json.status).toBe("failed");
+    expect(json.error).toMatchObject({ code: "stream_disconnected" });
+  });
+
+  it("11. empty content / stop finishes cleanly without throwing", async () => {
     const chunks = [
       { id: "chatcmpl-empty", model: "gpt-4o", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }
     ];

@@ -61,6 +61,23 @@ describe("CodexExecutor tool normalization", () => {
     expect(body.metadata).toBeUndefined();
   });
 
+  it("preserves current Codex Responses request controls", () => {
+    const executor = new CodexExecutor();
+    const body = {
+      model: "gpt-5.5",
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "probe" }] }],
+      parallel_tool_calls: false,
+      stream_options: { reasoning_summary_delivery: "sequential_cutoff" },
+      access_programs: { cyber: "standard" },
+    };
+    executor.transformRequest("gpt-5.5", body, true, { connectionId: "test", providerSpecificData: {} });
+    expect(body).toMatchObject({
+      parallel_tool_calls: false,
+      stream_options: { reasoning_summary_delivery: "sequential_cutoff" },
+      access_programs: { cyber: "standard" },
+    });
+  });
+
   it("preserves Responses-native tool_search tools", () => {
     const tools = normalizeTools([
       {

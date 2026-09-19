@@ -16,6 +16,7 @@ import {
   generateSessionId,
   generateProjectId,
   cleanJSONSchemaForAntigravity,
+  cleanResponseSchemaForAntigravity,
   normalizeGeminiContents
 } from "../formats/gemini.js";
 import { deriveSessionId, toNumericSessionId } from "../../utils/sessionManager.js";
@@ -66,7 +67,7 @@ function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG
       result.generationConfig.responseMimeType = "application/json";
       const schema = rf.json_schema?.schema || rf.schema;
       if (schema && typeof schema === "object") {
-        result.generationConfig.responseSchema = cleanJSONSchemaForAntigravity(structuredClone(schema));
+        result.generationConfig.responseSchema = cleanResponseSchemaForAntigravity(schema);
       }
     } else if (rf.type === "json_object") {
       result.generationConfig.responseMimeType = "application/json";
@@ -335,7 +336,7 @@ function wrapInCloudCodeEnvelopeForClaude(model, claudeRequest, credentials = nu
       envelope.request.generationConfig.responseMimeType = "application/json";
       const schema = responseFormat.json_schema?.schema || responseFormat.schema;
       if (schema && typeof schema === "object") {
-        envelope.request.generationConfig.responseSchema = cleanJSONSchemaForAntigravity(structuredClone(schema));
+        envelope.request.generationConfig.responseSchema = cleanResponseSchemaForAntigravity(schema);
       }
     } else if (responseFormat.type === "json_object") {
       envelope.request.generationConfig.responseMimeType = "application/json";

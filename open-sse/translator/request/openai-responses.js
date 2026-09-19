@@ -37,6 +37,7 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
   let pendingReasoningEncrypted = "";
   const additionalTools = [];
   const customToolNames = new Set();
+  const knownCallIds = new Set();
 
   const inputItems = normalizeResponsesInput(body.input);
   if (!inputItems) return body;
@@ -61,10 +62,15 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
     pendingReasoningEncrypted = "";
   };
 
-  for (const item of inputItems) {
-    // Determine item type - Droid CLI sends role-based items without 'type' field
-    // Fallback: if no type but has role property, treat as message
+  for (let itemIndex = 0; itemIndex < inputItems.length; itemIndex++) {
+    const item = inputItems[itemIndex];
+    // Determine item type - Droid CLI sends role-based items without 'type' field.
     const itemType = item.type || (item.role ? RESPONSES_ITEM.MESSAGE : null);
+    if (!itemType) {
+      const error = new Error(`Unsupported Responses input item at index ${itemIndex}`);
+      error.code = "unsupported_feature";
+      throw error;
+    }
 
     if (itemType === RESPONSES_ITEM.MESSAGE) {
       // Flush any pending assistant message with tool calls
@@ -86,8 +92,12 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
           if (c.type === RESPONSES_ITEM.INPUT_TEXT) return { type: OPENAI_BLOCK.TEXT, text: c.text };
           if (c.type === RESPONSES_ITEM.OUTPUT_TEXT) return { type: OPENAI_BLOCK.TEXT, text: c.text };
           if (c.type === RESPONSES_ITEM.INPUT_IMAGE) {
-            const url = c.image_url || c.file_id || "";
-            return { type: OPENAI_BLOCK.IMAGE_URL, image_url: { url, detail: c.detail || "auto" } };
+            if (!c.image_url && c.file_id) {
+              const error = new Error(`Unsupported Responses file_id image at index ${itemIndex}`);
+              error.code = "unsupported_feature";
+              throw error;
+            }
+            return { type: OPENAI_BLOCK.IMAGE_URL, image_url: { url: c.image_url || "", detail: c.detail || "auto" } };
           }
           return c;
         })
@@ -103,6 +113,13 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
     }
     else if (itemType === RESPONSES_ITEM.FUNCTION_CALL || itemType === RESPONSES_ITEM.CUSTOM_TOOL_CALL) {
       // Start or append to assistant message with tool_calls
+      // OpenAI/Gemini reject nameless calls. Do not create an empty assistant
+      // tool_calls carrier before validating the input.
+      if (!item.name || typeof item.name !== "string" || item.name.trim() === "") {
+        const error = new Error(`Unsupported Responses tool call without a name at index ${itemIndex}`);
+        error.code = "unsupported_feature";
+        throw error;
+      }
       if (!currentAssistantMsg) {
         currentAssistantMsg = {
           role: ROLE.ASSISTANT,
@@ -111,12 +128,16 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
         };
         attachPendingReasoning(currentAssistantMsg);
       }
-      // Skip items with empty/missing name — Codex/OpenAI reject nameless tool calls (#444)
-      if (!item.name || typeof item.name !== "string" || item.name.trim() === "") continue;
       if (itemType === RESPONSES_ITEM.CUSTOM_TOOL_CALL) customToolNames.add(item.name);
       const toolInput = itemType === RESPONSES_ITEM.CUSTOM_TOOL_CALL
         ? { input: typeof item.input === "string" ? item.input : JSON.stringify(item.input ?? "") }
         : item.arguments;
+      if (!item.call_id || typeof item.call_id !== "string" || knownCallIds.has(item.call_id)) {
+        const error = new Error(`Unsupported Responses tool call id at index ${itemIndex}`);
+        error.code = "unsupported_feature";
+        throw error;
+      }
+      knownCallIds.add(item.call_id);
       currentAssistantMsg.tool_calls.push({
         id: item.call_id,
         type: OPENAI_BLOCK.FUNCTION,
@@ -160,6 +181,10 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
         pendingReasoningEncrypted = item.encrypted_content;
       }
       continue;
+    } else {
+      const error = new Error(`Unsupported Responses item type '${itemType}' at index ${itemIndex}`);
+      error.code = "unsupported_feature";
+      throw error;
     }
   }
 

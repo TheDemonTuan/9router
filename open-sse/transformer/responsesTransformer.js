@@ -287,13 +287,14 @@ export function createResponsesApiTransformStream(optsOrLogger = null, modelArg 
     }
   };
 
+  const decoder = new TextDecoder();
   return new TransformStream({
     transform(chunk, controller) {
-      const text = new TextDecoder().decode(chunk);
+      const text = decoder.decode(chunk, { stream: true });
       logger?.logInput(text.trim());
       state.buffer += text;
 
-      const messages = state.buffer.split("\n\n");
+      const messages = state.buffer.split(/\r?\n\r?\n|\r\r/);
       state.buffer = messages.pop() || "";
 
       for (const msg of messages) {

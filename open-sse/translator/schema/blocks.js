@@ -37,6 +37,15 @@ export const RESPONSES_ITEM = {
   INPUT_TEXT: "input_text",
   INPUT_IMAGE: "input_image",
   SUMMARY_TEXT: "summary_text",
+  LOCAL_SHELL_CALL: "local_shell_call",
+  TOOL_SEARCH_CALL: "tool_search_call",
+  TOOL_SEARCH_CALL_OUTPUT: "tool_search_call_output",
+  WEB_SEARCH_CALL: "web_search_call",
+  IMAGE_GENERATION_CALL: "image_generation_call",
+  COMPACTION: "compaction",
+  COMPACTION_TRIGGER: "compaction_trigger",
+  CONFIGURATION_UPDATE: "configuration_update",
+  INPUT_FILE: "input_file",
 };
 
 // Valid OpenAI block types (used by filterToOpenAIFormat).

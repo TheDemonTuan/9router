@@ -131,10 +131,11 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
   if (isCodexResponsesApi) {
     try {
       const jsonResponse = await convertResponsesStreamToJson(providerResponse.body);
-      if (onRequestSuccess) await onRequestSuccess();
+      const completed = jsonResponse.status === "completed" || jsonResponse.status === "done";
+      if (completed && onRequestSuccess) await onRequestSuccess();
 
       const usage = jsonResponse.usage || {};
-      appendLog({ tokens: usage, status: "200 OK" });
+      appendLog({ tokens: usage, status: completed ? "200 OK" : `200 ${jsonResponse.status || "failed"}` });
       saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, silent: true });
       if (log?.line) log.line(reqTag, "📊", formatDoneLine({ usage, latency: { total: Date.now() - requestStartTime } }));
 

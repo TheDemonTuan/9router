@@ -12,10 +12,23 @@ const resultsPath = process.argv[2];
 if (!resultsPath) { console.error("Missing results.json path"); process.exit(2); }
 
 const r = JSON.parse(readFileSync(resultsPath, "utf8"));
-const nowFails = r.testResults.flatMap(f =>
-  f.assertionResults.filter(a => a.status === "failed")
-    .map(a => f.name.split("/app/")[1] + " :: " + a.fullName)
-);
+const relativeTestName = (name) => {
+  const normalized = String(name || "").replace(/\\/g, "/");
+  const marker = "/tests/";
+  const index = normalized.lastIndexOf(marker);
+  return index >= 0 ? `tests/${normalized.slice(index + marker.length)}` : normalized;
+};
+
+const nowFails = r.testResults.flatMap(f => {
+  const assertions = f.assertionResults || [];
+  const assertionFails = assertions
+    .filter(a => a.status === "failed")
+    .map(a => `${relativeTestName(f.name)} :: ${a.fullName}`);
+  // Vitest reports collection/import failures as a failed suite with no assertions.
+  return assertionFails.length || f.status !== "failed"
+    ? assertionFails
+    : [`${relativeTestName(f.name)} :: ${f.message || "test suite failed"}`];
+});
 
 // Regression = fail bây giờ NHƯNG không có trong baseline known-fails
 const regressions = nowFails.filter(f => !knownFails.has(f));

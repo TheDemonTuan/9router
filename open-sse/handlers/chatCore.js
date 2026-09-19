@@ -188,7 +188,14 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     // Normalize newer Cowork/CC beta shapes (adaptive thinking, mid-conversation system) the API rejects
     if (clientTool === "claude") normalizeClaudePassthrough(translatedBody, translatedBody.model);
   } else {
-    translatedBody = translateRequest(sourceFormat, targetFormat, upstreamModel, body, stream, credentials, provider, reqLogger, stripList, connectionId, clientTool);
+    try {
+      translatedBody = translateRequest(sourceFormat, targetFormat, upstreamModel, body, stream, credentials, provider, reqLogger, stripList, connectionId, clientTool);
+    } catch (error) {
+      const message = error?.code === "unsupported_feature"
+        ? error.message
+        : `Failed to translate request for ${sourceFormat} → ${targetFormat}`;
+      return createErrorResult(HTTP_STATUS.BAD_REQUEST, message);
+    }
     if (!translatedBody) {
       trackPendingRequest(model, provider, connectionId, false, true);
       return createErrorResult(HTTP_STATUS.BAD_REQUEST, `Failed to translate request for ${sourceFormat} → ${targetFormat}`);
@@ -251,8 +258,14 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     translatedBody.tools = defaultClaudeToolType(translatedBody.tools);
   }
 
-  // Per-request opt-out: client can bypass all token savers via header
-  const tokenSaverEnabled = clientRawRequest?.headers?.[TOKEN_SAVER_HEADER]?.toLowerCase() !== "off";
+  // Per-request opt-out: client can bypass all token savers via header.
+  // Structured output is a protocol contract; prompt/content mutations are unsafe.
+  const strictStructuredOutput = passthrough
+    || body.text?.format?.type === "json_schema"
+    || body.response_format?.type === "json_schema"
+    || body.response_format?.type === "json_object";
+  const tokenSaverEnabled = !strictStructuredOutput
+    && clientRawRequest?.headers?.[TOKEN_SAVER_HEADER]?.toLowerCase() !== "off";
 
   // RTK: compress tool_result content
   const rtkStats = compressMessages(translatedBody, tokenSaverEnabled && rtkEnabled);
@@ -288,7 +301,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   // PXPIPE: image bulky context (Claude-format bodies only), last saver before dispatch
   let pxpipeSummary = null;
-  if (pxpipeEnabled) {
+  if (pxpipeEnabled && !strictStructuredOutput) {
     const pxpipeResult = await compressWithPxpipe(translatedBody, {
       enabled: true, format: finalFormat, model: upstreamModel,
       minChars: pxpipeMinChars, timeoutMs: pxpipeTimeoutMs, transform: pxpipeTransform,

@@ -198,11 +198,10 @@ describe("Responses Structured Outputs & Multi-hop Translation", () => {
       expect(schema.type).toBe("object");
       expect(schema.properties.decision).toBeDefined();
       expect(schema.properties.evidence).toBeDefined();
-      // Verify union types [string, null] flattened to string
-      expect(schema.properties.next_step.type).toBe("string");
-      expect(schema.properties.blocker_key.type).toBe("string");
-      // Verify unsupported additionalProperties stripped
-      expect(schema.additionalProperties).toBeUndefined();
+      // Response schemas preserve nullable and closed-object constraints.
+      expect(schema.properties.next_step).toMatchObject({ type: "string", nullable: true });
+      expect(schema.properties.blocker_key).toMatchObject({ type: "string", nullable: true });
+      expect(schema.additionalProperties).toBe(false);
       // Verify required fields preserved
       expect(schema.required).toEqual(["decision", "evidence", "next_step", "blocker_key"]);
     });
@@ -301,7 +300,7 @@ describe("Responses Structured Outputs & Multi-hop Translation", () => {
       expect(finalSchema.type).toBe("object");
       expect(Object.keys(finalSchema.properties)).toEqual(["decision", "evidence", "next_step", "blocker_key"]);
       expect(finalSchema.required).toEqual(["decision", "evidence", "next_step", "blocker_key"]);
-      expect(finalSchema.additionalProperties).toBeUndefined();
+      expect(finalSchema.additionalProperties).toBe(false);
     });
   });
 });

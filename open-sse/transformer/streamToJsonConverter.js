@@ -9,56 +9,41 @@ import {
   buildOutputArray,
   normalizeResponsesUsage
 } from "./responsesBuilder.js";
+import { parseOpenAIResponsesSSERecord } from "../utils/responsesStreamHelpers.js";
 
-/**
- * Process a single SSE message and update state accordingly.
- */
-function processSSEMessage(msg, state) {
-  if (!msg.trim()) return;
-
-  const eventMatch = msg.match(/^event:\s*(.+)$/m);
-  const dataMatch = msg.match(/^data:\s*(.+)$/m);
-  if (!eventMatch || !dataMatch) return;
-
-  const eventType = eventMatch[1].trim();
-  const dataStr = dataMatch[1].trim();
-  if (dataStr === "[DONE]") return;
-
-  let parsed;
-  try { parsed = JSON.parse(dataStr); }
-  catch { return; }
-
-  const r = parsed.response;
-  if (r && typeof r === "object") {
-    if (r.id) state.responseId = r.id;
-    if (r.created_at) state.created = r.created_at;
-    if (r.model) state.model = r.model;
-    if (r.instructions !== undefined) state.instructions = r.instructions;
-    if (r.parallel_tool_calls !== undefined) state.parallelToolCalls = r.parallel_tool_calls;
-    if (r.previous_response_id !== undefined) state.previousResponseId = r.previous_response_id;
-    if (r.reasoning !== undefined) state.reasoning = r.reasoning;
-    if (r.store !== undefined) state.store = r.store;
-    if (r.text !== undefined) state.text = r.text;
-    if (r.tool_choice !== undefined) state.toolChoice = r.tool_choice;
-    if (r.tools !== undefined) state.tools = r.tools;
-    if (r.truncation !== undefined) state.truncation = r.truncation;
-    if (r.metadata !== undefined) state.metadata = r.metadata;
-    if (r.error !== undefined) state.error = r.error;
-    if (r.status) state.status = r.status;
-    if (r.usage) state.usage = normalizeResponsesUsage(r.usage);
-    if (Array.isArray(r.output) && r.output.length > 0) {
-      r.output.forEach((item, idx) => {
-        state.items.set(idx, item);
-      });
-    }
+function updateResponseState(response, state, authoritativeOutput = false) {
+  if (!response || typeof response !== "object") return;
+  if (response.id) state.responseId = response.id;
+  if (response.created_at) state.created = response.created_at;
+  if (response.model) state.model = response.model;
+  for (const [source, target] of [["instructions", "instructions"], ["parallel_tool_calls", "parallelToolCalls"], ["previous_response_id", "previousResponseId"], ["reasoning", "reasoning"], ["store", "store"], ["text", "text"], ["tool_choice", "toolChoice"], ["tools", "tools"], ["truncation", "truncation"], ["metadata", "metadata"], ["error", "error"], ["incomplete_details", "incomplete_details"]]) {
+    if (response[source] !== undefined) state[target] = response[source];
   }
+  if (response.status) state.status = response.status;
+  if (response.usage) state.usage = normalizeResponsesUsage(response.usage);
+  // A terminal output, including [], is authoritative.
+  if (authoritativeOutput && Array.isArray(response.output)) {
+    state.items.clear();
+    response.output.forEach((item, idx) => state.items.set(idx, item));
+    state.authoritativeOutput = true;
+  }
+}
 
-  if (eventType === "response.output_item.done") {
+function processSSEMessage(msg, state) {
+  const record = parseOpenAIResponsesSSERecord(msg);
+  if (!record || record.done || record.malformed || !record.data) return;
+  const { type: eventType, data: parsed } = record;
+  const terminal = eventType === "response.completed" || eventType === "response.done" || eventType === "response.failed" || eventType === "response.incomplete";
+  updateResponseState(parsed.response, state, terminal);
+
+  if (eventType === "response.output_item.done" && !state.authoritativeOutput && parsed.item) {
     state.items.set(parsed.output_index ?? state.items.size, parsed.item);
   } else if (eventType === "response.completed" || eventType === "response.done") {
-    state.status = "completed";
+    state.status = parsed.response?.status || "completed";
   } else if (eventType === "response.failed") {
     state.status = "failed";
+  } else if (eventType === "response.incomplete") {
+    state.status = "incomplete";
   }
 }
 
@@ -89,7 +74,8 @@ export async function convertResponsesStreamToJson(stream) {
     status: "in_progress",
     model: null,
     usage: null,
-    items: new Map()
+    items: new Map(),
+    authoritativeOutput: false
   };
 
   try {
@@ -98,25 +84,28 @@ export async function convertResponsesStreamToJson(stream) {
       if (done) break;
 
       buffer += decoder.decode(value, { stream: true });
-      const messages = buffer.split("\n\n");
+      const messages = buffer.split(/\r?\n\r?\n|\r\r/);
       buffer = messages.pop() || "";
 
-      for (const msg of messages) {
-        processSSEMessage(msg, state);
-      }
+      for (const msg of messages) processSSEMessage(msg, state);
     }
 
-    // Flush remaining buffer (last event may not end with \n\n)
-    if (buffer.trim()) {
-      processSSEMessage(buffer, state);
-    }
+    // Flush UTF-8 decoder and remaining frame (last event may lack delimiter).
+    buffer += decoder.decode();
+    if (buffer.trim()) processSSEMessage(buffer, state);
   } finally {
     reader.releaseLock();
   }
 
+  const disconnected = state.status === "in_progress";
   return buildResponseSnapshot(state, {
     output: buildOutputArray(state.items),
-    status: state.status === "in_progress" ? "completed" : (state.status || "completed"),
+    status: disconnected ? "failed" : state.status,
+    error: disconnected ? {
+      type: "stream_error",
+      code: "stream_disconnected",
+      message: "stream closed before response.completed"
+    } : state.error,
     usage: state.usage
   });
 }

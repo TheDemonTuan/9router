@@ -432,8 +432,29 @@ export function cleanJSONSchemaForAntigravity(schema) {
   return cleaned;
 }
 
-// Merge adjacent same-role messages, strip empty parts, ensure initial user turn
-export function normalizeGeminiContents(contents) {
+// Response schemas keep closed-object and nullable semantics. Tool schemas use
+// the stricter cleaner above because Antigravity validates tool parameters more narrowly.
+export function cleanResponseSchemaForAntigravity(schema) {
+  if (!schema || typeof schema !== "object") return schema;
+  const cleaned = structuredClone(schema);
+  const walk = (node) => {
+    if (!node || typeof node !== "object" || Array.isArray(node)) return;
+    if (Array.isArray(node.type) && node.type.includes("null")) {
+      const types = node.type.filter(type => type !== "null");
+      node.type = types.length === 1 ? types[0] : types;
+      node.nullable = true;
+    }
+    if (node.properties && !node.type) node.type = "object";
+    if (node.type === "array" && node.items) walk(node.items);
+    for (const value of Object.values(node.properties || {})) walk(value);
+    for (const key of ["$schema", "$id", "$defs", "$ref"]) delete node[key];
+  };
+  walk(cleaned);
+  return cleaned;
+}
+
+// Merge adjacent same-role messages, strip empty parts, ensure valid generation bounds.
+export function normalizeGeminiContents(contents, { requireTrailingUser = false } = {}) {
   const out = [];
   for (const c of contents || []) {
     if (!c?.role || !Array.isArray(c.parts)) continue;
@@ -443,9 +464,8 @@ export function normalizeGeminiContents(contents) {
     if (last?.role === c.role) last.parts.push(...parts);
     else out.push({ ...c, parts: [...parts] });
   }
-  if (out.length > 0 && out[0].role !== "user") {
-    out.unshift({ role: "user", parts: [{ text: "..." }] });
-  }
+  if (out.length > 0 && out[0].role !== "user") out.unshift({ role: "user", parts: [{ text: "..." }] });
+  if (requireTrailingUser && out.at(-1)?.role === "model") out.push({ role: "user", parts: [{ text: "" }] });
   return out;
 }
 

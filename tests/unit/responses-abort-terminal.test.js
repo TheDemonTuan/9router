@@ -33,6 +33,12 @@ async function readAll(stream) {
 }
 
 describe("Responses abort terminal synthesis", () => {
+  it("keeps model and abort message in the synthetic terminal", () => {
+    const text = new TextDecoder().decode(buildAbortedResponsesTerminalBytes({ model: "gpt-5.5", message: "stream stall timeout" }));
+    const payload = JSON.parse(text.match(/data: (\{.+\})/)[1]);
+    expect(payload.response).toMatchObject({ model: "gpt-5.5", error: { message: "stream stall timeout" } });
+  });
+
   it("emits response.failed + [DONE] when upstream errors (abort/stall)", async () => {
     // Upstream readable that errors mid-stream (simulates fetch abort on stall)
     const upstream = new ReadableStream({
