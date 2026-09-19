@@ -68,6 +68,29 @@ describe("Codex Responses Lite custom tools → OpenAI Chat", () => {
     });
   });
 
+  it("ignores compaction metadata while preserving a valid downstream conversation", () => {
+    const out = openaiResponsesToOpenAIRequest("ag/gemini-3.8-flash-high", {
+      input: [
+        { type: "message", role: "user", content: [{ type: "input_text", text: "before" }] },
+        { type: "compaction_trigger" },
+        { type: "compaction", summary: [{ type: "summary_text", text: "compressed" }] },
+        { type: "message", role: "user", content: [{ type: "input_text", text: "after" }] },
+      ],
+    }, true, null);
+    expect(out.messages).toEqual([
+      { role: "user", content: [{ type: "text", text: "before" }] },
+      { role: "user", content: [{ type: "text", text: "after" }] },
+    ]);
+  });
+
+  it("rejects orphan function and custom tool outputs", () => {
+    for (const type of ["function_call_output", "custom_tool_call_output"]) {
+      expect(() => openaiResponsesToOpenAIRequest("ag/gemini-3.8-flash-high", {
+        input: [{ type, call_id: "missing", output: "no call" }],
+      }, true, null)).toThrow("orphan tool output");
+    }
+  });
+
   it("merges additional_tools with normal top-level function tools", () => {
     const out = openaiResponsesToOpenAIRequest("cx/gpt-5.6-sol", {
       input: [{ type: "additional_tools", role: "developer", tools: [EXEC_TOOL] }],

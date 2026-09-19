@@ -1,7 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("@/lib/usageDb.js", () => ({
+  appendRequestLog: vi.fn(async () => {}),
+  saveRequestDetail: vi.fn(async () => {}),
+  saveRequestUsage: vi.fn(async () => {}),
+  trackPendingRequest: vi.fn(),
+}));
 
 import { FORMATS } from "../../open-sse/translator/formats.js";
-import { buildTransformStream } from "../../open-sse/handlers/chatCore/streamingHandler.js";
+import { appendRequestLog, saveRequestDetail, trackPendingRequest } from "@/lib/usageDb.js";
+import { buildOnStreamComplete, buildTransformStream, handleStreamingResponse } from "../../open-sse/handlers/chatCore/streamingHandler.js";
 
 async function read(stream) {
   const reader = stream.getReader();
@@ -49,5 +57,92 @@ describe("native Responses forwarding", () => {
     }).pipeThrough(transform));
     expect(output).toContain('"type":"response.failed"');
     expect(output).toContain('"model":"gpt-5.5"');
+  });
+
+  it("propagates safe Codex headers and only marks completed streams successful", async () => {
+    for (const [status, expectedSuccess] of [["completed", 1], ["failed", 0], ["incomplete", 0]]) {
+      let successes = 0;
+      const providerResponse = new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type: `response.${status}`, response: { status } })}\n\n`));
+          controller.close();
+        },
+      }), {
+        headers: { "content-type": "text/event-stream", "x-request-id": "req_123", "x-codex-turn-state": "turn_456", "set-cookie": "never-forward" },
+      });
+      const result = await handleStreamingResponse({
+        providerResponse, provider: "codex", model: "gpt-5.5", sourceFormat: FORMATS.OPENAI_RESPONSES,
+        targetFormat: FORMATS.OPENAI_RESPONSES, body: {}, stream: true, translatedBody: {}, requestStartTime: Date.now(),
+        streamController: { isConnected: () => true, handleComplete() {}, handleError() {}, handleDisconnect() {}, signal: new AbortController().signal },
+        onRequestSuccess: () => { successes++; }, streamDetailId: `test-${status}`,
+      });
+      await read(result.response.body);
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(successes).toBe(expectedSuccess);
+      expect(result.response.headers.get("x-request-id")).toBe("req_123");
+      expect(result.response.headers.get("x-codex-turn-state")).toBe("turn_456");
+      expect(result.response.headers.get("set-cookie")).toBeNull();
+    }
+  });
+
+  it("finalizes usage, request detail, and pending state for every terminal outcome", () => {
+    for (const [outcome, expectedStatus] of [
+      [{ status: "completed", successful: true }, "success"],
+      [{ status: "failed", successful: false }, "error"],
+      [{ status: "incomplete", successful: false }, "error"],
+    ]) {
+      vi.clearAllMocks();
+      const { onStreamComplete } = buildOnStreamComplete({
+        provider: "codex", model: "gpt-5.5", connectionId: "connection-1", requestStartTime: Date.now(),
+        body: { model: "gpt-5.5" }, stream: true, translatedBody: {}, streamDetailId: `test-${outcome.status}`,
+      });
+      onStreamComplete({ content: "partial", thinking: "" }, { prompt_tokens: 7, completion_tokens: 3 }, Date.now(), outcome);
+      expect(trackPendingRequest).toHaveBeenCalledWith("gpt-5.5", "codex", "connection-1", false);
+      expect(saveRequestDetail).toHaveBeenCalledWith(expect.objectContaining({
+        status: expectedStatus,
+        tokens: { prompt_tokens: 7, completion_tokens: 3 },
+      }));
+      if (outcome.successful) expect(appendRequestLog).not.toHaveBeenCalled();
+      else expect(appendRequestLog).toHaveBeenCalledWith(expect.objectContaining({ status: outcome.status }));
+    }
+  });
+
+  it("records terminal usage and distinguishes completed from failed/incomplete/EOF", async () => {
+    for (const [type, status, successful] of [
+      ["response.completed", "completed", true],
+      ["response.failed", "failed", false],
+      ["response.incomplete", "incomplete", false],
+    ]) {
+      const events = [];
+      const transform = buildTransformStream({
+        provider: "codex",
+        sourceFormat: FORMATS.OPENAI_RESPONSES,
+        targetFormat: FORMATS.OPENAI_RESPONSES,
+        model: "gpt-5.5",
+        onStreamComplete: (content, usage, _ttft, outcome) => events.push({ content, usage, outcome }),
+      });
+      await read(new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ type, response: { status, usage: { input_tokens: 7, output_tokens: 3 } } })}\n\n`));
+          controller.close();
+        },
+      }).pipeThrough(transform));
+      expect(events).toEqual([{
+        content: { content: "", thinking: "" },
+        usage: { prompt_tokens: 7, completion_tokens: 3 },
+        outcome: { status, successful },
+      }]);
+    }
+
+    const eofEvents = [];
+    const eofTransform = buildTransformStream({
+      provider: "codex",
+      sourceFormat: FORMATS.OPENAI_RESPONSES,
+      targetFormat: FORMATS.OPENAI_RESPONSES,
+      model: "gpt-5.5",
+      onStreamComplete: (_content, _usage, _ttft, outcome) => eofEvents.push(outcome),
+    });
+    await read(new ReadableStream({ start: c => c.close() }).pipeThrough(eofTransform));
+    expect(eofEvents).toEqual([{ status: "failed", successful: false }]);
   });
 });

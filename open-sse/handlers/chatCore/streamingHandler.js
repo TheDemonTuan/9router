@@ -7,8 +7,24 @@ import { HTTP_STATUS, STREAM_STALL_TIMEOUT_MS } from "../../config/runtimeConfig
 import { buildAbortedResponsesTerminalBytes, isOpenAIResponsesTerminalEvent, parseOpenAIResponsesSSERecord, formatIncompleteOpenAIResponsesStreamFailure } from "../../utils/responsesStreamHelpers.js";
 import { buildStreamErrorBytes } from "../../utils/streamHelpers.js";
 import { buildRequestDetail, extractRequestConfig, saveUsageStats, formatDoneLine } from "./requestDetail.js";
-import { saveRequestDetail } from "@/lib/usageDb.js";
+import { appendRequestLog, saveRequestDetail, trackPendingRequest } from "@/lib/usageDb.js";
 import { SSE_HEADERS_CORS as SSE_HEADERS } from "../../utils/sseConstants.js";
+import { extractUsage, mergeUsage } from "../../utils/usageTracking.js";
+
+const NATIVE_RESPONSES_HEADER_NAMES = [
+  "openai-model", "x-request-id", "x-reasoning-included", "x-codex-turn-state",
+  "x-ratelimit-limit-requests", "x-ratelimit-remaining-requests", "x-ratelimit-reset-requests",
+  "x-ratelimit-limit-tokens", "x-ratelimit-remaining-tokens", "x-ratelimit-reset-tokens",
+];
+
+export function buildNativeResponsesHeaders(upstreamHeaders) {
+  const headers = new Headers(SSE_HEADERS);
+  for (const name of NATIVE_RESPONSES_HEADER_NAMES) {
+    const value = upstreamHeaders?.get?.(name);
+    if (value) headers.set(name, value);
+  }
+  return headers;
+}
 
 // Codex returns Responses API SSE → which client format to translate INTO, by request sourceFormat.
 // Gemini-family all map to ANTIGRAVITY decoder; unknown sources fall back to OPENAI.
@@ -29,24 +45,44 @@ export function buildTransformStream({ provider, sourceFormat, targetFormat, use
   if (sourceFormat === FORMATS.OPENAI_RESPONSES && targetFormat === FORMATS.OPENAI_RESPONSES) {
     let buffer = "";
     let terminal = false;
+    let finalized = false;
+    let usage = null;
+    let content = "";
+    let ttftAt = null;
     const decoder = new TextDecoder();
+    const observe = (record) => {
+      const parsed = parseOpenAIResponsesSSERecord(record);
+      if (!parsed?.data) return;
+      if (!ttftAt) ttftAt = Date.now();
+      const extracted = extractUsage(parsed.data);
+      if (extracted) usage = mergeUsage(usage, extracted);
+      if (typeof parsed.data.delta === "string") content += parsed.data.delta;
+      if (isOpenAIResponsesTerminalEvent(parsed.type, parsed.data)) {
+        terminal = true;
+        const status = parsed.data.response?.status || (parsed.type === "response.completed" ? "completed" : "failed");
+        finish(status, status === "completed");
+      }
+    };
+    const finish = (status, successful) => {
+      if (finalized) return;
+      finalized = true;
+      onStreamComplete?.({ content, thinking: "" }, usage, ttftAt, { status, successful });
+    };
     return new TransformStream({
       transform(chunk, controller) {
         controller.enqueue(chunk);
         buffer += decoder.decode(chunk, { stream: true });
         const records = buffer.split(/\r?\n\r?\n|\r\r/);
         buffer = records.pop() || "";
-        for (const record of records) {
-          const parsed = parseOpenAIResponsesSSERecord(record);
-          if (parsed?.data && isOpenAIResponsesTerminalEvent(parsed.type, parsed.data)) terminal = true;
-        }
+        for (const record of records) observe(record);
       },
       flush(controller) {
-        if (buffer.trim()) {
-          const parsed = parseOpenAIResponsesSSERecord(buffer);
-          if (parsed?.data && isOpenAIResponsesTerminalEvent(parsed.type, parsed.data)) terminal = true;
+        buffer += decoder.decode();
+        if (buffer.trim()) observe(buffer);
+        if (!terminal) {
+          controller.enqueue(new TextEncoder().encode(formatIncompleteOpenAIResponsesStreamFailure({ model })));
+          finish("failed", false);
         }
-        if (!terminal) controller.enqueue(new TextEncoder().encode(formatIncompleteOpenAIResponsesStreamFailure({ model })));
       }
     });
   }
@@ -71,13 +107,17 @@ export function buildTransformStream({ provider, sourceFormat, targetFormat, use
  * Handle streaming response — pipe provider SSE through transform stream to client.
  */
 export async function handleStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, userAgent, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, pxpipe, reqTag, log, credentials }) {
-  if (onRequestSuccess) {
-    Promise.resolve()
-      .then(onRequestSuccess)
-      .catch(err => {
-        console.error("[ChatCore] onRequestSuccess failed:", err?.message || err);
-      });
-  }
+  const isResponsesPassthrough = sourceFormat === FORMATS.OPENAI_RESPONSES && targetFormat === FORMATS.OPENAI_RESPONSES;
+  let lifecycleFinalized = false;
+  const completeLifecycle = (content, usage, ttftAt, outcome) => {
+    if (lifecycleFinalized) return;
+    lifecycleFinalized = true;
+    onStreamComplete?.(content, usage, ttftAt, outcome);
+    if (outcome?.successful === false) return;
+    Promise.resolve(onRequestSuccess?.()).catch(err => {
+      console.error("[ChatCore] onRequestSuccess failed:", err?.message || err);
+    });
+  };
 
   // When upstream returns HTML/text instead of SSE (e.g. Cloudflare 5xx error
   // page), piping it through the SSE transform stream causes Next.js
@@ -106,15 +146,27 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
     };
   }
 
-  const transformStream = buildTransformStream({ provider, sourceFormat, targetFormat, userAgent, reqLogger, toolNameMap, customToolNames, model, connectionId, body, onStreamComplete, apiKey, credentials });
+  if (!isResponsesPassthrough && onRequestSuccess) {
+    Promise.resolve(onRequestSuccess()).catch(err => {
+      console.error("[ChatCore] onRequestSuccess failed:", err?.message || err);
+    });
+  }
+  const transformStream = buildTransformStream({
+    provider, sourceFormat, targetFormat, userAgent, reqLogger, toolNameMap, customToolNames,
+    model, connectionId, body,
+    onStreamComplete: isResponsesPassthrough ? completeLifecycle : onStreamComplete,
+    apiKey, credentials,
+  });
 
   // Terminal bytes when the stream aborts after HTTP 200 was already sent, so the
   // client sees a real error instead of a silently truncated stream.
   // Responses passthrough keeps its own response.failed shape; every other client
   // format gets the OpenAI error frame + [DONE], or `event: error` for Claude.
-  const isResponsesPassthrough = sourceFormat === FORMATS.OPENAI_RESPONSES && targetFormat === FORMATS.OPENAI_RESPONSES;
   const onAbortTerminal = isResponsesPassthrough
-    ? (message) => buildAbortedResponsesTerminalBytes({ model, message })
+    ? (message) => {
+      completeLifecycle({ content: "", thinking: "" }, null, null, { status: "failed", successful: false });
+      return buildAbortedResponsesTerminalBytes({ model, message });
+    }
     : (message) => buildStreamErrorBytes(HTTP_STATUS.GATEWAY_TIMEOUT, message, sourceFormat);
   const stallTimeoutMs = PROVIDERS[provider]?.stallTimeoutMs || STREAM_STALL_TIMEOUT_MS;
   const transformedBody = pipeWithDisconnect(providerResponse, transformStream, streamController, onAbortTerminal, stallTimeoutMs);
@@ -135,7 +187,9 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
 
   return {
     success: true,
-    response: new Response(transformedBody, { headers: SSE_HEADERS })
+    response: new Response(transformedBody, {
+      headers: isResponsesPassthrough ? buildNativeResponsesHeaders(providerResponse.headers) : SSE_HEADERS,
+    })
   };
 }
 
@@ -145,7 +199,7 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
 export function buildOnStreamComplete({ provider, model, connectionId, apiKey, requestStartTime, body, stream, finalBody, translatedBody, clientRawRequest, pxpipe, reqTag, log }) {
   const streamDetailId = `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
 
-  const onStreamComplete = (contentObj, usage, ttftAt) => {
+  const onStreamComplete = (contentObj, usage, ttftAt, outcome = { status: "completed", successful: true }) => {
     const latency = {
       ttft: ttftAt ? ttftAt - requestStartTime : Date.now() - requestStartTime,
       total: Date.now() - requestStartTime
@@ -153,6 +207,11 @@ export function buildOnStreamComplete({ provider, model, connectionId, apiKey, r
     const safeContent = contentObj?.content || "[Empty streaming response]";
     const safeThinking = contentObj?.thinking || null;
 
+    const successful = outcome?.successful !== false;
+    trackPendingRequest(model, provider, connectionId, false);
+    if (!successful) {
+      appendRequestLog({ model, provider, connectionId, tokens: null, status: outcome?.status || "failed" }).catch(() => {});
+    }
     saveRequestDetail(buildRequestDetail({
       provider, model, connectionId,
       latency,
@@ -162,7 +221,7 @@ export function buildOnStreamComplete({ provider, model, connectionId, apiKey, r
       providerResponse: safeContent,
       response: { content: safeContent, thinking: safeThinking, type: "streaming" },
       pxpipe,
-      status: "success"
+      status: successful ? "success" : "error"
     }, { id: streamDetailId })).catch(err => {
       console.error("[RequestDetail] Failed to update streaming content:", err.message);
     });

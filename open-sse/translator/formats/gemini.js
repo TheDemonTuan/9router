@@ -436,21 +436,77 @@ export function cleanJSONSchemaForAntigravity(schema) {
 // the stricter cleaner above because Antigravity validates tool parameters more narrowly.
 export function cleanResponseSchemaForAntigravity(schema) {
   if (!schema || typeof schema !== "object") return schema;
-  const cleaned = structuredClone(schema);
-  const walk = (node) => {
-    if (!node || typeof node !== "object" || Array.isArray(node)) return;
+  const root = structuredClone(schema);
+
+  const localRef = (ref) => {
+    if (typeof ref !== "string" || !ref.startsWith("#/")) return null;
+    return ref.slice(2).split("/").reduce((value, part) => value?.[part.replace(/~1/g, "/").replace(/~0/g, "~")], root);
+  };
+  const merge = (base, extension) => {
+    const merged = { ...base, ...extension };
+    if (base?.properties || extension?.properties) merged.properties = { ...(base?.properties || {}), ...(extension?.properties || {}) };
+    if (base?.required || extension?.required) merged.required = [...new Set([...(base?.required || []), ...(extension?.required || [])])];
+    return merged;
+  };
+  const score = (candidate) => {
+    if (!candidate || typeof candidate !== "object") return -1;
+    if (candidate.type === "object" || candidate.properties) return 3;
+    if (candidate.type === "array" || candidate.items) return 2;
+    return candidate.type && candidate.type !== "null" ? 1 : 0;
+  };
+  const walk = (node, resolving = new Set()) => {
+    if (Array.isArray(node)) return node.map(item => walk(item, resolving));
+    if (!node || typeof node !== "object") return node;
+
+    if (node.$ref) {
+      const target = localRef(node.$ref);
+      if (target && !resolving.has(node.$ref)) {
+        const nextResolving = new Set(resolving);
+        nextResolving.add(node.$ref);
+        const { $ref, ...siblings } = node;
+        return walk(merge(structuredClone(target), siblings), nextResolving);
+      }
+    }
+
     if (Array.isArray(node.type) && node.type.includes("null")) {
       const types = node.type.filter(type => type !== "null");
       node.type = types.length === 1 ? types[0] : types;
       node.nullable = true;
     }
+    if (Array.isArray(node.allOf)) {
+      const own = { ...node };
+      delete own.allOf;
+      node = node.allOf.reduce((merged, item) => merge(merged, walk(item, resolving)), own);
+    }
+    for (const key of ["anyOf", "oneOf"]) {
+      if (Array.isArray(node[key]) && node[key].length) {
+        const variants = node[key].map(item => walk(item, resolving));
+        const nonNull = variants.filter(item => item?.type !== "null");
+        const selected = nonNull.reduce((best, item) => score(item) > score(best) ? item : best, nonNull[0]);
+        const nullable = variants.length !== nonNull.length;
+        delete node[key];
+        node = merge(node, selected || {});
+        if (nullable) node.nullable = true;
+      }
+    }
     if (node.properties && !node.type) node.type = "object";
-    if (node.type === "array" && node.items) walk(node.items);
-    for (const value of Object.values(node.properties || {})) walk(value);
-    for (const key of ["$schema", "$id", "$defs", "$ref"]) delete node[key];
+    if (node.properties) {
+      for (const [key, value] of Object.entries(node.properties)) node.properties[key] = walk(value, resolving);
+    }
+    if (Array.isArray(node.prefixItems) && node.prefixItems.length) {
+      const variants = node.prefixItems.map(item => walk(item, resolving));
+      if (!node.items) node.items = variants.reduce((best, item) => score(item) > score(best) ? item : best, variants[0]);
+      delete node.prefixItems;
+    }
+    if (node.items) node.items = walk(node.items, resolving);
+    if (node.additionalProperties && typeof node.additionalProperties === "object") {
+      node.additionalProperties = walk(node.additionalProperties, resolving);
+    }
+    for (const key of ["$schema", "$id", "$defs", "definitions", "$ref"]) delete node[key];
+    return node;
   };
-  walk(cleaned);
-  return cleaned;
+
+  return walk(root);
 }
 
 // Merge adjacent same-role messages, strip empty parts, ensure valid generation bounds.

@@ -19,9 +19,35 @@ permissions:
   packages: write
 
 jobs:
+  test:
+    name: Responses & Translator Tests
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: Install runtime dependencies
+        run: bun install --frozen-lockfile
+      - name: Install test dependencies
+        working-directory: tests
+        run: bun install --frozen-lockfile
+      - name: Run Responses and translator regressions
+        working-directory: tests
+        run: >-
+          bun x vitest run
+          unit/responses-native-forwarding.test.js
+          unit/responses-abort-terminal.test.js
+          unit/openai-responses-terminal-event.test.js
+          unit/openai-responses-custom-tools.test.js
+          unit/responses-structured-outputs.test.js
+          translator/bugs-codexCli-responses.test.js
+
   build:
     name: Build & Push Native Image
     timeout-minutes: 10
+    needs: test
     runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
     outputs:
       image_ref: ${{ steps.meta.outputs.image_ref }}

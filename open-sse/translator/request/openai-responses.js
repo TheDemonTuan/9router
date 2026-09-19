@@ -148,6 +148,11 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
       });
     }
     else if (itemType === RESPONSES_ITEM.FUNCTION_CALL_OUTPUT || itemType === RESPONSES_ITEM.CUSTOM_TOOL_CALL_OUTPUT) {
+      if (!item.call_id || typeof item.call_id !== "string" || !knownCallIds.has(item.call_id)) {
+        const error = new Error(`Unsupported Responses orphan tool output at index ${itemIndex}`);
+        error.code = "unsupported_feature";
+        throw error;
+      }
       // Flush assistant message first if exists
       if (currentAssistantMsg) {
         result.messages.push(currentAssistantMsg);
@@ -169,6 +174,10 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
     }
     else if (itemType === RESPONSES_ITEM.ADDITIONAL_TOOLS) {
       if (Array.isArray(item.tools)) additionalTools.push(...item.tools);
+    }
+    else if (itemType === RESPONSES_ITEM.COMPACTION || itemType === RESPONSES_ITEM.COMPACTION_TRIGGER) {
+      // Compaction is transport metadata; forwarding it as a Chat message corrupts turn order.
+      continue;
     }
     else if (itemType === RESPONSES_ITEM.REASONING) {
       // Buffer reasoning text; attached to next assistant message/function_call.

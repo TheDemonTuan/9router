@@ -259,6 +259,57 @@ describe("Responses Structured Outputs & Multi-hop Translation", () => {
     });
   });
 
+  describe("nested response schemas", () => {
+    it("resolves local refs before preserving nested composition, arrays, and object constraints", () => {
+      const chatRequest = {
+        messages: [{ role: "user", content: "Evaluate" }],
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            schema: {
+              type: "object",
+              additionalProperties: false,
+              $defs: {
+                evidence: {
+                  allOf: [
+                    { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+                    { properties: { tags: { type: "array", items: { type: ["string", "null"] } } }, required: ["tags"] },
+                  ],
+                },
+              },
+              properties: {
+                evidence: { $ref: "#/$defs/evidence" },
+                metadata: { type: "object", additionalProperties: { type: "string" } },
+              },
+              required: ["evidence"],
+            },
+          },
+        },
+      };
+
+      const schema = openaiToAntigravityRequest("gemini-3.8-flash", chatRequest, false)
+        .request.generationConfig.responseSchema;
+      expect(schema).toMatchObject({
+        type: "object",
+        additionalProperties: false,
+        required: ["evidence"],
+        properties: {
+          evidence: {
+            type: "object",
+            required: ["id", "tags"],
+            properties: {
+              id: { type: "string" },
+              tags: { type: "array", items: { type: "string", nullable: true } },
+            },
+          },
+          metadata: { type: "object", additionalProperties: { type: "string" } },
+        },
+      });
+      expect(JSON.stringify(schema)).not.toContain("$ref");
+      expect(JSON.stringify(schema)).not.toContain("$defs");
+    });
+  });
+
   describe("End-to-end multi-hop translation chain", () => {
     it("preserves strict schema from Responses -> intermediate Chat -> Antigravity without leaking text", () => {
       const clientResponsesRequest = {
