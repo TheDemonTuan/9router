@@ -20,8 +20,8 @@ if [[ -f .env ]]; then
   set -a && source .env && set +a
 fi
 
-DASHBOARD_HOST="${DASHBOARD_HOST:-9router.tuannguyenviet.site}"
-DASHBOARD_ALIAS_HOST="${DASHBOARD_ALIAS_HOST:-9router-admin.tuannguyenviet.site}"
+DASHBOARD_HOST="${DASHBOARD_HOST:-9router-admin.tuannguyenviet.site}"
+DASHBOARD_ALIAS_HOST="${DASHBOARD_ALIAS_HOST:-}"
 API_HOST="${API_HOST:-9router-api.tuannguyenviet.site}"
 EDGE_NETWORK="${EDGE_NETWORK:-edge-9router}"
 READY_TIMEOUT="${READY_TIMEOUT:-60}"
@@ -65,13 +65,21 @@ render_traefik_config() {
   local dest="$2"
   local tmp="${dest}.tmp.$$"
   mkdir -p "$(dirname "$dest")"
+
+  local dashboard_rule="Host(\`${DASHBOARD_HOST}\`)"
+  local internal_hosts_rule="Host(\`${DASHBOARD_HOST}\`) || Host(\`${API_HOST}\`)"
+  if [[ -n "${DASHBOARD_ALIAS_HOST:-}" ]]; then
+    dashboard_rule="Host(\`${DASHBOARD_HOST}\`) || Host(\`${DASHBOARD_ALIAS_HOST}\`)"
+    internal_hosts_rule="Host(\`${DASHBOARD_HOST}\`) || Host(\`${DASHBOARD_ALIAS_HOST}\`) || Host(\`${API_HOST}\`)"
+  fi
+
   cat <<EOF > "$tmp"
 # Managed dynamically by 9router deploy.sh - DO NOT EDIT MANUALLY
 http:
   routers:
     # 1. Deny internal endpoints across all domains
     9router-deny-internal:
-      rule: "(Host(\`${DASHBOARD_HOST}\`) || Host(\`${DASHBOARD_ALIAS_HOST}\`) || Host(\`${API_HOST}\`)) && PathPrefix(\`/internal\`)"
+      rule: "(${internal_hosts_rule}) && PathPrefix(\`/internal\`)"
       entryPoints:
         - web
       priority: 1000
@@ -112,10 +120,10 @@ http:
         - deny-internal
       service: 9router-service
 
-    # 5. Dashboard Domain (${DASHBOARD_HOST} / ${DASHBOARD_ALIAS_HOST})
+    # 5. Dashboard Domain (${DASHBOARD_HOST})
     # Protected by Cloudflare Access at Edge
     9router-dashboard-router:
-      rule: "Host(\`${DASHBOARD_HOST}\`) || Host(\`${DASHBOARD_ALIAS_HOST}\`)"
+      rule: "${dashboard_rule}"
       entryPoints:
         - web
       priority: 100
@@ -175,7 +183,11 @@ show_status() {
   printf 'Active slot      : %s\n' "$active"
   printf 'Previous slot    : %s\n' "$previous"
   printf 'Deployed image   : %s\n' "$img"
-  printf 'Dashboard Host   : %s (alias: %s)\n' "$DASHBOARD_HOST" "$DASHBOARD_ALIAS_HOST"
+  if [[ -n "$DASHBOARD_ALIAS_HOST" ]]; then
+    printf 'Dashboard Host   : %s (alias: %s)\n' "$DASHBOARD_HOST" "$DASHBOARD_ALIAS_HOST"
+  else
+    printf 'Dashboard Host   : %s\n' "$DASHBOARD_HOST"
+  fi
   printf 'API Host         : %s\n' "$API_HOST"
   printf 'Traefik config   : %s/%s\n' "$TRAEFIK_DYNAMIC_DIR" "$TRAEFIK_CONFIG_NAME"
   printf '\nContainer states:\n'
@@ -255,7 +267,11 @@ log "Starting deployment:"
 log "  Image          : $IMAGE_REF"
 log "  Current slot   : $CURRENT_SLOT"
 log "  Target slot    : $TARGET_SLOT"
-log "  Dashboard Host : $DASHBOARD_HOST ($DASHBOARD_ALIAS_HOST)"
+  if [[ -n "$DASHBOARD_ALIAS_HOST" ]]; then
+    log "  Dashboard Host : $DASHBOARD_HOST ($DASHBOARD_ALIAS_HOST)"
+  else
+    log "  Dashboard Host : $DASHBOARD_HOST"
+  fi
 log "  API Host       : $API_HOST"
 log "  Traefik config : $TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME"
 

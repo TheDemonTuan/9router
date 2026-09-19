@@ -12,8 +12,8 @@ Hệ thống deploy tự động cho **9router** được thiết kế theo chu�
             ┌─────────────────────────┴─────────────────────────┐
             ▼                                                   ▼
   [Cloudflare Access BẬT]                              [Cloudflare Access TẮT]
-9router.tuannguyenviet.site                          9router-api.tuannguyenviet.site
-9router-admin.tuannguyenviet.site                    (Dành cho AI clients, Cursor, Claude...)
+9router-admin.tuannguyenviet.site                    9router-api.tuannguyenviet.site
+(Dành cho Admin Dashboard & Settings)                (Dành cho AI clients, Cursor, Claude...)
             │                                                   │
             └─────────────────────────┬─────────────────────────┘
                                       │ Cloudflare Tunnel
@@ -52,7 +52,7 @@ Hệ thống deploy tự động cho **9router** được thiết kế theo chu�
 
 Truy cập Cloudflare Zero Trust -> **Networks** -> **Tunnels** (Tunnel đang kết nối tới VPS):
 1. **Host Dashboard:**
-   - **Public hostname:** `9router.tuannguyenviet.site` (hoặc `9router-admin.tuannguyenviet.site`)
+   - **Public hostname:** `9router-admin.tuannguyenviet.site`
    - **Service:** `HTTP` -> `172.31.250.4:8080` (hoặc `edge-traefik:8080`)
    - **Access Policy:** Thêm Application bảo vệ bằng Cloudflare Access (Email OTP/Google SSO).
 2. **Host API:**
