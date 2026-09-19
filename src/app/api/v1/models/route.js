@@ -18,6 +18,7 @@ import { resolveZedModels } from "open-sse/shared/zedAuth.js";
 import { updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { capabilitiesFromServiceKind, getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
+import { getThinkingLevels } from "open-sse/providers/thinkingLevels.js";
 
 // Per-provider live model resolvers. Each receives a connection record and
 // returns { models: [{ id, name? }, ...] } | null on failure.
@@ -324,6 +325,7 @@ export async function buildModelsList(kindFilter, options = {}) {
     for (const [alias, providerModels] of Object.entries(PROVIDER_MODELS)) {
       const providerId = aliasToProviderId[alias] || alias;
       if (!providerMatchesKinds(providerId, kindFilter)) continue;
+      const providerInfo = AI_PROVIDERS[providerId];
       for (const model of providerModels) {
         if (!kindFilter.includes(modelKind(model))) continue;
         if (isDisabled(alias, model.id)) continue;
@@ -332,6 +334,19 @@ export async function buildModelsList(kindFilter, options = {}) {
           object: "model",
           owned_by: alias,
         });
+        if (providerInfo?.exposeThinkingVariants && !model.id.includes("(")) {
+          const levels = getThinkingLevels(providerId, model.id);
+          for (const level of levels ?? []) {
+            models.push({
+              id: `${alias}/${model.id}(${level})`,
+              object: "model",
+              owned_by: alias,
+              base_model: `${alias}/${model.id}`,
+              reasoning_effort: level,
+              virtual: true,
+            });
+          }
+        }
       }
     }
 
@@ -517,6 +532,25 @@ export async function buildModelsList(kindFilter, options = {}) {
           if (Number.isFinite(maxOutput)) model.max_completion_tokens = maxOutput;
         }
         models.push(model);
+
+        const activeProviderInfo = AI_PROVIDERS[providerId];
+        if (activeProviderInfo?.exposeThinkingVariants && !modelId.includes("(")) {
+          const levels = getThinkingLevels(providerId, modelId);
+          for (const level of levels ?? []) {
+            const variant = {
+              id: `${outputAlias}/${modelId}(${level})`,
+              object: "model",
+              owned_by: outputAlias,
+              base_model: `${outputAlias}/${modelId}`,
+              reasoning_effort: level,
+              virtual: true,
+            };
+            if (model.capabilities) variant.capabilities = model.capabilities;
+            if (model.context_length) variant.context_length = model.context_length;
+            if (model.max_completion_tokens) variant.max_completion_tokens = model.max_completion_tokens;
+            models.push(variant);
+          }
+        }
       }
 
       // Web search/fetch — provider IS the model, expose as {alias}/search and/or {alias}/fetch with explicit kind

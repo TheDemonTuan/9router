@@ -6,6 +6,7 @@ import { getCapabilitiesForModel } from "../../providers/capabilities.js";
 import { getThinkingLevels } from "../../providers/thinkingLevels.js";
 import { PROVIDERS } from "../../providers/index.js";
 import { LEVEL_TO_BUDGET, budgetToLevel, effortToBudget, effortToThinkingLevel } from "./thinking.js";
+import { getAlibabaTokenPlanThinkingRule, applyAlibabaTokenPlanThinking } from "../../providers/alibabaTokenPlanThinking.js";
 
 // Map a target wire-format to its native thinking format (when capability has none).
 const FORMAT_TO_NATIVE = {
@@ -366,18 +367,29 @@ export function applyThinking(targetFormat, model, body, provider = null, intent
   if (!body || typeof body !== "object") return body;
 
   const { cleanModel, override } = parseSuffix(model);
+  const effProvider = provider || (cleanModel.startsWith("alitp-intl/") ? "alitp-intl" : null);
+  const actualModel = cleanModel.startsWith("alitp-intl/") ? cleanModel.slice("alitp-intl/".length) : cleanModel;
   const cfg = override || intent || extractThinking(body);
-  const caps = getCapabilitiesForModel(provider, cleanModel);
+  const caps = getCapabilitiesForModel(effProvider, actualModel);
 
   // Model cannot reason → strip any stray thinking fields.
   if (!caps.reasoning) {
     stripAll(body);
     return body;
   }
+
+  if (effProvider === "alitp-intl") {
+    const rule = getAlibabaTokenPlanThinkingRule(actualModel);
+    if (rule) {
+      const display = typeof body.thinking?.display === "string" ? body.thinking.display : undefined;
+      return applyAlibabaTokenPlanThinking(targetFormat, actualModel, body, cfg, display);
+    }
+  }
+
   if (!cfg) return body;
 
-  const fmt = resolveFormat(targetFormat, cleanModel, provider);
-  const supportedLevels = getThinkingLevels(provider, cleanModel);
+  const fmt = resolveFormat(targetFormat, actualModel, effProvider);
+  const supportedLevels = getThinkingLevels(effProvider, actualModel);
   // Anthropic's `display` (summarized | omitted) decides whether thinking text
   // comes back at all; keep what the client asked for instead of resetting it.
   const display = typeof body.thinking?.display === "string" ? body.thinking.display : undefined;
