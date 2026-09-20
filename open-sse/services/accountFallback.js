@@ -138,12 +138,11 @@ function getModelLockMetadataKey(prefix, model) {
 
 function getActiveModelLocks(connection, model) {
   if (!connection) return [];
-  const locks = [{ model, expiry: connection[getModelLockKey(model)] }];
-  if (model !== null) locks.push({ model: null, expiry: connection[MODEL_LOCK_ALL] });
-  return locks
+  const accountLock = { model: null, expiry: connection[MODEL_LOCK_ALL] };
+  const modelLock = { model, expiry: connection[getModelLockKey(model)] };
+  return (model === null ? [accountLock] : [accountLock, modelLock])
     .map(lock => ({ ...lock, at: Date.parse(lock.expiry) }))
-    .filter(({ at }) => Number.isFinite(at) && at > Date.now())
-    .sort((a, b) => b.at - a.at);
+    .filter(({ at }) => Number.isFinite(at) && at > Date.now());
 }
 
 function getEffectiveModelLockScope(connection, model) {

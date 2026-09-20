@@ -138,10 +138,10 @@ describe("upstream quota classification", () => {
     });
   });
 
-  it("honors active account-wide locks despite an expired model lock and model success", async () => {
+  it("prioritizes account-wide quota metadata over model lock metadata and model success", async () => {
     mocks.connections = [{
       id: "shared", provider: "github", email: "shared@example.com", isActive: true,
-      [`modelLock_${MODEL}`]: "2026-09-19T00:00:00.000Z",
+      [`modelLock_${MODEL}`]: "2026-09-22T00:00:00.000Z",
       [`modelLockReason_${MODEL}`]: "rate_limited",
       [`modelLockErrorCode_${MODEL}`]: 429,
       modelLock___all: RESET,
