@@ -205,6 +205,22 @@ describe("Responses <-> Gemini direct translators", () => {
     expect(events.some((event) => event.event === "response.completed" || event.event === "response.incomplete")).toBe(false);
   });
 
+  it("fails an empty Gemini candidate list instead of dropping it", () => {
+    const state = initState(FORMATS.OPENAI_RESPONSES);
+    const events = translateResponse(FORMATS.GEMINI, FORMATS.OPENAI_RESPONSES, {
+      responseId: "empty-candidates",
+      candidates: [],
+    }, state);
+    const terminal = events.find((event) => event.event === "response.failed");
+
+    expect(terminal.data.response).toMatchObject({
+      status: "failed",
+      error: { type: "server_error", code: "provider_error" },
+    });
+    expect(events.some((event) => event.event === "response.created")).toBe(true);
+    expect(translateResponse(FORMATS.GEMINI, FORMATS.OPENAI_RESPONSES, null, state)).toEqual([]);
+  });
+
   it("reports a direct Gemini EOF without a finish reason as stream_disconnected", () => {
     const state = initState(FORMATS.OPENAI_RESPONSES);
     translateResponse(FORMATS.GEMINI, FORMATS.OPENAI_RESPONSES, {

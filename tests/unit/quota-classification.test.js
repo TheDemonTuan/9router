@@ -138,6 +138,31 @@ describe("upstream quota classification", () => {
     });
   });
 
+  it("honors active account-wide locks despite an expired model lock and model success", async () => {
+    mocks.connections = [{
+      id: "shared", provider: "github", email: "shared@example.com", isActive: true,
+      [`modelLock_${MODEL}`]: "2026-09-19T00:00:00.000Z",
+      modelLock___all: RESET,
+      unavailabilityReason: "quota_exhausted",
+      errorCode: 402,
+      testStatus: "unavailable",
+      lastError: "monthly usage exhausted",
+    }];
+
+    await expect(getProviderCredentials("github", null, MODEL)).resolves.toMatchObject({
+      allRateLimited: true,
+      unavailabilityReason: "quota_exhausted",
+      retryAfter: RESET,
+    });
+
+    await clearAccountError("shared", { _connection: mocks.connections[0] }, MODEL);
+    expect(mocks.connections[0].modelLock___all).toBe(RESET);
+    await expect(getProviderCredentials("github", null, MODEL)).resolves.toMatchObject({
+      allRateLimited: true,
+      retryAfter: RESET,
+    });
+  });
+
   it("returns the terminal quota contract without Retry-After", async () => {
     const response = quotaExhaustedResponse("quota exhausted", RESET, "reset tomorrow");
     expect(response.status).toBe(429);

@@ -136,10 +136,18 @@ function getModelLockMetadataKey(prefix, model) {
   return `${prefix}${model || "__all"}`;
 }
 
-/** Read the selected model's lock, falling back to an account-wide lock. */
+/** Read the active lock that keeps the selected model unavailable. */
 export function getModelLockUntil(connection, model) {
   if (!connection) return null;
-  return connection[getModelLockKey(model)] || connection[MODEL_LOCK_ALL] || null;
+  const modelLock = connection[getModelLockKey(model)];
+  const accountLock = connection[MODEL_LOCK_ALL];
+  const activeLocks = [modelLock, accountLock]
+    .map(expiry => ({ expiry, at: Date.parse(expiry) }))
+    .filter(({ at }) => Number.isFinite(at) && at > Date.now());
+  if (activeLocks.length > 0) {
+    return activeLocks.sort((a, b) => b.at - a.at)[0].expiry;
+  }
+  return modelLock || accountLock || null;
 }
 
 /**

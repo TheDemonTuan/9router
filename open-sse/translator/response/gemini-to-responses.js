@@ -249,7 +249,17 @@ export function geminiToResponsesResponse(chunk, state) {
   }
   const response = chunk.response || chunk;
   const candidate = response?.candidates?.[0];
-  if (!candidate) return events;
+  if (!candidate) {
+    if (!Array.isArray(response?.candidates)) return events;
+    const emit = emitFactory(state, events);
+    ensureStarted(state, emit, response);
+    fail(state, emit, {
+      type: "server_error",
+      code: "provider_error",
+      message: "Gemini response contained no candidate",
+    });
+    return events;
+  }
   const emit = emitFactory(state, events);
   ensureStarted(state, emit, response);
   const usage = response.usageMetadata || chunk.usageMetadata;
