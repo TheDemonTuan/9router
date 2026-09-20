@@ -229,61 +229,25 @@ function mergeAllOf(obj) {
   }
 }
 
-// Select best schema from anyOf/oneOf
-function selectBest(items) {
-  let bestIdx = 0;
-  let bestScore = -1;
-
-  for (let i = 0; i < items.length; i++) {
-    const item = items[i];
-    let score = 0;
-    const type = item.type;
-
-    if (type === "object" || item.properties) {
-      score = 3;
-    } else if (type === "array" || item.items) {
-      score = 2;
-    } else if (type && type !== "null") {
-      score = 1;
-    }
-
-    if (score > bestScore) {
-      bestScore = score;
-      bestIdx = i;
-    }
-  }
-
-  return bestIdx;
-}
-
-// Flatten anyOf/oneOf
+// Gemini has no multi-branch composition equivalent. Only null unions map to nullable.
 function flattenAnyOfOneOf(obj) {
   if (!obj || typeof obj !== "object") return;
 
-  if (obj.anyOf && Array.isArray(obj.anyOf) && obj.anyOf.length > 0) {
-    const nonNullSchemas = obj.anyOf.filter(s => s && s.type !== "null");
-    if (nonNullSchemas.length > 0) {
-      const bestIdx = selectBest(nonNullSchemas);
-      const selected = nonNullSchemas[bestIdx];
-      delete obj.anyOf;
-      Object.assign(obj, selected);
+  for (const key of ["anyOf", "oneOf"]) {
+    if (!Array.isArray(obj[key]) || obj[key].length === 0) continue;
+    const nonNull = obj[key].filter(item => item?.type !== "null");
+    if (obj[key].length !== 2 || nonNull.length !== 1) {
+      const error = new Error(`Unsupported response schema ${key}: Gemini cannot represent multi-branch composition`);
+      error.code = "unsupported_feature";
+      throw error;
     }
-  }
-
-  if (obj.oneOf && Array.isArray(obj.oneOf) && obj.oneOf.length > 0) {
-    const nonNullSchemas = obj.oneOf.filter(s => s && s.type !== "null");
-    if (nonNullSchemas.length > 0) {
-      const bestIdx = selectBest(nonNullSchemas);
-      const selected = nonNullSchemas[bestIdx];
-      delete obj.oneOf;
-      Object.assign(obj, selected);
-    }
+    delete obj[key];
+    Object.assign(obj, nonNull[0]);
+    obj.nullable = true;
   }
 
   for (const value of Object.values(obj)) {
-    if (value && typeof value === "object") {
-      flattenAnyOfOneOf(value);
-    }
+    if (value && typeof value === "object") flattenAnyOfOneOf(value);
   }
 }
 
@@ -310,25 +274,23 @@ function ensureObjectType(obj) {
   for (const v of Object.values(obj)) if (v && typeof v === "object") ensureObjectType(v);
 }
 
-// Convert prefixItems (tuple validation) to items — Gemini cannot express tuples,
-// and a type:"array" schema without items is rejected with "missing field"
+// Gemini cannot represent heterogeneous tuples.
 function convertPrefixItems(obj) {
   if (!obj || typeof obj !== "object") return;
 
   if (Array.isArray(obj.prefixItems) && obj.prefixItems.length > 0) {
-    const variants = obj.prefixItems.filter(s => s && s.type !== "null");
-    if (!obj.items && variants.length === 1) {
-      obj.items = variants[0];
-    } else if (!obj.items && variants.length > 1) {
-      obj.items = { anyOf: variants };
+    if (!obj.items && obj.prefixItems.length === 1) {
+      obj.items = obj.prefixItems[0];
+    } else if (!obj.items) {
+      const error = new Error("Unsupported response schema prefixItems: Gemini cannot represent tuples");
+      error.code = "unsupported_feature";
+      throw error;
     }
     delete obj.prefixItems;
   }
 
   for (const value of Object.values(obj)) {
-    if (value && typeof value === "object") {
-      convertPrefixItems(value);
-    }
+    if (value && typeof value === "object") convertPrefixItems(value);
   }
 }
 
@@ -448,11 +410,10 @@ export function cleanResponseSchemaForAntigravity(schema) {
     if (base?.required || extension?.required) merged.required = [...new Set([...(base?.required || []), ...(extension?.required || [])])];
     return merged;
   };
-  const score = (candidate) => {
-    if (!candidate || typeof candidate !== "object") return -1;
-    if (candidate.type === "object" || candidate.properties) return 3;
-    if (candidate.type === "array" || candidate.items) return 2;
-    return candidate.type && candidate.type !== "null" ? 1 : 0;
+  const unsupportedComposition = (keyword) => {
+    const error = new Error(`Unsupported response schema ${keyword}: Gemini cannot represent multi-branch composition`);
+    error.code = "unsupported_feature";
+    throw error;
   };
   const walk = (node, resolving = new Set()) => {
     if (Array.isArray(node)) return node.map(item => walk(item, resolving));
@@ -479,15 +440,13 @@ export function cleanResponseSchemaForAntigravity(schema) {
       node = node.allOf.reduce((merged, item) => merge(merged, walk(item, resolving)), own);
     }
     for (const key of ["anyOf", "oneOf"]) {
-      if (Array.isArray(node[key]) && node[key].length) {
-        const variants = node[key].map(item => walk(item, resolving));
-        const nonNull = variants.filter(item => item?.type !== "null");
-        const selected = nonNull.reduce((best, item) => score(item) > score(best) ? item : best, nonNull[0]);
-        const nullable = variants.length !== nonNull.length;
-        delete node[key];
-        node = merge(node, selected || {});
-        if (nullable) node.nullable = true;
-      }
+      if (!Array.isArray(node[key]) || node[key].length === 0) continue;
+      const variants = node[key].map(item => walk(item, resolving));
+      const nonNull = variants.filter(item => item?.type !== "null");
+      if (variants.length !== 2 || nonNull.length !== 1) unsupportedComposition(key);
+      delete node[key];
+      node = merge(node, nonNull[0]);
+      node.nullable = true;
     }
     if (node.properties && !node.type) node.type = "object";
     if (node.properties) {
@@ -495,7 +454,8 @@ export function cleanResponseSchemaForAntigravity(schema) {
     }
     if (Array.isArray(node.prefixItems) && node.prefixItems.length) {
       const variants = node.prefixItems.map(item => walk(item, resolving));
-      if (!node.items) node.items = variants.reduce((best, item) => score(item) > score(best) ? item : best, variants[0]);
+      if (!node.items && variants.length !== 1) unsupportedComposition("prefixItems");
+      if (!node.items) node.items = variants[0];
       delete node.prefixItems;
     }
     if (node.items) node.items = walk(node.items, resolving);

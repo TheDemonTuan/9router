@@ -68,19 +68,20 @@ describe("Codex Responses Lite custom tools → OpenAI Chat", () => {
     });
   });
 
-  it("ignores compaction metadata while preserving a valid downstream conversation", () => {
-    const out = openaiResponsesToOpenAIRequest("ag/gemini-3.8-flash-high", {
-      input: [
-        { type: "message", role: "user", content: [{ type: "input_text", text: "before" }] },
-        { type: "compaction_trigger" },
-        { type: "compaction", summary: [{ type: "summary_text", text: "compressed" }] },
-        { type: "message", role: "user", content: [{ type: "input_text", text: "after" }] },
-      ],
-    }, true, null);
-    expect(out.messages).toEqual([
-      { role: "user", content: [{ type: "text", text: "before" }] },
-      { role: "user", content: [{ type: "text", text: "after" }] },
-    ]);
+  it("rejects compaction controls without a Chat Completions equivalent", () => {
+    for (const type of ["compaction", "compaction_trigger"]) {
+      expect(() => openaiResponsesToOpenAIRequest("ag/gemini-3.8-flash-high", {
+        input: [{ type }],
+      }, true, null)).toThrow(`Unsupported Responses ${type}`);
+    }
+  });
+
+  it("rejects each special Responses item without a Chat Completions equivalent", () => {
+    for (const type of ["local_shell_call", "tool_search_call", "tool_search_call_output", "web_search_call", "image_generation_call", "configuration_update", "input_file"]) {
+      expect(() => openaiResponsesToOpenAIRequest("ag/gemini-3.8-flash-high", {
+        input: [{ type }],
+      }, true, null)).toThrow(`Unsupported Responses item type '${type}'`);
+    }
   });
 
   it("rejects orphan function and custom tool outputs", () => {

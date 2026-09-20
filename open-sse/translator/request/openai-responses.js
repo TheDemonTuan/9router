@@ -176,8 +176,9 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
       if (Array.isArray(item.tools)) additionalTools.push(...item.tools);
     }
     else if (itemType === RESPONSES_ITEM.COMPACTION || itemType === RESPONSES_ITEM.COMPACTION_TRIGGER) {
-      // Compaction is transport metadata; forwarding it as a Chat message corrupts turn order.
-      continue;
+      const error = new Error(`Unsupported Responses ${itemType} at index ${itemIndex}: Chat Completions has no equivalent`);
+      error.code = "unsupported_feature";
+      throw error;
     }
     else if (itemType === RESPONSES_ITEM.REASONING) {
       // Buffer reasoning text; attached to next assistant message/function_call.
@@ -315,16 +316,31 @@ export function responsesTextFormatToChatResponseFormat(text) {
     };
   }
 
-  if (format.type === "json_object") {
+  if (format.type === "json_object" || format.type === "text") {
+    return { type: format.type };
+  }
+
+  return null;
+}
+
+export function chatResponseFormatToResponsesText(responseFormat) {
+  if (!responseFormat || typeof responseFormat !== "object") return null;
+
+  if (responseFormat.type === "json_schema") {
+    const jsonSchema = responseFormat.json_schema || {};
     return {
-      type: "json_object",
+      format: {
+        type: "json_schema",
+        name: jsonSchema.name || "response",
+        ...(jsonSchema.description ? { description: jsonSchema.description } : {}),
+        strict: jsonSchema.strict ?? true,
+        schema: jsonSchema.schema || { type: "object", properties: {} },
+      },
     };
   }
 
-  if (format.type === "text") {
-    return {
-      type: "text",
-    };
+  if (responseFormat.type === "json_object" || responseFormat.type === "text") {
+    return { format: { type: responseFormat.type } };
   }
 
   return null;
@@ -400,6 +416,11 @@ export function openaiToOpenAIResponsesRequest(model, body, stream, credentials)
   // Body already in Responses API format (e.g. Cursor CLI calling /chat/completions with input[])
   if (body.input) {
     const out = { ...body, model, stream: true };
+    if (!out.text) {
+      const text = chatResponseFormatToResponsesText(out.response_format);
+      if (text) out.text = text;
+    }
+    delete out.response_format;
     if (out.max_output_tokens === undefined) {
       if (out.max_completion_tokens !== undefined) out.max_output_tokens = out.max_completion_tokens;
       else if (out.max_tokens !== undefined) out.max_output_tokens = out.max_tokens;
@@ -536,6 +557,8 @@ export function openaiToOpenAIResponsesRequest(model, body, stream, credentials)
   if (body.reasoning_effort !== undefined) result.reasoning = { effort: body.reasoning_effort, summary: "auto" };
   if (body.service_tier !== undefined) result.service_tier = body.service_tier;
   if (body.prompt_cache_key !== undefined) result.prompt_cache_key = body.prompt_cache_key;
+  const text = chatResponseFormatToResponsesText(body.response_format);
+  if (text) result.text = text;
 
   return result;
 }

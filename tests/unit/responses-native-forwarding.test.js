@@ -107,6 +107,42 @@ describe("native Responses forwarding", () => {
     }
   });
 
+  it("records TTFT only when the first text delta arrives", async () => {
+    let now = 100;
+    const realNow = Date.now;
+    Date.now = () => now;
+    try {
+      const events = [];
+      const transform = buildTransformStream({
+        provider: "codex", sourceFormat: FORMATS.OPENAI_RESPONSES, targetFormat: FORMATS.OPENAI_RESPONSES,
+        model: "gpt-5.5", onStreamComplete: (_content, _usage, ttft) => events.push(ttft),
+      });
+      const output = read(transform.readable);
+      const writer = transform.writable.getWriter();
+      await writer.write(new TextEncoder().encode('data: {"type":"response.created","response":{"status":"in_progress"}}\n\n'));
+      now = 250;
+      await writer.write(new TextEncoder().encode('data: {"type":"response.output_text.delta","delta":"hello"}\n\n'));
+      now = 300;
+      await writer.write(new TextEncoder().encode('data: {"type":"response.completed","response":{"status":"completed"}}\n\n'));
+      await writer.close();
+      expect(await output).toContain('response.output_text.delta');
+      expect(events).toEqual([250]);
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  it("logs ERROR/INCOMPLETE instead of DONE for failed terminal streams", () => {
+    const log = { line: vi.fn() };
+    const { onStreamComplete } = buildOnStreamComplete({
+      provider: "codex", model: "gpt-5.5", connectionId: "connection-1", requestStartTime: Date.now(),
+      body: {}, stream: true, translatedBody: {}, reqTag: "test", log,
+    });
+    onStreamComplete({ content: "partial" }, null, Date.now(), { status: "incomplete", successful: false });
+    expect(log.line).toHaveBeenCalledWith("test", "✗", expect.stringContaining("INCOMPLETE"));
+    expect(log.line.mock.calls[0][2]).not.toContain("DONE");
+  });
+
   it("records terminal usage and distinguishes completed from failed/incomplete/EOF", async () => {
     for (const [type, status, successful] of [
       ["response.completed", "completed", true],

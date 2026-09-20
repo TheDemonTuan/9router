@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
+  chatResponseFormatToResponsesText,
+  openaiToOpenAIResponsesRequest,
   openaiResponsesToOpenAIRequest,
   responsesTextFormatToChatResponseFormat,
 } from "../../open-sse/translator/request/openai-responses.js";
@@ -176,6 +178,55 @@ describe("Responses Structured Outputs & Multi-hop Translation", () => {
     });
   });
 
+  describe("openaiToOpenAIResponsesRequest", () => {
+    const goalResponseFormat = {
+      type: "json_schema",
+      json_schema: {
+        name: "goal_evaluator",
+        description: "Evaluate Goal state",
+        strict: true,
+        schema: goalEvaluatorSchema,
+      },
+    };
+
+    it("maps Goal json_schema from Chat to Responses and preserves it round-trip", () => {
+      const responses = openaiToOpenAIResponsesRequest("cx/gpt-5.5", {
+        messages: [{ role: "user", content: "Evaluate" }],
+        response_format: goalResponseFormat,
+      }, true);
+
+      expect(responses.response_format).toBeUndefined();
+      expect(responses.text).toEqual(chatResponseFormatToResponsesText(goalResponseFormat));
+      expect(openaiResponsesToOpenAIRequest("cx/gpt-5.5", responses, true).response_format).toEqual(goalResponseFormat);
+    });
+
+    it("maps json_object and text formats, including the input passthrough branch", () => {
+      for (const type of ["json_object", "text"]) {
+        const responseFormat = { type };
+        const normal = openaiToOpenAIResponsesRequest("cx/gpt-5.5", {
+          messages: [{ role: "user", content: "Format" }],
+          response_format: responseFormat,
+        }, true);
+        const input = openaiToOpenAIResponsesRequest("cx/gpt-5.5", {
+          input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "Format" }] }],
+          response_format: responseFormat,
+        }, true);
+        expect(normal).toMatchObject({ text: { format: { type } } });
+        expect(input).toMatchObject({ text: { format: { type } } });
+        expect(input.response_format).toBeUndefined();
+      }
+    });
+
+    it("keeps an existing Responses text format in the input branch", () => {
+      const text = { format: { type: "json_object" } };
+      const out = openaiToOpenAIResponsesRequest("cx/gpt-5.5", {
+        input: [], text, response_format: { type: "text" },
+      }, true);
+      expect(out.text).toBe(text);
+      expect(out.response_format).toBeUndefined();
+    });
+  });
+
   describe("OpenAI -> Gemini / Antigravity request mapping", () => {
     it("maps json_schema response_format to generationConfig responseMimeType and responseSchema in Gemini", () => {
       const chatRequest = {
@@ -257,6 +308,25 @@ describe("Responses Structured Outputs & Multi-hop Translation", () => {
       expect(agRequest.request.generationConfig.responseSchema).toBeDefined();
       expect(agRequest.request.generationConfig.responseSchema.properties.decision).toBeDefined();
     });
+  });
+
+  describe("schema composition safety", () => {
+    for (const keyword of ["anyOf", "oneOf"]) {
+      it(`rejects non-null ${keyword} branches instead of selecting one`, () => {
+        expect(() => openaiToGeminiRequest("gemini-3.8-flash", {
+          messages: [{ role: "user", content: "Choose" }],
+          response_format: {
+            type: "json_schema",
+            json_schema: {
+              schema: {
+                type: "object",
+                properties: { value: { [keyword]: [{ type: "string" }, { type: "object", properties: {} }] } },
+              },
+            },
+          },
+        }, false)).toThrow(`Unsupported response schema ${keyword}`);
+      });
+    }
   });
 
   describe("nested response schemas", () => {

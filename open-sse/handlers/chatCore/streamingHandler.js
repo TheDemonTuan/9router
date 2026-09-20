@@ -53,10 +53,14 @@ export function buildTransformStream({ provider, sourceFormat, targetFormat, use
     const observe = (record) => {
       const parsed = parseOpenAIResponsesSSERecord(record);
       if (!parsed?.data) return;
-      if (!ttftAt) ttftAt = Date.now();
+      const isTextDelta = (parsed.type === "response.output_text.delta" || parsed.data.type === "response.output_text.delta")
+        && typeof parsed.data.delta === "string";
+      if (isTextDelta) {
+        if (!ttftAt) ttftAt = Date.now();
+        content += parsed.data.delta;
+      }
       const extracted = extractUsage(parsed.data);
       if (extracted) usage = mergeUsage(usage, extracted);
-      if (typeof parsed.data.delta === "string") content += parsed.data.delta;
       if (isOpenAIResponsesTerminalEvent(parsed.type, parsed.data)) {
         terminal = true;
         const status = parsed.data.response?.status || (parsed.type === "response.completed" ? "completed" : "failed");
@@ -226,9 +230,12 @@ export function buildOnStreamComplete({ provider, model, connectionId, apiKey, r
       console.error("[RequestDetail] Failed to update streaming content:", err.message);
     });
 
-    // Persist stream usage to DB (no console line; the "📊 done" line below is authoritative)
+    // Persist stream usage to DB (no console line; terminal outcome below is authoritative)
     saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, label: "STREAM USAGE", silent: true });
-    if (log?.line) log.line(reqTag, "📊", formatDoneLine({ usage, latency }));
+    if (log?.line) {
+      const summary = formatDoneLine({ usage, latency });
+      log.line(reqTag, successful ? "📊" : "✗", successful ? summary : summary.replace("DONE", String(outcome?.status || "ERROR").toUpperCase()));
+    }
   };
 
   return { onStreamComplete, streamDetailId };
