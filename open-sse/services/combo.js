@@ -607,7 +607,7 @@ export async function handleFusionChat({ body, models, handleSingleModel, log, c
   }
 
   const t0 = Date.now();
-  const calls = panel.map((m) => withTimeout(handleSingleModel(panelBody, m, true), cfg.panelHardTimeoutMs));
+  const calls = panel.map((m) => withTimeout(Promise.resolve().then(() => handleSingleModel(panelBody, m, true)), cfg.panelHardTimeoutMs));
   const settled = await collectPanel(calls, { ...cfg, minPanel });
   log.info("FUSION", `fan-out collected in ${Date.now() - t0}ms`);
 

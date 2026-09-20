@@ -206,6 +206,23 @@ describe("fusion combo", () => {
     expect(res.headers.get("x-9router-error-code")).toBeNull();
   });
 
+  it("keeps synchronous panel exceptions generic instead of rejecting Fusion", async () => {
+    const handleSingleModel = vi.fn((_body, model) => {
+      if (model === "p/a") throw new Error("panel exploded");
+      return errResponse(503);
+    });
+
+    const res = await handleFusionChat({
+      body: { messages: [{ role: "user", content: "Q" }] },
+      models: ["p/a", "p/b"],
+      handleSingleModel,
+      log,
+    });
+
+    expect(res.status).toBe(503);
+    await expect(res.json()).resolves.toMatchObject({ error: { message: "All fusion panel models failed" } });
+  });
+
   it("flattens previous tool history and assistant tool_calls into prose for panel calls", async () => {
     const handleSingleModel = vi.fn(async () => okResponse("ans"));
     await handleFusionChat({
