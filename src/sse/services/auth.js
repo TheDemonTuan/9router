@@ -1,6 +1,6 @@
 import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings, getProxyPools } from "@/lib/localDb";
 import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/connectionProxy";
-import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
+import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, buildModelLockMetadataUpdate, buildClearModelLockMetadataUpdate, getModelLockUntil, getModelLockMetadata } from "open-sse/services/accountFallback.js";
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
 import { isAlitpModelAvailableForEdition } from "open-sse/providers/alibabaTokenPlanCatalog.js";
@@ -27,16 +27,17 @@ function getAntigravityQuotaBlock(cache, connectionId, model) {
     : null;
 }
 
-function getUnavailabilityReason(connections, lockedConns, quotaBlocks) {
+function getUnavailabilityReason(connections, lockedConns, quotaBlocks, model) {
   if (quotaBlocks.length === connections.length) return "quota_exhausted";
   if (lockedConns.length !== connections.length) return "unavailable";
-  const reasons = lockedConns.map((connection) => connection.unavailabilityReason);
+  const metadata = lockedConns.map((connection) => getModelLockMetadata(connection, model));
+  const reasons = metadata.map(({ unavailabilityReason }) => unavailabilityReason);
   if (reasons.every((reason) => reason === "quota_exhausted")) return "quota_exhausted";
   if (reasons.every((reason) => reason === "rate_limited")) return "rate_limited";
   if (reasons.every((reason) => reason === "auth_failed")) return "auth_failed";
   if (reasons.every((reason) => reason === "transient_provider_failure")) return "transient_provider_failure";
 
-  const errorCodes = lockedConns.map((connection) => Number(connection.errorCode));
+  const errorCodes = metadata.map(({ errorCode }) => Number(errorCode));
   if (errorCodes.every((status) => status === 401 || status === 403)) return "auth_failed";
   if (errorCodes.every((status) => status >= 500 && status <= 599)) return "transient_provider_failure";
   return "unavailable";
@@ -138,7 +139,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       const excluded = excludeSet.has(c.id);
       const locked = isModelLockActive(c, model);
       if (excluded || locked) {
-        const lockUntil = getEarliestModelLockUntil(c);
+        const lockUntil = getModelLockUntil(c, model);
         log.debug("AUTH", `  → ${c.id?.slice(0, 8)} | ${excluded ? "excluded" : ""} ${locked ? `modelLocked(${model}) until ${lockUntil}` : ""}`);
       }
     });
@@ -147,28 +148,28 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       // Classify only a provider-wide, future-dated quota cache block as quota exhaustion.
       const lockedConns = connections.filter(c => isModelLockActive(c, model));
       const quotaEntries = [...quotaBlocks.values()];
-      const unavailabilityReason = getUnavailabilityReason(connections, lockedConns, quotaEntries);
+      const unavailabilityReason = getUnavailabilityReason(connections, lockedConns, quotaEntries, model);
       const expiries = [
-        ...lockedConns.map(c => getEarliestModelLockUntil(c)).filter(Boolean),
-        ...quotaEntries.map((entry) => entry.resetAt),
-      ];
-      const earliest = expiries
-        .map((expiry) => ({ expiry, at: Date.parse(expiry) }))
+        ...lockedConns.map(c => ({ connection: c, expiry: getModelLockUntil(c, model) })).filter(({ expiry }) => expiry),
+        ...quotaEntries.map((entry) => ({ connection: null, expiry: entry.resetAt })),
+      ]
+        .map(({ connection, expiry }) => ({ connection, expiry, at: Date.parse(expiry) }))
         .filter(({ at }) => Number.isFinite(at) && at > Date.now())
-        .sort((a, b) => a.at - b.at)[0]?.expiry || null;
-      if (earliest) {
-        const earliestConn = lockedConns[0];
+        .sort((a, b) => a.at - b.at);
+      const earliestEntry = expiries[0] || null;
+      if (earliestEntry) {
+        const metadata = getModelLockMetadata(earliestEntry.connection, model);
         const lastError = unavailabilityReason === "quota_exhausted"
           ? "All accounts have exhausted their usage quota"
-          : earliestConn?.lastError || null;
-        log.warn("AUTH", `${provider} | all ${connections.length} accounts locked for ${model || "all"} (${formatRetryAfter(earliest)}) | reason=${unavailabilityReason}`);
+          : metadata.lastError;
+        log.warn("AUTH", `${provider} | all ${connections.length} accounts locked for ${model || "all"} (${formatRetryAfter(earliestEntry.expiry)}) | reason=${unavailabilityReason}`);
         return {
           allRateLimited: true,
           unavailabilityReason,
-          retryAfter: earliest,
-          retryAfterHuman: formatRetryAfter(earliest),
+          retryAfter: earliestEntry.expiry,
+          retryAfterHuman: formatRetryAfter(earliestEntry.expiry),
           lastError,
-          lastErrorCode: earliestConn?.errorCode || null
+          lastErrorCode: metadata.errorCode
         };
       }
       log.warn("AUTH", `${provider} | all ${connections.length} accounts unavailable`);
@@ -306,14 +307,17 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
   if (!shouldFallback) return { shouldFallback: false, cooldownMs: 0 };
 
   const reason = typeof errorText === "string" ? errorText.slice(0, 200) : "Provider error";
-  const lockUpdate = buildModelLockUpdate(githubResetAtMs ? null : model, cooldownMs);
+  const lockModel = githubResetAtMs ? null : model;
+  const lockUpdate = buildModelLockUpdate(lockModel, cooldownMs);
+  const unavailabilityReason = errorClass || (githubResetAtMs ? "quota_exhausted" : null);
 
   await updateProviderConnection(connectionId, {
     ...lockUpdate,
+    ...buildModelLockMetadataUpdate(lockModel, { unavailabilityReason, errorCode: status, lastError: reason }),
     testStatus: "unavailable",
     lastError: reason,
     errorCode: status,
-    unavailabilityReason: errorClass || (githubResetAtMs ? "quota_exhausted" : null),
+    unavailabilityReason,
     lastErrorAt: new Date().toISOString(),
     backoffLevel: newBackoffLevel ?? backoffLevel
   });
@@ -364,6 +368,10 @@ export async function clearAccountError(connectionId, currentConnection, model =
   });
 
   const clearObj = Object.fromEntries(keysToClear.map(k => [k, null]));
+  for (const lockKey of keysToClear) {
+    const lockModel = lockKey === "modelLock___all" ? null : lockKey.slice("modelLock_".length);
+    Object.assign(clearObj, buildClearModelLockMetadataUpdate(lockModel));
+  }
 
   // Only reset error state if no active locks remain
   if (remainingActiveLocks.length === 0) {

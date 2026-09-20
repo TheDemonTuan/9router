@@ -122,9 +122,56 @@ export const MODEL_LOCK_PREFIX = "modelLock_";
 /** Special key used when no model is known (account-level lock) */
 export const MODEL_LOCK_ALL = `${MODEL_LOCK_PREFIX}__all`;
 
+const MODEL_LOCK_REASON_PREFIX = "modelLockReason_";
+const MODEL_LOCK_ERROR_CODE_PREFIX = "modelLockErrorCode_";
+const MODEL_LOCK_LAST_ERROR_PREFIX = "modelLockLastError_";
+
 /** Build the flat field key for a model lock */
 export function getModelLockKey(model) {
   return model ? `${MODEL_LOCK_PREFIX}${model}` : MODEL_LOCK_ALL;
+}
+
+function getModelLockMetadataKey(prefix, model) {
+  return `${prefix}${model || "__all"}`;
+}
+
+/** Read the selected model's lock, falling back to an account-wide lock. */
+export function getModelLockUntil(connection, model) {
+  if (!connection) return null;
+  return connection[getModelLockKey(model)] || connection[MODEL_LOCK_ALL] || null;
+}
+
+/**
+ * Read metadata for the selected model. Legacy account-level fields remain a
+ * fallback only when the connection has no model-specific metadata yet.
+ */
+export function getModelLockMetadata(connection, model) {
+  if (!connection) return { unavailabilityReason: null, errorCode: null, lastError: null };
+  const keys = [
+    getModelLockMetadataKey(MODEL_LOCK_REASON_PREFIX, model),
+    getModelLockMetadataKey(MODEL_LOCK_ERROR_CODE_PREFIX, model),
+    getModelLockMetadataKey(MODEL_LOCK_LAST_ERROR_PREFIX, model),
+  ];
+  const hasModelMetadata = keys.some(key => Object.hasOwn(connection, key));
+  return {
+    unavailabilityReason: connection[keys[0]] ?? (hasModelMetadata ? null : connection.unavailabilityReason ?? null),
+    errorCode: connection[keys[1]] ?? (hasModelMetadata ? null : connection.errorCode ?? null),
+    lastError: connection[keys[2]] ?? (hasModelMetadata ? null : connection.lastError ?? null),
+  };
+}
+
+/** Build update fields for a model-specific unavailable state. */
+export function buildModelLockMetadataUpdate(model, { unavailabilityReason = null, errorCode = null, lastError = null } = {}) {
+  return {
+    [getModelLockMetadataKey(MODEL_LOCK_REASON_PREFIX, model)]: unavailabilityReason,
+    [getModelLockMetadataKey(MODEL_LOCK_ERROR_CODE_PREFIX, model)]: errorCode,
+    [getModelLockMetadataKey(MODEL_LOCK_LAST_ERROR_PREFIX, model)]: lastError,
+  };
+}
+
+/** Clear model-specific unavailable metadata with its lock. */
+export function buildClearModelLockMetadataUpdate(model) {
+  return buildModelLockMetadataUpdate(model);
 }
 
 /**
@@ -132,8 +179,7 @@ export function getModelLockKey(model) {
  * Reads flat field `modelLock_${model}` (or `modelLock___all` when model=null).
  */
 export function isModelLockActive(connection, model) {
-  const key = getModelLockKey(model);
-  const expiry = connection[key] || connection[MODEL_LOCK_ALL];
+  const expiry = getModelLockUntil(connection, model);
   if (!expiry) return false;
   return new Date(expiry).getTime() > Date.now();
 }

@@ -17,6 +17,20 @@ function errResponse(status = 500) {
   return make();
 }
 
+function quotaResponse(retryAt) {
+  return new Response(JSON.stringify({
+    error: { type: "usage_limit_reached", code: "insufficient_quota", resets_at: Date.parse(retryAt) / 1000 },
+  }), {
+    status: 429,
+    headers: {
+      "Content-Type": "application/json",
+      "x-should-retry": "false",
+      "x-9router-error-code": "provider_quota_exhausted",
+      "x-9router-retry-at": retryAt,
+    },
+  });
+}
+
 describe("fusion combo", () => {
   it("answers directly with a single-model panel (nothing to fuse)", async () => {
     const handleSingleModel = vi.fn(async () => okResponse("solo"));
@@ -140,6 +154,39 @@ describe("fusion combo", () => {
       tuning: { minPanel: 2, stragglerGraceMs: 50, panelHardTimeoutMs: 5000 },
     });
     expect(res.status).toBe(503);
+  });
+
+  it("preserves the earliest terminal quota response when every panel is exhausted", async () => {
+    const earlyReset = "2026-09-21T00:00:00.000Z";
+    const lateReset = "2026-09-22T00:00:00.000Z";
+    const handleSingleModel = vi.fn(async (_body, model) => quotaResponse(model === "p/a" ? lateReset : earlyReset));
+    const res = await handleFusionChat({
+      body: { messages: [{ role: "user", content: "Q" }] },
+      models: ["p/a", "p/b"],
+      handleSingleModel,
+      log,
+    });
+
+    expect(res.status).toBe(429);
+    expect(res.headers.get("x-should-retry")).toBe("false");
+    expect(res.headers.get("x-9router-error-code")).toBe("provider_quota_exhausted");
+    expect(res.headers.get("x-9router-retry-at")).toBe(earlyReset);
+    await expect(res.json()).resolves.toMatchObject({ error: { code: "insufficient_quota", resets_at: Date.parse(earlyReset) / 1000 } });
+  });
+
+  it("keeps mixed terminal quota and non-quota panel failures generic", async () => {
+    const handleSingleModel = vi.fn(async (_body, model) => (
+      model === "p/a" ? quotaResponse("2026-09-21T00:00:00.000Z") : errResponse(503)
+    ));
+    const res = await handleFusionChat({
+      body: { messages: [{ role: "user", content: "Q" }] },
+      models: ["p/a", "p/b"],
+      handleSingleModel,
+      log,
+    });
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("x-9router-error-code")).toBeNull();
   });
 
   it("flattens previous tool history and assistant tool_calls into prose for panel calls", async () => {

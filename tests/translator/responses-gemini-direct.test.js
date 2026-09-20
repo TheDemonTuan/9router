@@ -172,6 +172,11 @@ describe("Responses <-> Gemini direct translators", () => {
     ["STOP", "response.completed", "completed", null],
     ["MAX_TOKENS", "response.incomplete", "incomplete", "max_output_tokens"],
     ["SAFETY", "response.incomplete", "incomplete", "content_filter"],
+    ["RECITATION", "response.incomplete", "incomplete", "content_filter"],
+    ["BLOCKLIST", "response.incomplete", "incomplete", "content_filter"],
+    ["PROHIBITED_CONTENT", "response.incomplete", "incomplete", "content_filter"],
+    ["SPII", "response.incomplete", "incomplete", "content_filter"],
+    ["IMAGE_SAFETY", "response.incomplete", "incomplete", "content_filter"],
   ])("maps Gemini %s terminal semantics", (finishReason, eventName, status, reason) => {
     const state = initState(FORMATS.OPENAI_RESPONSES);
     const events = translateResponse(FORMATS.GEMINI, FORMATS.OPENAI_RESPONSES, {
@@ -183,6 +188,37 @@ describe("Responses <-> Gemini direct translators", () => {
     expect(terminal.data.response.status).toBe(status);
     expect(terminal.data.response.incomplete_details).toEqual(reason ? { reason } : null);
     expect(events.some((event) => event.event === "response.completed")).toBe(finishReason === "STOP");
+  });
+
+  it.each(["MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL", "OTHER", "UNKNOWN_REASON"])("maps Gemini %s to provider failure instead of content filtering", (finishReason) => {
+    const state = initState(FORMATS.OPENAI_RESPONSES);
+    const events = translateResponse(FORMATS.GEMINI, FORMATS.OPENAI_RESPONSES, {
+      responseId: `failed-${finishReason}`,
+      candidates: [{ content: { parts: [{ text: "partial" }] }, finishReason }],
+    }, state);
+    const terminal = events.find((event) => event.event === "response.failed");
+
+    expect(terminal.data.response).toMatchObject({
+      status: "failed",
+      error: { type: "server_error", code: "provider_error" },
+    });
+    expect(events.some((event) => event.event === "response.completed" || event.event === "response.incomplete")).toBe(false);
+  });
+
+  it("reports a direct Gemini EOF without a finish reason as stream_disconnected", () => {
+    const state = initState(FORMATS.OPENAI_RESPONSES);
+    translateResponse(FORMATS.GEMINI, FORMATS.OPENAI_RESPONSES, {
+      responseId: "unexpected-eof",
+      candidates: [{ content: { parts: [{ text: "partial" }] } }],
+    }, state);
+    const events = translateResponse(FORMATS.GEMINI, FORMATS.OPENAI_RESPONSES, null, state);
+    const terminal = events.find((event) => event.event === "response.failed");
+
+    expect(terminal.data.response).toMatchObject({
+      status: "failed",
+      error: { type: "stream_error", code: "stream_disconnected" },
+    });
+    expect(events.some((event) => event.event === "response.completed")).toBe(false);
   });
 
   it("closes text, function, and later text as separate Responses items", () => {

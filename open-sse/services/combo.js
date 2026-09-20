@@ -536,6 +536,20 @@ function collectPanel(calls, { minPanel, stragglerGraceMs, panelHardTimeoutMs })
   });
 }
 
+function isTerminalQuotaResponse(response) {
+  return response?.status === 429
+    && response.headers?.get("x-should-retry") === "false"
+    && response.headers?.get("x-9router-error-code") === "provider_quota_exhausted";
+}
+
+function pickEarliestQuotaResponse(responses) {
+  return [...responses].sort((a, b) => {
+    const aAt = Date.parse(a.headers?.get("x-9router-retry-at") || "");
+    const bAt = Date.parse(b.headers?.get("x-9router-retry-at") || "");
+    return (Number.isFinite(aAt) ? aAt : Infinity) - (Number.isFinite(bAt) ? bAt : Infinity);
+  })[0];
+}
+
 /**
  * Handle a fusion combo: fan the prompt out to every panel model in parallel,
  * then a judge model synthesizes one final answer from all panel responses.
@@ -597,15 +611,20 @@ export async function handleFusionChat({ body, models, handleSingleModel, log, c
   const settled = await collectPanel(calls, { ...cfg, minPanel });
   log.info("FUSION", `fan-out collected in ${Date.now() - t0}ms`);
 
-  // 2. Collect successful answers.
+  // 2. Collect successful answers and preserve an all-quota terminal result.
   const answers = [];
+  const quotaResponses = [];
   for (let i = 0; i < settled.length; i++) {
     const res = settled[i];
     const model = panel[i];
     if (!res) { log.warn("FUSION", `Panel ${model} dropped (straggler/timeout)`); continue; }
     if (res.__timeout) { log.warn("FUSION", `Panel ${model} timed out`); continue; }
     if (res.__error) { log.warn("FUSION", `Panel ${model} threw`, { error: res.__error?.message || String(res.__error) }); continue; }
-    if (!res.ok) { log.warn("FUSION", `Panel ${model} failed`, { status: res.status }); continue; }
+    if (!res.ok) {
+      if (isTerminalQuotaResponse(res)) quotaResponses.push(res);
+      log.warn("FUSION", `Panel ${model} failed`, { status: res.status });
+      continue;
+    }
     try {
       const json = await res.clone().json();
       const text = extractPanelText(json);
@@ -621,6 +640,10 @@ export async function handleFusionChat({ body, models, handleSingleModel, log, c
   }
 
   // 3. Degrade gracefully when the panel is too thin to fuse.
+  if (answers.length === 0 && quotaResponses.length === panel.length) {
+    log.warn("FUSION", "All panel models exhausted quota");
+    return pickEarliestQuotaResponse(quotaResponses);
+  }
   if (answers.length === 0) {
     log.warn("FUSION", "All panel models failed");
     return new Response(

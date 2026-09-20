@@ -1,6 +1,6 @@
 import { register } from "../index.js";
 import { FORMATS } from "../formats.js";
-import { DEFAULT_IMAGE_MIME, RESPONSES_ITEM, ROLE } from "../schema/index.js";
+import { DEFAULT_IMAGE_MIME, GEMINI_FINISH, RESPONSES_ITEM, ROLE } from "../schema/index.js";
 import { encodeDataUri } from "../concerns/image.js";
 import { storeGeminiThoughtSignature } from "../../services/thoughtSignatureStore.js";
 import {
@@ -183,22 +183,68 @@ function incomplete(state, emit, reason) {
   });
 }
 
-function finish(state, emit, finishReason = "STOP") {
+function fail(state, emit, error) {
+  if (state.geminiTerminal) return;
+  state.geminiTerminal = true;
+  emit("response.failed", {
+    response: buildResponseSnapshot(state, {
+      status: "failed",
+      error,
+      output: buildOutputArray(state.outputItems),
+      usage: state.usage || null,
+    }),
+  });
+}
+
+const CONTENT_FILTER_REASONS = new Set([
+  GEMINI_FINISH.SAFETY,
+  GEMINI_FINISH.RECITATION,
+  GEMINI_FINISH.BLOCKLIST,
+  GEMINI_FINISH.PROHIBITED_CONTENT,
+  GEMINI_FINISH.SPII,
+  GEMINI_FINISH.IMAGE_SAFETY,
+  GEMINI_FINISH.IMAGE_PROHIBITED_CONTENT,
+]);
+
+function closeOutput(state, emit) {
   closeMessage(state, emit);
   closeReasoning(state, emit);
   closeFunctionCalls(state, emit);
-  if (String(finishReason).toUpperCase() === "STOP") {
+}
+
+function finish(state, emit, finishReason) {
+  closeOutput(state, emit);
+  const reason = String(finishReason || "").toUpperCase();
+  if (reason === GEMINI_FINISH.STOP) {
     complete(state, emit);
     return;
   }
-  incomplete(state, emit, String(finishReason).toUpperCase() === "MAX_TOKENS" ? "max_output_tokens" : "content_filter");
+  if (reason === GEMINI_FINISH.MAX_TOKENS) {
+    incomplete(state, emit, "max_output_tokens");
+    return;
+  }
+  if (CONTENT_FILTER_REASONS.has(reason)) {
+    incomplete(state, emit, "content_filter");
+    return;
+  }
+  fail(state, emit, {
+    type: "server_error",
+    code: "provider_error",
+    message: `Gemini finished with unsupported reason: ${reason || "unknown"}`,
+  });
 }
 
 export function geminiToResponsesResponse(chunk, state) {
   const events = [];
   if (!chunk) {
-    if (!state.geminiResponsesStarted) return events;
-    finish(state, emitFactory(state, events));
+    if (!state.geminiResponsesStarted || state.geminiTerminal || state.geminiFinishSeen) return events;
+    const emit = emitFactory(state, events);
+    closeOutput(state, emit);
+    fail(state, emit, {
+      type: "stream_error",
+      code: "stream_disconnected",
+      message: "Gemini stream closed before a terminal finish reason",
+    });
     return events;
   }
   const response = chunk.response || chunk;
@@ -240,7 +286,10 @@ export function geminiToResponsesResponse(chunk, state) {
       state.pendingThoughtSignature = null;
     }
   }
-  if (candidate.finishReason) finish(state, emit, candidate.finishReason);
+  if (candidate.finishReason) {
+    state.geminiFinishSeen = true;
+    finish(state, emit, candidate.finishReason);
+  }
   return events;
 }
 

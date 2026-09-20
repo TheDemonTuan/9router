@@ -25,6 +25,7 @@ const { parseUpstreamError, quotaExhaustedResponse, credentialUnavailableRespons
 const { getProviderCredentials, markAccountUnavailable } = await import("../../src/sse/services/auth.js");
 
 const MODEL = "gpt-5.6";
+const SECOND_MODEL = "gpt-5.6-mini";
 const RESET = "2026-09-21T00:00:00.000Z";
 
 afterEach(() => vi.useRealTimers());
@@ -80,6 +81,36 @@ describe("upstream quota classification", () => {
     await markAccountUnavailable("healthy", 429, "insufficient_quota", "codex", MODEL, Date.parse(RESET), "quota_exhausted");
     await expect(getProviderCredentials("codex", null, MODEL)).resolves.toMatchObject({
       allRateLimited: true, unavailabilityReason: "quota_exhausted", retryAfter: RESET,
+    });
+  });
+
+  it("keeps lock classification and retry time scoped to the requested model", async () => {
+    const transientReset = "2026-09-20T00:00:30.000Z";
+    mocks.connections = [{ id: "shared", provider: "codex", email: "shared@example.com", isActive: true }];
+
+    await markAccountUnavailable("shared", 429, "insufficient_quota", "codex", MODEL, Date.parse(RESET), "quota_exhausted");
+    await markAccountUnavailable("shared", 503, "connection reset", "codex", SECOND_MODEL, null, "transient_provider_failure");
+
+    const quota = await getProviderCredentials("codex", null, MODEL);
+    const transient = await getProviderCredentials("codex", null, SECOND_MODEL);
+
+    expect(quota).toMatchObject({
+      allRateLimited: true,
+      unavailabilityReason: "quota_exhausted",
+      retryAfter: RESET,
+      lastErrorCode: 429,
+    });
+    expect(transient).toMatchObject({
+      allRateLimited: true,
+      unavailabilityReason: "transient_provider_failure",
+      retryAfter: transientReset,
+      lastErrorCode: 503,
+    });
+    expect(mocks.connections[0]).toMatchObject({
+      [`modelLockReason_${MODEL}`]: "quota_exhausted",
+      [`modelLockErrorCode_${MODEL}`]: 429,
+      [`modelLockReason_${SECOND_MODEL}`]: "transient_provider_failure",
+      [`modelLockErrorCode_${SECOND_MODEL}`]: 503,
     });
   });
 
