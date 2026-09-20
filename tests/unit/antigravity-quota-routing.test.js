@@ -92,6 +92,7 @@ describe("Antigravity quota-aware routing", () => {
     try {
       await expect(getProviderCredentials("antigravity", null, MODEL)).resolves.toMatchObject({
         allRateLimited: true,
+        unavailabilityReason: "quota_exhausted",
         retryAfter: FUTURE_RESET,
       });
     } finally {
@@ -307,5 +308,57 @@ describe("Antigravity quota-aware routing", () => {
     // Optimistic reading must NOT poison the shared cache (auth pre-filter
     // treats cached 0% as exhausted).
     expect(getAntigravityQuotaCache().get("ag-optimistic")?.[MODEL]?.remainingPercentage).toBe(90);
+  });
+
+  it("uses the earliest verified reset when every account has exhausted quota", async () => {
+    const laterReset = "2026-09-02T00:00:00.000Z";
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-26T00:00:00.000Z"));
+    mocks.getProviderConnections.mockResolvedValue([
+      { id: "ag-late", email: "late@example.com", isActive: true },
+      { id: "ag-early", email: "early@example.com", isActive: true },
+    ]);
+    getAntigravityQuotaCache().set("ag-late", {
+      [MODEL]: { remainingPercentage: 0, resetAt: laterReset },
+    });
+    getAntigravityQuotaCache().set("ag-early", {
+      [MODEL]: { remainingPercentage: 0, resetAt: FUTURE_RESET },
+    });
+
+    try {
+      await expect(getProviderCredentials("antigravity", null, MODEL)).resolves.toMatchObject({
+        allRateLimited: true,
+        unavailabilityReason: "quota_exhausted",
+        retryAfter: FUTURE_RESET,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    [401, "auth_failed"],
+    [503, "transient_provider_failure"],
+  ])("does not label locked %i accounts as quota exhaustion", async (status, unavailabilityReason) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-26T00:00:00.000Z"));
+    mocks.getProviderConnections.mockResolvedValue([{
+      id: "ag-locked",
+      email: "locked@example.com",
+      isActive: true,
+      [`modelLock_${MODEL}`]: FUTURE_RESET,
+      errorCode: status,
+      lastError: `upstream ${status}`,
+    }]);
+
+    try {
+      await expect(getProviderCredentials("antigravity", null, MODEL)).resolves.toMatchObject({
+        allRateLimited: true,
+        unavailabilityReason,
+        retryAfter: FUTURE_RESET,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

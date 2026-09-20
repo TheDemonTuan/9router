@@ -114,18 +114,78 @@ export function createErrorResult(statusCode, message, resetsAtMs) {
  * @returns {Response}
  */
 export function unavailableResponse(statusCode, message, retryAfter, retryAfterHuman) {
-  const retryAfterSec = Math.max(Math.ceil((new Date(retryAfter).getTime() - Date.now()) / 1000), 1);
-  const msg = `${message} (${retryAfterHuman})`;
+  const retryAtMs = Date.parse(retryAfter);
+  const retryAfterSec = Number.isFinite(retryAtMs)
+    ? Math.max(Math.ceil((retryAtMs - Date.now()) / 1000), 1)
+    : null;
+  const msg = retryAfterHuman ? `${message} (${retryAfterHuman})` : message;
   return new Response(
     JSON.stringify({ error: { message: msg } }),
     {
       status: statusCode,
       headers: {
         "Content-Type": "application/json",
-        "Retry-After": String(retryAfterSec)
+        ...(retryAfterSec ? { "Retry-After": String(retryAfterSec) } : {})
       }
     }
   );
+}
+
+/**
+ * Create a terminal response for confirmed provider quota exhaustion.
+ * @param {string} message - Error message (without retry info)
+ * @param {string} retryAfter - ISO timestamp when quota becomes available
+ * @param {string} retryAfterHuman - Human-readable retry info
+ * @returns {Response}
+ */
+export function quotaExhaustedResponse(message, retryAfter, retryAfterHuman) {
+  const retryAtMs = Date.parse(retryAfter);
+  const hasRetryAt = Number.isFinite(retryAtMs);
+  const retryAfterSec = hasRetryAt
+    ? Math.max(Math.ceil((retryAtMs - Date.now()) / 1000), 1)
+    : null;
+  const resetsAt = hasRetryAt ? Math.floor(retryAtMs / 1000) : null;
+  const msg = retryAfterHuman ? `${message} (${retryAfterHuman})` : message;
+
+  return new Response(
+    JSON.stringify({
+      error: {
+        message: msg,
+        type: "usage_limit_reached",
+        code: "insufficient_quota",
+        param: null,
+        ...(resetsAt !== null ? { resets_at: resetsAt } : {}),
+      },
+    }),
+    {
+      status: 429,
+      headers: {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "no-store",
+        "x-should-retry": "false",
+        "x-9router-error-code": "provider_quota_exhausted",
+        ...(retryAfterSec ? { "Retry-After": String(retryAfterSec) } : {}),
+        ...(hasRetryAt ? { "x-9router-retry-at": retryAfter } : {}),
+      },
+    }
+  );
+}
+
+/**
+ * Map classified credential exhaustion to its client-facing response.
+ */
+export function credentialUnavailableResponse(statusCode, message, credentials) {
+  if (credentials?.unavailabilityReason === "quota_exhausted") {
+    return quotaExhaustedResponse(message, credentials.retryAfter, credentials.retryAfterHuman);
+  }
+  if (credentials?.unavailabilityReason === "auth_failed") {
+    const authStatus = statusCode === 401 || statusCode === 403
+      ? statusCode
+      : (Number(credentials.lastErrorCode) === 403 ? 403 : 401);
+    return errorResponse(authStatus, message);
+  }
+  return unavailableResponse(statusCode, message, credentials?.retryAfter, credentials?.retryAfterHuman);
 }
 
 /**

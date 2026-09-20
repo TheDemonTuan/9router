@@ -296,6 +296,7 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
   let lastError = null;
   let earliestRetryAfter = null;
   let lastStatus = null;
+  const quotaResponses = [];
 
   for (let i = 0; i < rotatedModels.length; i++) {
     const modelStr = rotatedModels[i];
@@ -313,6 +314,9 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
       // Extract error info from response
       let errorText = result.statusText || "";
       let retryAfter = null;
+      if (result.headers.get("x-9router-error-code") === "provider_quota_exhausted") {
+        quotaResponses.push(result);
+      }
       try {
         const errorBody = await result.clone().json();
         errorText = errorBody?.error?.message || errorBody?.error || errorBody?.message || errorText;
@@ -360,7 +364,18 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
     }
   }
 
-  // All models failed
+  // All models failed. Preserve a terminal quota response when every candidate
+  // independently confirmed quota exhaustion instead of collapsing it into 503.
+  if (quotaResponses.length === rotatedModels.length) {
+    return quotaResponses
+      .slice()
+      .sort((a, b) => {
+        const aRetryAt = Date.parse(a.headers.get("x-9router-retry-at"));
+        const bRetryAt = Date.parse(b.headers.get("x-9router-retry-at"));
+        return (Number.isFinite(aRetryAt) ? aRetryAt : Infinity) - (Number.isFinite(bRetryAt) ? bRetryAt : Infinity);
+      })[0];
+  }
+
   // Use 503 (Service Unavailable) rather than 406 (Not Acceptable) — 406 implies
   // the request itself is invalid, but here the providers are simply unavailable
   // or have no active credentials. 503 is more accurate and retryable by clients.

@@ -19,6 +19,24 @@ function githubMonthlyResetMs(status, errorText, provider) {
   return Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1);
 }
 
+function getAntigravityQuotaBlock(cache, connectionId, model) {
+  const quota = cache?.get(connectionId)?.[model];
+  const resetAtMs = Date.parse(quota?.resetAt);
+  return quota?.remainingPercentage <= 0 && Number.isFinite(resetAtMs) && resetAtMs > Date.now()
+    ? { resetAt: quota.resetAt, resetAtMs }
+    : null;
+}
+
+function getUnavailabilityReason(connections, lockedConns, quotaBlocks) {
+  if (quotaBlocks.length === connections.length) return "quota_exhausted";
+  if (lockedConns.length !== connections.length) return "unavailable";
+
+  const errorCodes = lockedConns.map((connection) => Number(connection.errorCode));
+  if (errorCodes.every((status) => status === 401 || status === 403)) return "auth_failed";
+  if (errorCodes.every((status) => status >= 500 && status <= 599)) return "transient_provider_failure";
+  return "unavailable";
+}
+
 /**
  * Get provider credentials from localDb
  * Filters out unavailable accounts and returns the selected account based on strategy
@@ -82,6 +100,14 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     const isAntigravity = providerId === "antigravity";
     const antigravityQuotaCache = isAntigravity && model ? getAntigravityQuotaCache() : null;
 
+    const quotaBlocks = new Map();
+    if (isAntigravity && model && antigravityQuotaCache) {
+      for (const connection of connections) {
+        const quotaBlock = getAntigravityQuotaBlock(antigravityQuotaCache, connection.id, model);
+        if (quotaBlock) quotaBlocks.set(connection.id, quotaBlock);
+      }
+    }
+
     // Filter out model-locked, excluded, and Antigravity quota-exhausted connections.
     const availableConnections = connections.filter(c => {
       if (excludeSet.has(c.id)) return false;
@@ -92,14 +118,12 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
           !isAlitpModelAvailableForEdition(model, c.providerSpecificData?.tokenPlanEdition)) {
         return false;
       }
-      // Antigravity: skip if live quota exhausted for this model
-      if (isAntigravity && model && antigravityQuotaCache) {
-        const quota = antigravityQuotaCache.get(c.id)?.[model];
-        if (quota && quota.remainingPercentage <= 0 && quota.resetAt && new Date(quota.resetAt).getTime() > Date.now()) {
-          const account = c.id?.slice(0, 8) || "unknown";
-          log.info("AG_QUOTA", `${account} | CACHE_BLOCK ${model} — skip upstream until ${quota.resetAt}`);
-          return false;
-        }
+      // Antigravity: skip only verified exhausted quota with a future reset.
+      const quotaBlock = quotaBlocks.get(c.id);
+      if (quotaBlock) {
+        const account = c.id?.slice(0, 8) || "unknown";
+        log.info("AG_QUOTA", `${account} | CACHE_BLOCK ${model} — skip upstream until ${quotaBlock.resetAt}`);
+        return false;
       }
       return true;
     });
@@ -115,24 +139,32 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     });
 
     if (availableConnections.length === 0) {
-      // Find earliest persistent lock or lazy Antigravity quota-cache reset for retry timing.
+      // Classify only a provider-wide, future-dated quota cache block as quota exhaustion.
       const lockedConns = connections.filter(c => isModelLockActive(c, model));
-      const expiries = lockedConns.map(c => getEarliestModelLockUntil(c)).filter(Boolean);
-      if (isAntigravity && model && antigravityQuotaCache) {
-        connections.forEach((c) => {
-          const resetAt = antigravityQuotaCache.get(c.id)?.[model]?.resetAt;
-          if (resetAt && new Date(resetAt).getTime() > Date.now()) expiries.push(resetAt);
-        });
-      }
-      const earliest = expiries.sort()[0] || null;
+      const quotaEntries = [...quotaBlocks.values()];
+      const unavailabilityReason = getUnavailabilityReason(connections, lockedConns, quotaEntries);
+      const expiries = unavailabilityReason === "quota_exhausted"
+        ? quotaEntries.map((entry) => entry.resetAt)
+        : [
+          ...lockedConns.map(c => getEarliestModelLockUntil(c)).filter(Boolean),
+          ...quotaEntries.map((entry) => entry.resetAt),
+        ];
+      const earliest = expiries
+        .map((expiry) => ({ expiry, at: Date.parse(expiry) }))
+        .filter(({ at }) => Number.isFinite(at) && at > Date.now())
+        .sort((a, b) => a.at - b.at)[0]?.expiry || null;
       if (earliest) {
         const earliestConn = lockedConns[0];
-        log.warn("AUTH", `${provider} | all ${connections.length} accounts locked for ${model || "all"} (${formatRetryAfter(earliest)}) | lastError=${earliestConn?.lastError?.slice(0, 50)}`);
+        const lastError = unavailabilityReason === "quota_exhausted"
+          ? "All accounts have exhausted their usage quota"
+          : earliestConn?.lastError || null;
+        log.warn("AUTH", `${provider} | all ${connections.length} accounts locked for ${model || "all"} (${formatRetryAfter(earliest)}) | reason=${unavailabilityReason}`);
         return {
           allRateLimited: true,
+          unavailabilityReason,
           retryAfter: earliest,
           retryAfterHuman: formatRetryAfter(earliest),
-          lastError: earliestConn?.lastError || null,
+          lastError,
           lastErrorCode: earliestConn?.errorCode || null
         };
       }

@@ -8,7 +8,7 @@ import {
 import { getSettings, getProviderConnectionById } from "@/lib/localDb";
 import { getModelInfo } from "../services/model.js";
 import { handleVideoProxyCore, getVideoConfig, sanitizeSecrets } from "open-sse/handlers/videoCore.js";
-import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
+import { credentialUnavailableResponse, errorResponse } from "open-sse/utils/error.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import * as log from "../utils/logger.js";
@@ -138,7 +138,7 @@ export async function handleVideoCreate(request, action) {
       if (credentials?.allRateLimited) {
         const errorMsg = lastError || credentials.lastError || "Unavailable";
         const status = lastStatus || Number(credentials.lastErrorCode) || HTTP_STATUS.SERVICE_UNAVAILABLE;
-        return unavailableResponse(status, `[${provider}/${model || "video"}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman);
+        return credentialUnavailableResponse(status, `[${provider}/${model || "video"}] ${errorMsg}`, credentials);
       }
       if (excludeConnectionIds.size === 0) {
         return errorResponse(HTTP_STATUS.BAD_REQUEST, `No credentials for provider: ${provider}`);

@@ -8,6 +8,7 @@ import {
 import { getSettings } from "@/lib/localDb";
 import { PROVIDER_MODELS } from "@/shared/constants/models";
 import { GEMINI_NATIVE_TTS_FETCH_TIMEOUT_MS } from "open-sse/config/runtimeConfig.js";
+import { credentialUnavailableResponse } from "open-sse/utils/error.js";
 import { initTranslators } from "open-sse/translator/index.js";
 
 let initialized = false;
@@ -251,11 +252,13 @@ async function forwardGeminiNativeRequest(request, body, model, action) {
   while (true) {
     const credentials = await getProviderCredentials("gemini", excludeConnectionIds, modelId);
     if (!credentials || credentials.allRateLimited) {
-      console.log(`[GEMINI_NATIVE] exhausted model=${modelId} status=${lastStatus || Number(credentials?.lastErrorCode) || 503} error=${lastError || credentials?.lastError || "No active credentials for provider: gemini"}`);
-      return Response.json(
-        { error: { message: lastError || credentials?.lastError || "No active credentials for provider: gemini" } },
-        { status: lastStatus || Number(credentials?.lastErrorCode) || 503 }
-      );
+      const status = lastStatus || Number(credentials?.lastErrorCode) || 503;
+      const errorMessage = lastError || credentials?.lastError || "No active credentials for provider: gemini";
+      console.log(`[GEMINI_NATIVE] exhausted model=${modelId} status=${status} error=${errorMessage}`);
+      if (credentials?.allRateLimited) {
+        return credentialUnavailableResponse(status, `[gemini/${modelId}] ${errorMessage}`, credentials);
+      }
+      return Response.json({ error: { message: errorMessage } }, { status });
     }
 
     const authHeaders = buildGeminiNativeAuthHeaders(credentials);
