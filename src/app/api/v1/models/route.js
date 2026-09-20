@@ -18,7 +18,9 @@ import { resolveZedModels } from "open-sse/shared/zedAuth.js";
 import { updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { capabilitiesFromServiceKind, getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
-import { getThinkingLevels } from "open-sse/providers/thinkingLevels.js";
+import { getAdvertisedThinkingLevels } from "open-sse/providers/thinkingLevels.js";
+import { resolveEffectiveProviderModels } from "open-sse/services/alibabaTokenPlanModels.js";
+import { isAlitpModelAvailableForEdition } from "open-sse/providers/alibabaTokenPlanCatalog.js";
 
 // Per-provider live model resolvers. Each receives a connection record and
 // returns { models: [{ id, name? }, ...] } | null on failure.
@@ -55,6 +57,27 @@ const LIVE_MODEL_RESOLVERS = {
       providerSpecificData: conn.providerSpecificData || {}
     }, { log: console });
     return result?.models?.length ? { models: result.models } : null;
+  },
+  // Alibaba Token Plan: same effective catalog as /api/providers/[id]/models
+  // (live → cache → curated edition fallback). Merges every active Token Plan
+  // connection (a Personal + a Team account see the union catalog); a failing
+  // probe degrades per connection and never exposes credentials or raw errors.
+  "alitp-intl": async (conn, ctx) => {
+    const conns = (ctx?.connections || []).filter((c) => c.provider === "alitp-intl");
+    const merged = new Map();
+    for (const c of conns.length ? conns : [conn]) {
+      const result = await resolveEffectiveProviderModels("alitp-intl", {
+        id: c.id,
+        apiKey: c.apiKey,
+        providerSpecificData: c.providerSpecificData || {},
+      }, { log: console });
+      for (const m of result.models || []) {
+        // Deprecated compat aliases stay routable but not discoverable.
+        if (m.deprecated) continue;
+        if (!merged.has(m.id)) merged.set(m.id, m);
+      }
+    }
+    return merged.size ? { models: [...merged.values()] } : null;
   },
   github: async (conn) => {
     const result = await resolveCopilotModels({
@@ -329,13 +352,21 @@ export async function buildModelsList(kindFilter, options = {}) {
       for (const model of providerModels) {
         if (!kindFilter.includes(modelKind(model))) continue;
         if (isDisabled(alias, model.id)) continue;
+        // No connection/DB: retain legacy Personal compatibility, not the full
+        // registry's Team superset. Active connections use the shared effective
+        // catalog below and can expose Team models when entitled.
+        if (providerId === "alitp-intl" && !isAlitpModelAvailableForEdition(model.id, "personal")) continue;
+        // Deprecated compat aliases stay routable but are not discoverable.
+        if (model.deprecated && providerId === "alitp-intl") continue;
         models.push({
           id: `${alias}/${model.id}`,
           object: "model",
           owned_by: alias,
         });
         if (providerInfo?.exposeThinkingVariants && !model.id.includes("(")) {
-          const levels = getThinkingLevels(providerId, model.id);
+          // Canonical advertised levels only — wire aliases (high/max→xhigh)
+          // stay accepted at request time but never become virtual models.
+          const levels = getAdvertisedThinkingLevels(providerId, model.id);
           for (const level of levels ?? []) {
             models.push({
               id: `${alias}/${model.id}(${level})`,
@@ -398,7 +429,10 @@ export async function buildModelsList(kindFilter, options = {}) {
               ),
             ),
           )
-        : providerModels.map((model) => model.id);
+        // Deprecated compat aliases (alitp preview) stay routable, not discoverable.
+        : providerModels
+            .filter((model) => !(model.deprecated && providerId === "alitp-intl"))
+            .map((model) => model.id);
 
       if (isCompatibleProvider && rawModelIds.length === 0 && !skipDynamicFetch) {
         rawModelIds = await fetchCompatibleModelIds(conn);
@@ -410,7 +444,7 @@ export async function buildModelsList(kindFilter, options = {}) {
       const liveResolver = LIVE_MODEL_RESOLVERS[providerId];
       if (liveResolver && !hasExplicitEnabledModels) {
         try {
-          const live = await liveResolver(conn);
+          const live = await liveResolver(conn, { connections });
           if (live?.models?.length) {
             rawModelIds = live.models.map((m) => m.id);
             liveModelKindById = new Map(
@@ -535,7 +569,9 @@ export async function buildModelsList(kindFilter, options = {}) {
 
         const activeProviderInfo = AI_PROVIDERS[providerId];
         if (activeProviderInfo?.exposeThinkingVariants && !modelId.includes("(")) {
-          const levels = getThinkingLevels(providerId, modelId);
+          // Canonical advertised levels only — wire aliases stay accepted at
+          // request time but never become virtual models.
+          const levels = getAdvertisedThinkingLevels(providerId, modelId);
           for (const level of levels ?? []) {
             const variant = {
               id: `${outputAlias}/${modelId}(${level})`,

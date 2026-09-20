@@ -1,12 +1,17 @@
 import { CLAUDE_API_HEADERS } from "../shared.js";
+import { ALITP_MODELS, ALITP_DISCOVERY, resolveAlitpCatalogEntry } from "../alibabaTokenPlanCatalog.js";
 
 // Token Plan — credit subscription keys on token-plan.<region>.maas.aliyuncs.com.
 // Multi-transport endpoints: OpenAI Chat, Responses, and Anthropic Messages.
+// Config only: model membership/limits/thinking contracts live in
+// alibabaTokenPlanCatalog.js (single source of truth), discovery in
+// open-sse/services/alibabaTokenPlanModels.js.
 export default {
   id: "alitp-intl",
   priority: 11,
   alias: "alitp-intl",
   exposeThinkingVariants: true,
+  modelDiscovery: ALITP_DISCOVERY,
   display: {
     name: "Alibaba Token Plan",
     icon: "cloud",
@@ -41,16 +46,13 @@ export default {
       auth: { combined: true, header: "x-api-key", scheme: "raw" },
     },
   ],
-  models: [
-    { id: "qwen3.8-max", name: "Qwen3.8 Max" },
-    { id: "qwen3.8-flash", name: "Qwen3.8 Flash" },
-    { id: "qwen3.7-max", name: "Qwen3.7 Max" },
-    { id: "qwen3.7-plus", name: "Qwen3.7 Plus" },
-    { id: "qwen3.6-flash", name: "Qwen3.6 Flash" },
-    { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro" },
-    { id: "deepseek-v4-pro-0813", name: "DeepSeek V4 Pro (0813)" },
-    { id: "deepseek-v4-flash-0731", name: "DeepSeek V4 Flash (0731)" },
-    { id: "glm-5.2", name: "GLM 5.2" },
-    { id: "qwen3.8-max-preview", name: "Qwen3.8 Max Preview", upstreamModelId: "qwen3.8-max", deprecated: true },
-  ],
+  // Fallback catalog (routable set). Live discovery can extend it at runtime;
+  // deprecated aliases stay routable but are filtered out of discovery results.
+  models: ALITP_MODELS.map((m) => ({
+    id: m.id,
+    name: m.name,
+    ...(m.upstreamId ? { upstreamModelId: m.upstreamId } : {}),
+    ...(m.deprecated ? { deprecated: true } : {}),
+    ...(resolveAlitpCatalogEntry(m.id)?.formats ? { supportedFormats: resolveAlitpCatalogEntry(m.id).formats } : {}),
+  })),
 };

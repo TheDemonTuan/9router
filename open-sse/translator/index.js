@@ -53,6 +53,21 @@ export function translateRequest(sourceFormat, targetFormat, model, body, stream
   ensureInitialized();
   let result = body;
 
+  const isAlibabaTokenPlan = provider === "alitp-intl" || String(model || "").startsWith("alitp-intl/");
+  // Alibaba snapshots before normalizeThinkingConfig because its mapper must
+  // preserve the original intent/display across protocol conversion. Other
+  // providers keep their established capture timing and behavior unchanged.
+  let thinkingIntent = isAlibabaTokenPlan ? captureThinking(result) : undefined;
+  const preservedThinkingMetadata = isAlibabaTokenPlan ? {
+    reasoning: result.reasoning && typeof result.reasoning === "object" && !Array.isArray(result.reasoning)
+      ? Object.fromEntries(Object.entries(result.reasoning).filter(([key]) => key !== "effort"))
+      : null,
+    outputConfig: result.output_config && typeof result.output_config === "object" && !Array.isArray(result.output_config)
+      ? Object.fromEntries(Object.entries(result.output_config).filter(([key]) => key !== "effort"))
+      : null,
+    display: typeof result.thinking?.display === "string" ? result.thinking.display : undefined,
+  } : null;
+
   // Strip explicit content types (opt-in via strip[] in PROVIDER_MODELS entry)
   stripContentTypes(result, stripList);
 
@@ -70,9 +85,9 @@ export function translateRequest(sourceFormat, targetFormat, model, body, stream
     fixMissingToolResponses(result);
   }
 
-  // Capture thinking intent from the original (pre-translation) body, before any
-  // format conversion strips/renames the fields. Applied after translation.
-  const thinkingIntent = captureThinking(result);
+  // Historical capture point for all non-Alibaba providers (after generic
+  // request repair, before format translation). Alibaba was captured above.
+  if (!isAlibabaTokenPlan) thinkingIntent = captureThinking(result);
 
   // Capture session id from the original body (envelope still intact, e.g. antigravity request.sessionId)
   const clientSessionId = captureSessionId(result, credentials, connectionId, targetFormat);
@@ -116,7 +131,25 @@ export function translateRequest(sourceFormat, targetFormat, model, body, stream
     targetFormat === FORMATS.KIRO &&
     (sourceFormat === FORMATS.OPENAI || sourceFormat === FORMATS.CLAUDE);
   if (!kiroThinkingMappedByTranslator) {
-    applyThinking(targetFormat, model, result, provider, thinkingIntent);
+    // Restore source-wire sibling metadata lost by a cross-protocol translator.
+    // These fields are explicitly non-thinking client data; merging them before
+    // applyThinking lets the mapper retain them while replacing only effort.
+    if (isAlibabaTokenPlan && preservedThinkingMetadata.reasoning && targetFormat === FORMATS.OPENAI_RESPONSES) {
+      result = { ...result, reasoning: { ...preservedThinkingMetadata.reasoning, ...(result.reasoning || {}) } };
+    }
+    if (isAlibabaTokenPlan && preservedThinkingMetadata.outputConfig && targetFormat === FORMATS.CLAUDE) {
+      result = { ...result, output_config: { ...preservedThinkingMetadata.outputConfig, ...(result.output_config || {}) } };
+    }
+    if (isAlibabaTokenPlan && preservedThinkingMetadata.outputConfig && targetFormat !== FORMATS.CLAUDE) {
+      result = { ...result, output_config: { ...preservedThinkingMetadata.outputConfig, ...(result.output_config || {}) } };
+    }
+    if (isAlibabaTokenPlan && preservedThinkingMetadata.display && !result.thinking) {
+      result = { ...result, thinking: { type: "enabled", display: preservedThinkingMetadata.display } };
+    }
+    // Alibaba mapper is copy-on-write; established provider mappers mutate the
+    // translated body in place. Preserve that legacy contract elsewhere.
+    if (isAlibabaTokenPlan) result = applyThinking(targetFormat, model, result, provider, thinkingIntent);
+    else applyThinking(targetFormat, model, result, provider, thinkingIntent);
   }
 
   // Always normalize to clean OpenAI format when target is OpenAI

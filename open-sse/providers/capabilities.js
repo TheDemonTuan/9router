@@ -34,6 +34,27 @@
 
 import { matchPattern } from "./pricing.js";
 import { looksLikeVisionModel } from "./visionPatterns.js";
+import { ALITP_MODELS, resolveAlitpCatalogEntry } from "./alibabaTokenPlanCatalog.js";
+
+// Alibaba Token Plan — authoritative per-model metadata from the curated
+// catalog (docs-verified). Generic patterns are wrong here in both directions
+// (`*qwen*max*` would strip images from qwen3.8-max; `*deepseek-v4.*` claims
+// vision for text-only v4-pro), and wrong caps silently destroy client input
+// before the request ever reaches Alibaba → explicit entry for every model.
+const ALITP_CAPABILITIES = Object.fromEntries(
+  ALITP_MODELS.map((m) => {
+    const base = resolveAlitpCatalogEntry(m.id) || m;
+    return [m.id, {
+      vision: !!base.vision,
+      videoInput: !!base.videoInput,
+      pdf: false,
+      reasoning: true,
+      thinkingCanDisable: base.canDisable !== false,
+      contextWindow: base.contextWindow,
+      maxOutput: base.maxOutput,
+    }];
+  })
+);
 
 /**
  * Safe floor — every resolved result is merged over this so consumers
@@ -156,6 +177,7 @@ const CODEX_GPT_56_DEFAULT_CAPS = { vision: true, reasoning: true, search: true,
  * Provider-specific capability overrides. Keyed by provider alias/id.
  */
 export const PROVIDER_CAPABILITIES = {
+  "alitp-intl": ALITP_CAPABILITIES,
   // NVIDIA NIM is OpenAI-compatible → rejects MiniMax/GLM native `thinking` field.
   // Force openai reasoning_effort format for its reasoning models. #issue
   "nvidia": {

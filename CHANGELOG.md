@@ -7,6 +7,7 @@
 - **i18n**: integrate Persian (fa) translation
 
 ## Fixes
+- **Alibaba Token Plan**: add official Personal/Team catalog discovery with safe fallback, protocol-specific thinking controls, canonical model variants, and dashboard edition selection.
 - **OpenCode / OpenCode Go**: resolve 403 `FreeTierError` and 429 rate limits with canonical session format, valid User-Agent, and stable upstream session reuse; force stream and declare `forceStream` for free-tier SSE aggregation; cloak decoy tools, normalize Muse Free tool choice, and strip prior reasoning items on Responses models; route Union Alpha via Messages API
 - **Kiro**: preserve underscores in tool names (`mcp__server__tool`) and restore client tool names in responses; use neutral placeholder for tool-result-only turns; forward tool-result images
 - **Stream**: report aborts after HTTP 200 in-band (per-format error frames) instead of closing silently

@@ -26,6 +26,7 @@ import { compressMessages, formatRtkLog } from "../rtk/index.js";
 import { compressWithHeadroom, formatHeadroomLog, formatHeadroomSizeLog, isHeadroomPhantomSavings } from "../rtk/headroom.js";
 import { compressWithPxpipe } from "../rtk/pxpipe.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
+import { sanitizeAlitpBaseOrigin, applyAlitpBaseOrigin } from "../providers/alibabaTokenPlanCatalog.js";
 import { stripUnsupportedModalities } from "../translator/concerns/modality.js";
 import { prefetchRemoteImages } from "../translator/concerns/prefetch.js";
 import { defaultClaudeToolType, shouldDefaultClaudeToolType } from "../translator/concerns/toolCall.js";
@@ -98,6 +99,17 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // back to its declared Claude target).
   const targetFormat = useTransport?.format || modelTargetFormat || getTargetFormat(provider, credentials);
   if (useTransport && credentials) credentials.runtimeTransport = useTransport;
+  // Alibaba Token Plan Team Edition: connections may carry a console Base URL
+  // override. Swap the transport origin (all protocols) only for validated
+  // https *.maas.aliyuncs.com values; anything else is ignored so a bad config
+  // can never redirect credentials off the official endpoint.
+  if (provider === "alitp-intl" && credentials) {
+    const teamBase = credentials.providerSpecificData?.tokenPlanBaseUrl;
+    if (sanitizeAlitpBaseOrigin(teamBase)) {
+      const t = useTransport || PROVIDERS[provider]?.transports?.find((x) => x.format === targetFormat);
+      if (t) credentials.runtimeTransport = { ...t, baseUrl: applyAlitpBaseOrigin(t.baseUrl, teamBase) };
+    }
+  }
   const stripList = getModelStrip(alias, model);
   const upstreamModel = getModelUpstreamId(alias, model);
 
@@ -110,7 +122,10 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       body = { ...body, thinking: { type: "enabled", budget_tokens: 10000 } };
     } else if (mode === "off" && !body.thinking) {
       body = { ...body, thinking: { type: "disabled" } };
-    } else if (!body.reasoning_effort) {
+    } else if (!body.reasoning_effort && !body.reasoning?.effort && !body.output_config?.effort) {
+      // Precedence: explicit client effort on ANY wire shape wins over the
+      // provider-configured default (chat reasoning_effort, Responses
+      // reasoning.effort, Claude output_config.effort).
       body = { ...body, reasoning_effort: mode };
     }
   }
@@ -191,7 +206,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     try {
       translatedBody = translateRequest(sourceFormat, targetFormat, upstreamModel, body, stream, credentials, provider, reqLogger, stripList, connectionId, clientTool);
     } catch (error) {
-      const message = error?.code === "unsupported_feature"
+      const message = (error?.code === "unsupported_feature" || error?.code === "invalid_thinking_level")
         ? error.message
         : `Failed to translate request for ${sourceFormat} → ${targetFormat}`;
       return createErrorResult(HTTP_STATUS.BAD_REQUEST, message);

@@ -43,7 +43,10 @@ export function parseSuffix(model) {
   if (raw === "ultra") return { cleanModel, override: { mode: "level", level: raw } };
   if (/^\d+$/.test(raw)) return { cleanModel, override: { mode: "budget", budget: Number(raw) } };
   if (LEVEL_TO_BUDGET[raw] !== undefined) return { cleanModel, override: { mode: "level", level: raw } };
-  return { cleanModel, override: null };
+  // Suffix present but not a recognized level/budget/auto/none. Callers that
+  // require strict validation (alitp-intl) reject with 400; others keep the
+  // historical lenient behavior (suffix ignored, model name preserved as-is).
+  return { cleanModel, override: null, invalidSuffix: raw };
 }
 
 // Extract unified thinking intent from a request body (post-translation, mixed shapes).
@@ -366,24 +369,34 @@ function applyFormat(fmt, body, cfg, caps, supportedLevels, display) {
 export function applyThinking(targetFormat, model, body, provider = null, intent = undefined) {
   if (!body || typeof body !== "object") return body;
 
-  const { cleanModel, override } = parseSuffix(model);
+  const { cleanModel, override, invalidSuffix } = parseSuffix(model);
   const effProvider = provider || (cleanModel.startsWith("alitp-intl/") ? "alitp-intl" : null);
   const actualModel = cleanModel.startsWith("alitp-intl/") ? cleanModel.slice("alitp-intl/".length) : cleanModel;
   const cfg = override || intent || extractThinking(body);
   const caps = getCapabilitiesForModel(effProvider, actualModel);
 
-  // Model cannot reason → strip any stray thinking fields.
-  if (!caps.reasoning) {
-    stripAll(body);
-    return body;
-  }
-
   if (effProvider === "alitp-intl") {
     const rule = getAlibabaTokenPlanThinkingRule(actualModel);
+    // Strict validation (alitp-intl only): an unrecognized suffix is a 400 with
+    // the supported levels, never a silent fallback to the model default.
+    if (invalidSuffix) {
+      const error = new Error(
+        `Invalid thinking suffix "(${invalidSuffix})" for alitp-intl/${actualModel}. ` +
+        `Supported levels: ${rule?.levels ? rule.levels.join(", ") : "this model does not support thinking level suffixes"}.`
+      );
+      error.code = "invalid_thinking_level";
+      throw error;
+    }
     if (rule) {
       const display = typeof body.thinking?.display === "string" ? body.thinking.display : undefined;
       return applyAlibabaTokenPlanThinking(targetFormat, actualModel, body, cfg, display);
     }
+  }
+
+  // Model cannot reason → strip any stray thinking fields.
+  if (!caps.reasoning) {
+    stripAll(body);
+    return body;
   }
 
   if (!cfg) return body;

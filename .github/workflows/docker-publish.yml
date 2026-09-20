@@ -11,7 +11,44 @@ env:
   DOCKERHUB_IMAGE: decolua/9router
 
 jobs:
+  verify:
+    name: Offline verification
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: Install runtime dependencies
+        run: bun install --frozen-lockfile
+      - name: Install test dependencies
+        working-directory: tests
+        run: bun install --frozen-lockfile
+      - name: Run Alibaba and translator verification
+        working-directory: tests
+        run: |
+          bun x vitest run --config vitest.config.js \
+            unit/alibaba-token-plan-thinking.test.js \
+            unit/alibaba-token-plan-catalog.test.js \
+            unit/alibaba-token-plan-capabilities.test.js \
+            unit/alibaba-token-plan-models-route.test.js \
+            unit/alibaba-token-plan-provider.test.js \
+            translator/alibaba-token-plan-pipeline.test.js
+          set +e
+          bun x vitest run --config vitest.config.js translator/alibaba-token-plan-pipeline.test.js --reporter=json --outputFile=translator-results.json
+          vitest_status=$?
+          set -e
+          node __baseline__/verify-no-regression.mjs translator-results.json
+          if [ "$vitest_status" -ne 0 ]; then
+            echo "Known baseline failures verified; no new translator regression."
+          fi
+          node __baseline__/verify-providers.mjs
+          node __baseline__/verify-alias.mjs
+          node __baseline__/verify-oauth-urls.mjs
+
   build-and-push:
+    needs: verify
     runs-on: ubuntu-latest
     permissions:
       contents: read

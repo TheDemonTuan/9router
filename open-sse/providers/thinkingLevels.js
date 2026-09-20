@@ -4,6 +4,7 @@ import { getCapabilitiesForModel } from "./capabilities.js";
 import { matchPattern } from "./pricing.js";
 import { resolveKiroEffortPath } from "../config/kiroConstants.js";
 import { getAlibabaTokenPlanThinkingRule } from "./alibabaTokenPlanThinking.js";
+import { getAlitpCatalogEntry } from "./alibabaTokenPlanCatalog.js";
 
 // Shared level sets (deduped) — verified against provider docs + wire in thinkingUnified.applyFormat.
 const L = {
@@ -77,4 +78,20 @@ export function getThinkingLevels(provider, model) {
   let levels = hit?.levels || FORMAT_LEVELS[caps.thinkingFormat] || L.base;
   if (caps.thinkingCanDisable === false) levels = levels.filter((l) => l !== "none");
   return levels;
+}
+
+// Levels safe to ADVERTISE as virtual "model(level)" variants in discovery
+// (/v1/models, pickers). Canonical-only: wire aliases (high/max→xhigh etc.)
+// stay accepted at request time but are never advertised, models without a
+// verified canonical table advertise nothing, and deprecated aliases
+// (qwen3.8-max-preview) advertise nothing. Non-alitp providers keep the
+// existing getThinkingLevels behavior.
+export function getAdvertisedThinkingLevels(provider, model) {
+  if (provider === "alitp-intl") {
+    const bare = typeof model === "string" ? model.replace(/\([^()]+\)\s*$/, "").trim() : model;
+    const entry = getAlitpCatalogEntry(bare);
+    if (!entry || entry.deprecated) return null;
+    return entry.advertised || null;
+  }
+  return getThinkingLevels(provider, model);
 }

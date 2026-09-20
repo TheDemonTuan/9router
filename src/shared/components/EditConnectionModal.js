@@ -22,6 +22,7 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
     organization: "",
   });
   const [cloudflareData, setCloudflareData] = useState({ accountId: "" });
+  const [alitpData, setAlitpData] = useState({ tokenPlanEdition: "personal", tokenPlanBaseUrl: "" });
   const [region, setRegion] = useState("");
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null);
@@ -48,6 +49,12 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
       if (connection.provider === "cloudflare-ai" && connection.providerSpecificData) {
         setCloudflareData({ accountId: connection.providerSpecificData.accountId || "" });
       }
+      if (connection.provider === "alitp-intl") {
+        setAlitpData({
+          tokenPlanEdition: connection.providerSpecificData?.tokenPlanEdition || "personal",
+          tokenPlanBaseUrl: connection.providerSpecificData?.tokenPlanBaseUrl || "",
+        });
+      }
       // Load region for providers that support it (e.g. xiaomi-tokenplan)
       const providerCfg = AI_PROVIDERS?.[connection.provider];
       if (providerCfg?.regions) {
@@ -62,6 +69,7 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
   const isOAuth = connection?.authType === "oauth";
   const isAzure = connection?.provider === "azure";
   const isCloudflareAi = connection?.provider === "cloudflare-ai";
+  const isAlitp = connection?.provider === "alitp-intl";
   const isCompatible = connection
     ? (isOpenAICompatibleProvider(connection.provider) || isAnthropicCompatibleProvider(connection.provider))
     : false;
@@ -167,6 +175,16 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
       if (isCloudflareAi) {
         updates.providerSpecificData = { accountId: cloudflareData.accountId };
       }
+      // Alibaba Token Plan edition (merge — keep proxy/enabledModels data intact).
+      // Team Base URL only persists when it validates as https *.maas.aliyuncs.com
+      // server-side; an invalid value is ignored at routing time.
+      if (isAlitp) {
+        updates.providerSpecificData = {
+          ...(connection?.providerSpecificData || {}),
+          tokenPlanEdition: alitpData.tokenPlanEdition === "team" ? "team" : "personal",
+          tokenPlanBaseUrl: alitpData.tokenPlanBaseUrl.trim(),
+        };
+      }
       // Persist updated region for region-aware providers
       if (providerRegions && region) {
         updates.providerSpecificData = buildRegionSpecificData();
@@ -271,6 +289,33 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
             onChange={(e) => setRegion(e.target.value)}
             options={providerRegions.map((r) => ({ value: r.id, label: r.label }))}
           />
+        )}
+
+        {isAlitp && (
+          <div className="bg-sidebar/50 p-4 rounded-lg border border-accent/20">
+            <h3 className="font-semibold mb-3 text-sm">Token Plan Configuration</h3>
+            <div className="flex flex-col gap-3">
+              <Select
+                label="Edition"
+                value={alitpData.tokenPlanEdition}
+                onChange={(e) => setAlitpData({ ...alitpData, tokenPlanEdition: e.target.value })}
+                options={[
+                  { value: "personal", label: "Personal" },
+                  { value: "team", label: "Team" },
+                ]}
+                hint="Team unlocks the Team-only models (Kimi, GLM-5.1/5, DeepSeek V3.2/V4 Flash, MiniMax, Qwen3.6 Plus)."
+              />
+              {alitpData.tokenPlanEdition === "team" && (
+                <Input
+                  label="Team Base URL (optional)"
+                  value={alitpData.tokenPlanBaseUrl}
+                  onChange={(e) => setAlitpData({ ...alitpData, tokenPlanBaseUrl: e.target.value })}
+                  placeholder="https://token-plan.ap-southeast-1.maas.aliyuncs.com"
+                  hint="Console-provided endpoint for Team Edition. Must be https and end in maas.aliyuncs.com; invalid values are ignored."
+                />
+              )}
+            </div>
+          </div>
         )}
 
         {!isCompatible && !isAzure && !isCloudflareAi && (

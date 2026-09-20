@@ -3,6 +3,7 @@ import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/con
 import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
+import { isAlitpModelAvailableForEdition } from "open-sse/providers/alibabaTokenPlanCatalog.js";
 import { getAntigravityQuotaCache } from "./antigravityQuota.js";
 import * as log from "../utils/logger.js";
 
@@ -85,6 +86,12 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     const availableConnections = connections.filter(c => {
       if (excludeSet.has(c.id)) return false;
       if (isModelLockActive(c, model)) return false;
+      // Alibaba Token Plan: Team-only models require a Team Edition connection
+      // (metadata check on the cached connection — no network during selection).
+      if (providerId === "alitp-intl" && model &&
+          !isAlitpModelAvailableForEdition(model, c.providerSpecificData?.tokenPlanEdition)) {
+        return false;
+      }
       // Antigravity: skip if live quota exhausted for this model
       if (isAntigravity && model && antigravityQuotaCache) {
         const quota = antigravityQuotaCache.get(c.id)?.[model];

@@ -13,6 +13,7 @@ import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { resolveCursorModels } from "open-sse/services/cursorModels.js";
 import { resolveZedModels } from "open-sse/shared/zedAuth.js";
 import { resolveClineModels, resolveClinepassModels } from "open-sse/services/clinepassModels.js";
+import { resolveEffectiveProviderModels } from "open-sse/services/alibabaTokenPlanModels.js";
 
 const GEMINI_CLI_MODELS_URL = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
 
@@ -234,6 +235,26 @@ const PROVIDER_MODELS_CONFIG = {
     authHeader: "Authorization",
     authPrefix: "Bearer ",
     parseResponse: (data) => data.data || []
+  },
+  // Alibaba Token Plan: one shared effective catalog (live → cache → curated
+  // edition fallback) with /v1/models; a failing live probe never marks the
+  // connection broken and never leaks credentials or raw upstream errors.
+  "alitp-intl": {
+    customResolver: async (connection) => {
+      const result = await resolveEffectiveProviderModels("alitp-intl", {
+        id: connection.id,
+        apiKey: connection.apiKey,
+        providerSpecificData: connection.providerSpecificData || {},
+      });
+      return {
+        // Deprecated compat aliases (qwen3.8-max-preview) stay routable but
+        // are not discoverable.
+        models: (result.models || []).filter((m) => !m.deprecated),
+        ...(result.warning ? { warning: result.warning } : {}),
+        source: result.source,
+        fetchedAt: result.fetchedAt,
+      };
+    },
   },
   "volcengine-ark": createOpenAIModelsConfig("https://ark.cn-beijing.volces.com/api/coding/v3/models"),
   byteplus: createOpenAIModelsConfig("https://ark.ap-southeast.bytepluses.com/api/coding/v3/models"),
@@ -611,7 +632,9 @@ export async function GET(request, { params }) {
         provider: connection.provider,
         connectionId: connection.id,
         models: result.models,
-        ...(result.warning ? { warning: result.warning } : {})
+        ...(result.warning ? { warning: result.warning } : {}),
+        ...(result.source ? { source: result.source } : {}),
+        ...(result.fetchedAt ? { fetchedAt: result.fetchedAt } : {})
       });
     }
 

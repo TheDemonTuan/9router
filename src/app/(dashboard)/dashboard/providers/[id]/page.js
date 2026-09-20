@@ -154,8 +154,10 @@ export default function ProviderDetailPage() {
   const isOAuth = !!OAUTH_PROVIDERS[providerId] || !!FREE_PROVIDERS[providerId] || authModes.includes("oauth");
   const supportsApiKeyAuth = !!APIKEY_PROVIDERS[providerId] || authModes.includes("apikey");
   const isFreeNoAuth = !!FREE_PROVIDERS[providerId]?.noAuth;
-  const staticModels = getModelsByProviderId(providerId);
-  const models = (providerId === "cursor" || providerId === "zed") && liveModels.length > 0
+  // Deprecated compat aliases (alitp preview) stay routable but leave the picker.
+  const staticModels = getModelsByProviderId(providerId)
+    .filter((m) => !(m.deprecated && providerId === "alitp-intl"));
+  const models = (providerId === "cursor" || providerId === "zed" || providerId === "alitp-intl") && liveModels.length > 0
     ? liveModels
     : staticModels;
   const providerAlias = getProviderAlias(providerId);
@@ -471,44 +473,44 @@ export default function ProviderDetailPage() {
 
   // Live per-connection catalogs (cursor, zed): the static registry carries
   // no usable list, so resolve from the active connection. Fires only when
-  // the provider id or connection list changes — no polling, no loop.
-  // Cursor path is statement-identical to before; zed adds error surfacing.
+  // Account-scoped catalogs. Alibaba merges every active connection because a
+  // Personal + Team account exposes the union; its API already falls back to the
+  // official edition catalog, so a discovery failure never blanks the picker.
   useEffect(() => {
-    const isLiveCatalog = providerId === "cursor" || providerId === "zed";
+    const isLiveCatalog = providerId === "cursor" || providerId === "zed" || providerId === "alitp-intl";
     if (!isLiveCatalog) {
       setLiveModels([]);
       return;
     }
 
-    const connection = connections.find((item) => item.isActive !== false);
-    if (!connection?.id) {
+    const activeConnections = connections.filter((item) => item.isActive !== false && item.id);
+    if (!activeConnections.length) {
       setLiveModels([]);
-      if (providerId === "zed") setLiveModelsError(null);
+      if (providerId === "zed" || providerId === "alitp-intl") setLiveModelsError(null);
       return;
     }
 
     let cancelled = false;
-    if (providerId === "zed") setLiveModelsError(null);
-    fetch(`/api/providers/${connection.id}/models`, { cache: "no-store" })
-      .then(async (res) => ({ ok: res.ok, data: await res.json().catch(() => null) }))
-      .then(({ ok, data }) => {
-        if (cancelled) return;
-        if (ok && Array.isArray(data?.models) && data.models.length > 0) {
-          setLiveModels(data.models);
-          if (providerId === "zed" && data?.warning) setLiveModelsError(data.warning);
-          return;
+    if (providerId === "zed" || providerId === "alitp-intl") setLiveModelsError(null);
+    const catalogConnections = providerId === "alitp-intl" ? activeConnections : [activeConnections[0]];
+    Promise.all(catalogConnections.map((connection) =>
+      fetch(`/api/providers/${connection.id}/models`, { cache: "no-store" })
+        .then(async (res) => ({ ok: res.ok, data: await res.json().catch(() => null) }))
+        .catch(() => ({ ok: false, data: null })),
+    )).then((results) => {
+      if (cancelled) return;
+      const merged = new Map();
+      for (const { ok, data } of results) {
+        if (ok && Array.isArray(data?.models)) {
+          for (const model of data.models) if (model?.id && !merged.has(model.id)) merged.set(model.id, model);
         }
-        if (providerId === "zed") {
-          setLiveModels([]);
-          setLiveModelsError(data?.warning || data?.error || "Zed returned no live models.");
-        }
-      })
-      .catch(() => {
-        if (!cancelled && providerId === "zed") {
-          setLiveModels([]);
-          setLiveModelsError("Failed to reach the Zed model catalog.");
-        }
-      });
+      }
+      if (merged.size) setLiveModels([...merged.values()]);
+      else setLiveModels([]);
+      const warning = results.map((r) => r.data?.warning).find(Boolean);
+      if ((providerId === "zed" || providerId === "alitp-intl") && warning) setLiveModelsError(warning);
+      if (providerId === "zed" && !merged.size) setLiveModelsError(warning || "Zed returned no live models.");
+    });
 
     return () => { cancelled = true; };
   }, [providerId, connections]);
@@ -1811,8 +1813,8 @@ export default function ProviderDetailPage() {
             })()}
           </div>
         )}
-        {providerId === "zed" && !!liveModelsError && (
-          <p className="text-xs text-red-500 mb-3 break-words">{liveModelsError}</p>
+        {(providerId === "zed" || providerId === "alitp-intl") && !!liveModelsError && (
+          <p className={`text-xs mb-3 break-words ${providerId === "alitp-intl" ? "text-text-muted" : "text-red-500"}`}>{liveModelsError}</p>
         )}
         {renderModelsSection()}
       </Card>
