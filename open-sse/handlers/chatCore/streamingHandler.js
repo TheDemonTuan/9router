@@ -5,6 +5,7 @@ import { pipeWithDisconnect } from "../../utils/streamHandler.js";
 import { PROVIDERS } from "../../config/providers.js";
 import { HTTP_STATUS, STREAM_STALL_TIMEOUT_MS } from "../../config/runtimeConfig.js";
 import { buildAbortedResponsesTerminalBytes, isOpenAIResponsesTerminalEvent, parseOpenAIResponsesSSERecord, formatIncompleteOpenAIResponsesStreamFailure } from "../../utils/responsesStreamHelpers.js";
+import { ResponsesAccumulator } from "../../transformer/responsesAccumulator.js";
 import { buildStreamErrorBytes } from "../../utils/streamHelpers.js";
 import { buildRequestDetail, extractRequestConfig, saveUsageStats, formatDoneLine } from "./requestDetail.js";
 import { appendRequestLog, saveRequestDetail, trackPendingRequest } from "@/lib/usageDb.js";
@@ -39,10 +40,61 @@ const CODEX_SOURCE_TO_TARGET = {
 /**
  * Determine which SSE transform stream to use based on provider/format.
  */
-export function buildTransformStream({ provider, sourceFormat, targetFormat, userAgent, reqLogger, toolNameMap, customToolNames, model, connectionId, body, onStreamComplete, apiKey, credentials }) {
+export function buildTransformStream({ provider, sourceFormat, targetFormat, responsesClientDialect = "standard-openai", responsesProviderDialect = "standard-openai", userAgent, reqLogger, toolNameMap, customToolNames, model, connectionId, body, onStreamComplete, apiKey, credentials }) {
+  const isResponsesStream = sourceFormat === FORMATS.OPENAI_RESPONSES && targetFormat === FORMATS.OPENAI_RESPONSES;
+  const isNativeResponsesStream = isResponsesStream && responsesClientDialect === responsesProviderDialect;
+
+  // Cross-dialect Responses streams retain all non-terminal records verbatim;
+  // only an empty completed terminal is enriched from prior protocol events.
+  if (isResponsesStream && !isNativeResponsesStream) {
+    const accumulator = new ResponsesAccumulator({ model });
+    const decoder = new TextDecoder();
+    const encoder = new TextEncoder();
+    let buffer = "";
+    let finalized = false;
+    const finish = () => {
+      if (finalized) return;
+      finalized = true;
+      const snapshot = accumulator.snapshot();
+      const diagnostics = accumulator.diagnostics();
+      console.info(`[RESP] client=${responsesClientDialect} provider=${provider} source=${sourceFormat} providerDialect=${responsesProviderDialect} mode=normalize events=${diagnostics.events} doneItems=${diagnostics.doneItems} textChars=${diagnostics.textChars} toolCalls=${diagnostics.toolCalls} terminalOutputBefore=${diagnostics.terminalOutputBefore} terminalOutputAfter=${diagnostics.terminalOutputAfter} status=${snapshot.status}`);
+      if (!diagnostics.textChars && !diagnostics.toolCalls) console.info(`[RESP_EMPTY] client=${responsesClientDialect} provider=${provider} textChars=0 doneItems=${diagnostics.doneItems} toolCalls=0 reasoningItems=${diagnostics.reasoningItems}`);
+      onStreamComplete?.({ content: "", thinking: "" }, snapshot.usage, null, { status: snapshot.status, successful: snapshot.status === "completed" });
+    };
+    const writeRecord = (record, controller) => {
+      const parsed = accumulator.observeRecord(record);
+      if (!parsed?.data) {
+        controller.enqueue(encoder.encode(`${record}\n\n`));
+        return;
+      }
+      const enriched = accumulator.enrichTerminal(parsed.data);
+      if (enriched === parsed.data) {
+        controller.enqueue(encoder.encode(`${record}\n\n`));
+      } else {
+        const eventPrefix = parsed.eventName ? `event: ${parsed.eventName}\n` : "";
+        controller.enqueue(encoder.encode(`${eventPrefix}data: ${JSON.stringify(enriched)}\n\n`));
+      }
+      if (isOpenAIResponsesTerminalEvent(parsed.type, enriched)) finish();
+    };
+    return new TransformStream({
+      transform(chunk, controller) {
+        buffer += decoder.decode(chunk, { stream: true });
+        const records = buffer.split(/\r?\n\r?\n|\r\r/);
+        buffer = records.pop() || "";
+        for (const record of records) writeRecord(record, controller);
+      },
+      flush(controller) {
+        buffer += decoder.decode();
+        if (buffer.trim()) writeRecord(buffer, controller);
+        if (!accumulator.state.terminal) controller.enqueue(encoder.encode(formatIncompleteOpenAIResponsesStreamFailure({ model })));
+        finish();
+      },
+    });
+  }
+
   // Native Responses streams are protocol data, not Chat SSE. Preserve every
   // upstream byte, including data-only and future event types.
-  if (sourceFormat === FORMATS.OPENAI_RESPONSES && targetFormat === FORMATS.OPENAI_RESPONSES) {
+  if (isNativeResponsesStream) {
     let buffer = "";
     let terminal = false;
     let finalized = false;
@@ -110,8 +162,8 @@ export function buildTransformStream({ provider, sourceFormat, targetFormat, use
 /**
  * Handle streaming response — pipe provider SSE through transform stream to client.
  */
-export async function handleStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, userAgent, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, pxpipe, reqTag, log, credentials }) {
-  const isResponsesPassthrough = sourceFormat === FORMATS.OPENAI_RESPONSES && targetFormat === FORMATS.OPENAI_RESPONSES;
+export async function handleStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, responsesClientDialect = "standard-openai", responsesProviderDialect = "standard-openai", userAgent, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, pxpipe, reqTag, log, credentials }) {
+  const isResponsesPassthrough = sourceFormat === FORMATS.OPENAI_RESPONSES && targetFormat === FORMATS.OPENAI_RESPONSES && responsesClientDialect === responsesProviderDialect;
   let lifecycleFinalized = false;
   const completeLifecycle = (content, usage, ttftAt, outcome) => {
     if (lifecycleFinalized) return;
@@ -156,7 +208,7 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
     });
   }
   const transformStream = buildTransformStream({
-    provider, sourceFormat, targetFormat, userAgent, reqLogger, toolNameMap, customToolNames,
+    provider, sourceFormat, targetFormat, responsesClientDialect, responsesProviderDialect, userAgent, reqLogger, toolNameMap, customToolNames,
     model, connectionId, body,
     onStreamComplete: isResponsesPassthrough ? completeLifecycle : onStreamComplete,
     apiKey, credentials,

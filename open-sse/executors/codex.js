@@ -45,6 +45,27 @@ const RESPONSES_API_ALLOWLIST = new Set([
   "reasoning", "service_tier", "include", "prompt_cache_key", "client_metadata",
   "text", "parallel_tool_calls", "stream_options", "access_programs"
 ]);
+const CODEX_ENCRYPTED_REASONING_INCLUDE = "reasoning.encrypted_content";
+const CODEX_SEMANTICALLY_UNSUPPORTED_FIELDS = new Set(["previous_response_id"]);
+
+export function validateCodexResponsesRequest(body) {
+  for (const field of CODEX_SEMANTICALLY_UNSUPPORTED_FIELDS) {
+    if (body?.[field] !== undefined) {
+      const error = new Error(`Codex Responses does not support '${field}'`);
+      error.code = "unsupported_feature";
+      throw error;
+    }
+  }
+  if (body?.truncation && body.truncation !== "disabled") {
+    const error = new Error("Codex Responses does not support truncation modes");
+    error.code = "unsupported_feature";
+    throw error;
+  }
+}
+
+function mergeAllowedIncludes(current, required) {
+  return [...new Set([...(Array.isArray(current) ? current : []), ...required])];
+}
 
 // Convert role=system → role=developer in body.input (keeps content in cacheable prefix)
 function convertSystemToDeveloperRole(body) {
@@ -401,6 +422,7 @@ export class CodexExecutor extends BaseExecutor {
    * Image fetching is handled separately in prefetchImages() so this stays sync.
    */
   transformRequest(model, body, stream, credentials) {
+    validateCodexResponsesRequest(body);
     this._isCompact = !!body._compact;
     delete body._compact;
     // Resolve conversation-stable session_id (priority: body → assistant-text → workspace → machine)
@@ -463,9 +485,14 @@ export class CodexExecutor extends BaseExecutor {
     }
     delete body.reasoning_effort;
 
-    // Include reasoning encrypted content (required by Codex backend for reasoning models)
+    // Include reasoning encrypted content without dropping client-requested includes.
     if (body.reasoning && body.reasoning.effort && body.reasoning.effort !== 'none') {
-      body.include = ["reasoning.encrypted_content"];
+      body.include = mergeAllowedIncludes(body.include, [CODEX_ENCRYPTED_REASONING_INCLUDE]);
+    }
+
+    if (body.stream_tool_calls !== undefined) {
+      console.info("[RESP_COMPAT] provider=codex stream_tool_calls=requested upstream=unsupported terminal_reconstruction=enabled");
+      delete body.stream_tool_calls;
     }
 
     // Remove unsupported parameters for Codex API

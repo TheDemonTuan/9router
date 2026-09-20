@@ -256,7 +256,7 @@ describe("Canonical Responses builder & transformers", () => {
     });
   });
 
-  it("9. collects data-only CRLF frames and uses terminal output as authoritative", async () => {
+  it("9. recovers data-only CRLF text when terminal output is empty", async () => {
     const encoder = new TextEncoder();
     const source = new ReadableStream({
       start(controller) {
@@ -266,7 +266,8 @@ describe("Canonical Responses builder & transformers", () => {
       }
     });
     const json = await convertResponsesStreamToJson(source);
-    expect(json).toMatchObject({ id: "resp_data", status: "completed", output: [] });
+    expect(json).toMatchObject({ id: "resp_data", status: "completed" });
+    expect(json.output[0].content[0].text).toBe("lost?");
     expect(json.usage).toMatchObject({ input_tokens: 1 });
   });
 

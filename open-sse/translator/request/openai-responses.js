@@ -557,6 +557,9 @@ export function openaiToOpenAIResponsesRequest(model, body, stream, credentials)
   if (body.reasoning_effort !== undefined) result.reasoning = { effort: body.reasoning_effort, summary: "auto" };
   if (body.service_tier !== undefined) result.service_tier = body.service_tier;
   if (body.prompt_cache_key !== undefined) result.prompt_cache_key = body.prompt_cache_key;
+  if (Array.isArray(body.include)) result.include = [...body.include];
+  if (body.tool_choice !== undefined) result.tool_choice = body.tool_choice;
+  if (body.parallel_tool_calls !== undefined) result.parallel_tool_calls = body.parallel_tool_calls;
   const text = chatResponseFormatToResponsesText(body.response_format);
   if (text) result.text = text;
 

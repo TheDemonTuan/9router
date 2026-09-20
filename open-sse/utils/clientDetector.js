@@ -13,13 +13,18 @@ const NATIVE_PAIRS = {
 
 /**
  * Detect which CLI tool is making the request.
- * Returns one of: "claude" | "gemini-cli" | "antigravity" | "codex" | null
+ * Returns one of: "claude" | "gemini-cli" | "antigravity" | "codex" | "grok-build" | null
  * @param {object} headers - Lowercase header key/value object
  * @param {object} body    - Parsed request body
  */
 export function detectClientTool(headers = {}, body = {}) {
   const ua = (headers["user-agent"] || "").toLowerCase();
   const xApp = (headers["x-app"] || "").toLowerCase();
+  const grokClientIdentifier = (headers["x-grok-client-identifier"] || "").toLowerCase();
+
+  if (ua.includes("grok-shell") || ua.includes("grok-tui") || ua.includes("grok-cli") || grokClientIdentifier.includes("grok")) {
+    return "grok-build";
+  }
   const openaiIntent = (headers["openai-intent"] || "").toLowerCase();
   const initiator = (headers["x-initiator"] || headers["X-Initiator"] || "").toLowerCase();
   const originator = (headers["originator"] || "").toLowerCase();
@@ -54,6 +59,12 @@ export function detectClientTool(headers = {}, body = {}) {
  * @param {string|null} clientTool - Result of detectClientTool()
  * @param {string} provider        - Provider ID (e.g. "claude", "gemini-cli")
  */
+export function getResponsesDialect(clientTool, provider) {
+  if (clientTool === "codex" || provider === "codex") return "codex-native";
+  if (clientTool === "grok-build") return "grok-build";
+  return "standard-openai";
+}
+
 export function isNativePassthrough(clientTool, provider) {
   if (!clientTool) return false;
   const nativeProviders = NATIVE_PAIRS[clientTool];

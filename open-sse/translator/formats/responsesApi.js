@@ -81,6 +81,18 @@ export function coerceResponsesOutput(value) {
  * Responses API uses: { input: [...], instructions: "..." }
  * Chat API uses: { messages: [...] }
  */
+const RESPONSES_REQUEST_FIELDS = [
+  "include", "prompt_cache_key", "reasoning", "text", "tool_choice", "parallel_tool_calls",
+  "stream_tool_calls", "max_output_tokens", "previous_response_id", "truncation", "metadata",
+];
+
+function preserveResponsesRequestFields(source, target) {
+  for (const field of RESPONSES_REQUEST_FIELDS) {
+    if (source[field] !== undefined) target[field] = source[field];
+  }
+  return target;
+}
+
 export function convertResponsesApiFormat(body) {
   if (!body.input) return body;
 
@@ -190,5 +202,5 @@ export function convertResponsesApiFormat(body) {
   delete result.store;
   delete result.reasoning;
 
-  return result;
+  return preserveResponsesRequestFields(body, result);
 }
