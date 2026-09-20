@@ -283,10 +283,13 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
   if (!connectionId || connectionId === "noauth") return { shouldFallback: false, cooldownMs: 0 };
   const connections = await getProviderConnections({ provider });
   const conn = connections.find(c => c.id === connectionId);
-  const backoffLevel = conn?.backoffLevel || 0;
 
   // GitHub premium-request exhaustion is account-wide until the next UTC month.
   const githubResetAtMs = githubMonthlyResetMs(status, errorText, provider);
+  const lockModel = githubResetAtMs ? null : model;
+  const backoffLevel = lockModel === null
+    ? (conn?.backoffLevel || 0)
+    : (getModelLockMetadata(conn, lockModel).backoffLevel || 0);
 
   // Provider-specific precise cooldown (e.g. codex usage_limit_reached resets_at) overrides backoff
   let shouldFallback, cooldownMs, newBackoffLevel;
@@ -307,19 +310,21 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
   if (!shouldFallback) return { shouldFallback: false, cooldownMs: 0 };
 
   const reason = typeof errorText === "string" ? errorText.slice(0, 200) : "Provider error";
-  const lockModel = githubResetAtMs ? null : model;
   const lockUpdate = buildModelLockUpdate(lockModel, cooldownMs);
   const unavailabilityReason = errorClass || (githubResetAtMs ? "quota_exhausted" : null);
+  const nextBackoffLevel = newBackoffLevel ?? backoffLevel;
 
   await updateProviderConnection(connectionId, {
     ...lockUpdate,
-    ...buildModelLockMetadataUpdate(lockModel, { unavailabilityReason, errorCode: status, lastError: reason }),
+    ...buildModelLockMetadataUpdate(lockModel, {
+      unavailabilityReason, errorCode: status, lastError: reason, backoffLevel: nextBackoffLevel,
+    }),
     testStatus: "unavailable",
     lastError: reason,
     errorCode: status,
     unavailabilityReason,
     lastErrorAt: new Date().toISOString(),
-    backoffLevel: newBackoffLevel ?? backoffLevel
+    ...(lockModel === null ? { backoffLevel: nextBackoffLevel } : {})
   });
 
   const lockKey = Object.keys(lockUpdate)[0];

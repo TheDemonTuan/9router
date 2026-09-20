@@ -22,7 +22,7 @@ vi.mock("@/shared/constants/providers.js", () => ({ FREE_PROVIDERS: {}, resolveP
 vi.mock("@/sse/utils/logger.js", () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn() }));
 
 const { parseUpstreamError, quotaExhaustedResponse, credentialUnavailableResponse } = await import("../../open-sse/utils/error.js");
-const { getProviderCredentials, markAccountUnavailable } = await import("../../src/sse/services/auth.js");
+const { clearAccountError, getProviderCredentials, markAccountUnavailable } = await import("../../src/sse/services/auth.js");
 
 const MODEL = "gpt-5.6";
 const SECOND_MODEL = "gpt-5.6-mini";
@@ -111,6 +111,30 @@ describe("upstream quota classification", () => {
       [`modelLockErrorCode_${MODEL}`]: 429,
       [`modelLockReason_${SECOND_MODEL}`]: "transient_provider_failure",
       [`modelLockErrorCode_${SECOND_MODEL}`]: 503,
+    });
+  });
+
+  it("keeps retryable backoff and success reset scoped to each model", async () => {
+    mocks.connections = [{ id: "shared", provider: "codex", email: "shared@example.com", isActive: true }];
+
+    await markAccountUnavailable("shared", 429, "rate limit", "codex", MODEL, null, "rate_limited");
+    await markAccountUnavailable("shared", 429, "rate limit", "codex", SECOND_MODEL, null, "rate_limited");
+
+    expect(mocks.connections[0]).toMatchObject({
+      [`modelLockBackoffLevel_${MODEL}`]: 1,
+      [`modelLockBackoffLevel_${SECOND_MODEL}`]: 1,
+    });
+
+    await clearAccountError("shared", { _connection: mocks.connections[0] }, MODEL);
+    expect(mocks.connections[0]).toMatchObject({
+      [`modelLockBackoffLevel_${MODEL}`]: null,
+      [`modelLockBackoffLevel_${SECOND_MODEL}`]: 1,
+    });
+
+    await markAccountUnavailable("shared", 429, "rate limit", "codex", MODEL, null, "rate_limited");
+    expect(mocks.connections[0]).toMatchObject({
+      [`modelLockBackoffLevel_${MODEL}`]: 1,
+      [`modelLockBackoffLevel_${SECOND_MODEL}`]: 1,
     });
   });
 

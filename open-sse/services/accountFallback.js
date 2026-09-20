@@ -125,6 +125,7 @@ export const MODEL_LOCK_ALL = `${MODEL_LOCK_PREFIX}__all`;
 const MODEL_LOCK_REASON_PREFIX = "modelLockReason_";
 const MODEL_LOCK_ERROR_CODE_PREFIX = "modelLockErrorCode_";
 const MODEL_LOCK_LAST_ERROR_PREFIX = "modelLockLastError_";
+const MODEL_LOCK_BACKOFF_LEVEL_PREFIX = "modelLockBackoffLevel_";
 
 /** Build the flat field key for a model lock */
 export function getModelLockKey(model) {
@@ -151,21 +152,24 @@ export function getModelLockMetadata(connection, model) {
     getModelLockMetadataKey(MODEL_LOCK_REASON_PREFIX, model),
     getModelLockMetadataKey(MODEL_LOCK_ERROR_CODE_PREFIX, model),
     getModelLockMetadataKey(MODEL_LOCK_LAST_ERROR_PREFIX, model),
+    getModelLockMetadataKey(MODEL_LOCK_BACKOFF_LEVEL_PREFIX, model),
   ];
   const hasModelMetadata = keys.some(key => Object.hasOwn(connection, key));
   return {
     unavailabilityReason: connection[keys[0]] ?? (hasModelMetadata ? null : connection.unavailabilityReason ?? null),
     errorCode: connection[keys[1]] ?? (hasModelMetadata ? null : connection.errorCode ?? null),
     lastError: connection[keys[2]] ?? (hasModelMetadata ? null : connection.lastError ?? null),
+    backoffLevel: connection[keys[3]] ?? (hasModelMetadata ? null : connection.backoffLevel ?? null),
   };
 }
 
 /** Build update fields for a model-specific unavailable state. */
-export function buildModelLockMetadataUpdate(model, { unavailabilityReason = null, errorCode = null, lastError = null } = {}) {
+export function buildModelLockMetadataUpdate(model, { unavailabilityReason = null, errorCode = null, lastError = null, backoffLevel = null } = {}) {
   return {
     [getModelLockMetadataKey(MODEL_LOCK_REASON_PREFIX, model)]: unavailabilityReason,
     [getModelLockMetadataKey(MODEL_LOCK_ERROR_CODE_PREFIX, model)]: errorCode,
     [getModelLockMetadataKey(MODEL_LOCK_LAST_ERROR_PREFIX, model)]: lastError,
+    [getModelLockMetadataKey(MODEL_LOCK_BACKOFF_LEVEL_PREFIX, model)]: backoffLevel,
   };
 }
 

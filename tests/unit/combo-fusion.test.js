@@ -189,6 +189,23 @@ describe("fusion combo", () => {
     expect(res.headers.get("x-9router-error-code")).toBeNull();
   });
 
+  it("keeps quota-plus-timeout panels generic because every panel must settle", async () => {
+    const handleSingleModel = vi.fn(async (_body, model) => {
+      if (model === "p/c") return new Promise(() => {});
+      return quotaResponse("2026-09-21T00:00:00.000Z");
+    });
+    const res = await handleFusionChat({
+      body: { messages: [{ role: "user", content: "Q" }] },
+      models: ["p/a", "p/b", "p/c"],
+      handleSingleModel,
+      log,
+      tuning: { minPanel: 2, stragglerGraceMs: 5, panelHardTimeoutMs: 20 },
+    });
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("x-9router-error-code")).toBeNull();
+  });
+
   it("flattens previous tool history and assistant tool_calls into prose for panel calls", async () => {
     const handleSingleModel = vi.fn(async () => okResponse("ans"));
     await handleFusionChat({
