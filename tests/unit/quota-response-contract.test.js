@@ -20,9 +20,7 @@ describe("quotaExhaustedResponse", () => {
       expect(response.headers.get("x-should-retry")).toBe("false");
       expect(response.headers.get("x-9router-error-code")).toBe("provider_quota_exhausted");
       expect(response.headers.get("x-9router-retry-at")).toBe(RESET_AT);
-      expect(response.headers.get("Retry-After")).toBe(String(
-        Math.ceil((Date.parse(RESET_AT) - Date.parse("2026-09-20T00:00:00.000Z")) / 1000)
-      ));
+      expect(response.headers.get("Retry-After")).toBeNull();
       await expect(response.json()).resolves.toEqual({
         error: {
           message: "Provider quota exhausted (reset after 4d 8h)",

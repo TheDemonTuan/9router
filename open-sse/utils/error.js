@@ -49,11 +49,27 @@ export async function writeStreamError(writer, statusCode, message) {
   await writer.write(encoder.encode(`data: ${JSON.stringify(errorBody)}\n\n`));
 }
 
+const QUOTA_CODES = new Set([
+  "usage_limit_reached", "insufficient_quota", "quota_exhausted", "credit_balance_exhausted",
+  "organization_spend_limit_exceeded", "project_spend_limit_exceeded",
+]);
+
+export function classifyUpstreamError(statusCode, message, error = {}) {
+  const code = String(error?.code || error?.type || "").toLowerCase();
+  const text = `${code} ${String(message || "")}`.toLowerCase();
+  if (QUOTA_CODES.has(code) || /(?:free )?usage (?:limit |is )?exhausted|quota (?:is )?exhausted|quota remaining\s*[=:]\s*0/.test(text)) {
+    return { errorClass: "quota_exhausted", retryable: false };
+  }
+  if (statusCode === 401 || statusCode === 403) return { errorClass: "auth_failed", retryable: false };
+  if (statusCode === 429 || /rate limit|too many requests|concurrency limit|requests per (?:minute|second)|capacity|overloaded/.test(text)) {
+    return { errorClass: "rate_limited", retryable: true };
+  }
+  if (statusCode >= 500) return { errorClass: "transient_provider_failure", retryable: true };
+  return { errorClass: "request_error", retryable: false };
+}
+
 /**
- * Parse upstream provider error response
- * @param {Response} response - Fetch response from provider
- * @param {object} [executor] - Optional executor with parseError() override for provider-specific parsing
- * @returns {Promise<{statusCode: number, message: string, resetsAtMs?: number}>}
+ * Parse upstream provider error response.
  */
 export async function parseUpstreamError(response, executor = null) {
   let bodyText = "";
@@ -63,29 +79,25 @@ export async function parseUpstreamError(response, executor = null) {
     bodyText = "";
   }
 
-  // Let executor-specific parser extract provider-specific fields (e.g. codex resetsAtMs)
+  let body = null;
+  try { body = JSON.parse(bodyText); } catch { /* non-JSON provider error */ }
+  const providerError = body?.error && typeof body.error === "object" ? body.error : body || {};
+  let parsed = null;
   if (executor && typeof executor.parseError === "function") {
-    try {
-      const parsed = executor.parseError(response, bodyText);
-      if (parsed && typeof parsed === "object") {
-        const msg = parsed.message || DEFAULT_ERROR_MESSAGES[response.status] || `Upstream error: ${response.status}`;
-        return { statusCode: parsed.status || response.status, message: msg, resetsAtMs: parsed.resetsAtMs };
-      }
-    } catch { /* fall through to default parsing */ }
+    try { parsed = executor.parseError(response, bodyText); } catch { /* default parser below */ }
   }
-
-  let message = "";
-  try {
-    const json = JSON.parse(bodyText);
-    message = json.error?.message || json.message || json.error || bodyText;
-  } catch {
-    message = bodyText;
-  }
-
-  const messageStr = typeof message === "string" ? message : JSON.stringify(message);
-  const finalMessage = messageStr || DEFAULT_ERROR_MESSAGES[response.status] || `Upstream error: ${response.status}`;
-
-  return { statusCode: response.status, message: finalMessage };
+  const statusCode = parsed?.status || response.status;
+  const message = parsed?.message || providerError.message || body?.message || (typeof body?.error === "string" ? body.error : "") || bodyText || DEFAULT_ERROR_MESSAGES[statusCode] || `Upstream error: ${statusCode}`;
+  const classification = classifyUpstreamError(statusCode, message, {
+    type: parsed?.type || providerError.type,
+    code: parsed?.code || providerError.code,
+  });
+  return {
+    statusCode,
+    message: typeof message === "string" ? message : JSON.stringify(message),
+    resetsAtMs: parsed?.resetsAtMs,
+    ...classification,
+  };
 }
 
 /**
@@ -95,12 +107,14 @@ export async function parseUpstreamError(response, executor = null) {
  * @param {number} [resetsAtMs] - Optional precise cooldown expiry (ms epoch) for provider-specific quota errors
  * @returns {{ success: false, status: number, error: string, response: Response, resetsAtMs?: number }}
  */
-export function createErrorResult(statusCode, message, resetsAtMs) {
+export function createErrorResult(statusCode, message, resetsAtMs, classification = {}) {
   return {
     success: false,
     status: statusCode,
     error: message,
     resetsAtMs,
+    errorClass: classification.errorClass,
+    retryable: classification.retryable,
     response: errorResponse(statusCode, message)
   };
 }
@@ -141,9 +155,6 @@ export function unavailableResponse(statusCode, message, retryAfter, retryAfterH
 export function quotaExhaustedResponse(message, retryAfter, retryAfterHuman) {
   const retryAtMs = Date.parse(retryAfter);
   const hasRetryAt = Number.isFinite(retryAtMs);
-  const retryAfterSec = hasRetryAt
-    ? Math.max(Math.ceil((retryAtMs - Date.now()) / 1000), 1)
-    : null;
   const resetsAt = hasRetryAt ? Math.floor(retryAtMs / 1000) : null;
   const msg = retryAfterHuman ? `${message} (${retryAfterHuman})` : message;
 
@@ -165,7 +176,6 @@ export function quotaExhaustedResponse(message, retryAfter, retryAfterHuman) {
         "Cache-Control": "no-store",
         "x-should-retry": "false",
         "x-9router-error-code": "provider_quota_exhausted",
-        ...(retryAfterSec ? { "Retry-After": String(retryAfterSec) } : {}),
         ...(hasRetryAt ? { "x-9router-retry-at": retryAfter } : {}),
       },
     }

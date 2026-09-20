@@ -25,7 +25,7 @@ import { ROLE, GEMINI_ROLE, OPENAI_BLOCK, CLAUDE_BLOCK } from "../schema/index.j
 // Sanitize function names for Gemini API.
 // Gemini requires: starts with [a-zA-Z_], followed by [a-zA-Z0-9_.:\-], max 64 chars.
 // Replace any invalid character with '_' and truncate to 64.
-function sanitizeGeminiFunctionName(name) {
+export function sanitizeGeminiFunctionName(name) {
   if (!name) return "_unknown";
   // Replace any char not in [a-zA-Z0-9_.:\-] with '_'
   let sanitized = name.replace(/[^a-zA-Z0-9_.:\-]/g, "_");
@@ -277,7 +277,7 @@ export function openaiToGeminiCLIRequest(model, body, stream, credentials = null
 }
 
 // Wrap Gemini CLI format in Cloud Code wrapper
-function wrapInCloudCodeEnvelope(model, geminiCLI, credentials = null, isAntigravity = false) {
+export function wrapInCloudCodeEnvelope(model, geminiCLI, credentials = null, isAntigravity = false) {
   const projectId = credentials?.projectId || generateProjectId();
 
   const envelope = {

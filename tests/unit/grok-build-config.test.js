@@ -67,6 +67,22 @@ describe("grokBuildConfig", () => {
     expect(parsed.subagentModels.plan).toBeNull();
   });
 
+  it("sets terminal-429 controls on every generated slot without disabling other retries", () => {
+    const result = applyGrokBuildConfig(BASE_CONFIG, {
+      ...APPLY_INPUT,
+      subagentModels: {
+        "general-purpose": APPLY_INPUT.subagentModels["general-purpose"],
+        explore: APPLY_INPUT.subagentModels.explore,
+        plan: { model: "cc/claude-opus-4.8", contextWindow: 1000000 },
+      },
+    });
+    const parsed = parseGrokBuildConfig(result);
+    for (const slot of [parsed.model, ...Object.values(parsed.subagentModels)]) {
+      expect(slot).toMatchObject({ rate_limit_retry_threshold: 1, subagent_rate_limit_max_attempts: 0 });
+      expect(slot.raw).not.toContain("max_retries");
+    }
+  });
+
   it("preserves unrelated config sections", () => {
     const result = applyGrokBuildConfig(BASE_CONFIG, APPLY_INPUT);
     expect(result).toContain("[cli]\ninstaller = \"internal\"");

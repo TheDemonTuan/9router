@@ -30,6 +30,11 @@ function getAntigravityQuotaBlock(cache, connectionId, model) {
 function getUnavailabilityReason(connections, lockedConns, quotaBlocks) {
   if (quotaBlocks.length === connections.length) return "quota_exhausted";
   if (lockedConns.length !== connections.length) return "unavailable";
+  const reasons = lockedConns.map((connection) => connection.unavailabilityReason);
+  if (reasons.every((reason) => reason === "quota_exhausted")) return "quota_exhausted";
+  if (reasons.every((reason) => reason === "rate_limited")) return "rate_limited";
+  if (reasons.every((reason) => reason === "auth_failed")) return "auth_failed";
+  if (reasons.every((reason) => reason === "transient_provider_failure")) return "transient_provider_failure";
 
   const errorCodes = lockedConns.map((connection) => Number(connection.errorCode));
   if (errorCodes.every((status) => status === 401 || status === 403)) return "auth_failed";
@@ -143,12 +148,10 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       const lockedConns = connections.filter(c => isModelLockActive(c, model));
       const quotaEntries = [...quotaBlocks.values()];
       const unavailabilityReason = getUnavailabilityReason(connections, lockedConns, quotaEntries);
-      const expiries = unavailabilityReason === "quota_exhausted"
-        ? quotaEntries.map((entry) => entry.resetAt)
-        : [
-          ...lockedConns.map(c => getEarliestModelLockUntil(c)).filter(Boolean),
-          ...quotaEntries.map((entry) => entry.resetAt),
-        ];
+      const expiries = [
+        ...lockedConns.map(c => getEarliestModelLockUntil(c)).filter(Boolean),
+        ...quotaEntries.map((entry) => entry.resetAt),
+      ];
       const earliest = expiries
         .map((expiry) => ({ expiry, at: Date.parse(expiry) }))
         .filter(({ at }) => Number.isFinite(at) && at > Date.now())
@@ -275,7 +278,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
  * @param {string|null} model - The specific model that triggered the error
  * @returns {{ shouldFallback: boolean, cooldownMs: number }}
  */
-export async function markAccountUnavailable(connectionId, status, errorText, provider = null, model = null, resetsAtMs = null) {
+export async function markAccountUnavailable(connectionId, status, errorText, provider = null, model = null, resetsAtMs = null, errorClass = null) {
   if (!connectionId || connectionId === "noauth") return { shouldFallback: false, cooldownMs: 0 };
   const connections = await getProviderConnections({ provider });
   const conn = connections.find(c => c.id === connectionId);
@@ -292,8 +295,8 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
     newBackoffLevel = 0;
   } else if (resetsAtMs && resetsAtMs > Date.now()) {
     shouldFallback = true;
-    // Antigravity quota API provides exact per-model resetAt. Do not truncate it.
-    cooldownMs = resolveProviderId(provider) === "antigravity"
+    // Confirmed quota and Antigravity cache resets are provider commitments, not retry hints.
+    cooldownMs = errorClass === "quota_exhausted" || resolveProviderId(provider) === "antigravity"
       ? resetsAtMs - Date.now()
       : Math.min(resetsAtMs - Date.now(), MAX_RATE_LIMIT_COOLDOWN_MS);
     newBackoffLevel = 0;
@@ -310,6 +313,7 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
     testStatus: "unavailable",
     lastError: reason,
     errorCode: status,
+    unavailabilityReason: errorClass,
     lastErrorAt: new Date().toISOString(),
     backoffLevel: newBackoffLevel ?? backoffLevel
   });
@@ -367,6 +371,7 @@ export async function clearAccountError(connectionId, currentConnection, model =
       testStatus: "active",
       lastError: null,
       errorCode: null,
+      unavailabilityReason: null,
       lastErrorAt: null,
       backoffLevel: 0
     });

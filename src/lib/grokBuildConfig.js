@@ -80,6 +80,8 @@ function parseModelSection(toml, slot) {
   if (!match) return null;
   const body = match[1] || "";
   const contextWindow = getSectionNumber(toml, `model.${slot}`, "context_window");
+  const rateLimitRetryThreshold = getSectionNumber(toml, `model.${slot}`, "rate_limit_retry_threshold");
+  const subagentRateLimitMaxAttempts = getSectionNumber(toml, `model.${slot}`, "subagent_rate_limit_max_attempts");
   return {
     model: getSectionField(toml, `model.${slot}`, "model"),
     base_url: getSectionField(toml, `model.${slot}`, "base_url"),
@@ -87,6 +89,8 @@ function parseModelSection(toml, slot) {
     api_key: getSectionField(toml, `model.${slot}`, "api_key"),
     api_backend: getSectionField(toml, `model.${slot}`, "api_backend"),
     context_window: Number.isFinite(contextWindow) && contextWindow > 0 ? contextWindow : null,
+    rate_limit_retry_threshold: Number.isFinite(rateLimitRetryThreshold) ? rateLimitRetryThreshold : null,
+    subagent_rate_limit_max_attempts: Number.isFinite(subagentRateLimitMaxAttempts) ? subagentRateLimitMaxAttempts : null,
     raw: body,
   };
 }
@@ -99,6 +103,8 @@ function buildModelSection({ slot, model, baseUrl, apiKey, contextWindow, name }
     `name = ${tomlString(name)}`,
     `description = ${tomlString("Routed via 9Router gateway")}`,
     `api_backend = "chat_completions"`,
+    `rate_limit_retry_threshold = 1`,
+    `subagent_rate_limit_max_attempts = 0`,
   ];
   if (apiKey) lines.push(`api_key = ${tomlString(apiKey)}`);
   if (Number.isFinite(contextWindow) && contextWindow > 0) {
