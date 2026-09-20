@@ -57,7 +57,9 @@ const QUOTA_CODES = new Set([
 export function classifyUpstreamError(statusCode, message, error = {}) {
   const code = String(error?.code || error?.type || "").toLowerCase();
   const text = `${code} ${String(message || "")}`.toLowerCase();
-  if (QUOTA_CODES.has(code) || /(?:free )?usage (?:limit |is )?exhausted|quota (?:is )?exhausted|quota remaining\s*[=:]\s*0/.test(text)) {
+  if (QUOTA_CODES.has(code) ||
+    (statusCode === 402 && /additional usage limit for your plan/.test(text)) ||
+    /(?:free )?usage (?:limit |is )?exhausted|quota (?:is )?exhausted|quota remaining\s*[=:]\s*0/.test(text)) {
     return { errorClass: "quota_exhausted", retryable: false };
   }
   if (statusCode === 401 || statusCode === 403) return { errorClass: "auth_failed", retryable: false };

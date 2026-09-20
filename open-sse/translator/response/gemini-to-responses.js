@@ -2,6 +2,7 @@ import { register } from "../index.js";
 import { FORMATS } from "../formats.js";
 import { DEFAULT_IMAGE_MIME, RESPONSES_ITEM, ROLE } from "../schema/index.js";
 import { encodeDataUri } from "../concerns/image.js";
+import { storeGeminiThoughtSignature } from "../../services/thoughtSignatureStore.js";
 import {
   buildOutputArray,
   buildResponseSnapshot,
@@ -30,11 +31,10 @@ function ensureStarted(state, emit, response) {
 }
 
 function startReasoning(state, emit) {
-  if (state.geminiReasoning?.done) return;
   if (state.geminiReasoning) return;
   const index = state.geminiNextOutputIndex++;
   const id = `rs_${state.responseId}_${index}`;
-  state.geminiReasoning = { id, index, text: "", done: false };
+  state.geminiReasoning = { id, index, text: "" };
   emit("response.output_item.added", {
     output_index: index,
     item: { id, type: RESPONSES_ITEM.REASONING, status: "in_progress", summary: [] },
@@ -47,8 +47,7 @@ function startReasoning(state, emit) {
 
 function closeReasoning(state, emit) {
   const reasoning = state.geminiReasoning;
-  if (!reasoning || reasoning.done) return;
-  reasoning.done = true;
+  if (!reasoning) return;
   emit("response.reasoning_summary_text.done", {
     item_id: reasoning.id, output_index: reasoning.index, summary_index: 0, text: reasoning.text,
   });
@@ -62,13 +61,14 @@ function closeReasoning(state, emit) {
   };
   state.outputItems.set(reasoning.index, item);
   emit("response.output_item.done", { output_index: reasoning.index, item });
+  state.geminiReasoning = null;
 }
 
 function startMessage(state, emit) {
   if (state.geminiMessage) return state.geminiMessage;
   const index = state.geminiNextOutputIndex++;
   const id = `msg_${state.responseId}_${index}`;
-  const message = { id, index, parts: [], done: false };
+  const message = { id, index, parts: [] };
   state.geminiMessage = message;
   emit("response.output_item.added", {
     output_index: index,
@@ -113,8 +113,7 @@ function emitImage(state, emit, inlineData) {
 
 function closeMessage(state, emit) {
   const message = state.geminiMessage;
-  if (!message || message.done) return;
-  message.done = true;
+  if (!message) return;
   const content = message.parts.map(({ index, ...part }) => part);
   for (const part of message.parts) {
     if (part.type !== RESPONSES_ITEM.OUTPUT_TEXT) continue;
@@ -129,41 +128,41 @@ function closeMessage(state, emit) {
   const item = { id: message.id, type: RESPONSES_ITEM.MESSAGE, status: "completed", role: ROLE.ASSISTANT, content };
   state.outputItems.set(message.index, item);
   emit("response.output_item.done", { output_index: message.index, item });
+  state.geminiMessage = null;
 }
 
-function emitFunctionCall(state, emit, call) {
+function emitFunctionCall(state, emit, call, signature = null) {
   if (!call?.name) return;
   const callId = call.id || `call_${state.responseId}_${state.geminiFunctionCalls?.size || 0}`;
   state.geminiFunctionCalls ??= new Map();
   if (state.geminiFunctionCalls.has(callId)) return;
+  if (signature) storeGeminiThoughtSignature(callId, signature, state.sessionId, state.model);
   const index = state.geminiNextOutputIndex++;
   const argumentsText = JSON.stringify(call.args || {});
   const item = {
     id: `fc_${callId}`, type: RESPONSES_ITEM.FUNCTION_CALL, status: "in_progress",
     call_id: callId, name: call.name, arguments: "",
   };
-  state.geminiFunctionCalls.set(callId, { ...item, index, argumentsText, done: false });
+  state.geminiFunctionCalls.set(callId, { ...item, index, argumentsText });
   emit("response.output_item.added", { output_index: index, item });
   if (argumentsText) emit("response.function_call_arguments.delta", { item_id: item.id, output_index: index, delta: argumentsText });
 }
 
 function closeFunctionCalls(state, emit) {
-  for (const call of state.geminiFunctionCalls?.values() || []) {
-    if (call.done) continue;
-    call.done = true;
+  for (const [callId, call] of state.geminiFunctionCalls?.entries() || []) {
     emit("response.function_call_arguments.done", { item_id: call.id, output_index: call.index, arguments: call.argumentsText });
     const item = { ...call, status: "completed", arguments: call.argumentsText };
     delete item.index;
     delete item.argumentsText;
-    delete item.done;
     state.outputItems.set(call.index, item);
     emit("response.output_item.done", { output_index: call.index, item });
+    state.geminiFunctionCalls.delete(callId);
   }
 }
 
 function complete(state, emit) {
-  if (state.geminiCompleted) return;
-  state.geminiCompleted = true;
+  if (state.geminiTerminal) return;
+  state.geminiTerminal = true;
   emit("response.completed", {
     response: buildResponseSnapshot(state, {
       status: "completed", output: buildOutputArray(state.outputItems), usage: state.usage || null,
@@ -171,15 +170,35 @@ function complete(state, emit) {
   });
 }
 
+function incomplete(state, emit, reason) {
+  if (state.geminiTerminal) return;
+  state.geminiTerminal = true;
+  emit("response.incomplete", {
+    response: buildResponseSnapshot(state, {
+      status: "incomplete",
+      incomplete_details: { reason },
+      output: buildOutputArray(state.outputItems),
+      usage: state.usage || null,
+    }),
+  });
+}
+
+function finish(state, emit, finishReason = "STOP") {
+  closeMessage(state, emit);
+  closeReasoning(state, emit);
+  closeFunctionCalls(state, emit);
+  if (String(finishReason).toUpperCase() === "STOP") {
+    complete(state, emit);
+    return;
+  }
+  incomplete(state, emit, String(finishReason).toUpperCase() === "MAX_TOKENS" ? "max_output_tokens" : "content_filter");
+}
+
 export function geminiToResponsesResponse(chunk, state) {
   const events = [];
   if (!chunk) {
     if (!state.geminiResponsesStarted) return events;
-    const emit = emitFactory(state, events);
-    closeMessage(state, emit);
-    closeReasoning(state, emit);
-    closeFunctionCalls(state, emit);
-    complete(state, emit);
+    finish(state, emitFactory(state, events));
     return events;
   }
   const response = chunk.response || chunk;
@@ -198,7 +217,11 @@ export function geminiToResponsesResponse(chunk, state) {
     });
   }
   for (const part of candidate.content?.parts || []) {
+    const signature = part.thoughtSignature || part.thought_signature;
+    if (typeof signature === "string" && signature) state.pendingThoughtSignature = signature;
     if (part.thought === true && part.text) {
+      closeMessage(state, emit);
+      closeFunctionCalls(state, emit);
       startReasoning(state, emit);
       state.geminiReasoning.text += part.text;
       emit("response.reasoning_summary_text.delta", {
@@ -207,20 +230,17 @@ export function geminiToResponsesResponse(chunk, state) {
       continue;
     }
     closeReasoning(state, emit);
+    if (part.text || part.inlineData?.data || part.inline_data?.data) closeFunctionCalls(state, emit);
     if (part.text) emitText(state, emit, part.text);
     const inlineData = part.inlineData || part.inline_data;
     if (inlineData?.data) emitImage(state, emit, inlineData);
     if (part.functionCall) {
       closeMessage(state, emit);
-      emitFunctionCall(state, emit, part.functionCall);
+      emitFunctionCall(state, emit, part.functionCall, signature || state.pendingThoughtSignature);
+      state.pendingThoughtSignature = null;
     }
   }
-  if (candidate.finishReason) {
-    closeMessage(state, emit);
-    closeReasoning(state, emit);
-    closeFunctionCalls(state, emit);
-    complete(state, emit);
-  }
+  if (candidate.finishReason) finish(state, emit, candidate.finishReason);
   return events;
 }
 

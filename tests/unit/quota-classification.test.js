@@ -49,6 +49,25 @@ describe("upstream quota classification", () => {
     expect(parsed).toMatchObject({ errorClass: "quota_exhausted", retryable: false, resetsAtMs: Date.parse(RESET) });
   });
 
+  it("classifies GitHub monthly 402 as terminal quota exhaustion through account selection", async () => {
+    mocks.connections = [{ id: "github-spent", provider: "github", email: "spent@example.com", isActive: true }];
+    const parsed = await parseUpstreamError(new Response("You've reached your additional usage limit for your plan.", { status: 402 }));
+
+    expect(parsed).toMatchObject({ errorClass: "quota_exhausted", retryable: false });
+    await markAccountUnavailable("github-spent", parsed.statusCode, parsed.message, "github", MODEL, parsed.resetsAtMs, parsed.errorClass);
+    const exhausted = await getProviderCredentials("github", null, MODEL);
+    const response = credentialUnavailableResponse(503, exhausted.lastError, exhausted);
+
+    expect(exhausted).toMatchObject({ allRateLimited: true, unavailabilityReason: "quota_exhausted", retryAfter: "2026-10-01T00:00:00.000Z" });
+    expect(response.status).toBe(429);
+    expect(response.headers.get("x-should-retry")).toBe("false");
+  });
+
+  it("keeps unrelated 402 errors as request failures", async () => {
+    await expect(parseUpstreamError(new Response("Payment required", { status: 402 })))
+      .resolves.toMatchObject({ errorClass: "request_error", retryable: false });
+  });
+
   it("locks quota-exhausted pairs until their real reset, skips them, and uses a healthy fallback", async () => {
     mocks.connections = [
       { id: "spent", provider: "codex", email: "spent@example.com", isActive: true },

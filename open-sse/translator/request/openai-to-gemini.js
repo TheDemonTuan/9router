@@ -290,19 +290,18 @@ export function wrapInCloudCodeEnvelope(model, geminiCLI, credentials = null, is
       contents: geminiCLI.contents,
       systemInstruction: geminiCLI.systemInstruction,
       generationConfig: geminiCLI.generationConfig,
+      safetySettings: geminiCLI.safetySettings,
       tools: geminiCLI.tools,
+      toolConfig: geminiCLI.toolConfig,
     }
   };
 
   // Antigravity specific fields
   if (isAntigravity) {
     envelope.requestType = "agent";
-  } else {
-    // Keep safetySettings for Gemini CLI
-    envelope.request.safetySettings = geminiCLI.safetySettings;
   }
 
-  if (geminiCLI.tools?.length > 0) {
+  if (!envelope.request.toolConfig && geminiCLI.tools?.length > 0) {
     envelope.request.toolConfig = {
       functionCallingConfig: { mode: "VALIDATED" }
     };

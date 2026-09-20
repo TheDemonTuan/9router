@@ -313,7 +313,7 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
     testStatus: "unavailable",
     lastError: reason,
     errorCode: status,
-    unavailabilityReason: errorClass,
+    unavailabilityReason: errorClass || (githubResetAtMs ? "quota_exhausted" : null),
     lastErrorAt: new Date().toISOString(),
     backoffLevel: newBackoffLevel ?? backoffLevel
   });

@@ -48,6 +48,7 @@ describe("GitHub monthly usage exhaustion", () => {
           modelLock___all: "2026-09-01T00:00:00.000Z",
           testStatus: "unavailable",
           errorCode: 402,
+          unavailabilityReason: "quota_exhausted",
           backoffLevel: 0,
         }),
       );

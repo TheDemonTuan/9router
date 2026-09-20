@@ -43,6 +43,11 @@ jobs:
             $response_tests \
             unit/codex-tool-normalization.test.js \
             unit/codex-native-passthrough-thinking.test.js \
+            unit/grok-build-config.test.js \
+            unit/quota-classification.test.js \
+            unit/quota-response-contract.test.js \
+            unit/chat-quota-handler.test.js \
+            unit/antigravity-quota-routing.test.js \
             unit/continuity-strip.test.js \
             unit/alibaba-token-plan-thinking.test.js \
             unit/alibaba-token-plan-catalog.test.js \
