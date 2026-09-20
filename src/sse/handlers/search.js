@@ -210,7 +210,7 @@ async function handleSingleProviderSearch(body, providerInput, request, apiKey, 
         });
       },
       onRequestSuccess: async () => {
-        await clearAccountError(credentials.connectionId, credentials);
+        await clearAccountError(credentials.connectionId, credentials, searchLockKey);
       }
     });
 

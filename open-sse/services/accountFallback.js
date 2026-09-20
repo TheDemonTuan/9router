@@ -136,18 +136,27 @@ function getModelLockMetadataKey(prefix, model) {
   return `${prefix}${model || "__all"}`;
 }
 
+function getActiveModelLocks(connection, model) {
+  if (!connection) return [];
+  const locks = [{ model, expiry: connection[getModelLockKey(model)] }];
+  if (model !== null) locks.push({ model: null, expiry: connection[MODEL_LOCK_ALL] });
+  return locks
+    .map(lock => ({ ...lock, at: Date.parse(lock.expiry) }))
+    .filter(({ at }) => Number.isFinite(at) && at > Date.now())
+    .sort((a, b) => b.at - a.at);
+}
+
+function getEffectiveModelLockScope(connection, model) {
+  const activeLock = getActiveModelLocks(connection, model)[0];
+  return activeLock ? activeLock.model : model;
+}
+
 /** Read the active lock that keeps the selected model unavailable. */
 export function getModelLockUntil(connection, model) {
   if (!connection) return null;
-  const modelLock = connection[getModelLockKey(model)];
-  const accountLock = connection[MODEL_LOCK_ALL];
-  const activeLocks = [modelLock, accountLock]
-    .map(expiry => ({ expiry, at: Date.parse(expiry) }))
-    .filter(({ at }) => Number.isFinite(at) && at > Date.now());
-  if (activeLocks.length > 0) {
-    return activeLocks.sort((a, b) => b.at - a.at)[0].expiry;
-  }
-  return modelLock || accountLock || null;
+  const activeLock = getActiveModelLocks(connection, model)[0];
+  if (activeLock) return activeLock.expiry;
+  return connection[getModelLockKey(model)] || connection[MODEL_LOCK_ALL] || null;
 }
 
 /**
@@ -156,11 +165,12 @@ export function getModelLockUntil(connection, model) {
  */
 export function getModelLockMetadata(connection, model) {
   if (!connection) return { unavailabilityReason: null, errorCode: null, lastError: null };
+  const metadataModel = getEffectiveModelLockScope(connection, model);
   const keys = [
-    getModelLockMetadataKey(MODEL_LOCK_REASON_PREFIX, model),
-    getModelLockMetadataKey(MODEL_LOCK_ERROR_CODE_PREFIX, model),
-    getModelLockMetadataKey(MODEL_LOCK_LAST_ERROR_PREFIX, model),
-    getModelLockMetadataKey(MODEL_LOCK_BACKOFF_LEVEL_PREFIX, model),
+    getModelLockMetadataKey(MODEL_LOCK_REASON_PREFIX, metadataModel),
+    getModelLockMetadataKey(MODEL_LOCK_ERROR_CODE_PREFIX, metadataModel),
+    getModelLockMetadataKey(MODEL_LOCK_LAST_ERROR_PREFIX, metadataModel),
+    getModelLockMetadataKey(MODEL_LOCK_BACKOFF_LEVEL_PREFIX, metadataModel),
   ];
   const hasModelMetadata = keys.some(key => Object.hasOwn(connection, key));
   return {

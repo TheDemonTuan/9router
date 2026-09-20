@@ -142,7 +142,11 @@ describe("upstream quota classification", () => {
     mocks.connections = [{
       id: "shared", provider: "github", email: "shared@example.com", isActive: true,
       [`modelLock_${MODEL}`]: "2026-09-19T00:00:00.000Z",
+      [`modelLockReason_${MODEL}`]: "rate_limited",
+      [`modelLockErrorCode_${MODEL}`]: 429,
       modelLock___all: RESET,
+      modelLockReason___all: "quota_exhausted",
+      modelLockErrorCode___all: 402,
       unavailabilityReason: "quota_exhausted",
       errorCode: 402,
       testStatus: "unavailable",

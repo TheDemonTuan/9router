@@ -306,3 +306,4 @@ export function geminiToResponsesResponse(chunk, state) {
 register(FORMATS.GEMINI, FORMATS.OPENAI_RESPONSES, null, geminiToResponsesResponse);
 register(FORMATS.GEMINI_CLI, FORMATS.OPENAI_RESPONSES, null, geminiToResponsesResponse);
 register(FORMATS.ANTIGRAVITY, FORMATS.OPENAI_RESPONSES, null, geminiToResponsesResponse);
+register(FORMATS.VERTEX, FORMATS.OPENAI_RESPONSES, null, geminiToResponsesResponse);

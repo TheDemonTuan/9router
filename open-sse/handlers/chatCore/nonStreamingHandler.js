@@ -1,5 +1,5 @@
 import { FORMATS } from "../../translator/formats.js";
-import { needsTranslation } from "../../translator/index.js";
+import { initState, needsTranslation, translateResponse } from "../../translator/index.js";
 import { fromOpenAIFinish } from "../../translator/concerns/finishReason.js";
 import { ollamaBodyToOpenAI } from "../../translator/response/ollama-to-openai.js";
 import { addBufferToUsage, filterUsageForFormat } from "../../utils/usageTracking.js";
@@ -62,13 +62,38 @@ function openAICompletionToClaudeMessage(responseBody) {
   };
 }
 
-import { openAICompletionToResponses } from "../../transformer/responsesBuilder.js";
+import { buildResponseSnapshot, openAICompletionToResponses } from "../../transformer/responsesBuilder.js";
+
+const GEMINI_RESPONSE_FORMATS = new Set([
+  FORMATS.GEMINI,
+  FORMATS.GEMINI_CLI,
+  FORMATS.ANTIGRAVITY,
+  FORMATS.VERTEX,
+]);
+
+function geminiToResponsesSnapshot(responseBody, targetFormat) {
+  const state = initState(FORMATS.OPENAI_RESPONSES);
+  const events = translateResponse(targetFormat, FORMATS.OPENAI_RESPONSES, responseBody, state);
+  const terminal = events?.find(event => (
+    event.event === "response.completed"
+    || event.event === "response.incomplete"
+    || event.event === "response.failed"
+  ));
+  if (terminal?.data?.response) return terminal.data.response;
+  return buildResponseSnapshot({ model: responseBody?.modelVersion || responseBody?.response?.modelVersion || "gemini" }, {
+    status: "failed",
+    error: { type: "server_error", code: "provider_error", message: "Gemini response had no terminal candidate" },
+  });
+}
 
 /**
  * Translate non-streaming response body from provider format → OpenAI format.
  */
 export function translateNonStreamingResponse(responseBody, targetFormat, sourceFormat, customToolNames = null) {
   if (targetFormat === sourceFormat) return responseBody;
+  if (sourceFormat === FORMATS.OPENAI_RESPONSES && GEMINI_RESPONSE_FORMATS.has(targetFormat)) {
+    return geminiToResponsesSnapshot(responseBody, targetFormat);
+  }
   // Provider responded in OpenAI Chat Completions shape but the client speaks
   // Responses API — convert so tool_calls/text surface as Responses `output`.
   if (targetFormat === FORMATS.OPENAI && sourceFormat === FORMATS.OPENAI_RESPONSES) {
