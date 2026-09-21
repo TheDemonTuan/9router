@@ -125,9 +125,9 @@ export class BaseExecutor {
     };
 
     for (let urlIndex = 0; urlIndex < fallbackCount; urlIndex++) {
-      const url = this.buildUrl(model, stream, urlIndex, credentials);
+      const url = this.buildUrl(model, stream, urlIndex, credentials, body);
       const transformedBody = this.transformRequest(model, body, stream, credentials);
-      const headers = this.buildHeaders(credentials, stream, url, model, transformedBody);
+      const headers = this.buildHeaders(credentials, stream, url, model, transformedBody, body);
 
       if (!retryAttemptsByUrl[urlIndex]) retryAttemptsByUrl[urlIndex] = 0;
 
@@ -163,20 +163,44 @@ export class BaseExecutor {
         return { response, url, headers, transformedBody };
       } catch (error) {
         clearTimeout(connectTimer);
-        lastError = error;
-        const isConnectTimeout = connectCtrl.signal.aborted && error.name === "AbortError";
-        dbg("FETCH", `${this.provider.toUpperCase()} ✖ ${error.name}: ${error.message}${isConnectTimeout ? " (connect timeout)" : ""}`);
-        // Connect timeout is internal — convert to retryable network error, don't propagate AbortError
-        if (error.name === "AbortError" && !isConnectTimeout) throw error;
+        const clientAborted = signal?.aborted === true;
+        const connectTimedOut = connectCtrl.signal.aborted && !clientAborted;
+        let activeError = error;
 
-        // Map network/fetch exceptions to 502 retry config
-        if (await tryRetry(urlIndex, HTTP_STATUS.BAD_GATEWAY, `network "${error.message}"`)) { urlIndex--; continue; }
+        if (connectTimedOut) {
+          const timeoutError = new Error(`Upstream connect timeout after ${timeoutMs}ms`);
+          timeoutError.code = "UPSTREAM_CONNECT_TIMEOUT";
+          timeoutError.status = HTTP_STATUS.GATEWAY_TIMEOUT;
+          timeoutError.retryable = true;
+          activeError = timeoutError;
+          log?.warn?.("TIMEOUT", `${this.provider.toUpperCase()} connect timeout after ${timeoutMs}ms`);
+        } else if (clientAborted) {
+          const clientError = new Error("Client closed request");
+          clientError.code = "CLIENT_ABORT";
+          clientError.status = 499;
+          clientError.retryable = false;
+          activeError = clientError;
+          log?.debug?.("ABORT", `${this.provider.toUpperCase()} client closed request`);
+          throw clientError;
+        }
+
+        lastError = activeError;
+        dbg("FETCH", `${this.provider.toUpperCase()} ✖ ${activeError.name || "Error"}: ${activeError.message}${connectTimedOut ? " (connect timeout)" : ""}`);
+
+        // Client abort is terminal — do not retry. Other AbortErrors that are not connect timeouts rethrow
+        if (error.name === "AbortError" && !connectTimedOut) {
+          throw activeError;
+        }
+
+        // Map timeout and network/fetch exceptions to retry config (504 for timeout, 502 for network)
+        const retryStatus = connectTimedOut ? HTTP_STATUS.GATEWAY_TIMEOUT : HTTP_STATUS.BAD_GATEWAY;
+        if (await tryRetry(urlIndex, retryStatus, connectTimedOut ? "connect timeout" : `network "${error.message}"`)) { urlIndex--; continue; }
 
         if (urlIndex + 1 < fallbackCount) {
           log?.debug?.("RETRY", `Error on ${url}, trying fallback ${urlIndex + 1}`);
           continue;
         }
-        throw error;
+        throw activeError;
       }
     }
 

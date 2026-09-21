@@ -15,11 +15,28 @@ function getTimeString() {
  * @param {string} options.provider - Provider name
  * @param {string} options.model - Model name
  */
-export function createStreamController({ onDisconnect, onError, log, provider, model, reqTag = "" } = {}) {
+export function createStreamController({ onDisconnect, onError, log, provider, model, reqTag = "", clientSignal = null } = {}) {
   const abortController = new AbortController();
   const startTime = Date.now();
   let disconnected = false;
   let abortTimeout = null;
+
+  // If external client signal aborts, handle disconnect as client abort
+  if (clientSignal) {
+    if (clientSignal.aborted) {
+      disconnected = true;
+      abortController.abort(clientSignal.reason);
+      onDisconnect?.({ reason: "client_aborted", duration: 0 });
+    } else {
+      clientSignal.addEventListener("abort", () => {
+        if (disconnected) return;
+        disconnected = true;
+        dbg("CTRL", `${provider}/${model} | clientSignal aborted | dur=${Date.now() - startTime}ms`);
+        abortController.abort(clientSignal.reason);
+        onDisconnect?.({ reason: "client_aborted", duration: Date.now() - startTime });
+      }, { once: true });
+    }
+  }
 
   // Only abnormal terminations are logged; normal completion is covered by "📊 done".
   // isError uses errorLine (always shown, ignores LOG_LEVEL) so failures survive quiet levels.
