@@ -104,6 +104,23 @@ describe("Responses <-> Gemini direct translators", () => {
     expect(payload.generationConfig.responseSchema).toBeUndefined();
   });
 
+  it("falls back to schema instructions for internal Responses multi-branch output", () => {
+    const result = directRequest(FORMATS.ANTIGRAVITY, {
+      model: "gemini-3.8-pro",
+      input: [{ type: "message", role: "user", content: "Choose" }],
+      text: {
+        format: {
+          type: "json_schema",
+          schema: { type: "object", properties: { value: { oneOf: [{ type: "string" }, { type: "object" }] } } },
+        },
+      },
+    });
+
+    expect(result.request.generationConfig.responseSchema).toBeUndefined();
+    expect(result.request.systemInstruction.parts[0].text).toContain("JSON Schema");
+    expect(result.request.systemInstruction.parts[0].text).toContain("oneOf");
+  });
+
   it("uses the Claude-compatible Antigravity path for Claude models", () => {
     const result = directRequest(FORMATS.ANTIGRAVITY, { ...REQUEST, model: "claude-sonnet-4-6" }, "claude-sonnet-4-6");
 

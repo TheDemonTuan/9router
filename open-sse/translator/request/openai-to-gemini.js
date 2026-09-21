@@ -18,6 +18,7 @@ import {
   cleanJSONSchemaForAntigravity,
   cleanResponseSchemaForAntigravity,
   cleanResponseJsonSchemaForGemini,
+  cleanLegacyResponseSchemaOrFallback,
   normalizeGeminiContents
 } from "../formats/gemini.js";
 import { deriveSessionId, toNumericSessionId } from "../../utils/sessionManager.js";
@@ -46,6 +47,7 @@ function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG
     generationConfig: {},
     safetySettings: DEFAULT_SAFETY_SETTINGS
   };
+  let responseSchemaFallbackInstruction = null;
 
   // Generation config
   if (body.temperature !== undefined) {
@@ -69,13 +71,24 @@ function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG
       const schema = rf.json_schema?.schema || rf.schema;
       if (schema && typeof schema === "object") {
         const usesJsonSchema = responseSchemaMode === "jsonSchema";
-        result.generationConfig[usesJsonSchema ? "responseJsonSchema" : "responseSchema"] = usesJsonSchema
-          ? cleanResponseJsonSchemaForGemini(schema)
-          : cleanResponseSchemaForAntigravity(schema);
+        if (usesJsonSchema) {
+          result.generationConfig.responseJsonSchema = cleanResponseJsonSchemaForGemini(schema);
+        } else {
+          const legacy = cleanLegacyResponseSchemaOrFallback(schema);
+          if (legacy.schema) result.generationConfig.responseSchema = legacy.schema;
+          responseSchemaFallbackInstruction = legacy.fallbackInstruction;
+        }
       }
     } else if (rf.type === "json_object") {
       result.generationConfig.responseMimeType = "application/json";
     }
+  }
+
+  if (responseSchemaFallbackInstruction) {
+    result.systemInstruction = {
+      role: GEMINI_ROLE.USER,
+      parts: [{ text: responseSchemaFallbackInstruction }],
+    };
   }
 
   // Build tool_call_id -> name map
@@ -110,9 +123,10 @@ function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG
       const content = msg.content;
 
       if (role === ROLE.SYSTEM && body.messages.length > 1) {
+        const systemText = typeof content === "string" ? content : extractTextContent(content);
         result.systemInstruction = {
           role: GEMINI_ROLE.USER,
-          parts: [{ text: typeof content === "string" ? content : extractTextContent(content) }]
+          parts: [{ text: responseSchemaFallbackInstruction ? `${responseSchemaFallbackInstruction}\n\n${systemText}` : systemText }]
         };
       } else if (role === ROLE.USER || (role === ROLE.SYSTEM && body.messages.length === 1)) {
         const parts = convertOpenAIContentToParts(content);

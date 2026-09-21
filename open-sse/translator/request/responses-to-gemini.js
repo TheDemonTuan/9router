@@ -6,6 +6,7 @@ import {
   cleanJSONSchemaForAntigravity,
   cleanResponseSchemaForAntigravity,
   cleanResponseJsonSchemaForGemini,
+  cleanLegacyResponseSchemaOrFallback,
   normalizeGeminiContents,
   tryParseJSON,
 } from "../formats/gemini.js";
@@ -69,15 +70,15 @@ function responseSchema(text, responseSchemaMode = "legacy") {
   if (format.type !== "json_schema") return {};
   const schema = format.schema;
   const usesJsonSchema = responseSchemaMode === "jsonSchema";
+  if (!schema || typeof schema !== "object") return { responseMimeType: "application/json" };
+  if (usesJsonSchema) {
+    return { responseMimeType: "application/json", responseJsonSchema: cleanResponseJsonSchemaForGemini(schema) };
+  }
+  const legacy = cleanLegacyResponseSchemaOrFallback(schema);
   return {
     responseMimeType: "application/json",
-    ...(schema && typeof schema === "object"
-      ? {
-          [usesJsonSchema ? "responseJsonSchema" : "responseSchema"]: usesJsonSchema
-            ? cleanResponseJsonSchemaForGemini(schema)
-            : cleanResponseSchemaForAntigravity(schema),
-        }
-      : {}),
+    ...(legacy.schema ? { responseSchema: legacy.schema } : {}),
+    ...(legacy.fallbackInstruction ? { responseSchemaFallbackInstruction: legacy.fallbackInstruction } : {}),
   };
 }
 
@@ -129,8 +130,11 @@ export function responsesToGeminiBase(model, body, signature, sessionId = null, 
     generationConfig: responseSchema(body.text, responseSchemaMode),
     safetySettings: DEFAULT_SAFETY_SETTINGS,
   };
-  if (body.instructions) {
-    result.systemInstruction = { role: GEMINI_ROLE.USER, parts: [{ text: String(body.instructions) }] };
+  const responseSchemaFallbackInstruction = result.generationConfig.responseSchemaFallbackInstruction;
+  delete result.generationConfig.responseSchemaFallbackInstruction;
+  if (body.instructions || responseSchemaFallbackInstruction) {
+    const instructions = [responseSchemaFallbackInstruction, body.instructions].filter(Boolean).join("\n\n");
+    result.systemInstruction = { role: GEMINI_ROLE.USER, parts: [{ text: instructions }] };
   }
   if (body.temperature !== undefined) result.generationConfig.temperature = body.temperature;
   if (body.top_p !== undefined) result.generationConfig.topP = body.top_p;

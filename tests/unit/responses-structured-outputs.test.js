@@ -313,6 +313,23 @@ describe("Responses Structured Outputs & Multi-hop Translation", () => {
   });
 
   describe("schema composition safety", () => {
+    it("falls back to an instruction for unsupported Antigravity composition", () => {
+      const request = openaiToGeminiCLIRequest("gemini-cli-model", {
+        messages: [{ role: "user", content: "Choose" }],
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            schema: { type: "object", properties: { value: { oneOf: [{ type: "string" }, { type: "object" }] } } },
+          },
+        },
+      }, false);
+
+      expect(request.generationConfig.responseSchema).toBeUndefined();
+      expect(request.generationConfig.responseJsonSchema).toBeUndefined();
+      expect(request.systemInstruction.parts[0].text).toContain("JSON Schema");
+      expect(request.systemInstruction.parts[0].text).toContain("oneOf");
+    });
+
     it("preserves multi-branch oneOf for Chat -> Vertex responseJsonSchema", () => {
       const schema = {
         type: "object",

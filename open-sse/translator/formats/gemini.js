@@ -495,6 +495,22 @@ export function cleanResponseJsonSchemaForGemini(schema) {
   return clean(schema);
 }
 
+export function buildResponseSchemaFallbackInstruction(schema) {
+  return [
+    "Return valid JSON matching the following JSON Schema. Do not wrap the JSON in markdown fences.",
+    JSON.stringify(schema),
+  ].join("\n");
+}
+
+export function cleanLegacyResponseSchemaOrFallback(schema) {
+  try {
+    return { schema: cleanResponseSchemaForAntigravity(schema), fallbackInstruction: null };
+  } catch (error) {
+    if (error?.code !== "unsupported_feature") throw error;
+    return { schema: null, fallbackInstruction: buildResponseSchemaFallbackInstruction(schema) };
+  }
+}
+
 // Merge adjacent same-role messages, strip empty parts, ensure valid generation bounds.
 export function normalizeGeminiContents(contents, { requireTrailingUser = false } = {}) {
   const out = [];
