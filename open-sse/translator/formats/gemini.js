@@ -469,28 +469,30 @@ export function cleanResponseSchemaForAntigravity(schema) {
   return walk(root);
 }
 
-// Keywords unsupported in Gemini schema objects. Property names themselves
-// (under "properties" / "$defs" / "definitions") must never be filtered by these rules.
-const GEMINI_UNSUPPORTED_SCHEMA_KEYWORDS = new Set([
-  "$schema",
+// Keywords supported in Gemini schema objects per official docs. Property names themselves
+// (under "properties" / "$defs") must never be filtered by these rules.
+const GEMINI_SUPPORTED_SCHEMA_KEYWORDS = new Set([
   "$id",
-  "$comment",
-  "patternProperties",
-  "propertyNames",
-  "unevaluatedProperties",
-  "unevaluatedItems",
-  "contentSchema",
-  "contentMediaType",
-  "contentEncoding",
-  "if",
-  "then",
-  "else",
-  "dependencies",
-  "dependentSchemas",
-  "dependentRequired",
-  "readOnly",
-  "writeOnly",
-  "deprecated",
+  "$defs",
+  "$ref",
+  "$anchor",
+  "type",
+  "format",
+  "title",
+  "description",
+  "enum",
+  "items",
+  "prefixItems",
+  "minItems",
+  "maxItems",
+  "minimum",
+  "maximum",
+  "anyOf",
+  "oneOf",
+  "properties",
+  "additionalProperties",
+  "required",
+  "propertyOrdering",
 ]);
 
 function cleanGeminiJsonSchemaNode(value, isPropertyMap = false) {
@@ -514,11 +516,11 @@ function cleanGeminiJsonSchemaNode(value, isPropertyMap = false) {
 
   const entries = [];
   for (const [key, child] of Object.entries(value)) {
-    if (GEMINI_UNSUPPORTED_SCHEMA_KEYWORDS.has(key) || key.startsWith("x-")) {
+    if (!GEMINI_SUPPORTED_SCHEMA_KEYWORDS.has(key)) {
       continue;
     }
     const isChildPropertyMap =
-      key === "properties" || key === "$defs" || key === "definitions";
+      key === "properties" || key === "$defs";
     entries.push([key, cleanGeminiJsonSchemaNode(child, isChildPropertyMap)]);
   }
   return Object.fromEntries(entries);

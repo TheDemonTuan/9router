@@ -287,6 +287,7 @@ describe("Responses Structured Outputs & Multi-hop Translation", () => {
         tools: [{ type: "function", function: {
           name: "search",
           parameters: {
+            $id: "https://example.com/search.json",
             type: "object",
             description: "Search arguments",
             properties: {
@@ -301,12 +302,14 @@ describe("Responses Structured Outputs & Multi-hop Translation", () => {
       }, false);
       const schema = request.tools[0].functionDeclarations[0].parametersJsonSchema;
       expect(schema).toMatchObject({
+        $id: "https://example.com/search.json",
         description: "Search arguments",
         properties: {
           "x-user-id": { type: "string" },
-          query: { type: "string", format: "email", minLength: 3 },
+          query: { type: "string", format: "email" },
         },
       });
+      expect(schema.properties.query.minLength).toBeUndefined();
       expect(schema.patternProperties).toBeUndefined();
       expect(schema["x-custom-meta"]).toBeUndefined();
     });
