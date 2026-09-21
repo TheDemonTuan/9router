@@ -50,6 +50,45 @@ describe("CodexExecutor — concurrent request isolation (Issue #3164)", () => {
     fetchMock.mockReset();
   });
 
+  it("keeps compact routing across a connect-timeout retry", async () => {
+    const executor = new CodexExecutor();
+    executor.config.timeoutMs = 10;
+    executor.config.retry = { 504: { attempts: 1, delayMs: 0 }, 503: { attempts: 0, delayMs: 0 } };
+    const urls = [];
+
+    fetchMock.mockImplementation((url, options) => {
+      urls.push(url);
+      if (urls.length === 1) {
+        return new Promise((resolve, reject) => {
+          const fail = () => {
+            const error = new Error("aborted");
+            error.name = "AbortError";
+            reject(error);
+          };
+          if (options.signal.aborted) fail();
+          else options.signal.addEventListener("abort", fail, { once: true });
+        });
+      }
+      return Promise.resolve(makeSseResponse("compact retry succeeded"));
+    });
+
+    const result = await executor.execute({
+      model: "gpt-5.6-luna",
+      body: {
+        model: "gpt-5.6-luna",
+        input: [{ type: "message", role: "user", content: "compact request" }],
+        session_id: "compact-session",
+        _compact: true,
+      },
+      stream: true,
+      credentials: { accessToken: "tok", connectionId: "compact-connection" },
+    });
+
+    expect(result.response.status).toBe(200);
+    expect(urls).toHaveLength(2);
+    expect(urls.every((url) => url.endsWith("/responses/compact"))).toBe(true);
+  });
+
   it("prevents state collision between concurrent non-stream title and stream main requests", async () => {
     // Shared singleton executor instance
     const executor = new CodexExecutor();

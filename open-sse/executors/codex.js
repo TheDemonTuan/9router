@@ -250,9 +250,9 @@ export class CodexExecutor extends BaseExecutor {
     return headers;
   }
 
-  buildUrl(model, stream, urlIndex = 0, credentials = null, body = null) {
-    const base = super.buildUrl(model, stream, urlIndex, credentials, body);
-    return body?._compact ? `${base}/compact` : base;
+  buildUrl(model, stream, urlIndex = 0, credentials = null, requestContext = null) {
+    const base = super.buildUrl(model, stream, urlIndex, credentials, requestContext);
+    return requestContext?.compact ? `${base}/compact` : base;
   }
 
   async refreshCredentials(credentials, log) {

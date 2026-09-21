@@ -111,6 +111,30 @@ describe("BaseExecutor — timeout and abort classification", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("Case B2: first abort reason remains upstream timeout when client abort follows", () => {
+    const timeoutError = Object.assign(new Error("connect timeout"), {
+      code: "UPSTREAM_CONNECT_TIMEOUT",
+      status: 504,
+      retryable: true,
+    });
+    const clientError = Object.assign(new Error("client closed"), {
+      code: "CLIENT_ABORT",
+      status: 499,
+      retryable: false,
+    });
+    const upstream = new AbortController();
+    const client = new AbortController();
+    const merged = AbortSignal.any([upstream.signal, client.signal]);
+
+    upstream.abort(timeoutError);
+    client.abort(clientError);
+
+    expect(merged.reason).toBe(timeoutError);
+    expect(merged.reason.code).toBe("UPSTREAM_CONNECT_TIMEOUT");
+    expect(merged.reason.status).toBe(504);
+    expect(merged.reason.retryable).toBe(true);
+  });
+
   it("Case C: network reset (ECONNRESET) retries and throws network error (502 mapping)", async () => {
     const ex = makeExec({
       baseUrl: "https://x/api",
@@ -134,35 +158,34 @@ describe("BaseExecutor — timeout and abort classification", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
-  it("Case D: stream stall after 200 SSE produces valid terminal failure event, not 499", async () => {
-    const { createDisconnectAwareStream } = await import("../../open-sse/utils/streamHandler.js");
+  it("Case D: stream stall watchdog after 200 SSE produces terminal failure, not 499", async () => {
+    const { pipeWithDisconnect } = await import("../../open-sse/utils/streamHandler.js");
     const { buildAbortedResponsesTerminalBytes } = await import("../../open-sse/utils/responsesStreamHelpers.js");
 
     let status = 200;
-    // Upstream stream stalls / cuts out
+    const controller = new AbortController();
     const upstream = new ReadableStream({
-      start(controller) {
-        controller.enqueue(new TextEncoder().encode("event: response.created\ndata: {}\n\n"));
-        // Upstream abruptly stops or aborts
-        controller.error(new Error("stream stall timeout"));
+      start(streamController) {
+        streamController.enqueue(new TextEncoder().encode("event: response.created\ndata: {}\n\n"));
+        controller.signal.addEventListener("abort", () => streamController.error(new Error("aborted")), { once: true });
       },
     });
-
-    let disconnectedReason = null;
     const streamController = {
-      signal: new AbortController().signal,
+      signal: controller.signal,
       startTime: Date.now(),
       isConnected: () => true,
       handleComplete: () => {},
-      handleError: () => {},
-      handleDisconnect: (r) => { disconnectedReason = r; },
-      abort: () => {},
+      handleError: (error) => { if (error.message === "stream stall timeout") controller.abort(); },
+      handleDisconnect: () => {},
+      abort: () => controller.abort(),
     };
 
-    const out = createDisconnectAwareStream(
-      { readable: upstream, writable: { getWriter: () => ({ abort: () => Promise.resolve() }) } },
+    const out = pipeWithDisconnect(
+      { body: upstream },
+      new TransformStream(),
       streamController,
-      () => buildAbortedResponsesTerminalBytes({ model: "gpt-5.6-luna", message: "stream stall timeout" })
+      (message) => buildAbortedResponsesTerminalBytes({ model: "gpt-5.6-luna", message }),
+      20
     );
 
     const reader = out.getReader();

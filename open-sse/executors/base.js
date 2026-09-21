@@ -124,18 +124,51 @@ export class BaseExecutor {
       return true;
     };
 
+    // Preserve transport-only fields before provider transforms mutate the body.
+    const requestContext = { compact: body?._compact === true };
+
     for (let urlIndex = 0; urlIndex < fallbackCount; urlIndex++) {
-      const url = this.buildUrl(model, stream, urlIndex, credentials, body);
+      const url = this.buildUrl(model, stream, urlIndex, credentials, requestContext);
       const transformedBody = this.transformRequest(model, body, stream, credentials);
       const headers = this.buildHeaders(credentials, stream, url, model, transformedBody, body);
 
       if (!retryAttemptsByUrl[urlIndex]) retryAttemptsByUrl[urlIndex] = 0;
 
-      // Abort if upstream doesn't return response headers within connection timeout
+      // Keep the first abort origin in the merged signal reason.
       const connectCtrl = new AbortController();
+      const clientCtrl = new AbortController();
+      let firstAbortReason = null;
+      const mergedCtrl = new AbortController();
       const timeoutMs = this.config?.timeoutMs || FETCH_CONNECT_TIMEOUT_MS;
-      const connectTimer = setTimeout(() => connectCtrl.abort(new Error("fetch connect timeout")), timeoutMs);
-      const mergedSignal = signal ? AbortSignal.any([signal, connectCtrl.signal]) : connectCtrl.signal;
+      const timeoutError = new Error(`Upstream connect timeout after ${timeoutMs}ms`);
+      timeoutError.code = "UPSTREAM_CONNECT_TIMEOUT";
+      timeoutError.status = HTTP_STATUS.GATEWAY_TIMEOUT;
+      timeoutError.retryable = true;
+      const clientError = new Error("Client closed request");
+      clientError.code = "CLIENT_ABORT";
+      clientError.status = 499;
+      clientError.retryable = false;
+      const forwardAbort = (source) => {
+        if (firstAbortReason == null) firstAbortReason = source.reason;
+        if (!mergedCtrl.signal.aborted) mergedCtrl.abort(source.reason);
+      };
+      const onConnectAbort = () => forwardAbort(connectCtrl.signal);
+      const onClientAbort = () => forwardAbort(clientCtrl.signal);
+      connectCtrl.signal.addEventListener("abort", onConnectAbort, { once: true });
+      clientCtrl.signal.addEventListener("abort", onClientAbort, { once: true });
+      const clientSignalListener = signal ? () => clientCtrl.abort(clientError) : null;
+      if (clientSignalListener) {
+        if (signal.aborted) clientSignalListener();
+        else signal.addEventListener("abort", clientSignalListener, { once: true });
+      }
+      const connectTimer = setTimeout(() => connectCtrl.abort(timeoutError), timeoutMs);
+      const mergedSignal = mergedCtrl.signal;
+      const cleanupAbort = () => {
+        clearTimeout(connectTimer);
+        connectCtrl.signal.removeEventListener("abort", onConnectAbort);
+        clientCtrl.signal.removeEventListener("abort", onClientAbort);
+        if (clientSignalListener) signal.removeEventListener("abort", clientSignalListener);
+      };
 
       try {
         const bodyStr = JSON.stringify(transformedBody);
@@ -147,7 +180,7 @@ export class BaseExecutor {
           body: bodyStr,
           signal: mergedSignal
         }, proxyOptions);
-        clearTimeout(connectTimer);
+        cleanupAbort();
         const ct = response.headers?.get?.("content-type") || "";
         const cl = response.headers?.get?.("content-length") || "?";
         dbg("FETCH", `${this.provider.toUpperCase()} ← ${response.status} | ttft=${Date.now() - fetchT0}ms | ct=${ct} | cl=${cl}`);
@@ -162,23 +195,16 @@ export class BaseExecutor {
 
         return { response, url, headers, transformedBody };
       } catch (error) {
-        clearTimeout(connectTimer);
-        const clientAborted = signal?.aborted === true;
-        const connectTimedOut = connectCtrl.signal.aborted && !clientAborted;
+        cleanupAbort();
+        const abortReason = firstAbortReason || mergedSignal.reason;
+        const clientAborted = abortReason?.code === "CLIENT_ABORT";
+        const connectTimedOut = abortReason?.code === "UPSTREAM_CONNECT_TIMEOUT";
         let activeError = error;
 
         if (connectTimedOut) {
-          const timeoutError = new Error(`Upstream connect timeout after ${timeoutMs}ms`);
-          timeoutError.code = "UPSTREAM_CONNECT_TIMEOUT";
-          timeoutError.status = HTTP_STATUS.GATEWAY_TIMEOUT;
-          timeoutError.retryable = true;
           activeError = timeoutError;
           log?.warn?.("TIMEOUT", `${this.provider.toUpperCase()} connect timeout after ${timeoutMs}ms`);
         } else if (clientAborted) {
-          const clientError = new Error("Client closed request");
-          clientError.code = "CLIENT_ABORT";
-          clientError.status = 499;
-          clientError.retryable = false;
           activeError = clientError;
           log?.debug?.("ABORT", `${this.provider.toUpperCase()} client closed request`);
           throw clientError;
@@ -187,7 +213,7 @@ export class BaseExecutor {
         lastError = activeError;
         dbg("FETCH", `${this.provider.toUpperCase()} ✖ ${activeError.name || "Error"}: ${activeError.message}${connectTimedOut ? " (connect timeout)" : ""}`);
 
-        // Client abort is terminal — do not retry. Other AbortErrors that are not connect timeouts rethrow
+        // Client abort is terminal. Unknown AbortErrors remain terminal too.
         if (error.name === "AbortError" && !connectTimedOut) {
           throw activeError;
         }
