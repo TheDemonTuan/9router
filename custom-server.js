@@ -57,14 +57,26 @@ http.createServer = (...args) => {
     let received = head.length;
     const serve = () => {
       // Replay the upgraded request through the existing HTTP/1.1 handler.
+      const buffered = Buffer.concat(chunks, received);
+      const overflow = buffered.subarray(contentLength);
       const replay = new http.IncomingMessage(socket);
       Object.assign(replay, { method: req.method, url: req.url, headers: req.headers, complete: true });
-      if (received) replay.push(Buffer.concat(chunks, received).subarray(0, contentLength));
+      if (contentLength) replay.push(buffered.subarray(0, contentLength));
       replay.push(null);
       const res = new http.ServerResponse(replay);
-      res.shouldKeepAlive = false;
+      res.shouldKeepAlive = overflow.length > 0;
       res.assignSocket(socket);
-      res.once("finish", () => socket.end());
+      res.once("finish", () => {
+        if (!overflow.length) {
+          socket.end();
+          return;
+        }
+        // Upgrade parsing consumes bytes beyond the first body. Put them back
+        // through Node's HTTP parser instead of silently dropping pipelined data.
+        res.detachSocket(socket);
+        socket.unshift(overflow);
+        http._connectionListener.call(server, socket);
+      });
       Promise.resolve().then(() => wrapped(replay, res)).catch((error) => {
         console.error("Failed to downgrade h2c request", error);
         socket.destroy();

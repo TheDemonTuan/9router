@@ -43,6 +43,8 @@ jobs:
             $response_tests \
             unit/codex-tool-normalization.test.js \
             unit/codex-native-passthrough-thinking.test.js \
+            unit/base-executor-timeout-classification.test.js \
+            integration/zcode-concurrent-responses.test.js \
             unit/grok-build-config.test.js \
             unit/quota-classification.test.js \
             unit/quota-response-contract.test.js \
@@ -55,6 +57,11 @@ jobs:
             unit/alibaba-token-plan-models-route.test.js \
             unit/alibaba-token-plan-provider.test.js \
             translator/alibaba-token-plan-pipeline.test.js
+      - name: Run h2c and Bun disconnect regressions
+        run: |
+          set -euo pipefail
+          node --test tests/unit/custom-server-h2c.test.cjs tests/unit/custom-server-h2c-concurrent.test.cjs
+          bun test tests/unit/bun-client-disconnect.test.cjs
       - name: Verify provider, alias, and OAuth baselines
         working-directory: tests
         run: |
