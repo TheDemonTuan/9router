@@ -469,24 +469,63 @@ export function cleanResponseSchemaForAntigravity(schema) {
   return walk(root);
 }
 
-// Gemini JSON Schema fields preserve composition and validation semantics. Strip
-// only document-level metadata/vendor extensions that are not request schema.
-const GEMINI_JSON_SCHEMA_IGNORED_KEYWORDS = new Set([
-  "$schema", "$id", "$comment",
+// Keywords unsupported in Gemini schema objects. Property names themselves
+// (under "properties" / "$defs" / "definitions") must never be filtered by these rules.
+const GEMINI_UNSUPPORTED_SCHEMA_KEYWORDS = new Set([
+  "$schema",
+  "$id",
+  "$comment",
+  "patternProperties",
+  "propertyNames",
+  "unevaluatedProperties",
+  "unevaluatedItems",
+  "contentSchema",
+  "contentMediaType",
+  "contentEncoding",
+  "if",
+  "then",
+  "else",
+  "dependencies",
+  "dependentSchemas",
+  "dependentRequired",
+  "readOnly",
+  "writeOnly",
+  "deprecated",
 ]);
 
-function cleanGeminiJsonSchema(schema) {
-  if (!schema || typeof schema !== "object") return schema;
-  const clean = (value) => {
-    if (Array.isArray(value)) return value.map(clean);
-    if (!value || typeof value !== "object") return value;
+function cleanGeminiJsonSchemaNode(value, isPropertyMap = false) {
+  if (Array.isArray(value)) {
+    return value.map((item) => cleanGeminiJsonSchemaNode(item, false));
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+
+  // Inside a map of property names (e.g. `properties: { "x-user-id": schema }`),
+  // keep all property names verbatim; only clean their schema bodies.
+  if (isPropertyMap) {
     return Object.fromEntries(
-      Object.entries(value)
-        .filter(([key]) => !GEMINI_JSON_SCHEMA_IGNORED_KEYWORDS.has(key) && !key.startsWith("x-"))
-        .map(([key, entry]) => [key, clean(entry)])
+      Object.entries(value).map(([propName, propSchema]) => [
+        propName,
+        cleanGeminiJsonSchemaNode(propSchema, false),
+      ])
     );
-  };
-  return clean(schema);
+  }
+
+  const entries = [];
+  for (const [key, child] of Object.entries(value)) {
+    if (GEMINI_UNSUPPORTED_SCHEMA_KEYWORDS.has(key) || key.startsWith("x-")) {
+      continue;
+    }
+    const isChildPropertyMap =
+      key === "properties" || key === "$defs" || key === "definitions";
+    entries.push([key, cleanGeminiJsonSchemaNode(child, isChildPropertyMap)]);
+  }
+  return Object.fromEntries(entries);
+}
+
+function cleanGeminiJsonSchema(schema) {
+  return cleanGeminiJsonSchemaNode(schema, false);
 }
 
 export function cleanResponseJsonSchemaForGemini(schema) {

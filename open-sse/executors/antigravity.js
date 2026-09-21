@@ -248,16 +248,17 @@ export class AntigravityExecutor extends BaseExecutor {
           const name = sanitizeFunctionName(fn.name);
           if (seenToolNames.has(name)) continue;
           seenToolNames.add(name);
-          const schema = fn.parametersJsonSchema || fn.parameters;
-          const isJsonSchema = Boolean(fn.parametersJsonSchema);
+          const { parameters, parametersJsonSchema, ...rest } = fn;
+          const schema = parametersJsonSchema || parameters;
+          const isJsonSchema = Boolean(parametersJsonSchema);
           allDeclarations.push({
-            ...fn,
+            ...rest,
             name,
             ...(schema
               ? isJsonSchema
-                ? { parametersJsonSchema: cleanToolJsonSchemaForGemini(structuredClone(schema)), parameters: undefined }
-                : { parameters: cleanJSONSchemaForAntigravity(structuredClone(schema)), parametersJsonSchema: undefined }
-              : { parameters: { type: "object", properties: { reason: { type: "string", description: "Brief explanation" } }, required: ["reason"] } })
+                ? { parametersJsonSchema: cleanToolJsonSchemaForGemini(structuredClone(schema)) }
+                : { parameters: cleanJSONSchemaForAntigravity(structuredClone(schema)) }
+              : { parameters: { type: "object", properties: { reason: { type: "string", description: "Brief explanation" } }, required: ["reason"] } }),
           });
         }
       }

@@ -5,7 +5,6 @@ import {
   DEFAULT_SAFETY_SETTINGS,
   cleanJSONSchemaForAntigravity,
   cleanToolJsonSchemaForGemini,
-  cleanResponseSchemaForAntigravity,
   cleanResponseJsonSchemaForGemini,
   cleanLegacyResponseSchemaOrFallback,
   normalizeGeminiContents,

@@ -17,7 +17,6 @@ import {
   generateProjectId,
   cleanJSONSchemaForAntigravity,
   cleanToolJsonSchemaForGemini,
-  cleanResponseSchemaForAntigravity,
   cleanResponseJsonSchemaForGemini,
   cleanLegacyResponseSchemaOrFallback,
   normalizeGeminiContents

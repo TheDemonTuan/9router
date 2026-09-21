@@ -289,15 +289,26 @@ describe("Responses Structured Outputs & Multi-hop Translation", () => {
           parameters: {
             type: "object",
             description: "Search arguments",
-            properties: { query: { type: "string", format: "email", minLength: 3 } },
+            properties: {
+              "x-user-id": { type: "string" },
+              query: { type: "string", format: "email", minLength: 3 },
+            },
+            patternProperties: { "^s_": { type: "string" } },
+            "x-custom-meta": { internal: true },
             required: ["query"],
           },
         } }],
       }, false);
-      expect(request.tools[0].functionDeclarations[0].parametersJsonSchema).toMatchObject({
+      const schema = request.tools[0].functionDeclarations[0].parametersJsonSchema;
+      expect(schema).toMatchObject({
         description: "Search arguments",
-        properties: { query: { type: "string", format: "email", minLength: 3 } },
+        properties: {
+          "x-user-id": { type: "string" },
+          query: { type: "string", format: "email", minLength: 3 },
+        },
       });
+      expect(schema.patternProperties).toBeUndefined();
+      expect(schema["x-custom-meta"]).toBeUndefined();
     });
 
     it("keeps Claude Antigravity tools on the legacy sanitizer", () => {
