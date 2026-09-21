@@ -132,6 +132,7 @@ export function responsesToGeminiBase(model, body, signature, sessionId = null, 
   };
   const responseSchemaFallbackInstruction = result.generationConfig.responseSchemaFallbackInstruction;
   delete result.generationConfig.responseSchemaFallbackInstruction;
+  if (responseSchemaFallbackInstruction) result._responseSchemaValidation = body.text.format.schema;
   if (body.instructions || responseSchemaFallbackInstruction) {
     const instructions = [responseSchemaFallbackInstruction, body.instructions].filter(Boolean).join("\n\n");
     result.systemInstruction = { role: GEMINI_ROLE.USER, parts: [{ text: instructions }] };

@@ -259,6 +259,16 @@ describe("Responses Structured Outputs & Multi-hop Translation", () => {
       expect(schema.required).toEqual(["decision", "evidence", "next_step", "blocker_key"]);
     });
 
+    it("keeps complex tool parameters on the tool cleaner", () => {
+      expect(() => openaiToGeminiRequest("gemini-2.5-flash", {
+        messages: [{ role: "user", content: "Use tool" }],
+        tools: [{ type: "function", function: {
+          name: "pick",
+          parameters: { type: "object", properties: { value: { oneOf: [{ type: "string" }, { type: "number" }] } } },
+        } }],
+      }, false)).toThrow("Unsupported tool schema oneOf");
+    });
+
     it("maps json_object response_format to application/json in Gemini", () => {
       const chatRequest = {
         messages: [{ role: "user", content: "JSON please" }],
@@ -313,6 +323,19 @@ describe("Responses Structured Outputs & Multi-hop Translation", () => {
   });
 
   describe("schema composition safety", () => {
+    it("falls back to an instruction for unsupported Antigravity anyOf composition", () => {
+      const request = openaiToAntigravityRequest("gemini-3.7-flash", {
+        messages: [{ role: "user", content: "Choose" }],
+        response_format: {
+          type: "json_schema",
+          json_schema: { schema: { type: "object", properties: { value: { anyOf: [{ type: "string" }, { type: "number" }] } } } },
+        },
+      }, false);
+      expect(request.request.generationConfig.responseSchema).toBeUndefined();
+      expect(request.request._responseSchemaValidation.properties.value.anyOf).toHaveLength(2);
+      expect(request.request.systemInstruction.parts[0].text).toContain("anyOf");
+    });
+
     it("falls back to an instruction for unsupported Antigravity composition", () => {
       const request = openaiToGeminiCLIRequest("gemini-cli-model", {
         messages: [{ role: "user", content: "Choose" }],

@@ -89,6 +89,24 @@ describe("Responses <-> Gemini direct translators", () => {
     if (target !== FORMATS.GEMINI) expect(result.request).toBeDefined();
   });
 
+  it.each([FORMATS.GEMINI, FORMATS.VERTEX])("preserves anyOf and nullable unions for public Responses -> %s", (target) => {
+    const schema = {
+      type: "object",
+      properties: {
+        value: { anyOf: [{ type: "string" }, { type: "number" }] },
+        maybe: { type: ["string", "null"] },
+      },
+    };
+    const payload = payloadFor(target, {
+      model: "gemini-3.8-pro",
+      input: [{ type: "message", role: "user", content: "Choose" }],
+      text: { format: { type: "json_schema", schema } },
+    });
+
+    expect(payload.generationConfig.responseJsonSchema).toEqual(schema);
+    expect(payload.generationConfig.responseSchema).toBeUndefined();
+  });
+
   it.each([FORMATS.GEMINI, FORMATS.VERTEX])("preserves multi-branch oneOf for public Responses -> %s", (target) => {
     const schema = {
       type: "object",

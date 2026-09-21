@@ -230,14 +230,14 @@ function mergeAllOf(obj) {
 }
 
 // Gemini has no multi-branch composition equivalent. Only null unions map to nullable.
-function flattenAnyOfOneOf(obj) {
+function flattenAnyOfOneOf(obj, schemaKind = "tool") {
   if (!obj || typeof obj !== "object") return;
 
   for (const key of ["anyOf", "oneOf"]) {
     if (!Array.isArray(obj[key]) || obj[key].length === 0) continue;
     const nonNull = obj[key].filter(item => item?.type !== "null");
     if (obj[key].length !== 2 || nonNull.length !== 1) {
-      const error = new Error(`Unsupported response schema ${key}: Gemini cannot represent multi-branch composition`);
+      const error = new Error(`Unsupported ${schemaKind} schema ${key}: Gemini cannot represent multi-branch composition`);
       error.code = "unsupported_feature";
       throw error;
     }
@@ -247,7 +247,7 @@ function flattenAnyOfOneOf(obj) {
   }
 
   for (const value of Object.values(obj)) {
-    if (value && typeof value === "object") flattenAnyOfOneOf(value);
+    if (value && typeof value === "object") flattenAnyOfOneOf(value, schemaKind);
   }
 }
 
@@ -504,10 +504,14 @@ export function buildResponseSchemaFallbackInstruction(schema) {
 
 export function cleanLegacyResponseSchemaOrFallback(schema) {
   try {
-    return { schema: cleanResponseSchemaForAntigravity(schema), fallbackInstruction: null };
+    return { schema: cleanResponseSchemaForAntigravity(schema), fallbackInstruction: null, validationSchema: null };
   } catch (error) {
     if (error?.code !== "unsupported_feature") throw error;
-    return { schema: null, fallbackInstruction: buildResponseSchemaFallbackInstruction(schema) };
+    return {
+      schema: null,
+      fallbackInstruction: buildResponseSchemaFallbackInstruction(schema),
+      validationSchema: structuredClone(schema),
+    };
   }
 }
 

@@ -77,6 +77,7 @@ function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG
           const legacy = cleanLegacyResponseSchemaOrFallback(schema);
           if (legacy.schema) result.generationConfig.responseSchema = legacy.schema;
           responseSchemaFallbackInstruction = legacy.fallbackInstruction;
+          if (legacy.validationSchema) result._responseSchemaValidation = legacy.validationSchema;
         }
       }
     } else if (rf.type === "json_object") {
@@ -319,6 +320,11 @@ export function wrapInCloudCodeEnvelope(model, geminiCLI, credentials = null, is
     envelope.requestType = "agent";
   }
 
+  if (geminiCLI._responseSchemaValidation) {
+    envelope.request._responseSchemaValidation = geminiCLI._responseSchemaValidation;
+    delete geminiCLI._responseSchemaValidation;
+  }
+
   if (!envelope.request.toolConfig && geminiCLI.tools?.length > 0) {
     envelope.request.toolConfig = {
       functionCallingConfig: { mode: "VALIDATED" }
@@ -353,7 +359,15 @@ function wrapInCloudCodeEnvelopeForClaude(model, claudeRequest, credentials = nu
       envelope.request.generationConfig.responseMimeType = "application/json";
       const schema = responseFormat.json_schema?.schema || responseFormat.schema;
       if (schema && typeof schema === "object") {
-        envelope.request.generationConfig.responseSchema = cleanResponseSchemaForAntigravity(schema);
+        const legacy = cleanLegacyResponseSchemaOrFallback(schema);
+        if (legacy.schema) envelope.request.generationConfig.responseSchema = legacy.schema;
+        if (legacy.validationSchema) envelope.request._responseSchemaValidation = legacy.validationSchema;
+        if (legacy.fallbackInstruction) {
+          envelope.request.systemInstruction = {
+            role: GEMINI_ROLE.USER,
+            parts: [{ text: legacy.fallbackInstruction }],
+          };
+        }
       }
     } else if (responseFormat.type === "json_object") {
       envelope.request.generationConfig.responseMimeType = "application/json";
@@ -465,7 +479,11 @@ function wrapInCloudCodeEnvelopeForClaude(model, claudeRequest, credentials = nu
   }
 
   if (systemParts.length > 0) {
-    envelope.request.systemInstruction = { role: GEMINI_ROLE.USER, parts: systemParts };
+    const existingSystemParts = envelope.request.systemInstruction?.parts || [];
+    envelope.request.systemInstruction = {
+      role: GEMINI_ROLE.USER,
+      parts: [...existingSystemParts, ...systemParts],
+    };
   }
 
   envelope.request.contents = normalizeGeminiContents(envelope.request.contents);

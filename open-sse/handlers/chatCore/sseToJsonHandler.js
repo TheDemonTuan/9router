@@ -10,6 +10,7 @@ import { ROLE, RESPONSES_ITEM } from "../../translator/schema/index.js";
 // Responses-API providers (e.g. codex) may emit SSE without content-type + use Responses output shape
 const isResponsesProvider = (p) => PROVIDERS[p]?.format === FORMATS.OPENAI_RESPONSES;
 import { saveRequestDetail, appendRequestLog } from "@/lib/usageDb.js";
+import { validateStructuredResponse } from "../../translator/concerns/jsonSchemaValidation.js";
 
 function textFromResponsesMessageItem(item) {
   if (!item?.content || !Array.isArray(item.content)) return "";
@@ -110,7 +111,7 @@ export function parseSSEToOpenAIResponse(rawSSE, fallbackModel) {
  * Handle case: provider forced streaming but client wants JSON.
  * Supports both Codex/Responses API SSE and standard Chat Completions SSE.
  */
-export async function handleForcedSSEToJson({ providerResponse, sourceFormat, targetFormat, provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, customToolNames, trackDone, appendLog, reqTag, log }) {
+export async function handleForcedSSEToJson({ providerResponse, sourceFormat, targetFormat, provider, model, body, stream, translatedBody, finalBody, responseSchemaValidation, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, customToolNames, trackDone, appendLog, reqTag, log }) {
   const contentType = providerResponse.headers.get("content-type") || "";
   const isSSE = contentType.includes("text/event-stream") || (contentType === "" && isResponsesProvider(provider));
   if (!isSSE) return null; // not handled here
@@ -134,6 +135,10 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
       const completed = jsonResponse.status === "completed" || jsonResponse.status === "done";
       if (completed && onRequestSuccess) await onRequestSuccess();
 
+      if (responseSchemaValidation) {
+        const validation = validateStructuredResponse(jsonResponse, responseSchemaValidation);
+        if (!validation.valid) return createErrorResult(HTTP_STATUS.BAD_GATEWAY, `Structured output failed JSON Schema validation: ${validation.errors.join("; ")}`);
+      }
       const usage = jsonResponse.usage || {};
       appendLog({ tokens: usage, status: completed ? "200 OK" : `200 ${jsonResponse.status || "failed"}` });
       saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, silent: true });
@@ -234,6 +239,10 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
 
     if (onRequestSuccess) await onRequestSuccess();
 
+    if (responseSchemaValidation) {
+      const validation = validateStructuredResponse(parsed, responseSchemaValidation);
+      if (!validation.valid) return createErrorResult(HTTP_STATUS.BAD_GATEWAY, `Structured output failed JSON Schema validation: ${validation.errors.join("; ")}`);
+    }
     const usage = parsed.usage || {};
     appendLog({ tokens: usage, status: "200 OK" });
     saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, silent: true });

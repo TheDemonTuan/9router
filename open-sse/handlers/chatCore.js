@@ -186,6 +186,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   }
 
   let translatedBody;
+  let responseSchemaValidation;
   let toolNameMap;
   let customToolNames;
   if (passthrough) {
@@ -218,6 +219,9 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       trackPendingRequest(model, provider, connectionId, false, true);
       return createErrorResult(HTTP_STATUS.BAD_REQUEST, `Failed to translate request for ${sourceFormat} → ${targetFormat}`);
     }
+    responseSchemaValidation = translatedBody._responseSchemaValidation || translatedBody.request?._responseSchemaValidation;
+    delete translatedBody._responseSchemaValidation;
+    if (translatedBody.request?._responseSchemaValidation) delete translatedBody.request._responseSchemaValidation;
     toolNameMap = translatedBody._toolNameMap;
     delete translatedBody._toolNameMap;
     customToolNames = translatedBody._customToolNames;
@@ -513,7 +517,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     return createErrorResult(statusCode, errMsg, resetsAtMs, { errorClass, retryable });
   }
 
-  const sharedCtx = { provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag, log, responsesClientDialect, responsesProviderDialect };
+  const sharedCtx = { provider, model, body, stream, translatedBody, finalBody, responseSchemaValidation, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag, log, responsesClientDialect, responsesProviderDialect };
   const appendLog = (extra) => appendRequestLog({ model, provider, connectionId, ...extra }).catch(() => { });
   const trackDone = () => trackPendingRequest(model, provider, connectionId, false);
 

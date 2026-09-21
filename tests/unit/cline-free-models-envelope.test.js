@@ -116,7 +116,7 @@ describe("cline free-models envelope in nonStreamingHandler", () => {
     return { logProviderResponse() {}, logConvertedResponse() {} };
   }
 
-  function callHandler(providerResponse, provider = "cline") {
+  function callHandler(providerResponse, provider = "cline", responseSchemaValidation = null) {
     return handleNonStreamingResponse({
       providerResponse,
       provider,
@@ -127,6 +127,7 @@ describe("cline free-models envelope in nonStreamingHandler", () => {
       stream: false,
       translatedBody: null,
       finalBody: null,
+      responseSchemaValidation,
       requestStartTime: Date.now(),
       connectionId: "c1",
       apiKey: "k",
@@ -142,6 +143,20 @@ describe("cline free-models envelope in nonStreamingHandler", () => {
       log: null,
     });
   }
+
+  it("rejects invalid internal structured output", async () => {
+    const result = await callHandler(
+      new Response(JSON.stringify({ choices: [{ message: { content: "{\\\"ok\\\":false}" } }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+      "cline",
+      { type: "object", properties: { ok: { const: true } }, required: ["ok"] },
+    );
+    expect(result.success).toBe(false);
+    expect(result.response.status).toBe(502);
+    expect((await result.response.json()).error.message).toContain("JSON Schema validation");
+  });
 
   it("unwraps the {success,data} envelope before usage extraction and translation", async () => {
     const providerResponse = new Response(
