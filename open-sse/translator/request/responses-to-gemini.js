@@ -4,6 +4,7 @@ import { normalizeResponsesInput } from "../formats/responsesApi.js";
 import {
   DEFAULT_SAFETY_SETTINGS,
   cleanJSONSchemaForAntigravity,
+  cleanToolJsonSchemaForGemini,
   cleanResponseSchemaForAntigravity,
   cleanResponseJsonSchemaForGemini,
   cleanLegacyResponseSchemaOrFallback,
@@ -82,7 +83,7 @@ function responseSchema(text, responseSchemaMode = "legacy") {
   };
 }
 
-function functionDeclarations(tools) {
+function functionDeclarations(tools, toolSchemaMode = "legacy") {
   const declarations = [];
   for (const tool of tools || []) {
     if (!tool || typeof tool !== "object" || tool.type !== "function") {
@@ -92,10 +93,13 @@ function functionDeclarations(tools) {
     if (!fn?.name || typeof fn.name !== "string") {
       unsupported("Unsupported Responses function tool without a name");
     }
+    const schema = structuredClone(fn.parameters || { type: "object", properties: {} });
     declarations.push({
       name: sanitizeGeminiFunctionName(fn.name),
       description: String(fn.description || ""),
-      parameters: cleanJSONSchemaForAntigravity(structuredClone(fn.parameters || { type: "object", properties: {} })),
+      ...(toolSchemaMode === "jsonSchema"
+        ? { parametersJsonSchema: cleanToolJsonSchemaForGemini(schema) }
+        : { parameters: cleanJSONSchemaForAntigravity(schema) }),
     });
   }
   return declarations;
@@ -123,7 +127,7 @@ function toolConfig(body, declarations) {
   unsupported("Unsupported Responses tool_choice for Gemini direct translation");
 }
 
-export function responsesToGeminiBase(model, body, signature, sessionId = null, responseSchemaMode = "legacy") {
+export function responsesToGeminiBase(model, body, signature, sessionId = null, responseSchemaMode = "legacy", toolSchemaMode = "legacy") {
   const result = {
     model,
     contents: [],
@@ -187,7 +191,7 @@ export function responsesToGeminiBase(model, body, signature, sessionId = null, 
     result.contents = normalizeGeminiContents(result.contents);
   }
 
-  const declarations = functionDeclarations(body.tools);
+  const declarations = functionDeclarations(body.tools, toolSchemaMode);
   if (declarations.length) result.tools = [{ functionDeclarations: declarations }];
   const config = toolConfig(body, declarations);
   if (config) result.toolConfig = config;
@@ -195,7 +199,7 @@ export function responsesToGeminiBase(model, body, signature, sessionId = null, 
 }
 
 export function responsesToGeminiRequest(model, body, stream, credentials = null) {
-  return responsesToGeminiBase(model, body, DEFAULT_THINKING_AG_SIGNATURE, credentials?._clientSessionId, "jsonSchema");
+  return responsesToGeminiBase(model, body, DEFAULT_THINKING_AG_SIGNATURE, credentials?._clientSessionId, "jsonSchema", "jsonSchema");
 }
 
 export function responsesToVertexRequest(model, body, stream, credentials = null) {
@@ -203,14 +207,14 @@ export function responsesToVertexRequest(model, body, stream, credentials = null
 }
 
 export function responsesToGeminiCLIRequest(model, body, stream, credentials = null) {
-  return wrapInCloudCodeEnvelope(model, responsesToGeminiBase(model, body, DEFAULT_THINKING_GEMINI_CLI_SIGNATURE, credentials?._clientSessionId), credentials);
+  return wrapInCloudCodeEnvelope(model, responsesToGeminiBase(model, body, DEFAULT_THINKING_GEMINI_CLI_SIGNATURE, credentials?._clientSessionId, "legacy", "jsonSchema"), credentials);
 }
 
 export function responsesToAntigravityRequest(model, body, stream, credentials = null) {
   if (String(model || "").toLowerCase().includes("claude")) {
     return openaiToAntigravityRequest(model, openaiResponsesToOpenAIRequest(model, body, stream, credentials), stream, credentials);
   }
-  return wrapInCloudCodeEnvelope(model, responsesToGeminiBase(model, body, DEFAULT_THINKING_AG_SIGNATURE, credentials?._clientSessionId), credentials, true);
+  return wrapInCloudCodeEnvelope(model, responsesToGeminiBase(model, body, DEFAULT_THINKING_AG_SIGNATURE, credentials?._clientSessionId, "legacy", "jsonSchema"), credentials, true);
 }
 
 register(FORMATS.OPENAI_RESPONSES, FORMATS.GEMINI, responsesToGeminiRequest, null);

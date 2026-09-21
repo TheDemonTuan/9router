@@ -259,14 +259,60 @@ describe("Responses Structured Outputs & Multi-hop Translation", () => {
       expect(schema.required).toEqual(["decision", "evidence", "next_step", "blocker_key"]);
     });
 
-    it("keeps complex tool parameters on the tool cleaner", () => {
-      expect(() => openaiToGeminiRequest("gemini-2.5-flash", {
+    it.each([
+      ["Gemini", openaiToGeminiRequest, "gemini-2.5-flash"],
+      ["Vertex", openaiToVertexRequest, "gemini-2.5-flash"],
+      ["Gemini CLI", openaiToGeminiCLIRequest, "gemini-cli-model"],
+      ["Antigravity Gemini", openaiToAntigravityRequest, "gemini-3.7-flash"],
+    ])("preserves complex tool parameters as JSON Schema for %s", (_label, translate, model) => {
+      const request = translate(model, {
         messages: [{ role: "user", content: "Use tool" }],
         tools: [{ type: "function", function: {
           name: "pick",
           parameters: { type: "object", properties: { value: { oneOf: [{ type: "string" }, { type: "number" }] } } },
         } }],
-      }, false)).toThrow("Unsupported tool schema oneOf");
+      }, false);
+      const payload = request.request || request;
+
+      expect(payload.tools[0].functionDeclarations[0].parameters).toBeUndefined();
+      expect(payload.tools[0].functionDeclarations[0].parametersJsonSchema.properties.value.oneOf).toEqual([
+        { type: "string" },
+        { type: "number" },
+      ]);
+    });
+
+    it("preserves supported JSON Schema annotations and constraints", () => {
+      const request = openaiToGeminiRequest("gemini-2.5-flash", {
+        messages: [{ role: "user", content: "Use tool" }],
+        tools: [{ type: "function", function: {
+          name: "search",
+          parameters: {
+            type: "object",
+            description: "Search arguments",
+            properties: { query: { type: "string", format: "email", minLength: 3 } },
+            required: ["query"],
+          },
+        } }],
+      }, false);
+      expect(request.tools[0].functionDeclarations[0].parametersJsonSchema).toMatchObject({
+        description: "Search arguments",
+        properties: { query: { type: "string", format: "email", minLength: 3 } },
+      });
+    });
+
+    it("keeps Claude Antigravity tools on the legacy sanitizer", () => {
+      const request = openaiToAntigravityRequest("claude-3-7-sonnet", {
+        messages: [{ role: "user", content: "Use tool" }],
+        tools: [{ type: "function", function: {
+          name: "pick",
+          parameters: { type: "object", properties: { value: { type: "string", minLength: 1 } } },
+        } }],
+      }, false);
+      expect(request.request.tools[0].functionDeclarations[0].parametersJsonSchema).toBeUndefined();
+      expect(request.request.tools[0].functionDeclarations[0].parameters).toMatchObject({
+        type: "object",
+        properties: { value: { type: "string" } },
+      });
     });
 
     it("maps json_object response_format to application/json in Gemini", () => {

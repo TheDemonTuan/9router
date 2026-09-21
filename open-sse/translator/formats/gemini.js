@@ -469,19 +469,13 @@ export function cleanResponseSchemaForAntigravity(schema) {
   return walk(root);
 }
 
-// Public Gemini and Vertex accept JSON Schema directly. Remove only metadata
-// that the API does not define; preserve schema composition and references.
+// Gemini JSON Schema fields preserve composition and validation semantics. Strip
+// only document-level metadata/vendor extensions that are not request schema.
 const GEMINI_JSON_SCHEMA_IGNORED_KEYWORDS = new Set([
-  "$schema", "$id", "$comment", "title", "description", "default", "examples",
-  "format", "deprecated", "readOnly", "writeOnly", "minLength", "maxLength",
-  "exclusiveMinimum", "exclusiveMaximum", "multipleOf", "uniqueItems", "contains",
-  "unevaluatedProperties", "unevaluatedItems", "contentSchema", "additionalItems",
-  "propertyNames", "patternProperties", "enumDescriptions", "dependencies",
-  "dependentSchemas", "dependentRequired", "if", "then", "else", "contentMediaType",
-  "contentEncoding", "optional",
+  "$schema", "$id", "$comment",
 ]);
 
-export function cleanResponseJsonSchemaForGemini(schema) {
+function cleanGeminiJsonSchema(schema) {
   if (!schema || typeof schema !== "object") return schema;
   const clean = (value) => {
     if (Array.isArray(value)) return value.map(clean);
@@ -493,6 +487,14 @@ export function cleanResponseJsonSchemaForGemini(schema) {
     );
   };
   return clean(schema);
+}
+
+export function cleanResponseJsonSchemaForGemini(schema) {
+  return cleanGeminiJsonSchema(schema);
+}
+
+export function cleanToolJsonSchemaForGemini(schema) {
+  return cleanGeminiJsonSchema(schema);
 }
 
 export function buildResponseSchemaFallbackInstruction(schema) {

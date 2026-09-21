@@ -84,9 +84,23 @@ describe("Responses <-> Gemini direct translators", () => {
       }),
       expect.objectContaining({ role: "user", parts: expect.arrayContaining([expect.objectContaining({ text: "Compare both cities" })]) }),
     ]));
-    expect(payload.tools[0].functionDeclarations).toEqual([expect.objectContaining({ name: "get_weather" })]);
+    expect(payload.tools[0].functionDeclarations).toEqual([expect.objectContaining({
+      name: "get_weather",
+      parametersJsonSchema: REQUEST.tools[0].parameters,
+    })]);
     expect(payload.toolConfig).toEqual({ functionCallingConfig: { mode: "AUTO" } });
     if (target !== FORMATS.GEMINI) expect(result.request).toBeDefined();
+  });
+
+  it.each([FORMATS.GEMINI, FORMATS.VERTEX])("preserves tool oneOf for public Responses -> %s", (target) => {
+    const schema = { type: "object", properties: { value: { oneOf: [{ type: "string" }, { type: "number" }] } } };
+    const payload = payloadFor(target, {
+      model: "gemini-3.8-pro",
+      input: [{ type: "message", role: "user", content: "Choose" }],
+      tools: [{ type: "function", name: "pick", parameters: schema }],
+    });
+    expect(payload.tools[0].functionDeclarations[0].parameters).toBeUndefined();
+    expect(payload.tools[0].functionDeclarations[0].parametersJsonSchema).toEqual(schema);
   });
 
   it.each([FORMATS.GEMINI, FORMATS.VERTEX])("preserves anyOf and nullable unions for public Responses -> %s", (target) => {
@@ -120,6 +134,17 @@ describe("Responses <-> Gemini direct translators", () => {
 
     expect(payload.generationConfig.responseJsonSchema.properties.value.oneOf).toEqual(schema.properties.value.oneOf);
     expect(payload.generationConfig.responseSchema).toBeUndefined();
+  });
+
+  it.each([FORMATS.GEMINI_CLI, FORMATS.ANTIGRAVITY])("preserves tool oneOf for internal Gemini-family Responses -> %s", (target) => {
+    const result = directRequest(target, {
+      model: "gemini-3.8-pro",
+      input: [{ type: "message", role: "user", content: "Choose" }],
+      tools: [{ type: "function", name: "pick", parameters: { type: "object", properties: { value: { oneOf: [{ type: "string" }, { type: "number" }] } } } }],
+    });
+    const payload = result.request;
+    expect(payload.tools[0].functionDeclarations[0].parameters).toBeUndefined();
+    expect(payload.tools[0].functionDeclarations[0].parametersJsonSchema.properties.value.oneOf).toHaveLength(2);
   });
 
   it("falls back to schema instructions for internal Responses multi-branch output", () => {

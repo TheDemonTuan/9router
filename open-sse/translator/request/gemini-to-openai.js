@@ -60,7 +60,7 @@ export function geminiToOpenAIRequest(model, body, stream) {
             function: {
               name: func.name,
               description: func.description || "",
-              parameters: func.parameters || { type: "object", properties: {} }
+              parameters: func.parametersJsonSchema || func.parameters || { type: "object", properties: {} }
             }
           });
         }

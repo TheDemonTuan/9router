@@ -16,6 +16,7 @@ import {
   generateSessionId,
   generateProjectId,
   cleanJSONSchemaForAntigravity,
+  cleanToolJsonSchemaForGemini,
   cleanResponseSchemaForAntigravity,
   cleanResponseJsonSchemaForGemini,
   cleanLegacyResponseSchemaOrFallback,
@@ -40,7 +41,7 @@ export function sanitizeGeminiFunctionName(name) {
 }
 
 // Core: Convert OpenAI request to Gemini format (base for all variants)
-function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG_SIGNATURE, sessionId = null, responseSchemaMode = "legacy") {
+function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG_SIGNATURE, sessionId = null, responseSchemaMode = "legacy", toolSchemaMode = "legacy") {
   const result = {
     model: model,
     contents: [],
@@ -232,28 +233,25 @@ function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG
     }
   }
 
-  // Convert tools
+  // Convert tools. Public Gemini-family transports accept full JSON Schema;
+  // Claude Antigravity retains the legacy sanitized OpenAPI subset.
   if (body.tools && Array.isArray(body.tools) && body.tools.length > 0) {
     const functionDeclarations = [];
+    const cleanToolSchema = (schema) => toolSchemaMode === "jsonSchema"
+      ? cleanToolJsonSchemaForGemini(structuredClone(schema))
+      : cleanJSONSchemaForAntigravity(structuredClone(schema));
+    const declaration = (name, description, schema) => toolSchemaMode === "jsonSchema"
+      ? { name: sanitizeGeminiFunctionName(name), description: description || "", parametersJsonSchema: cleanToolSchema(schema) }
+      : { name: sanitizeGeminiFunctionName(name), description: description || "", parameters: cleanToolSchema(schema) };
     for (const t of body.tools) {
       // Check if already in Anthropic/Claude format (no type field, direct name/description/input_schema)
       if (t.name && t.input_schema) {
-        const cleanedSchema = cleanJSONSchemaForAntigravity(structuredClone(t.input_schema || { type: "object", properties: {} }));
-        functionDeclarations.push({
-          name: sanitizeGeminiFunctionName(t.name),
-          description: t.description || "",
-          parameters: cleanedSchema
-        });
+        functionDeclarations.push(declaration(t.name, t.description, t.input_schema || { type: "object", properties: {} }));
       }
       // OpenAI format
       else if (t.type === OPENAI_BLOCK.FUNCTION && t.function) {
         const fn = t.function;
-        const cleanedSchema = cleanJSONSchemaForAntigravity(structuredClone(fn.parameters || { type: "object", properties: {} }));
-        functionDeclarations.push({
-          name: sanitizeGeminiFunctionName(fn.name),
-          description: fn.description || "",
-          parameters: cleanedSchema
-        });
+        functionDeclarations.push(declaration(fn.name, fn.description, fn.parameters || { type: "object", properties: {} }));
       }
     }
 
@@ -268,31 +266,13 @@ function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG
 
 // OpenAI -> Gemini (standard API)
 export function openaiToGeminiRequest(model, body, stream, credentials = null) {
-  return openaiToGeminiBase(model, body, stream, DEFAULT_THINKING_AG_SIGNATURE, credentials?._clientSessionId, "jsonSchema");
+  return openaiToGeminiBase(model, body, stream, DEFAULT_THINKING_AG_SIGNATURE, credentials?._clientSessionId, "jsonSchema", "jsonSchema");
 }
 
 // OpenAI -> Gemini CLI (Cloud Code Assist)
 export function openaiToGeminiCLIRequest(model, body, stream, credentials = null) {
-  const gemini = openaiToGeminiBase(model, body, stream, DEFAULT_THINKING_GEMINI_CLI_SIGNATURE, credentials?._clientSessionId);
-  // Thinking is normalized centrally by applyThinking (thinkingUnified.js) after translation.
-
-  // Clean schema for tools
-  if (gemini.tools?.[0]?.functionDeclarations) {
-    for (const fn of gemini.tools[0].functionDeclarations) {
-      if (fn.parameters) {
-        const cleanedSchema = cleanJSONSchemaForAntigravity(fn.parameters);
-        fn.parameters = cleanedSchema;
-        // if (isClaude) {
-        //   fn.parameters = cleanedSchema;
-        // } else {
-        //   fn.parametersJsonSchema = cleanedSchema;
-        //   delete fn.parameters;
-        // }
-      }
-    }
-  }
-
-  return gemini;
+  // Gemini CLI uses the current JSON Schema tool field, while Claude AG does not.
+  return openaiToGeminiBase(model, body, stream, DEFAULT_THINKING_GEMINI_CLI_SIGNATURE, credentials?._clientSessionId, "legacy", "jsonSchema");
 }
 
 // Wrap Gemini CLI format in Cloud Code wrapper
