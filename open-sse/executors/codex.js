@@ -223,16 +223,16 @@ function codexSseErrorResponse(status, message) {
 export class CodexExecutor extends BaseExecutor {
   constructor() {
     super("codex", PROVIDERS.codex);
-    this._currentSessionId = null;
   }
 
   /**
    * Override headers to add codex-specific identity headers.
-   * transformRequest runs BEFORE buildHeaders, sets this._currentSessionId.
+   * Session ID is computed request-locally from originalBody/credentials.
    */
-  buildHeaders(credentials, stream = true) {
-    const headers = super.buildHeaders(credentials, stream);
-    headers["session_id"] = this._currentSessionId || credentials?.connectionId || "default";
+  buildHeaders(credentials, stream = true, url = null, model = null, transformedBody = null, originalBody = null) {
+    const headers = super.buildHeaders(credentials, stream, url, model, transformedBody, originalBody);
+    const sessionId = resolveCacheSessionId(originalBody || transformedBody, credentials);
+    headers["session_id"] = sessionId || credentials?.connectionId || "default";
     // Identify client type to Codex backend (matches official codex CLI)
     if (!headers["originator"]) headers["originator"] = "codex_cli_rs";
     // Account/workspace binding header — required when multiple Codex accounts
@@ -250,9 +250,9 @@ export class CodexExecutor extends BaseExecutor {
     return headers;
   }
 
-  buildUrl(model, stream, urlIndex = 0, credentials = null) {
-    const base = super.buildUrl(model, stream, urlIndex, credentials);
-    return this._isCompact ? `${base}/compact` : base;
+  buildUrl(model, stream, urlIndex = 0, credentials = null, body = null) {
+    const base = super.buildUrl(model, stream, urlIndex, credentials, body);
+    return body?._compact ? `${base}/compact` : base;
   }
 
   async refreshCredentials(credentials, log) {
@@ -287,9 +287,10 @@ export class CodexExecutor extends BaseExecutor {
   }
 
   async execute(args) {
+    const sessionId = resolveCacheSessionId(args.body, args.credentials);
     const imgCount = Array.isArray(args.body?.input) ? args.body.input.reduce((n, it) => n + (Array.isArray(it.content) ? it.content.filter(c => c.type === "image_url").length : 0), 0) : 0;
     const inputLen = Array.isArray(args.body?.input) ? args.body.input.length : 0;
-    dbg("CODEX", `execute start | inputItems=${inputLen} | images=${imgCount} | sessionId=${this._currentSessionId || "pending"}`);
+    dbg("CODEX", `execute start | inputItems=${inputLen} | images=${imgCount} | sessionId=${sessionId || "pending"}`);
     if (imgCount > 0) {
       const t0 = Date.now();
       await this.prefetchImages(args.body);
@@ -423,10 +424,9 @@ export class CodexExecutor extends BaseExecutor {
    */
   transformRequest(model, body, stream, credentials) {
     validateCodexResponsesRequest(body);
-    this._isCompact = !!body._compact;
     delete body._compact;
     // Resolve conversation-stable session_id (priority: body → assistant-text → workspace → machine)
-    this._currentSessionId = resolveCacheSessionId(body, credentials);
+    const sessionId = resolveCacheSessionId(body, credentials);
     // Convert string input to array format (Codex API requires input as array)
     const normalized = normalizeResponsesInput(body.input);
     if (normalized) body.input = normalized;
@@ -455,8 +455,8 @@ export class CodexExecutor extends BaseExecutor {
     body.store = false;
 
     // Inject prompt_cache_key for stable Codex prompt caching
-    if (!body.prompt_cache_key && this._currentSessionId) {
-      body.prompt_cache_key = this._currentSessionId;
+    if (!body.prompt_cache_key && sessionId) {
+      body.prompt_cache_key = sessionId;
     }
 
     // Map virtual Codex review models to the upstream Codex model before suffix parsing.
