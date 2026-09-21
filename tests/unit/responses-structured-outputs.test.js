@@ -10,6 +10,7 @@ import {
   openaiToGeminiCLIRequest,
   openaiToAntigravityRequest,
 } from "../../open-sse/translator/request/openai-to-gemini.js";
+import { openaiToVertexRequest } from "../../open-sse/translator/request/openai-to-vertex.js";
 
 describe("Responses Structured Outputs & Multi-hop Translation", () => {
   const goalEvaluatorSchema = {
@@ -228,7 +229,7 @@ describe("Responses Structured Outputs & Multi-hop Translation", () => {
   });
 
   describe("OpenAI -> Gemini / Antigravity request mapping", () => {
-    it("maps json_schema response_format to generationConfig responseMimeType and responseSchema in Gemini", () => {
+    it("maps json_schema response_format to generationConfig responseMimeType and responseJsonSchema in Gemini", () => {
       const chatRequest = {
         messages: [{ role: "user", content: "Evaluate" }],
         response_format: {
@@ -243,15 +244,16 @@ describe("Responses Structured Outputs & Multi-hop Translation", () => {
       const geminiRequest = openaiToGeminiRequest("gemini-2.5-flash", chatRequest, false);
 
       expect(geminiRequest.generationConfig.responseMimeType).toBe("application/json");
-      expect(geminiRequest.generationConfig.responseSchema).toBeDefined();
+      expect(geminiRequest.generationConfig.responseJsonSchema).toBeDefined();
+      expect(geminiRequest.generationConfig.responseSchema).toBeUndefined();
 
-      const schema = geminiRequest.generationConfig.responseSchema;
+      const schema = geminiRequest.generationConfig.responseJsonSchema;
       expect(schema.type).toBe("object");
       expect(schema.properties.decision).toBeDefined();
       expect(schema.properties.evidence).toBeDefined();
-      // Response schemas preserve nullable and closed-object constraints.
-      expect(schema.properties.next_step).toMatchObject({ type: "string", nullable: true });
-      expect(schema.properties.blocker_key).toMatchObject({ type: "string", nullable: true });
+      // Public JSON Schema preserves nullable type arrays and closed-object constraints.
+      expect(schema.properties.next_step).toEqual({ type: ["string", "null"] });
+      expect(schema.properties.blocker_key).toEqual({ type: ["string", "null"] });
       expect(schema.additionalProperties).toBe(false);
       // Verify required fields preserved
       expect(schema.required).toEqual(["decision", "evidence", "next_step", "blocker_key"]);
@@ -311,20 +313,33 @@ describe("Responses Structured Outputs & Multi-hop Translation", () => {
   });
 
   describe("schema composition safety", () => {
+    it("preserves multi-branch oneOf for Chat -> Vertex responseJsonSchema", () => {
+      const schema = {
+        type: "object",
+        properties: { value: { oneOf: [{ type: "string" }, { type: "object", properties: {} }] } },
+      };
+      const request = openaiToVertexRequest("gemini-3.8-flash", {
+        messages: [{ role: "user", content: "Choose" }],
+        response_format: { type: "json_schema", json_schema: { schema } },
+      }, false);
+
+      expect(request.generationConfig.responseJsonSchema.properties.value.oneOf).toEqual(schema.properties.value.oneOf);
+      expect(request.generationConfig.responseSchema).toBeUndefined();
+    });
+
     for (const keyword of ["anyOf", "oneOf"]) {
-      it(`rejects non-null ${keyword} branches instead of selecting one`, () => {
-        expect(() => openaiToGeminiRequest("gemini-3.8-flash", {
+      it(`preserves multi-branch ${keyword} for Gemini responseJsonSchema`, () => {
+        const schema = {
+          type: "object",
+          properties: { value: { [keyword]: [{ type: "string" }, { type: "object", properties: {} }] } },
+        };
+        const request = openaiToGeminiRequest("gemini-3.8-flash", {
           messages: [{ role: "user", content: "Choose" }],
-          response_format: {
-            type: "json_schema",
-            json_schema: {
-              schema: {
-                type: "object",
-                properties: { value: { [keyword]: [{ type: "string" }, { type: "object", properties: {} }] } },
-              },
-            },
-          },
-        }, false)).toThrow(`Unsupported response schema ${keyword}`);
+          response_format: { type: "json_schema", json_schema: { schema } },
+        }, false);
+
+        expect(request.generationConfig.responseJsonSchema.properties.value[keyword]).toEqual(schema.properties.value[keyword]);
+        expect(request.generationConfig.responseSchema).toBeUndefined();
       });
     }
   });

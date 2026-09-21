@@ -43,7 +43,7 @@ function directRequest(target, body = REQUEST, model = body.model) {
 
 function payloadFor(target, body = REQUEST, model = body.model) {
   const result = directRequest(target, body, model);
-  return target === FORMATS.GEMINI ? result : result.request;
+  return target === FORMATS.GEMINI || target === FORMATS.VERTEX ? result : result.request;
 }
 
 function toolRequest(tool_choice, parallel_tool_calls = undefined) {
@@ -66,8 +66,10 @@ describe("Responses <-> Gemini direct translators", () => {
     expect(payload.systemInstruction.parts).toEqual([{ text: "Return a grounded result." }]);
     expect(responsesToGeminiBase(REQUEST.model, REQUEST, "sig").generationConfig.maxOutputTokens).toBe(321);
     expect(payload.generationConfig).toMatchObject({
-      temperature: 0.2, topP: 0.8, responseMimeType: "application/json", responseSchema: GOAL_SCHEMA,
+      temperature: 0.2, topP: 0.8, responseMimeType: "application/json",
+      [target === FORMATS.GEMINI ? "responseJsonSchema" : "responseSchema"]: GOAL_SCHEMA,
     });
+    expect(payload.generationConfig[target === FORMATS.GEMINI ? "responseSchema" : "responseJsonSchema"]).toBeUndefined();
     expect(payload.generationConfig.maxOutputTokens).toBeGreaterThanOrEqual(321);
     expect(payload.safetySettings).toEqual(expect.any(Array));
     expect(payload.contents).toEqual(expect.arrayContaining([
@@ -85,6 +87,21 @@ describe("Responses <-> Gemini direct translators", () => {
     expect(payload.tools[0].functionDeclarations).toEqual([expect.objectContaining({ name: "get_weather" })]);
     expect(payload.toolConfig).toEqual({ functionCallingConfig: { mode: "AUTO" } });
     if (target !== FORMATS.GEMINI) expect(result.request).toBeDefined();
+  });
+
+  it.each([FORMATS.GEMINI, FORMATS.VERTEX])("preserves multi-branch oneOf for public Responses -> %s", (target) => {
+    const schema = {
+      type: "object",
+      properties: { value: { oneOf: [{ type: "string" }, { type: "object", properties: {} }] } },
+    };
+    const payload = payloadFor(target, {
+      model: "gemini-3.8-pro",
+      input: [{ type: "message", role: "user", content: "Choose" }],
+      text: { format: { type: "json_schema", schema } },
+    });
+
+    expect(payload.generationConfig.responseJsonSchema.properties.value.oneOf).toEqual(schema.properties.value.oneOf);
+    expect(payload.generationConfig.responseSchema).toBeUndefined();
   });
 
   it("uses the Claude-compatible Antigravity path for Claude models", () => {

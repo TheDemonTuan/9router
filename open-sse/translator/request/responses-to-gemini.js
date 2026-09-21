@@ -5,6 +5,7 @@ import {
   DEFAULT_SAFETY_SETTINGS,
   cleanJSONSchemaForAntigravity,
   cleanResponseSchemaForAntigravity,
+  cleanResponseJsonSchemaForGemini,
   normalizeGeminiContents,
   tryParseJSON,
 } from "../formats/gemini.js";
@@ -15,6 +16,7 @@ import {
   wrapInCloudCodeEnvelope,
 } from "./openai-to-gemini.js";
 import { openaiResponsesToOpenAIRequest } from "./openai-responses.js";
+import { postProcessForVertex } from "./openai-to-vertex.js";
 import { getGeminiThoughtSignatureSync } from "../../services/thoughtSignatureStore.js";
 import {
   DEFAULT_THINKING_AG_SIGNATURE,
@@ -60,16 +62,21 @@ function contentParts(content, itemType) {
   return parts;
 }
 
-function responseSchema(text) {
+function responseSchema(text, responseSchemaMode = "legacy") {
   const format = text?.format;
   if (!format || typeof format !== "object") return {};
   if (format.type === "json_object") return { responseMimeType: "application/json" };
   if (format.type !== "json_schema") return {};
   const schema = format.schema;
+  const usesJsonSchema = responseSchemaMode === "jsonSchema";
   return {
     responseMimeType: "application/json",
     ...(schema && typeof schema === "object"
-      ? { responseSchema: cleanResponseSchemaForAntigravity(schema) }
+      ? {
+          [usesJsonSchema ? "responseJsonSchema" : "responseSchema"]: usesJsonSchema
+            ? cleanResponseJsonSchemaForGemini(schema)
+            : cleanResponseSchemaForAntigravity(schema),
+        }
       : {}),
   };
 }
@@ -115,11 +122,11 @@ function toolConfig(body, declarations) {
   unsupported("Unsupported Responses tool_choice for Gemini direct translation");
 }
 
-export function responsesToGeminiBase(model, body, signature, sessionId = null) {
+export function responsesToGeminiBase(model, body, signature, sessionId = null, responseSchemaMode = "legacy") {
   const result = {
     model,
     contents: [],
-    generationConfig: responseSchema(body.text),
+    generationConfig: responseSchema(body.text, responseSchemaMode),
     safetySettings: DEFAULT_SAFETY_SETTINGS,
   };
   if (body.instructions) {
@@ -183,7 +190,11 @@ export function responsesToGeminiBase(model, body, signature, sessionId = null) 
 }
 
 export function responsesToGeminiRequest(model, body, stream, credentials = null) {
-  return responsesToGeminiBase(model, body, DEFAULT_THINKING_AG_SIGNATURE, credentials?._clientSessionId);
+  return responsesToGeminiBase(model, body, DEFAULT_THINKING_AG_SIGNATURE, credentials?._clientSessionId, "jsonSchema");
+}
+
+export function responsesToVertexRequest(model, body, stream, credentials = null) {
+  return postProcessForVertex(responsesToGeminiRequest(model, body, stream, credentials));
 }
 
 export function responsesToGeminiCLIRequest(model, body, stream, credentials = null) {
@@ -198,5 +209,6 @@ export function responsesToAntigravityRequest(model, body, stream, credentials =
 }
 
 register(FORMATS.OPENAI_RESPONSES, FORMATS.GEMINI, responsesToGeminiRequest, null);
+register(FORMATS.OPENAI_RESPONSES, FORMATS.VERTEX, responsesToVertexRequest, null);
 register(FORMATS.OPENAI_RESPONSES, FORMATS.GEMINI_CLI, responsesToGeminiCLIRequest, null);
 register(FORMATS.OPENAI_RESPONSES, FORMATS.ANTIGRAVITY, responsesToAntigravityRequest, null);

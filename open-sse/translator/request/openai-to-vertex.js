@@ -9,7 +9,7 @@ import { DEFAULT_THINKING_VERTEX_SIGNATURE } from "../../config/defaultThinkingS
  * 1. Replace all synthetic thoughtSignatures with Vertex-native signature.
  * 2. Strip `id` from functionCall and functionResponse (Vertex rejects these).
  */
-function postProcessForVertex(body) {
+export function postProcessForVertex(body) {
   if (!body?.contents) return body;
 
   for (const turn of body.contents) {

@@ -469,6 +469,32 @@ export function cleanResponseSchemaForAntigravity(schema) {
   return walk(root);
 }
 
+// Public Gemini and Vertex accept JSON Schema directly. Remove only metadata
+// that the API does not define; preserve schema composition and references.
+const GEMINI_JSON_SCHEMA_IGNORED_KEYWORDS = new Set([
+  "$schema", "$id", "$comment", "title", "description", "default", "examples",
+  "format", "deprecated", "readOnly", "writeOnly", "minLength", "maxLength",
+  "exclusiveMinimum", "exclusiveMaximum", "multipleOf", "uniqueItems", "contains",
+  "unevaluatedProperties", "unevaluatedItems", "contentSchema", "additionalItems",
+  "propertyNames", "patternProperties", "enumDescriptions", "dependencies",
+  "dependentSchemas", "dependentRequired", "if", "then", "else", "contentMediaType",
+  "contentEncoding", "optional",
+]);
+
+export function cleanResponseJsonSchemaForGemini(schema) {
+  if (!schema || typeof schema !== "object") return schema;
+  const clean = (value) => {
+    if (Array.isArray(value)) return value.map(clean);
+    if (!value || typeof value !== "object") return value;
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([key]) => !GEMINI_JSON_SCHEMA_IGNORED_KEYWORDS.has(key) && !key.startsWith("x-"))
+        .map(([key, entry]) => [key, clean(entry)])
+    );
+  };
+  return clean(schema);
+}
+
 // Merge adjacent same-role messages, strip empty parts, ensure valid generation bounds.
 export function normalizeGeminiContents(contents, { requireTrailingUser = false } = {}) {
   const out = [];

@@ -17,6 +17,7 @@ import {
   generateProjectId,
   cleanJSONSchemaForAntigravity,
   cleanResponseSchemaForAntigravity,
+  cleanResponseJsonSchemaForGemini,
   normalizeGeminiContents
 } from "../formats/gemini.js";
 import { deriveSessionId, toNumericSessionId } from "../../utils/sessionManager.js";
@@ -38,7 +39,7 @@ export function sanitizeGeminiFunctionName(name) {
 }
 
 // Core: Convert OpenAI request to Gemini format (base for all variants)
-function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG_SIGNATURE, sessionId = null) {
+function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG_SIGNATURE, sessionId = null, responseSchemaMode = "legacy") {
   const result = {
     model: model,
     contents: [],
@@ -67,7 +68,10 @@ function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG
       result.generationConfig.responseMimeType = "application/json";
       const schema = rf.json_schema?.schema || rf.schema;
       if (schema && typeof schema === "object") {
-        result.generationConfig.responseSchema = cleanResponseSchemaForAntigravity(schema);
+        const usesJsonSchema = responseSchemaMode === "jsonSchema";
+        result.generationConfig[usesJsonSchema ? "responseJsonSchema" : "responseSchema"] = usesJsonSchema
+          ? cleanResponseJsonSchemaForGemini(schema)
+          : cleanResponseSchemaForAntigravity(schema);
       }
     } else if (rf.type === "json_object") {
       result.generationConfig.responseMimeType = "application/json";
@@ -249,7 +253,7 @@ function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG
 
 // OpenAI -> Gemini (standard API)
 export function openaiToGeminiRequest(model, body, stream, credentials = null) {
-  return openaiToGeminiBase(model, body, stream, DEFAULT_THINKING_AG_SIGNATURE, credentials?._clientSessionId);
+  return openaiToGeminiBase(model, body, stream, DEFAULT_THINKING_AG_SIGNATURE, credentials?._clientSessionId, "jsonSchema");
 }
 
 // OpenAI -> Gemini CLI (Cloud Code Assist)
