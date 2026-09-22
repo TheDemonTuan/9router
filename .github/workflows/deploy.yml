@@ -54,6 +54,7 @@ jobs:
             unit/chat-quota-handler.test.js \
             unit/antigravity-quota-routing.test.js \
             unit/continuity-strip.test.js \
+            unit/health-route.test.js \
             unit/alibaba-token-plan-thinking.test.js \
             unit/alibaba-token-plan-catalog.test.js \
             unit/alibaba-token-plan-capabilities.test.js \
@@ -65,6 +66,8 @@ jobs:
           set -euo pipefail
           node --test tests/unit/custom-server-h2c.test.cjs tests/unit/custom-server-h2c-concurrent.test.cjs
           bun test tests/unit/bun-client-disconnect.test.cjs
+      - name: Verify blue-green reconcile and drain safety
+        run: bash tests/unit/blue-green-reconcile.test.sh
       - name: Verify provider, alias, and OAuth baselines
         working-directory: tests
         run: |
@@ -263,6 +266,11 @@ jobs:
               chmod +x '$DEPLOY_PATH/deploy.sh'
               printf '%s' '$GHCR_TOKEN' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
               cd '$DEPLOY_PATH'
+              if [ -f .active-slot ] && [ -f .deployed-image ]; then
+                ./deploy.sh --reconcile
+              else
+                echo 'No persisted deployment state; skipping reconcile for initial bootstrap.'
+              fi
               ./deploy.sh '$IMAGE_REF'
               ./deploy.sh --status
             "

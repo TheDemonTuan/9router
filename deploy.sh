@@ -191,6 +191,26 @@ wait_healthy() {
   done
 }
 
+reconcile_active_slot() {
+  [[ -f "$ACTIVE_SLOT_FILE" ]] || die "Cannot reconcile: missing $ACTIVE_SLOT_FILE"
+  [[ -f "$DEPLOYED_IMAGE_FILE" ]] || die "Cannot reconcile: missing $DEPLOYED_IMAGE_FILE"
+
+  local active_slot
+  active_slot="$(tr -d '[:space:]' < "$ACTIVE_SLOT_FILE")"
+  [[ "$active_slot" == "blue" || "$active_slot" == "green" ]] || die "Cannot reconcile: invalid active slot: $active_slot"
+
+  IMAGE_REF="$(tr -d '[:space:]' < "$DEPLOYED_IMAGE_FILE")"
+  [[ -n "$IMAGE_REF" ]] || die "Cannot reconcile: empty $DEPLOYED_IMAGE_FILE"
+  export IMAGE_REF
+
+  log "Reconciling active slot: $active_slot"
+  ensure_network
+  compose up -d --no-deps --pull never "9router-$active_slot"
+  wait_healthy "$active_slot" || die "Active slot $active_slot failed healthcheck during reconcile"
+  render_traefik_config "$active_slot" "$TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME"
+  log "Reconciled Traefik route and active slot: $active_slot"
+}
+
 show_status() {
   local active
   active="$(cat "$ACTIVE_SLOT_FILE" 2>/dev/null || echo "none")"
@@ -388,6 +408,11 @@ if [[ "$cmd" == "--status" ]]; then
   exit 0
 fi
 
+if [[ "$cmd" == "--reconcile" ]]; then
+  reconcile_active_slot
+  exit 0
+fi
+
 if [[ "$cmd" == "--rollback" ]]; then
   do_rollback
   exit 0
@@ -410,7 +435,7 @@ if [[ -z "$IMAGE_REF" ]]; then
   if [[ -f "$DEPLOYED_IMAGE_FILE" ]]; then
     IMAGE_REF="$(cat "$DEPLOYED_IMAGE_FILE")"
   else
-    die "Usage: $0 <IMAGE_REF> | --rollback | --status | --setup-host | --diagnostics"
+      die "Usage: $0 <IMAGE_REF> | --reconcile | --rollback | --status | --setup-host | --diagnostics"
   fi
 fi
 export IMAGE_REF
