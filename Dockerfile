@@ -34,7 +34,6 @@ RUN mkdir -p /app/data && chown -R bun:bun /app && \
 RUN apk add --no-cache su-exec && \
   printf '#!/bin/sh\nchown -R bun:bun /app/data /app/data-home 2>/dev/null\nexec su-exec bun "$@"\n' > /entrypoint.sh && \
   chmod +x /entrypoint.sh
-  chmod +x /entrypoint.sh
 
 EXPOSE 20128
 

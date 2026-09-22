@@ -30,7 +30,7 @@ jobs:
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.2
@@ -68,10 +68,10 @@ jobs:
           node __baseline__/verify-alias.mjs
           node __baseline__/verify-oauth-urls.mjs
 
-  build-and-push:
+  prepare:
+    name: Validate release
     needs: verify
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     permissions:
       contents: read
 
