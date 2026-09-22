@@ -26,8 +26,8 @@ export async function POST(request, { params }) {
 
     const baseUrl = `http://127.0.0.1:${process.env.PORT || UPDATER_CONFIG.appPort}`;
 
-    // Compatible providers: fetch live model list
-    if (isCompatible && models.length === 0) {
+    // Dynamic compatible and bridge providers expose their model catalog through the internal route.
+    if ((isCompatible || providerId === "chatgpt-web") && models.length === 0) {
       try {
         const modelsRes = await fetch(`${baseUrl}/api/providers/${id}/models`);
         if (modelsRes.ok) {

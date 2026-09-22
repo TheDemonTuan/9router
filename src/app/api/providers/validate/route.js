@@ -6,6 +6,11 @@ import { resolveOllamaLocalHost, resolveXiaomiTokenplanBaseUrl, PROVIDERS } from
 import { openaiToCommandCodeRequest } from "open-sse/translator/request/openai-to-commandcode.js";
 import { resolveQoderCredentials, resolveQoderModels } from "open-sse/services/qoderModels.js";
 import { normalizeProviderId } from "@/lib/providerNormalization";
+import {
+  getChatGptWebCatalog,
+  getChatGptWebHealth,
+  validateChatGptWebBridgeId,
+} from "open-sse/services/chatgptWebBridge.js";
 
 // Probe a webSearch/webFetch provider using its searchConfig/fetchConfig.
 // Returns true if API key is accepted (status !== 401 && !== 403).
@@ -87,6 +92,34 @@ export async function POST(request) {
     const body = await request.json();
     const provider = normalizeProviderId(body.provider);
     const { apiKey, providerSpecificData } = body;
+
+    if (provider === "chatgpt-web") {
+      try {
+        const bridgeId = validateChatGptWebBridgeId(providerSpecificData?.bridgeId || body.bridgeId);
+        const connection = { provider, providerSpecificData: { bridgeId } };
+        const [health, catalog] = await Promise.all([
+          getChatGptWebHealth(connection),
+          getChatGptWebCatalog(connection, { force: true }),
+        ]);
+        const usableModels = catalog.stale ? [] : catalog.models.filter((model) => {
+          const capabilities = model?.capabilities;
+          return capabilities?.native_responses === true || capabilities?.generic_responses === true;
+        });
+        const valid = health.status === "ok"
+          && health.accepting_turns !== false
+          && !catalog.stale
+          && usableModels.length > 0;
+        return NextResponse.json({
+          valid,
+          error: valid ? null : catalog.stale ? "Bridge catalog is stale" : usableModels.length === 0 ? "Bridge has no usable models" : "Bridge is not healthy",
+          health,
+          models: usableModels,
+          stale: catalog.stale,
+        });
+      } catch (error) {
+        return NextResponse.json({ valid: false, error: error.message }, { status: 400 });
+      }
+    }
 
     const isNoAuth = AI_PROVIDERS[provider]?.noAuth === true;
     if (!provider || (!apiKey && provider !== "ollama-local" && !isNoAuth)) {

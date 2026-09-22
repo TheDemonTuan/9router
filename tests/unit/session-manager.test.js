@@ -1,6 +1,15 @@
 // A2: locks resolveSessionId priority/stickiness (codex/kiro/antigravity centralization).
-import { describe, it, expect, beforeEach } from "vitest";
-import { resolveContinuationId, resolveSessionId, resolveSessionIdentity, deriveSessionId, clearSessionStore } from "../../open-sse/utils/sessionManager.js";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import {
+  clearSessionStore,
+  deriveSessionId,
+  getChatGptWebPinnedConnection,
+  pinChatGptWebConnection,
+  resolveChatGptWebConversationKey,
+  resolveContinuationId,
+  resolveSessionId,
+  resolveSessionIdentity,
+} from "../../open-sse/utils/sessionManager.js";
 
 // Assistant text must reach ASSISTANT_MIN_LEN (80) to use assistant anchor; else first user message.
 const longAssistant = "x".repeat(80);
@@ -179,6 +188,37 @@ describe("resolveSessionId", () => {
     const a = resolveSessionId({ body: withAssistant, connectionId: "conn1", scope: "kiro" });
     const b = resolveSessionId({ body: withAssistant, connectionId: "conn1", scope: "kiro" });
     expect(a).not.toBe(b);
+  });
+});
+
+describe("ChatGPT Web conversation routing", () => {
+  it("uses explicit session, Responses, and Codex thread identifiers only", () => {
+    expect(resolveChatGptWebConversationKey({ headers: { "x-session-id": "session-1" }, body: {} }))
+      .toBe("session:session-1");
+    expect(resolveChatGptWebConversationKey({ body: { previous_response_id: "resp-1" } }))
+      .toBe("previous_response_id:resp-1");
+    expect(resolveChatGptWebConversationKey({ body: { client_metadata: { thread_id: "thread-1" } } }))
+      .toBe("thread:thread-1");
+    expect(resolveChatGptWebConversationKey({
+      headers: { "x-codex-turn-metadata": JSON.stringify({ thread_id: "codex-thread-1", turn_id: "turn-1" }) },
+      body: {},
+    })).toBe("thread:codex-thread-1");
+  });
+
+  it("does not use assistant text, metadata user, or request IDs", () => {
+    const body = { metadata: { user_id: "user-1" }, messages: [{ role: "assistant", content: "x".repeat(100) }] };
+    expect(resolveChatGptWebConversationKey({ headers: { "x-client-request-id": "request-1" }, body })).toBeNull();
+  });
+
+  it("expires ChatGPT Web pins after the session TTL", async () => {
+    vi.useFakeTimers();
+    try {
+      await pinChatGptWebConnection("conversation-1", "connection-1");
+      vi.advanceTimersByTime(2 * 60 * 60 * 1000 + 1);
+      expect(getChatGptWebPinnedConnection("conversation-1")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

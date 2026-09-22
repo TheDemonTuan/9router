@@ -8,7 +8,7 @@ import {
   isValidApiKey,
 } from "../services/auth.js";
 import { handleAntigravityQuotaError, clearAntigravityStrikes } from "../services/antigravityQuota.js";
-import { getSettings } from "@/lib/localDb";
+import { getSettings, getProviderConnections } from "@/lib/localDb";
 import { getModelInfo, getComboModels } from "../services/model.js";
 import { handleChatCore } from "open-sse/handlers/chatCore.js";
 import { DEFAULT_HEADROOM_URL } from "@/lib/headroom/detect";
@@ -20,10 +20,109 @@ import { augmentModelsWithCapacityAdapter, withCapacityAdapterStripping, getActi
 import { handleBypassRequest } from "open-sse/utils/bypassHandler.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import { detectFormatByEndpoint } from "open-sse/translator/formats.js";
+import { detectClientTool } from "open-sse/utils/clientDetector.js";
 import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
+
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
 import { stripModelContextMarker } from "open-sse/utils/modelMarkers.js";
+import {
+  getChatGptWebCatalog,
+} from "open-sse/services/chatgptWebBridge.js";
+import {
+  loadChatGptWebPinnedConnection,
+  pinChatGptWebConnection,
+  resolveChatGptWebConversationKey,
+} from "open-sse/utils/sessionManager.js";
+
+function readHeader(headers, name) {
+  if (!headers || typeof headers !== "object") return null;
+  const target = name.toLowerCase();
+  const entry = Object.entries(headers).find(([key]) => key.toLowerCase() === target);
+  return typeof entry?.[1] === "string" && entry[1].trim() ? entry[1].trim() : null;
+}
+
+function getChatGptWebExplicitConnectionId(clientRawRequest) {
+  return readHeader(clientRawRequest?.headers, "x-connection-id")
+    || readHeader(clientRawRequest?.headers, "x-9router-connection-id");
+}
+
+function getChatGptWebConversationKey(clientRawRequest, body) {
+  return resolveChatGptWebConversationKey({ headers: clientRawRequest?.headers, body });
+}
+
+function withConnectionHeader(response, connectionId) {
+  if (!response || !connectionId) return response;
+  const headers = new Headers(response.headers);
+  headers.set("x-9router-connection-id", String(connectionId));
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
+function bridgeContinuationError(connectionId) {
+  return new Response(JSON.stringify({
+    error: {
+      type: "bridge_error",
+      code: "bridge_connection_unavailable",
+      message: `Pinned ChatGPT Web bridge connection is unavailable: ${connectionId}`,
+    },
+  }), {
+    status: 409,
+    headers: {
+      "content-type": "application/json",
+      "x-9router-no-fallback": "true",
+      "x-should-retry": "false",
+      "x-9router-error-code": "bridge_connection_unavailable",
+      "x-9router-connection-id": String(connectionId),
+    },
+  });
+}
+
+/**
+ * Resolve account-scoped cgw capabilities before combo ordering. Unknown or stale rows stay
+ * unsupported; a capability is usable when at least one verified active bridge can provide it.
+ */
+function bridgeCapabilityForRequest(clientRawRequest, body) {
+  return detectClientTool(clientRawRequest?.headers || {}, body) === "codex"
+    ? "native_responses"
+    : "generic_responses";
+}
+
+async function loadChatGptWebComboCapabilities(models, bridgeCapability = "generic_responses") {
+  const bridgeModels = (Array.isArray(models) ? models : []).filter((value) => (
+    typeof value === "string" && (value.startsWith("cgw/") || value.startsWith("chatgpt-web/"))
+  ));
+  if (bridgeModels.length === 0) return null;
+
+  const capabilities = new Map();
+  let connections;
+  try {
+    connections = await getProviderConnections({ provider: "chatgpt-web", isActive: true });
+  } catch {
+    return capabilities;
+  }
+
+  await Promise.all(connections.map(async (connection) => {
+    try {
+      const catalog = await getChatGptWebCatalog(connection);
+      if (catalog.stale) return;
+      for (const candidate of bridgeModels) {
+        const rowId = candidate.startsWith("cgw/") ? candidate.slice(4) : candidate;
+        const row = catalog.models?.find((entry) => entry.id === rowId);
+        if (row?.capabilities?.[bridgeCapability] !== true) continue;
+        if (!row?.capabilities || typeof row.capabilities !== "object") continue;
+        const merged = capabilities.get(candidate) || {};
+        for (const [key, value] of Object.entries(row.capabilities)) {
+          if (value === true) merged[key] = true;
+          else if (!(key in merged) && value === false) merged[key] = false;
+        }
+        capabilities.set(candidate, merged);
+      }
+    } catch {
+      // Offline/unknown bridges contribute no capability evidence.
+    }
+  }));
+  return capabilities;
+}
 
 /**
  * Handle chat completion request
@@ -91,6 +190,7 @@ export async function handleChat(request, clientRawRequest = null) {
   if (bypassResponse) return bypassResponse.response || bypassResponse;
 
   const requiredCapabilities = detectRequiredCapabilities(body);
+  const bridgeCapability = bridgeCapabilityForRequest(clientRawRequest, body);
 
   // Check if model is a combo (has multiple models with fallback)
   const comboModels = await getComboModels(modelStr);
@@ -101,6 +201,7 @@ export async function handleChat(request, clientRawRequest = null) {
     const comboStrategy = comboSpecificStrategy || settings.comboStrategy || "fallback";
     const augmentedModels = augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, settings);
     const adapterAdded = augmentedModels.filter((m) => !comboModels.includes(m));
+    const liveCapabilities = await loadChatGptWebComboCapabilities(augmentedModels, bridgeCapability);
 
     if (comboStrategy === "fusion") {
       log.info("CHAT", `Combo "${modelStr}" with ${comboModels.length} models (strategy: fusion)`);
@@ -134,7 +235,8 @@ export async function handleChat(request, clientRawRequest = null) {
       log,
       comboName: modelStr,
       comboStrategy,
-      comboStickyLimit
+      comboStickyLimit,
+      liveCapabilities,
     });
   }
 
@@ -176,8 +278,10 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       const comboSpecificStrategy = comboStrategies[modelStr]?.fallbackStrategy;
       const comboStrategy = comboSpecificStrategy || chatSettings.comboStrategy || "fallback";
       const requiredCapabilities = detectRequiredCapabilities(body);
+      const bridgeCapability = bridgeCapabilityForRequest(clientRawRequest, body);
       const augmentedModels = augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, chatSettings);
       const adapterAdded = augmentedModels.filter((m) => !comboModels.includes(m));
+      const liveCapabilities = await loadChatGptWebComboCapabilities(augmentedModels, bridgeCapability);
 
       if (comboStrategy === "fusion") {
         log.info("CHAT", `Combo "${modelStr}" with ${comboModels.length} models (strategy: fusion)`);
@@ -211,7 +315,8 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         log,
         comboName: modelStr,
         comboStrategy,
-        comboStickyLimit
+        comboStickyLimit,
+        liveCapabilities,
       });
     }
     log.warn("CHAT", "Invalid model format", { model: modelStr });
@@ -227,11 +332,28 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
 
   // Try with available accounts (fallback on errors)
   const excludeConnectionIds = new Set();
+  const requiredCapabilities = detectRequiredCapabilities(body);
+  const bridgeCapability = bridgeCapabilityForRequest(clientRawRequest, body);
+  const conversationKey = provider === "chatgpt-web"
+    ? getChatGptWebConversationKey(clientRawRequest, body)
+    : null;
+  const explicitConnectionId = provider === "chatgpt-web"
+    ? getChatGptWebExplicitConnectionId(clientRawRequest)
+    : null;
+  const pinnedConnectionId = provider === "chatgpt-web"
+    ? (explicitConnectionId || await loadChatGptWebPinnedConnection(conversationKey))
+    : null;
   let lastError = null;
   let lastStatus = null;
 
   while (true) {
-    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model);
+    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, {
+      requiredCapabilities,
+      ...(pinnedConnectionId ? { pinConnectionId: pinnedConnectionId } : {}),
+      ...(provider === "chatgpt-web" ? { bridgeCapability } : {}),
+    });
+
+    if (credentials?.pinnedConnectionUnavailable) return bridgeContinuationError(pinnedConnectionId);
 
     // All accounts unavailable
     if (!credentials || credentials.allRateLimited) {
@@ -247,6 +369,10 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       }
       log.warn("CHAT", "No more accounts available", { provider });
       return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable");
+    }
+
+    if (provider === "chatgpt-web" && conversationKey && credentials.connectionId) {
+      await pinChatGptWebConnection(conversationKey, credentials.connectionId);
     }
 
     // Account selection shown in the unified "▶" line (acc:...)
@@ -308,7 +434,28 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       }
     });
 
-    if (result.success) return result.response;
+    if (result.success) return withConnectionHeader(result.response, credentials.connectionId);
+
+    const isBridgeCooldown = provider === "chatgpt-web"
+      && (result.status === HTTP_STATUS.RATE_LIMITED
+        || result.errorClass === "quota_exhausted"
+        || result.errorClass === "rate_limited");
+    if (isBridgeCooldown) {
+      try {
+        await markAccountUnavailable(
+          credentials.connectionId,
+          result.status,
+          result.error,
+          provider,
+          model,
+          result.resetsAtMs,
+          result.errorClass,
+        );
+      } catch (error) {
+        log.warn("AUTH", `Failed to record ChatGPT Web cooldown: ${error.message}`);
+      }
+    }
+    if (result.terminalNoFallback) return withConnectionHeader(result.response, credentials.connectionId);
 
     // Antigravity 409/429: refresh live quota to get exact resetAt before locking
     let quotaResetMs = null;
@@ -339,6 +486,8 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       continue;
     }
 
-    return result.response;
+    return provider === "chatgpt-web"
+      ? withConnectionHeader(result.response, credentials.connectionId)
+      : result.response;
   }
 }

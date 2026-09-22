@@ -114,7 +114,12 @@ function createNoOpLogger() {
  * @param {string} model - Model name
  * @returns {Promise<object>} Promise that resolves to logger object with methods to log each stage
  */
-export async function createRequestLogger(sourceFormat, targetFormat, model) {
+export async function createRequestLogger(sourceFormat, targetFormat, model, options = {}) {
+  // ChatGPT Web prompts and native checkpoints never belong in diagnostic files.
+  const redactPayloads = options.redactPayloads === true;
+  const payload = (value) => redactPayloads ? { redacted: true } : value;
+  const safeHeaders = (value) => redactPayloads ? { redacted: true } : maskSensitiveHeaders(value);
+
   // Return no-op logger if logging is disabled
   if (!LOGGING_ENABLED) {
     return createNoOpLogger();
@@ -131,8 +136,8 @@ export async function createRequestLogger(sourceFormat, targetFormat, model) {
       writeJsonFile(sessionPath, "1_req_client.json", {
         timestamp: new Date().toISOString(),
         endpoint,
-        headers: maskSensitiveHeaders(headers),
-        body
+        headers: safeHeaders(headers),
+        body: payload(body)
       });
     },
     
@@ -140,8 +145,8 @@ export async function createRequestLogger(sourceFormat, targetFormat, model) {
     logRawRequest(body, headers = {}) {
       writeJsonFile(sessionPath, "2_req_source.json", {
         timestamp: new Date().toISOString(),
-        headers: maskSensitiveHeaders(headers),
-        body
+        headers: safeHeaders(headers),
+        body: payload(body)
       });
     },
     
@@ -149,7 +154,7 @@ export async function createRequestLogger(sourceFormat, targetFormat, model) {
     logOpenAIRequest(body) {
       writeJsonFile(sessionPath, "3_req_openai.json", {
         timestamp: new Date().toISOString(),
-        body
+        body: payload(body)
       });
     },
     
@@ -158,8 +163,8 @@ export async function createRequestLogger(sourceFormat, targetFormat, model) {
       writeJsonFile(sessionPath, "4_req_target.json", {
         timestamp: new Date().toISOString(),
         url,
-        headers: maskSensitiveHeaders(headers),
-        body
+        headers: safeHeaders(headers),
+        body: payload(body)
       });
     },
     
@@ -170,14 +175,16 @@ export async function createRequestLogger(sourceFormat, targetFormat, model) {
         timestamp: new Date().toISOString(),
         status,
         statusText,
-        headers: headers ? (typeof headers.entries === "function" ? Object.fromEntries(headers.entries()) : headers) : {},
-        body
+        headers: redactPayloads
+          ? { redacted: true }
+          : (headers ? (typeof headers.entries === "function" ? Object.fromEntries(headers.entries()) : headers) : {}),
+        body: payload(body)
       });
     },
     
     // 5. Append streaming chunk to provider response
     appendProviderChunk(chunk) {
-      if (!fs || !sessionPath) return;
+      if (redactPayloads || !fs || !sessionPath) return;
       try {
         const filePath = path.join(sessionPath, "5_res_provider.txt");
         fs.appendFileSync(/* turbopackIgnore: true */ filePath, chunk);
@@ -188,7 +195,7 @@ export async function createRequestLogger(sourceFormat, targetFormat, model) {
     
     // 6. Append OpenAI intermediate chunks (target → openai)
     appendOpenAIChunk(chunk) {
-      if (!fs || !sessionPath) return;
+      if (redactPayloads || !fs || !sessionPath) return;
       try {
         const filePath = path.join(sessionPath, "6_res_openai.txt");
         fs.appendFileSync(/* turbopackIgnore: true */ filePath, chunk);
@@ -201,13 +208,13 @@ export async function createRequestLogger(sourceFormat, targetFormat, model) {
     logConvertedResponse(body) {
       writeJsonFile(sessionPath, "7_res_client.json", {
         timestamp: new Date().toISOString(),
-        body
+        body: payload(body)
       });
     },
     
     // 7. Append streaming chunk to converted response
     appendConvertedChunk(chunk) {
-      if (!fs || !sessionPath) return;
+      if (redactPayloads || !fs || !sessionPath) return;
       try {
         const filePath = path.join(sessionPath, "7_res_client.txt");
         fs.appendFileSync(/* turbopackIgnore: true */ filePath, chunk);
@@ -222,7 +229,7 @@ export async function createRequestLogger(sourceFormat, targetFormat, model) {
         timestamp: new Date().toISOString(),
         error: error?.message || String(error),
         stack: error?.stack,
-        requestBody
+        requestBody: payload(requestBody)
       });
     }
   };

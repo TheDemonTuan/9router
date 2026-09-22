@@ -60,25 +60,49 @@ function flattenToolHistory(messages) {
 
 // Reorder combo models by capability fit. Stable; never drops a model (fallback intact).
 // Tier 0: satisfies all hard + all soft. Tier 1: all hard only. Tier 2: rest.
-export function reorderByCapabilities(models, required) {
+// liveCapabilities is supplied by the app boundary for account-scoped providers.
+export function reorderByCapabilities(models, required, liveCapabilities = null) {
   if (!required || required.size === 0 || !Array.isArray(models) || models.length <= 1) return models;
   const hard = [...required].filter((c) => HARD_CAPS.has(c));
   const soft = [...required].filter((c) => !HARD_CAPS.has(c));
+
+  const liveCapsFor = (modelString, provider, model) => {
+    if (provider !== "cgw" && provider !== "chatgpt-web") return null;
+    if (liveCapabilities instanceof Map) {
+      return liveCapabilities.get(modelString)
+        || liveCapabilities.get(`cgw/${model}`)
+        || liveCapabilities.get(`chatgpt-web/${model}`)
+        || null;
+    }
+    if (liveCapabilities && typeof liveCapabilities === "object") {
+      return liveCapabilities[modelString]
+        || liveCapabilities[`cgw/${model}`]
+        || liveCapabilities[`chatgpt-web/${model}`]
+        || null;
+    }
+    return null;
+  };
 
   const tierOf = (m) => {
     const slash = typeof m === "string" ? m.indexOf("/") : -1;
     const provider = slash > 0 ? m.slice(0, slash) : "";
     const model = slash > 0 ? m.slice(slash + 1) : m;
-    const caps = getCapabilitiesForModel(provider, model);
+    // cgw has no static capability defaults: unknown live evidence stays unsupported.
+    const caps = liveCapsFor(m, provider, model) || (
+      provider === "cgw" || provider === "chatgpt-web"
+        ? {}
+        : getCapabilitiesForModel(provider, model)
+    );
     if (!hard.every((c) => caps[c] === true)) return 2;
     return soft.every((c) => caps[c] === true) ? 0 : 1;
   };
 
   // Stable sort by tier (Array.prototype.sort is stable in modern engines).
-  return models
+  const reordered = models
     .map((m, i) => ({ m, i, t: tierOf(m) }))
     .sort((a, b) => a.t - b.t || a.i - b.i)
     .map((x) => x.m);
+  return reordered.every((model, index) => model === models[index]) ? models : reordered;
 }
 
 /**
@@ -178,7 +202,10 @@ export function detectRequiredCapabilities(body) {
   const contents = body.contents || body.request?.contents;                      // gemini / antigravity
   for (const c of trailingUserItems(contents)) scanContent(c.parts);
 
-  // search: temporarily disabled in auto-switch (feature not wired yet).
+  // Search tools are request-wide; unlike modalities they need no message scan.
+  if (Array.isArray(body.tools) && body.tools.some((tool) =>
+    tool?.type === "web_search" || tool?.type === "web_search_preview" || tool?.function?.name === "web_search"
+  )) required.add("search");
 
   return required;
 }
@@ -308,6 +335,11 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
       // Success (2xx) - return response
       if (result.ok) {
         log.info("COMBO", `Model ${modelStr} succeeded`);
+        return result;
+      }
+
+      if (result.headers.get("x-9router-no-fallback") === "true") {
+        log.warn("COMBO", `Model ${modelStr} returned a terminal no-fallback error`, { status: result.status });
         return result;
       }
 
@@ -575,6 +607,13 @@ function pickEarliestQuotaResponse(responses) {
  */
 export async function handleFusionChat({ body, models, handleSingleModel, log, comboName, judgeModel, tuning }) {
   const panel = Array.isArray(models) ? models.filter(Boolean) : [];
+  const statefulBridgeModel = (value) => typeof value === "string" && (value.startsWith("cgw/") || value.startsWith("chatgpt-web/"));
+  if (panel.some(statefulBridgeModel) || statefulBridgeModel(judgeModel)) {
+    return new Response(
+      JSON.stringify({ error: { message: "ChatGPT Web native requests cannot be duplicated by fusion" } }),
+      { status: 400, headers: { "Content-Type": "application/json", "x-9router-no-fallback": "true" } },
+    );
+  }
   if (panel.length === 0) {
     return new Response(
       JSON.stringify({ error: { message: "Fusion combo has no models" } }),

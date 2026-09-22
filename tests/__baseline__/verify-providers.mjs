@@ -11,6 +11,8 @@ const baseline = JSON.parse(readFileSync(join(here, "providers-baseline.json"), 
 // Fields intentionally added during refactor (verified by dedicated runtime tests, not byte-baseline).
 // authUrl: removed dead field (qwen/iflow) — no consumer reads config.authUrl (oauth block has authorize/deviceCode)
 const ADDED_FIELDS = new Set(["forceStream", "urlSuffix", "retry", "quirks", "auth", "validateUrl", "usage", "clientId", "clientSecret", "tokenUrl", "cliVersion", "apiClient", "copilot", "authorizeUrl", "authUrl", "regions", "defaultRegion", "reasoningInject", "priority", "hasFree"]);
+// ChatGPT Web is a deliberate new registry provider; its contract is covered by dedicated cgw tests.
+const INTENTIONAL_PROVIDER_ADDITIONS = new Set(["chatgpt-web"]);
 
 // Normalize via JSON roundtrip so function/undefined are dropped identically; drop added/removed fields.
 // ADDED_FIELDS are verified by dedicated runtime tests, so drop them from BOTH sides (added or intentionally removed).
@@ -25,7 +27,10 @@ const allIds = new Set([...Object.keys(baseline), ...Object.keys(current)]);
 for (const id of allIds) {
   const a = baseline[id];
   const b = current[id];
-  if (a === undefined) { diffs.push(`+ provider added: ${id}`); continue; }
+  if (a === undefined) {
+    if (!INTENTIONAL_PROVIDER_ADDITIONS.has(id)) diffs.push(`+ provider added: ${id}`);
+    continue;
+  }
   if (b === undefined) { diffs.push(`- provider removed: ${id}`); continue; }
   const sa = JSON.stringify(a);
   const sb = JSON.stringify(b);

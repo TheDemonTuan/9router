@@ -113,10 +113,12 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   }
   const stripList = getModelStrip(alias, model);
   const upstreamModel = getModelUpstreamId(alias, model);
+  const detectedClientTool = detectClientTool(clientRawRequest?.headers || {}, body);
+  const nativePassthrough = isNativePassthrough(detectedClientTool, provider);
 
-  // Inject provider-level thinking config override (only if client hasn't set)
-  // on/off → extended type (body.thinking), none/low/medium/high → effort type (body.reasoning_effort)
-  if (providerThinking?.mode && providerThinking.mode !== "auto") {
+  // Provider-level overrides are translation conveniences, never part of native passthrough.
+  // Mutating a Codex request here would break opaque reasoning/tool state.
+  if (!nativePassthrough && providerThinking?.mode && providerThinking.mode !== "auto") {
     const mode = providerThinking.mode;
     if (mode === "on" && !body.thinking) {
       console.log("Injecting provider-level thinking config override: on");
@@ -157,15 +159,17 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     stream = false;
   }
 
-  const reqLogger = await createRequestLogger(sourceFormat, targetFormat, model);
+  const reqLogger = await createRequestLogger(sourceFormat, targetFormat, model, {
+    redactPayloads: provider === "chatgpt-web",
+  });
   if (clientRawRequest) reqLogger.logClientRawRequest(clientRawRequest.endpoint, clientRawRequest.body, clientRawRequest.headers);
   reqLogger.logRawRequest(body);
   log?.debug?.("FORMAT", `${sourceFormat} → ${targetFormat} | stream=${stream}`);
 
   // Native passthrough: CLI tool and provider are the same ecosystem
   // Skip all translation/normalization — only model and Bearer are swapped
-  const clientTool = detectClientTool(clientRawRequest?.headers || {}, body);
-  const passthrough = isNativePassthrough(clientTool, provider);
+  const clientTool = detectedClientTool;
+  const passthrough = nativePassthrough;
   const responsesClientDialect = getResponsesDialect(clientTool);
   const responsesProviderDialect = getResponsesDialect(null, provider);
 
@@ -216,7 +220,6 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       return createErrorResult(HTTP_STATUS.BAD_REQUEST, message);
     }
     if (!translatedBody) {
-      trackPendingRequest(model, provider, connectionId, false, true);
       return createErrorResult(HTTP_STATUS.BAD_REQUEST, `Failed to translate request for ${sourceFormat} → ${targetFormat}`);
     }
     responseSchemaValidation = translatedBody._responseSchemaValidation || translatedBody.request?._responseSchemaValidation;
@@ -349,6 +352,12 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   if (passthrough && clientTool === "claude") anchorClaudeCache(translatedBody);
 
   const executor = getExecutor(provider);
+  let pendingReleased = false;
+  const releasePending = (error = false) => {
+    if (pendingReleased) return;
+    pendingReleased = true;
+    trackPendingRequest(model, provider, connectionId, false, error);
+  };
   trackPendingRequest(model, provider, connectionId, true);
   appendRequestLog({ model, provider, connectionId, status: "PENDING" }).catch(() => { });
 
@@ -357,10 +366,10 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   const streamController = createStreamController({
     onDisconnect: (reason) => {
-      trackPendingRequest(model, provider, connectionId, false);
+      releasePending();
       if (onDisconnect) onDisconnect(reason);
     },
-    onError: () => trackPendingRequest(model, provider, connectionId, false),
+    onError: () => releasePending(true),
     log, provider, model, reqTag, clientSignal
   });
 
@@ -425,7 +434,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     const isConnectTimeout = error.code === "UPSTREAM_CONNECT_TIMEOUT" || error.status === HTTP_STATUS.GATEWAY_TIMEOUT;
     const failureStatus = isClientAbort ? 499 : (isConnectTimeout ? HTTP_STATUS.GATEWAY_TIMEOUT : HTTP_STATUS.BAD_GATEWAY);
 
-    trackPendingRequest(model, provider, connectionId, false, true);
+    releasePending(true);
     appendRequestLog({ model, provider, connectionId, status: `FAILED ${failureStatus}` }).catch(() => { });
     saveRequestDetail(buildRequestDetail({
       provider, model, connectionId,
@@ -511,8 +520,10 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   // Provider returned error
   if (!providerResponse.ok) {
-    trackPendingRequest(model, provider, connectionId, false, true);
-    const { statusCode, message, resetsAtMs, errorClass, retryable } = await parseUpstreamError(providerResponse, executor);
+    releasePending(true);
+    const terminalNoFallback = providerResponse.headers.get("x-9router-no-fallback") === "true";
+    const originalProviderError = terminalNoFallback ? providerResponse.clone() : null;
+    const { statusCode, message, resetsAtMs, resolvedModel, errorClass, retryable } = await parseUpstreamError(providerResponse, executor);
     appendRequestLog({ model, provider, connectionId, status: `FAILED ${statusCode}` }).catch(() => { });
     saveRequestDetail(buildRequestDetail({
       provider, model, connectionId,
@@ -531,12 +542,21 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       log.errorLine(reqTag, "✗", `ERROR ${statusCode} · ${provider}/${model} · ${Date.now() - requestStartTime}ms${urlStr}\n    ${errMsg}`);
     }
     reqLogger.logError(new Error(message), finalBody || translatedBody);
-    return createErrorResult(statusCode, errMsg, resetsAtMs, { errorClass, retryable });
+    const errorResult = createErrorResult(statusCode, errMsg, resetsAtMs, {
+      errorClass,
+      retryable,
+      ...(resolvedModel ? { resolvedModel } : {}),
+    });
+    if (terminalNoFallback) {
+      errorResult.terminalNoFallback = true;
+      errorResult.response = originalProviderError;
+    }
+    return errorResult;
   }
 
-  const sharedCtx = { provider, model, body, stream, translatedBody, finalBody, responseSchemaValidation, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag, log, responsesClientDialect, responsesProviderDialect };
+  const sharedCtx = { provider, model, body, stream, translatedBody, finalBody, responseSchemaValidation, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag, log, responsesClientDialect, responsesProviderDialect, releasePending };
   const appendLog = (extra) => appendRequestLog({ model, provider, connectionId, ...extra }).catch(() => { });
-  const trackDone = () => trackPendingRequest(model, provider, connectionId, false);
+  const trackDone = () => releasePending();
 
   // Provider forced streaming but client wants JSON
   if (!clientRequestedStreaming && providerRequiresStreaming) {

@@ -25,10 +25,17 @@ jobs:
       - name: Install test dependencies
         working-directory: tests
         run: bun install --frozen-lockfile
-      - name: Run Alibaba and translator verification
+      - name: Run Responses and ChatGPT Web verification
         working-directory: tests
         run: |
+          set -euo pipefail
+          response_tests="$(find unit translator -type f -name '*responses*.test.js' ! -path '*/real/*' | sort)"
+          chatgpt_web_tests="$(find unit integration -type f -name '*chatgpt*.test.js' ! -path '*/real/*' | sort)"
+          printf 'Responses regression gate:\n%s\n' "$response_tests"
+          printf 'ChatGPT Web regression gate:\n%s\n' "$chatgpt_web_tests"
           bun x vitest run --config vitest.config.js \
+            $response_tests \
+            $chatgpt_web_tests \
             unit/alibaba-token-plan-thinking.test.js \
             unit/alibaba-token-plan-catalog.test.js \
             unit/alibaba-token-plan-capabilities.test.js \

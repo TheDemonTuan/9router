@@ -7,13 +7,14 @@ import ProviderIcon from "./ProviderIcon";
 import CapacityBadges from "./CapacityBadges";
 import { useModelCaps } from "@/shared/hooks/useModelCaps";
 import { getModelsByProviderId, getModelKind } from "@/shared/constants/models";
-import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, AI_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, getProviderAlias } from "@/shared/constants/providers";
+import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, LOCAL_BRIDGE_PROVIDERS, AI_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, getProviderAlias } from "@/shared/constants/providers";
 
 // Provider order: OAuth first, then Free Tier, then API Key (matches dashboard/providers)
 const PROVIDER_ORDER = [
   ...Object.keys(OAUTH_PROVIDERS),
   ...Object.keys(FREE_PROVIDERS),
   ...Object.keys(FREE_TIER_PROVIDERS),
+  ...Object.keys(LOCAL_BRIDGE_PROVIDERS),
   ...Object.keys(APIKEY_PROVIDERS),
 ];
 
@@ -22,13 +23,13 @@ const NO_AUTH_PROVIDER_IDS = Object.keys(FREE_PROVIDERS).filter(id => FREE_PROVI
 
 // Providers with per-account live catalogs via /api/providers/[id]/models.
 // Static registry stays as fallback when live fetch fails or is empty.
-const LIVE_CATALOG_PROVIDERS = ["cursor", "cline", "clinepass", "alitp-intl"];
+const LIVE_CATALOG_PROVIDERS = ["cursor", "cline", "clinepass", "alitp-intl", "chatgpt-web"];
 
 // Fetch a provider's account-scoped catalog for every active connection and merge
 // the results. Entries collapse by model id on purpose: two connections of the
 // same provider produce the same picker value (`alias/id`), so keeping the first
-// avoids duplicate rows. There is no per-connection metadata to preserve beyond
-// {id,name}. Empty array means "nothing live" so callers keep the static fallback.
+// avoids duplicate rows. Live capability fields are retained for strict capability filters.
+// Empty array means "nothing live" so callers keep the static fallback.
 function useLiveProviderModels(isOpen, connectionIds, label) {
   const [models, setModels] = useState([]);
   const idsKey = (connectionIds ?? []).join("|");
@@ -45,7 +46,7 @@ function useLiveProviderModels(isOpen, connectionIds, label) {
       const response = await fetch(`/api/providers/${connectionId}/models`, { cache: "no-store" });
       if (!response.ok) return [];
       const data = await response.json();
-      return Array.isArray(data.models) ? data.models : [];
+      return data.stale === true ? [] : (Array.isArray(data.models) ? data.models : []);
     }))
       .then((modelLists) => {
         if (cancelled) return;
@@ -113,11 +114,13 @@ export default function ModelSelectModal({
   const clineConnectionIds = liveConnectionIdsByProvider.cline;
   const clinepassConnectionIds = liveConnectionIdsByProvider.clinepass;
   const alitpConnectionIds = liveConnectionIdsByProvider["alitp-intl"];
+  const chatgptWebConnectionIds = liveConnectionIdsByProvider["chatgpt-web"];
 
   const cursorModels = useLiveProviderModels(isOpen, cursorConnectionIds, "Cursor");
   const clineModels = useLiveProviderModels(isOpen, clineConnectionIds, "Cline");
   const clinepassModels = useLiveProviderModels(isOpen, clinepassConnectionIds, "ClinePass");
   const alitpModels = useLiveProviderModels(isOpen, alitpConnectionIds, "Alibaba Token Plan");
+  const chatgptWebModels = useLiveProviderModels(isOpen, chatgptWebConnectionIds, "ChatGPT Web");
 
   const fetchCombos = async () => {
     try {
@@ -183,7 +186,7 @@ export default function ModelSelectModal({
     if (isOpen) fetchDisabledModels();
   }, [isOpen]);
 
-  const allProviders = useMemo(() => ({ ...OAUTH_PROVIDERS, ...FREE_PROVIDERS, ...FREE_TIER_PROVIDERS, ...APIKEY_PROVIDERS }), []);
+  const allProviders = useMemo(() => ({ ...OAUTH_PROVIDERS, ...FREE_PROVIDERS, ...FREE_TIER_PROVIDERS, ...LOCAL_BRIDGE_PROVIDERS, ...APIKEY_PROVIDERS }), []);
 
   // Group models by provider with priority order
   const groupedModels = useMemo(() => {
@@ -350,11 +353,13 @@ export default function ModelSelectModal({
           hasModels: mergedModels.length > 0,
         };
       } else {
-        const liveModels = providerId === "cursor" ? cursorModels : providerId === "cline" ? clineModels : providerId === "clinepass" ? clinepassModels : providerId === "alitp-intl" ? alitpModels : [];
-        const hardcodedModels = liveModels.length > 0
+        const liveModels = providerId === "cursor" ? cursorModels : providerId === "cline" ? clineModels : providerId === "clinepass" ? clinepassModels : providerId === "alitp-intl" ? alitpModels : providerId === "chatgpt-web" ? chatgptWebModels : [];
+        const hardcodedModels = providerId === "chatgpt-web"
           ? liveModels
-          // Deprecated compat aliases stay routable but leave the picker.
-          : getModelsByProviderId(providerId).filter((m) => !(m.deprecated && providerId === "alitp-intl"));
+          : liveModels.length > 0
+            ? liveModels
+            // Deprecated compat aliases stay routable but leave the picker.
+            : getModelsByProviderId(providerId).filter((m) => !(m.deprecated && providerId === "alitp-intl"));
         const hardcodedIds = new Set(hardcodedModels.map((m) => m.id));
 
         // Custom models: if no hardcoded models (e.g. openrouter), show all aliases for this provider
@@ -362,6 +367,7 @@ export default function ModelSelectModal({
         const hasHardcoded = hardcodedModels.length > 0;
         const customAliasModels = Object.entries(modelAliases)
           .filter(([aliasName, fullModel]) =>
+            providerId !== "chatgpt-web" &&
             fullModel.startsWith(`${alias}/`) &&
             (hasHardcoded ? aliasName === fullModel.replace(`${alias}/`, "") : true) &&
             !hardcodedIds.has(fullModel.replace(`${alias}/`, ""))
@@ -374,11 +380,17 @@ export default function ModelSelectModal({
         // Custom models registered via /api/models/custom (provider "Add Model" button)
         const customAliasIds = new Set(customAliasModels.map((m) => m.id));
         const customRegisteredModels = customModels
-          .filter((m) => m.providerAlias === alias && !hardcodedIds.has(m.id) && !customAliasIds.has(m.id))
+          .filter((m) => providerId !== "chatgpt-web" && m.providerAlias === alias && !hardcodedIds.has(m.id) && !customAliasIds.has(m.id))
           .map((m) => ({ id: m.id, name: m.name || m.id, value: `${alias}/${m.id}`, isCustom: true }));
 
         const merged = [
-          ...hardcodedModels.map((m) => ({ id: m.id, name: m.name, value: `${alias}/${m.id}`, kind: getModelKind(m) })),
+          ...hardcodedModels.map((m) => ({
+            id: m.id,
+            name: m.name,
+            value: `${alias}/${m.id}`,
+            kind: getModelKind(m),
+            ...(m.capabilities && typeof m.capabilities === "object" ? { capabilities: m.capabilities } : {}),
+          })),
           ...customAliasModels,
           ...customRegisteredModels,
         ];
@@ -423,7 +435,7 @@ export default function ModelSelectModal({
     });
 
     return groups;
-  }, [filteredActiveProviders, modelAliases, allProviders, providerNodes, customModels, disabledModels, kindFilter, activeProviders, cursorModels, clineModels, clinepassModels, alitpModels]);
+  }, [filteredActiveProviders, modelAliases, allProviders, providerNodes, customModels, disabledModels, kindFilter, activeProviders, cursorModels, clineModels, clinepassModels, alitpModels, chatgptWebModels]);
 
   // Filter combos by search query (and hide combos when kindFilter is set — combos are LLM-only by design)
   const filteredCombos = useMemo(() => {
@@ -449,7 +461,10 @@ export default function ModelSelectModal({
       let models = group.models;
       // Filter by input-modality capability (vision/pdf/audioInput/videoInput).
       if (capFilter) {
-        models = models.filter((m) => getCaps(m.value)?.[capFilter] === true);
+        models = models.filter((m) => {
+          const liveCapabilities = m.capabilities && typeof m.capabilities === "object" ? m.capabilities : null;
+          return (liveCapabilities || getCaps(m.value))?.[capFilter] === true;
+        });
         if (models.length === 0) return;
       }
       if (query) {

@@ -16,7 +16,7 @@ describe("detectRequiredCapabilities", () => {
 
   it("openai file -> pdf", () => {
     const r = detectRequiredCapabilities({ messages: [{ role: "user", content: [
-      { type: "file", file: { file_data: "data:application/pdf;base64,x" } },
+      { type: "file", file: { file_data: "[PDF attachment removed — 0 KB]" } },
     ] }] });
     expect(r.has("pdf")).toBe(true);
   });
@@ -69,6 +69,21 @@ describe("reorderByCapabilities", () => {
     const models = ["deepseek/deepseek-chat", "deepseek/deepseek-reasoner"];
     const out = reorderByCapabilities(models, new Set(["vision"]));
     expect(out).toBe(models);
+  });
+
+  it("uses verified live cgw capabilities for combo ordering", () => {
+    const models = ["deepseek/deepseek-chat", "cgw/chatgpt-web/high"];
+    const liveCapabilities = new Map([
+      ["cgw/chatgpt-web/high", { vision: true, tools: true }],
+    ]);
+    const out = reorderByCapabilities(models, new Set(["vision"]), liveCapabilities);
+    expect(out[0]).toBe("cgw/chatgpt-web/high");
+  });
+
+  it("keeps unknown cgw capability evidence unsupported", () => {
+    const models = ["cgw/chatgpt-web/high", "anthropic/claude-sonnet-4.6"];
+    const out = reorderByCapabilities(models, new Set(["vision"]));
+    expect(out[0]).toBe("anthropic/claude-sonnet-4.6");
   });
 
   it("single model -> unchanged", () => {

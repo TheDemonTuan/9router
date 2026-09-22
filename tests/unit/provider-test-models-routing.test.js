@@ -60,6 +60,26 @@ describe("provider test-models route kind routing", () => {
     global.fetch = originalFetch;
   });
 
+  it("loads dynamic ChatGPT Web models from the provider models route", async () => {
+    mocks.getProviderConnectionById.mockResolvedValue({ id: "bridge-1", provider: "chatgpt-web" });
+    global.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      models: [{ id: "chatgpt-web/high", name: "High" }],
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+
+    const { POST } = await import("../../src/app/api/providers/[id]/test-models/route.js");
+    const res = await POST(new Request("http://localhost/api/providers/bridge-1/test-models", { method: "POST" }), {
+      params: Promise.resolve({ id: "bridge-1" }),
+    });
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.results).toHaveLength(1);
+    expect(body.results[0].modelId).toBe("chatgpt-web/high");
+    expect(global.fetch).toHaveBeenCalledWith(
+      "http://127.0.0.1:20128/api/providers/bridge-1/models"
+    );
+  });
+
   it("routes huggingface image models to /api/v1/images/generations", async () => {
     const { POST } = await import("../../src/app/api/providers/[id]/test-models/route.js");
 

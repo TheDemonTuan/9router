@@ -16,6 +16,8 @@ const PERIOD_MS = { "24h": 86400000, "7d": 604800000, "30d": 2592000000, "60d": 
 
 // In-memory state shared across Next.js modules
 if (!global._pendingRequests) global._pendingRequests = { byModel: {}, byAccount: {} };
+// Deployment drain uses this counter; unlike dashboard pending stats, it never expires.
+if (!global._livePendingRequests) global._livePendingRequests = { byModel: {}, byAccount: {} };
 if (!global._lastErrorProvider) global._lastErrorProvider = { provider: "", ts: 0 };
 if (!global._statsEmitter) {
   global._statsEmitter = new EventEmitter();
@@ -27,6 +29,7 @@ if (!global._connectionMapCache) global._connectionMapCache = { map: {}, ts: 0 }
 if (!global._statsEmitTimers) global._statsEmitTimers = { pending: null, update: null };
 
 const pendingRequests = global._pendingRequests;
+const livePendingRequests = global._livePendingRequests;
 const lastErrorProvider = global._lastErrorProvider;
 const pendingTimers = global._pendingTimers;
 const recentRing = global._recentRing;
@@ -153,29 +156,38 @@ export function trackPendingRequest(model, provider, connectionId, started, erro
   const modelKey = provider ? `${model} (${provider})` : model;
   const timerKey = `${connectionId}|${modelKey}`;
 
-  if (!pendingRequests.byModel[modelKey]) pendingRequests.byModel[modelKey] = 0;
-  pendingRequests.byModel[modelKey] = Math.max(0, pendingRequests.byModel[modelKey] + (started ? 1 : -1));
-  if (pendingRequests.byModel[modelKey] === 0) delete pendingRequests.byModel[modelKey];
+  const updateCounter = (counter) => {
+    if (!counter.byModel[modelKey]) counter.byModel[modelKey] = 0;
+    counter.byModel[modelKey] = Math.max(0, counter.byModel[modelKey] + (started ? 1 : -1));
+    if (counter.byModel[modelKey] === 0) delete counter.byModel[modelKey];
 
-  if (connectionId) {
-    if (!pendingRequests.byAccount[connectionId]) pendingRequests.byAccount[connectionId] = {};
-    if (!pendingRequests.byAccount[connectionId][modelKey]) pendingRequests.byAccount[connectionId][modelKey] = 0;
-    pendingRequests.byAccount[connectionId][modelKey] = Math.max(0, pendingRequests.byAccount[connectionId][modelKey] + (started ? 1 : -1));
-    if (pendingRequests.byAccount[connectionId][modelKey] === 0) {
-      delete pendingRequests.byAccount[connectionId][modelKey];
-      if (Object.keys(pendingRequests.byAccount[connectionId]).length === 0) {
-        delete pendingRequests.byAccount[connectionId];
+    if (connectionId) {
+      if (!counter.byAccount[connectionId]) counter.byAccount[connectionId] = {};
+      if (!counter.byAccount[connectionId][modelKey]) counter.byAccount[connectionId][modelKey] = 0;
+      counter.byAccount[connectionId][modelKey] = Math.max(0, counter.byAccount[connectionId][modelKey] + (started ? 1 : -1));
+      if (counter.byAccount[connectionId][modelKey] === 0) {
+        delete counter.byAccount[connectionId][modelKey];
+        if (Object.keys(counter.byAccount[connectionId]).length === 0) {
+          delete counter.byAccount[connectionId];
+        }
       }
     }
-  }
+  };
+
+  updateCounter(pendingRequests);
+  updateCounter(livePendingRequests);
 
   if (started) {
     clearTimeout(pendingTimers[timerKey]);
     pendingTimers[timerKey] = setTimeout(() => {
       delete pendingTimers[timerKey];
-      if (pendingRequests.byModel[modelKey] > 0) pendingRequests.byModel[modelKey] = 0;
+      // Expiry hides stale dashboard rows only; live drain state remains untouched.
+      if (pendingRequests.byModel[modelKey] > 0) delete pendingRequests.byModel[modelKey];
       if (connectionId && pendingRequests.byAccount[connectionId]?.[modelKey] > 0) {
-        pendingRequests.byAccount[connectionId][modelKey] = 0;
+        delete pendingRequests.byAccount[connectionId][modelKey];
+        if (Object.keys(pendingRequests.byAccount[connectionId]).length === 0) {
+          delete pendingRequests.byAccount[connectionId];
+        }
       }
       scheduleStatsEvent("pending");
     }, PENDING_TIMEOUT_MS);
@@ -193,22 +205,45 @@ export function trackPendingRequest(model, provider, connectionId, started, erro
   scheduleStatsEvent("pending");
 }
 
+function getRequestRows(counter) {
+  const rows = [];
+  for (const [connectionId, models] of Object.entries(counter.byAccount || {})) {
+    for (const [modelKey, count] of Object.entries(models)) {
+      if (count > 0) rows.push({ connectionId, modelKey, count });
+    }
+  }
+  return rows;
+}
+
+function getModelRequestRows(counter) {
+  return Object.entries(counter.byModel || {})
+    .filter(([, count]) => count > 0)
+    .map(([modelKey, count]) => ({ modelKey, count }));
+}
+
 export async function getActiveRequests() {
   const activeRequests = [];
   const connectionMap = await getConnectionMapCached();
 
-  for (const [connectionId, models] of Object.entries(pendingRequests.byAccount)) {
-    for (const [modelKey, count] of Object.entries(models)) {
-      if (count > 0) {
-        const accountName = connectionMap[connectionId] || `Account ${connectionId.slice(0, 8)}...`;
-        const match = modelKey.match(/^(.*) \((.*)\)$/);
-        activeRequests.push({
-          model: match ? match[1] : modelKey,
-          provider: match ? match[2] : "unknown",
-          account: accountName, count,
-        });
-      }
-    }
+  for (const { connectionId, modelKey, count } of getRequestRows(pendingRequests)) {
+    const accountName = connectionMap[connectionId] || `Account ${connectionId.slice(0, 8)}...`;
+    const match = modelKey.match(/^(.*) \((.*)\)$/);
+    activeRequests.push({
+      model: match ? match[1] : modelKey,
+      provider: match ? match[2] : "unknown",
+      account: accountName, count,
+    });
+  }
+
+  // Keep the expiring dashboard rows separate from the authoritative drain rows.
+  const liveActiveRequests = [];
+  for (const { modelKey, count } of getModelRequestRows(livePendingRequests)) {
+    const match = modelKey.match(/^(.*) \((.*)\)$/);
+    liveActiveRequests.push({
+      model: match ? match[1] : modelKey,
+      provider: match ? match[2] : "unknown",
+      count,
+    });
   }
 
   await ensureRingInitialized();
@@ -235,7 +270,7 @@ export async function getActiveRequests() {
     .slice(0, 20);
 
   const errorProvider = (Date.now() - lastErrorProvider.ts < 10000) ? lastErrorProvider.provider : "";
-  return { activeRequests, recentRequests, errorProvider };
+  return { activeRequests, liveActiveRequests, activeRequestsKnown: true, recentRequests, errorProvider };
 }
 
 export async function saveRequestUsage(entry) {
@@ -249,35 +284,11 @@ export async function saveRequestUsage(entry) {
     const promptTokens = tokens.prompt_tokens || tokens.input_tokens || 0;
     const completionTokens = tokens.completion_tokens || tokens.output_tokens || 0;
 
-    let inserted = false;
-
     // All 3 writes (history insert, daily upsert, lifetime counter) in ONE transaction.
-    // better-sqlite3 is sync → no JS yield mid-transaction → no race in same process.
+    // Every completed request is a distinct usage event; timestamp/payload equality is
+    // not an idempotency key because concurrent requests commonly share both.
+    let inserted = false;
     db.transaction(() => {
-      const existing = db.get(
-        `SELECT id, endpoint FROM usageHistory
-         WHERE timestamp = ?
-           AND COALESCE(provider, '') = COALESCE(?, '')
-           AND COALESCE(model, '') = COALESCE(?, '')
-           AND COALESCE(connectionId, '') = COALESCE(?, '')
-           AND COALESCE(apiKey, '') = COALESCE(?, '')
-           AND promptTokens = ?
-           AND completionTokens = ?
-         ORDER BY id DESC LIMIT 1`,
-        [
-          entry.timestamp, entry.provider || null, entry.model || null,
-          entry.connectionId || null, entry.apiKey || null,
-          promptTokens, completionTokens,
-        ]
-      );
-
-      if (existing) {
-        if (!existing.endpoint && entry.endpoint) {
-          db.run(`UPDATE usageHistory SET endpoint = ? WHERE id = ?`, [entry.endpoint, existing.id]);
-        }
-        return;
-      }
-
       db.run(
         `INSERT INTO usageHistory(timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, status, tokens, meta) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
@@ -399,23 +410,30 @@ export async function getUsageStats(period = "all") {
     last10Minutes: [],
     pending: pendingRequests,
     activeRequests: [],
+    liveActiveRequests: [],
+    activeRequestsKnown: true,
     recentRequests,
     errorProvider: (Date.now() - lastErrorProvider.ts < 10000) ? lastErrorProvider.provider : "",
   };
 
   // Active requests
-  for (const [connectionId, models] of Object.entries(pendingRequests.byAccount)) {
-    for (const [modelKey, count] of Object.entries(models)) {
-      if (count > 0) {
-        const accountName = connectionMap[connectionId] || `Account ${connectionId.slice(0, 8)}...`;
-        const match = modelKey.match(/^(.*) \((.*)\)$/);
-        stats.activeRequests.push({
-          model: match ? match[1] : modelKey,
-          provider: match ? match[2] : "unknown",
-          account: accountName, count,
-        });
-      }
-    }
+  for (const { connectionId, modelKey, count } of getRequestRows(pendingRequests)) {
+    const accountName = connectionMap[connectionId] || `Account ${connectionId.slice(0, 8)}...`;
+    const match = modelKey.match(/^(.*) \((.*)\)$/);
+    stats.activeRequests.push({
+      model: match ? match[1] : modelKey,
+      provider: match ? match[2] : "unknown",
+      account: accountName, count,
+    });
+  }
+  for (const { connectionId, modelKey, count } of getRequestRows(livePendingRequests)) {
+    const accountName = connectionMap[connectionId] || `Account ${connectionId.slice(0, 8)}...`;
+    const match = modelKey.match(/^(.*) \((.*)\)$/);
+    stats.liveActiveRequests.push({
+      model: match ? match[1] : modelKey,
+      provider: match ? match[2] : "unknown",
+      account: accountName, count,
+    });
   }
 
   // last10Minutes — query 10min window

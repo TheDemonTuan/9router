@@ -14,6 +14,9 @@ import { resolveCursorModels } from "open-sse/services/cursorModels.js";
 import { resolveZedModels } from "open-sse/shared/zedAuth.js";
 import { resolveClineModels, resolveClinepassModels } from "open-sse/services/clinepassModels.js";
 import { resolveEffectiveProviderModels } from "open-sse/services/alibabaTokenPlanModels.js";
+import {
+  getChatGptWebCatalog,
+} from "open-sse/services/chatgptWebBridge.js";
 
 const GEMINI_CLI_MODELS_URL = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
 
@@ -538,6 +541,29 @@ export async function GET(request, { params }) {
 
     if (!connection) {
       return NextResponse.json({ error: "Connection not found" }, { status: 404 });
+    }
+
+    if (connection.provider === "chatgpt-web") {
+      try {
+        const catalog = await getChatGptWebCatalog(connection, {
+          force: new URL(request.url).searchParams.get("refresh") === "true",
+        });
+        return NextResponse.json({
+          provider: connection.provider,
+          connectionId: connection.id,
+          // A retained catalog is diagnostic evidence only; stale rows must never be advertised.
+          models: catalog.stale ? [] : catalog.models.filter((model) => {
+            const capabilities = model?.capabilities;
+            return capabilities?.native_responses === true || capabilities?.generic_responses === true;
+          }),
+          stale: catalog.stale,
+          bridgeIdentity: catalog.bridgeIdentity,
+          revision: catalog.revision,
+          checkedAt: catalog.checkedAt,
+        });
+      } catch (error) {
+        return NextResponse.json({ error: error.message, models: [], stale: false }, { status: 503 });
+      }
     }
 
     if (isOpenAICompatibleProvider(connection.provider)) {

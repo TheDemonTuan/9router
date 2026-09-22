@@ -15,6 +15,7 @@ import { OAUTH_PROVIDERS, APIKEY_PROVIDERS } from "@/shared/constants/config";
 import {
   FREE_PROVIDERS,
   FREE_TIER_PROVIDERS,
+  LOCAL_BRIDGE_PROVIDERS,
   WEB_COOKIE_PROVIDERS,
   OPENAI_COMPATIBLE_PREFIX,
   ANTHROPIC_COMPATIBLE_PREFIX,
@@ -306,6 +307,12 @@ export default function ProvidersPage() {
     return ["oauth", "apikey", "api_key"];
   };
 
+  const localBridgeEntries = sortByPriority(
+    Object.entries(LOCAL_BRIDGE_PROVIDERS).filter(
+      ([key, info]) => !info.hidden && matchSearch(info.name) && matchStatus(getProviderStats(key, "bridge"), false),
+    ),
+    "bridge",
+  );
   const oauthEntries = sortByPriority(
     Object.entries(OAUTH_PROVIDERS).filter(
       ([key, info]) =>
@@ -463,6 +470,24 @@ export default function ProvidersPage() {
           </div>
         )}
       </div>
+
+      {localBridgeEntries.length > 0 && (
+        <div className="flex flex-col gap-4">
+          <h2 className="text-lg sm:text-xl font-semibold">Local Bridges</h2>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4 lg:grid-cols-3 xl:grid-cols-4">
+            {localBridgeEntries.map(([key, info]) => (
+              <ApiKeyProviderCard
+                key={key}
+                providerId={key}
+                provider={info}
+                stats={getProviderStats(key, "bridge")}
+                authType="bridge"
+                onToggle={(active) => handleToggleProvider(key, "bridge", active)}
+              />
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* OAuth Providers */}
       {oauthEntries.length > 0 && (
@@ -708,6 +733,7 @@ function ProviderCard({ providerId, provider, stats, authType, onToggle }) {
     oauth: "OAuth",
     apikey: "API Key",
     compatible: "Compatible",
+    bridge: "Local Bridge",
   };
 
   return (
@@ -827,6 +853,7 @@ function ApiKeyProviderCard({
     oauth: "OAuth",
     apikey: "API Key",
     compatible: "Compatible",
+    bridge: "Local Bridge",
   };
 
   const getIconPath = () => {

@@ -10,10 +10,13 @@
 
 import crypto from "crypto";
 import { MEMORY_CONFIG } from "../config/runtimeConfig.js";
+import { makeKv } from "../../src/lib/db/helpers/kvStore.js";
 
 // Runtime storage: Key = connectionId, Value = { sessionId, lastUsed }
 const runtimeSessionStore = new Map();
 const continuationStore = new Map();
+const chatGptWebConnectionStore = new Map();
+const chatGptWebPinsKv = makeKv("chatgptWebPins");
 
 // Periodically evict entries that haven't been used within TTL
 const cleanupInterval = setInterval(() => {
@@ -82,6 +85,8 @@ export function clearSessionStore() {
     runtimeSessionStore.clear();
     assistantSessionStore.clear();
     continuationStore.clear();
+    chatGptWebConnectionStore.clear();
+    chatGptWebPinsKv.clear().catch(() => {});
 }
 
 // Conversation-stable session store: Key = hash(scope+assistant text), Value = { sessionId, lastUsed }
@@ -90,6 +95,7 @@ const ASSISTANT_MIN_LEN = 50;
 const ASSISTANT_CAP_LEN = 50;
 const MAX_ASSISTANT_SESSIONS = 5000;
 const MAX_CONTINUATION_SESSIONS = 5000;
+const MAX_CHATGPT_WEB_CONNECTIONS = 5000;
 
 // Client headers/body fields that carry an upstream session id (priority order)
 const SESSION_HEADER_KEYS = ["x-session-id", "session-id", "session_id", "x-amp-thread-id"];
@@ -125,6 +131,26 @@ function headerValue(headers, key) {
     return normalizeSessionId(headers[key] ?? headers[key.toLowerCase()]);
 }
 
+function rawHeaderValue(headers, key) {
+    if (!headers || typeof headers !== "object") return null;
+    const target = key.toLowerCase();
+    const entry = Object.entries(headers).find(([name]) => name.toLowerCase() === target);
+    return typeof entry?.[1] === "string" ? entry[1] : null;
+}
+
+function parseCodexTurnMetadata(headers, body) {
+    const raw = rawHeaderValue(headers, "x-codex-turn-metadata")
+        || body?.client_metadata?.["x-codex-turn-metadata"];
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) return raw;
+    if (typeof raw !== "string" || raw.length > 16_384) return null;
+    try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+    } catch {
+        return null;
+    }
+}
+
 // Read client-provided session id from headers/body (no generation)
 // Antigravity envelope carries session in request.sessionId; requestId embeds conversation uuid
 const ANTIGRAVITY_CONV_RE = /^[a-z]+\/([0-9a-f-]{36})\//i;
@@ -135,7 +161,7 @@ function extractAntigravitySession(body) {
     return m ? normalizeSessionId(m[1]) : null;
 }
 
-function extractClientSessionId(headers, body, scope = "") {
+function extractClientSessionId(headers, body, scope = "", { includeRequestId = true, includeMetadataUser = true } = {}) {
     // Claude Code sends the session in a header AND in metadata.user_id; the header
     // survives translation to formats that drop metadata (e.g. Responses API).
     const claude = extractClaudeCodeSession(body?.metadata?.user_id)
@@ -147,14 +173,37 @@ function extractClientSessionId(headers, body, scope = "") {
         const v = headerValue(headers, key);
         if (v) return v;
     }
-    const requestId = scope === "kiro" ? null : headerValue(headers, "x-client-request-id");
+    const requestId = includeRequestId && scope !== "kiro" ? headerValue(headers, "x-client-request-id") : null;
     if (requestId) return requestId;
     const fromBody =
         normalizeSessionId(body?.prompt_cache_key) ||
         normalizeSessionId(body?.session_id) ||
         normalizeSessionId(body?.conversation_id) ||
-        (scope === "kiro" ? null : normalizeSessionId(body?.metadata?.user_id));
+        (includeMetadataUser && scope !== "kiro" ? normalizeSessionId(body?.metadata?.user_id) : null);
     return fromBody || null;
+}
+
+/**
+ * Resolve only explicit, stable continuation identifiers for ChatGPT Web routing.
+ * Deliberately excludes assistant-text hashes and request-scoped x-client-request-id.
+ */
+export function resolveChatGptWebConversationKey({ headers, body } = {}) {
+    const session = extractClientSessionId(headers, body, "chatgpt-web", {
+        includeRequestId: false,
+        includeMetadataUser: false,
+    });
+    if (session) return `session:${session}`;
+
+    const turnMetadata = parseCodexTurnMetadata(headers, body);
+    const threadId = normalizeSessionId(turnMetadata?.thread_id)
+        || normalizeSessionId(body?.client_metadata?.thread_id)
+        || normalizeSessionId(body?.metadata?.thread_id)
+        || normalizeSessionId(body?.thread_id)
+        || normalizeSessionId(body?.threadId);
+    if (threadId) return `thread:${threadId}`;
+
+    const previousResponseId = normalizeSessionId(body?.previous_response_id);
+    return previousResponseId ? `previous_response_id:${previousResponseId}` : null;
 }
 
 function requestMessages(body) {
@@ -242,6 +291,58 @@ export function resolveContinuationId({ sessionId, connectionId, scope = "", eph
     return continuationId;
 }
 
+/**
+ * Return the connection pinned to an explicit ChatGPT Web conversation key.
+ * No key means a new conversation and normal account selection.
+ */
+export function getChatGptWebPinnedConnection(conversationKey) {
+    if (!conversationKey) return null;
+    const entry = chatGptWebConnectionStore.get(conversationKey);
+    if (!entry?.connectionId) return null;
+    if (Date.now() - entry.lastUsed > MEMORY_CONFIG.sessionTtlMs) {
+        chatGptWebConnectionStore.delete(conversationKey);
+        chatGptWebPinsKv.remove(conversationKey).catch(() => {});
+        return null;
+    }
+    entry.lastUsed = Date.now();
+    chatGptWebConnectionStore.delete(conversationKey);
+    chatGptWebConnectionStore.set(conversationKey, entry);
+    chatGptWebPinsKv.set(conversationKey, entry).catch(() => {});
+    return entry.connectionId;
+}
+
+export async function loadChatGptWebPinnedConnection(conversationKey) {
+    const current = getChatGptWebPinnedConnection(conversationKey);
+    if (current || !conversationKey) return current;
+    try {
+        const entry = await chatGptWebPinsKv.get(conversationKey, null);
+        if (!entry?.connectionId) return null;
+        chatGptWebConnectionStore.set(conversationKey, entry);
+        return getChatGptWebPinnedConnection(conversationKey);
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Pin a selected ChatGPT Web connection for a bounded conversation TTL.
+ */
+export async function pinChatGptWebConnection(conversationKey, connectionId) {
+    if (!conversationKey || !connectionId) return;
+    if (chatGptWebConnectionStore.size >= MAX_CHATGPT_WEB_CONNECTIONS && !chatGptWebConnectionStore.has(conversationKey)) {
+        const oldest = chatGptWebConnectionStore.keys().next().value;
+        chatGptWebConnectionStore.delete(oldest);
+        chatGptWebPinsKv.remove(oldest).catch(() => {});
+    }
+    const entry = { connectionId, lastUsed: Date.now() };
+    chatGptWebConnectionStore.set(conversationKey, entry);
+    try {
+        await chatGptWebPinsKv.set(conversationKey, entry);
+    } catch {
+        // Keep the live-process pin; persistence is best effort during DB shutdown.
+    }
+}
+
 // Capture session id from request body + credentials (envelope still intact here)
 export function captureSessionId(body, credentials, connectionId, scope = "") {
     return resolveSessionId({ headers: credentials?.rawHeaders, body, connectionId, scope });
@@ -266,6 +367,9 @@ const assistantCleanup = setInterval(() => {
     }
     for (const [key, entry] of continuationStore) {
         if (now - entry.lastUsed > MEMORY_CONFIG.sessionTtlMs) continuationStore.delete(key);
+    }
+    for (const [key, entry] of chatGptWebConnectionStore) {
+        if (now - entry.lastUsed > MEMORY_CONFIG.sessionTtlMs) chatGptWebConnectionStore.delete(key);
     }
 }, MEMORY_CONFIG.sessionCleanupIntervalMs);
 if (assistantCleanup.unref) assistantCleanup.unref();

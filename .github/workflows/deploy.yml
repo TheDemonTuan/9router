@@ -38,9 +38,12 @@ jobs:
         run: |
           set -euo pipefail
           response_tests="$(find unit translator -type f -name '*responses*.test.js' ! -path '*/real/*' | sort)"
+          chatgpt_web_tests="$(find unit integration -type f -name '*chatgpt*.test.js' ! -path '*/real/*' | sort)"
           printf 'Responses regression gate:\n%s\n' "$response_tests"
+          printf 'ChatGPT Web regression gate:\n%s\n' "$chatgpt_web_tests"
           bun x vitest run --config vitest.config.js \
             $response_tests \
+            $chatgpt_web_tests \
             unit/codex-tool-normalization.test.js \
             unit/codex-native-passthrough-thinking.test.js \
             unit/base-executor-timeout-classification.test.js \
@@ -239,7 +242,7 @@ jobs:
           scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" \
             -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
             -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o TCPKeepAlive=yes \
-            docker-compose.prod.yml deploy.sh \
+            docker-compose.prod.yml docker-compose.chatgpt-web.yml deploy.sh \
             "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/"
 
       - name: Execute Blue/Green Cutover on VPS

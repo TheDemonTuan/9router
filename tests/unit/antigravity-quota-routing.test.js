@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   getSettings: vi.fn(),
   resolveConnectionProxyConfig: vi.fn(),
   getAntigravityUsage: vi.fn(),
+  getChatGptWebCatalog: vi.fn(),
 }));
 
 vi.mock("@/lib/localDb", () => ({
@@ -26,6 +27,10 @@ vi.mock("open-sse/services/usage/google.js", () => ({
   getAntigravityUsage: mocks.getAntigravityUsage,
 }));
 vi.mock("@/sse/utils/logger.js", () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn() }));
+vi.mock("open-sse/services/chatgptWebBridge.js", async () => ({
+  ...(await vi.importActual("open-sse/services/chatgptWebBridge.js")),
+  getChatGptWebCatalog: mocks.getChatGptWebCatalog,
+}));
 
 const { getAntigravityQuotaCache, handleAntigravityQuotaError, refreshAntigravityQuota, clearAntigravityStrikes } = await import("@/sse/services/antigravityQuota.js");
 const { getProviderCredentials } = await import("@/sse/services/auth.js");
@@ -334,6 +339,121 @@ describe("Antigravity quota-aware routing", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("selects a cgw account whose verified live catalog satisfies the request", async () => {
+    mocks.getProviderConnections.mockResolvedValue([
+      { id: "cgw-text", name: "Text bridge", provider: "chatgpt-web", isActive: true },
+      { id: "cgw-vision", name: "Vision bridge", provider: "chatgpt-web", isActive: true },
+    ]);
+    mocks.getChatGptWebCatalog.mockImplementation(async (connection) => ({
+      stale: false,
+      models: [{
+        id: "chatgpt-web/high",
+        capabilities: connection.id === "cgw-vision"
+          ? { native_responses: true, vision: true }
+          : { native_responses: true, reasoning: true },
+      }],
+    }));
+
+    await expect(getProviderCredentials(
+      "chatgpt-web",
+      null,
+      "chatgpt-web/high",
+      { requiredCapabilities: new Set(["vision"]) },
+    )).resolves.toMatchObject({ connectionId: "cgw-vision" });
+  });
+
+  it("pins cgw selection when the requested connection is explicit", async () => {
+    mocks.getProviderConnections.mockResolvedValue([
+      { id: "cgw-a", name: "A", provider: "chatgpt-web", isActive: true },
+      { id: "cgw-b", name: "B", provider: "chatgpt-web", isActive: true },
+    ]);
+    mocks.getChatGptWebCatalog.mockResolvedValue({
+      stale: false,
+      models: [{ id: "chatgpt-web/high", capabilities: { native_responses: true } }],
+    });
+
+    await expect(getProviderCredentials(
+      "chatgpt-web",
+      null,
+      "chatgpt-web/high",
+      { pinConnectionId: "cgw-b" },
+    )).resolves.toMatchObject({ connectionId: "cgw-b" });
+  });
+
+  it("reports a missing pinned cgw connection instead of selecting another", async () => {
+    mocks.getProviderConnections.mockResolvedValue([
+      { id: "cgw-a", name: "A", provider: "chatgpt-web", isActive: true },
+    ]);
+    mocks.getChatGptWebCatalog.mockResolvedValue({
+      stale: false,
+      models: [{ id: "chatgpt-web/high", capabilities: { native_responses: true } }],
+    });
+
+    await expect(getProviderCredentials(
+      "chatgpt-web",
+      null,
+      "chatgpt-web/high",
+      { pinConnectionId: "missing" },
+    )).resolves.toMatchObject({ pinnedConnectionUnavailable: true, connectionId: "missing" });
+  });
+
+  it("keeps native Codex selection closed to generic-only bridges", async () => {
+    mocks.getProviderConnections.mockResolvedValue([
+      { id: "cgw-generic", name: "Generic bridge", provider: "chatgpt-web", isActive: true },
+    ]);
+    mocks.getChatGptWebCatalog.mockResolvedValue({
+      stale: false,
+      models: [{ id: "chatgpt-web/high", capabilities: { generic_responses: true } }],
+    });
+
+    await expect(getProviderCredentials(
+      "chatgpt-web",
+      null,
+      "chatgpt-web/high",
+      { bridgeCapability: "native_responses" },
+    )).resolves.toBeNull();
+  });
+
+  it("selects a generic-capable bridge only for generic requests", async () => {
+    mocks.getProviderConnections.mockResolvedValue([
+      { id: "cgw-native", name: "Native bridge", provider: "chatgpt-web", isActive: true },
+      { id: "cgw-generic", name: "Generic bridge", provider: "chatgpt-web", isActive: true },
+    ]);
+    mocks.getChatGptWebCatalog.mockImplementation(async (connection) => ({
+      stale: false,
+      models: [{
+        id: "chatgpt-web/high",
+        capabilities: connection.id === "cgw-generic"
+          ? { generic_responses: true }
+          : { native_responses: true },
+      }],
+    }));
+
+    await expect(getProviderCredentials(
+      "chatgpt-web",
+      null,
+      "chatgpt-web/high",
+      { bridgeCapability: "generic_responses" },
+    )).resolves.toMatchObject({ connectionId: "cgw-generic" });
+  });
+
+  it("keeps an unverified cgw capability out of dispatch", async () => {
+    mocks.getProviderConnections.mockResolvedValue([
+      { id: "cgw-unknown", name: "Unknown bridge", provider: "chatgpt-web", isActive: true },
+    ]);
+    mocks.getChatGptWebCatalog.mockResolvedValue({
+      stale: false,
+      models: [{ id: "chatgpt-web/high" }],
+    });
+
+    await expect(getProviderCredentials(
+      "chatgpt-web",
+      null,
+      "chatgpt-web/high",
+      { requiredCapabilities: new Set(["vision"]) },
+    )).resolves.toBeNull();
   });
 
   it.each([

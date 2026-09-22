@@ -17,7 +17,11 @@ beforeAll(async () => {
   await sqliteDb.initDb();
 });
 
-afterAll(() => {
+afterAll(async () => {
+  try {
+    const { resetAdapterForTest } = await import("@/lib/db/driver.js");
+    resetAdapterForTest();
+  } catch {}
   if (tempDir) fs.rmSync(tempDir, { recursive: true, force: true });
   if (originalDataDir === undefined) delete process.env.DATA_DIR;
   else process.env.DATA_DIR = originalDataDir;
@@ -312,11 +316,29 @@ describe("DB SQLite layer — public API parity", () => {
     expect(stats.byProvider.openai.promptTokens).toBeGreaterThanOrEqual(300);
   });
 
-  it("usage: pending tracking in-memory", () => {
-    sqliteDb.trackPendingRequest("gpt-4", "openai", "c1", true);
-    expect(global._pendingRequests.byModel["gpt-4 (openai)"]).toBe(1);
-    sqliteDb.trackPendingRequest("gpt-4", "openai", "c1", false);
-    expect(global._pendingRequests.byModel["gpt-4 (openai)"]).toBeUndefined();
+  it("usage: pending tracking keeps live drain state after the dashboard timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      sqliteDb.trackPendingRequest("gpt-4", "openai", "c1", true);
+      expect(global._pendingRequests.byModel["gpt-4 (openai)"]).toBe(1);
+      expect(global._livePendingRequests.byModel["gpt-4 (openai)"]).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(60 * 1000);
+      expect(global._pendingRequests.byModel["gpt-4 (openai)"]).toBeUndefined();
+      expect(global._livePendingRequests.byModel["gpt-4 (openai)"]).toBe(1);
+
+      const active = await sqliteDb.getActiveRequests();
+      expect(active.activeRequests).toEqual([]);
+      expect(active.liveActiveRequests).toEqual([
+        expect.objectContaining({ model: "gpt-4", provider: "openai", count: 1 }),
+      ]);
+      expect(active.activeRequestsKnown).toBe(true);
+
+      sqliteDb.trackPendingRequest("gpt-4", "openai", "c1", false);
+      expect(global._livePendingRequests.byModel["gpt-4 (openai)"]).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("requestDetails: save → query with paging", async () => {

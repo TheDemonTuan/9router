@@ -98,7 +98,9 @@ export async function parseUpstreamError(response, executor = null) {
     statusCode,
     message: typeof message === "string" ? message : JSON.stringify(message),
     resetsAtMs: parsed?.resetsAtMs,
+    ...(parsed?.resolvedModel ? { resolvedModel: parsed.resolvedModel } : {}),
     ...classification,
+    ...(typeof parsed?.retryable === "boolean" ? { retryable: parsed.retryable } : {}),
   };
 }
 
@@ -110,6 +112,13 @@ export async function parseUpstreamError(response, executor = null) {
  * @returns {{ success: false, status: number, error: string, response: Response, resetsAtMs?: number }}
  */
 export function createErrorResult(statusCode, message, resetsAtMs, classification = {}) {
+  const headers = {
+    ...(typeof classification.retryable === "boolean" ? { "x-should-retry": String(classification.retryable) } : {}),
+    ...(resetsAtMs ? { "x-9router-retry-at": new Date(resetsAtMs).toISOString() } : {}),
+    ...(classification.resolvedModel ? { "x-9router-resolved-model": classification.resolvedModel } : {}),
+  };
+  const response = errorResponse(statusCode, message);
+  for (const [name, value] of Object.entries(headers)) response.headers.set(name, value);
   return {
     success: false,
     status: statusCode,
@@ -117,7 +126,8 @@ export function createErrorResult(statusCode, message, resetsAtMs, classificatio
     resetsAtMs,
     errorClass: classification.errorClass,
     retryable: classification.retryable,
-    response: errorResponse(statusCode, message)
+    ...(classification.resolvedModel ? { resolvedModel: classification.resolvedModel } : {}),
+    response,
   };
 }
 

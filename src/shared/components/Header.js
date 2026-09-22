@@ -54,7 +54,7 @@ const getPageInfo = (pathname) => {
   if (providerMatch) {
     const providerId = providerMatch[1];
     const providerInfo =
-      OAUTH_PROVIDERS[providerId] || APIKEY_PROVIDERS[providerId];
+      OAUTH_PROVIDERS[providerId] || APIKEY_PROVIDERS[providerId] || AI_PROVIDERS[providerId];
     if (providerInfo) {
       return {
         title: providerInfo.name,

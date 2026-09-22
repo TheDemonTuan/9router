@@ -11,6 +11,7 @@ export async function createBunSqliteAdapter(filePath) {
   db.exec(PRAGMA_SQL);
 
   const stmtCache = new Map();
+  let closed = false;
   function prepare(sql) {
     let stmt = stmtCache.get(sql);
     if (!stmt) {
@@ -21,13 +22,19 @@ export async function createBunSqliteAdapter(filePath) {
   }
 
   const checkpointTimer = setInterval(() => {
+    if (closed) return;
     try { db.exec("PRAGMA wal_checkpoint(TRUNCATE)"); } catch {}
   }, CHECKPOINT_INTERVAL_MS);
   if (typeof checkpointTimer.unref === "function") checkpointTimer.unref();
 
   function gracefulClose() {
+    if (closed) return;
+    closed = true;
     try { db.exec("PRAGMA wal_checkpoint(TRUNCATE)"); } catch {}
-    try { stmtCache.clear(); } catch {}
+    for (const stmt of stmtCache.values()) {
+      try { stmt.finalize(); } catch {}
+    }
+    stmtCache.clear();
     try { db.close(); } catch {}
   }
   const onShutdown = () => gracefulClose();
