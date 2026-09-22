@@ -21,8 +21,6 @@ on:
 concurrency:
   group: docker-publish-${{ github.repository }}
   cancel-in-progress: false
-  queue: max
-
 env:
   DOCKERHUB_IMAGE: decolua/9router
 

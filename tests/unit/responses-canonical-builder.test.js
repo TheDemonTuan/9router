@@ -90,9 +90,7 @@ describe("Canonical Responses builder & transformers", () => {
     expect(completed.data.response.usage).toEqual({
       input_tokens: 10,
       output_tokens: 2,
-      total_tokens: 12,
-      input_tokens_details: { cached_tokens: 0 },
-      output_tokens_details: { reasoning_tokens: 0 }
+      total_tokens: 12
     });
   });
 
@@ -124,9 +122,7 @@ describe("Canonical Responses builder & transformers", () => {
     expect(responsesObj.usage).toEqual({
       input_tokens: 15,
       output_tokens: 5,
-      total_tokens: 20,
-      input_tokens_details: { cached_tokens: 0 },
-      output_tokens_details: { reasoning_tokens: 0 }
+      total_tokens: 20
     });
   });
 
@@ -202,9 +198,7 @@ describe("Canonical Responses builder & transformers", () => {
     expect(completed.data.response.usage).toEqual({
       input_tokens: 30,
       output_tokens: 10,
-      total_tokens: 40,
-      input_tokens_details: { cached_tokens: 0 },
-      output_tokens_details: { reasoning_tokens: 0 }
+      total_tokens: 40
     });
   });
 
@@ -250,9 +244,7 @@ describe("Canonical Responses builder & transformers", () => {
     expect(json.usage).toEqual({
       input_tokens: 5,
       output_tokens: 3,
-      total_tokens: 8,
-      input_tokens_details: { cached_tokens: 0 },
-      output_tokens_details: { reasoning_tokens: 0 }
+      total_tokens: 8
     });
   });
 

@@ -16,25 +16,22 @@ export function normalizeResponseId(id) {
  */
 export function normalizeResponsesUsage(usage) {
   if (!usage || typeof usage !== "object") return null;
-  const inputTokens = usage.input_tokens ?? usage.prompt_tokens ?? 0;
-  const outputTokens = usage.output_tokens ?? usage.completion_tokens ?? 0;
-  const totalTokens = usage.total_tokens ?? (inputTokens + outputTokens);
+  const inputTokens = [usage.input_tokens, usage.prompt_tokens].find(Number.isFinite) ?? 0;
+  const outputTokens = [usage.output_tokens, usage.completion_tokens].find(Number.isFinite) ?? 0;
+  const totalTokens = Number.isFinite(usage.total_tokens) ? usage.total_tokens : (inputTokens + outputTokens);
 
-  const inputDetails = usage.input_tokens_details ?? (usage.prompt_tokens_details ? {
-    cached_tokens: usage.prompt_tokens_details.cached_tokens ?? 0
-  } : { cached_tokens: 0 });
-
-  const outputDetails = usage.output_tokens_details ?? (usage.completion_tokens_details ? {
-    reasoning_tokens: usage.completion_tokens_details.reasoning_tokens ?? 0
-  } : { reasoning_tokens: 0 });
-
-  return {
+  const responseUsage = {
     input_tokens: inputTokens,
     output_tokens: outputTokens,
     total_tokens: totalTokens,
-    input_tokens_details: inputDetails,
-    output_tokens_details: outputDetails
   };
+
+  const cachedTokens = [usage.input_tokens_details?.cached_tokens, usage.prompt_tokens_details?.cached_tokens].find(Number.isFinite);
+  const reasoningTokens = [usage.output_tokens_details?.reasoning_tokens, usage.completion_tokens_details?.reasoning_tokens].find(Number.isFinite);
+  if (Number.isFinite(cachedTokens)) responseUsage.input_tokens_details = { cached_tokens: cachedTokens };
+  if (Number.isFinite(reasoningTokens)) responseUsage.output_tokens_details = { reasoning_tokens: reasoningTokens };
+
+  return responseUsage;
 }
 
 /**
