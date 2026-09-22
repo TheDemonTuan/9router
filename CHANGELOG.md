@@ -10,6 +10,7 @@
 - **Qoder CN**: add `qoder-cn` provider for qoder.com.cn with OAuth flow, COSY protocol, and CN gateway routing
 
 ## Fixes
+- **Server / Bun**: preserve pipelined h2c requests without Node-private parser APIs; bridge Bun socket disconnects into `NextRequest.signal` and executor aborts, with Node/Bun regressions
 - **Translator**: map Claude `refusal` stop_reason to `content_filter` and surface explanation; strip replayed reasoning fields for Groq, Mistral, and Cerebras (#4220)
 - **Antigravity**: drop requestType `agent` to avoid false 429 `RESOURCE_EXHAUSTED`; separate weekly and short-window (5-hour) quotas and deduplicate dashboard rows
 - **Responses API**: report usage on `response.completed` so clients can auto-compact (#3432)

@@ -64,8 +64,8 @@ jobs:
       - name: Run h2c and Bun disconnect regressions
         run: |
           set -euo pipefail
-          node --test tests/unit/custom-server-h2c.test.cjs tests/unit/custom-server-h2c-concurrent.test.cjs
-          bun test tests/unit/bun-client-disconnect.test.cjs
+          node --test --test-concurrency=1 tests/unit/custom-server-h2c.test.cjs tests/unit/custom-server-h2c-concurrent.test.cjs
+          bun test tests/unit/custom-server-h2c.test.cjs tests/unit/custom-server-h2c-concurrent.test.cjs tests/unit/bun-client-disconnect.test.cjs tests/unit/bun-next-request-disconnect.test.cjs
       - name: Verify blue-green reconcile and drain safety
         run: bash tests/unit/blue-green-reconcile.test.sh
       - name: Verify provider, alias, and OAuth baselines
