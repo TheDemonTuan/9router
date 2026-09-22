@@ -135,8 +135,14 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     }
   }
 
-  // Per-request opt-out: client can bypass all token savers via header
-  const tokenSaverEnabled = clientRawRequest?.headers?.[TOKEN_SAVER_HEADER]?.toLowerCase() !== "off";
+  // Per-request opt-out: client can bypass all token savers via header.
+  // Structured output is a protocol contract; prompt/content mutations are unsafe.
+  const strictStructuredOutput = nativePassthrough
+    || body.text?.format?.type === "json_schema"
+    || body.response_format?.type === "json_schema"
+    || body.response_format?.type === "json_object";
+  const tokenSaverEnabled = !strictStructuredOutput
+    && clientRawRequest?.headers?.[TOKEN_SAVER_HEADER]?.toLowerCase() !== "off";
 
   // Cursor's translator rewrites tool_result into user text, so RTK must run on
   // the source body before translation. Every other pair translates the tool
@@ -306,14 +312,6 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     translatedBody.tools = defaultClaudeToolType(translatedBody.tools);
   }
 
-  // Per-request opt-out: client can bypass all token savers via header.
-  // Structured output is a protocol contract; prompt/content mutations are unsafe.
-  const strictStructuredOutput = passthrough
-    || body.text?.format?.type === "json_schema"
-    || body.response_format?.type === "json_schema"
-    || body.response_format?.type === "json_object";
-  const tokenSaverEnabled = !strictStructuredOutput
-    && clientRawRequest?.headers?.[TOKEN_SAVER_HEADER]?.toLowerCase() !== "off";
 
   // RTK: compress tool_result content. Skipped when already done pre-translate.
   const rtkStats = preTranslateRtk || compressMessages(translatedBody, tokenSaverEnabled && rtkEnabled);

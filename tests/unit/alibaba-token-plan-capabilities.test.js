@@ -67,8 +67,8 @@ describe("Alibaba Token Plan provider-specific capabilities", () => {
   });
 
   it("does not change another provider's generic family capabilities", () => {
-    const alitp = getCapabilitiesForModel("alitp-intl", "qwen3.8-max");
-    const generic = getCapabilitiesForModel("some-other-provider", "qwen3.8-max");
+    const alitp = getCapabilitiesForModel("alitp-intl", "qwen3.8-flash");
+    const generic = getCapabilitiesForModel("some-other-provider", "qwen3.8-flash");
     expect(alitp.vision).toBe(true);
     expect(generic.vision).not.toBe(true);
   });

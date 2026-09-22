@@ -167,7 +167,7 @@ describe("Responses <-> Gemini direct translators", () => {
   it("uses the Claude-compatible Antigravity path for Claude models", () => {
     const result = directRequest(FORMATS.ANTIGRAVITY, { ...REQUEST, model: "claude-sonnet-4-6" }, "claude-sonnet-4-6");
 
-    expect(result.requestType).toBe("agent");
+    expect(result.requestType).toBeUndefined();
     expect(result.model).toBe("claude-sonnet-4-6");
     expect(result.request.contents).toEqual(expect.arrayContaining([
       expect.objectContaining({ role: "user", parts: expect.arrayContaining([expect.objectContaining({ text: "First question" })]) }),
