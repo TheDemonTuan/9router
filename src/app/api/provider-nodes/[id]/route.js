@@ -1,5 +1,15 @@
 import { NextResponse } from "next/server";
 import { deleteProviderConnectionsByProvider, deleteProviderNode, getProviderConnections, getProviderNodeById, updateProviderConnection, updateProviderNode } from "@/models";
+import { assertPublicUrlResolved } from "@/shared/utils/ssrfGuard.js";
+
+async function validateBaseUrl(value) {
+  const baseUrl = typeof value === "string" ? value.trim() : "";
+  if (!baseUrl) throw new Error("Base URL is required");
+  const parsed = new URL(baseUrl);
+  if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("Base URL must use HTTP or HTTPS");
+  await assertPublicUrlResolved(baseUrl);
+  return baseUrl;
+}
 
 // PUT /api/provider-nodes/[id] - Update provider node
 export async function PUT(request, { params }) {
@@ -30,7 +40,7 @@ export async function PUT(request, { params }) {
       return NextResponse.json({ error: "Base URL is required" }, { status: 400 });
     }
 
-    let sanitizedBaseUrl = baseUrl.trim();
+    let sanitizedBaseUrl = await validateBaseUrl(baseUrl);
     
     // Sanitize Base URL for Anthropic Compatible
     if (node.type === "anthropic-compatible") {
@@ -76,7 +86,8 @@ export async function PUT(request, { params }) {
     return NextResponse.json({ node: updated });
   } catch (error) {
     console.log("Error updating provider node:", error);
-    return NextResponse.json({ error: "Failed to update provider node" }, { status: 500 });
+    const status = /Base URL|URL must|Invalid URL|Blocked URL/.test(error.message || "") ? 400 : 500;
+    return NextResponse.json({ error: status === 400 ? error.message : "Failed to update provider node" }, { status });
   }
 }
 

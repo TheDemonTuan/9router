@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { killAppProcesses } from "@/lib/appUpdater";
 
-// Shutdown app to release file locks for manual update
+// Shutdown app after the dashboard's independent Shutdown action.
 export async function POST() {
   try {
     await killAppProcesses();

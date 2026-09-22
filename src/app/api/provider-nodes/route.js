@@ -2,6 +2,16 @@ import { NextResponse } from "next/server";
 import { createProviderNode, getProviderNodes } from "@/models";
 import { OPENAI_COMPATIBLE_PREFIX, ANTHROPIC_COMPATIBLE_PREFIX, CUSTOM_EMBEDDING_PREFIX } from "@/shared/constants/providers";
 import { generateId } from "@/shared/utils";
+import { assertPublicUrlResolved } from "@/shared/utils/ssrfGuard.js";
+
+async function validateBaseUrl(value) {
+  const baseUrl = typeof value === "string" ? value.trim() : "";
+  if (!baseUrl) throw new Error("Base URL is required");
+  const parsed = new URL(baseUrl);
+  if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("Base URL must use HTTP or HTTPS");
+  await assertPublicUrlResolved(baseUrl);
+  return baseUrl;
+}
 
 export const dynamic = "force-dynamic";
 
@@ -50,12 +60,13 @@ export async function POST(request) {
         return NextResponse.json({ error: "Invalid OpenAI compatible API type" }, { status: 400 });
       }
 
+      const validatedBaseUrl = await validateBaseUrl(baseUrl || OPENAI_COMPATIBLE_DEFAULTS.baseUrl);
       const node = await createProviderNode({
         id: `${OPENAI_COMPATIBLE_PREFIX}${apiType}-${generateId()}`,
         type: "openai-compatible",
         prefix: prefix.trim(),
         apiType,
-        baseUrl: (baseUrl || OPENAI_COMPATIBLE_DEFAULTS.baseUrl).trim(),
+        baseUrl: validatedBaseUrl,
         name: name.trim(),
       });
       return NextResponse.json({ node }, { status: 201 });
@@ -63,7 +74,8 @@ export async function POST(request) {
 
     if (nodeType === "custom-embedding") {
       // Strip trailing slash and /embeddings if user pasted full endpoint
-      let sanitizedBaseUrl = (baseUrl || CUSTOM_EMBEDDING_DEFAULTS.baseUrl).trim().replace(/\/$/, "");
+      let sanitizedBaseUrl = await validateBaseUrl(baseUrl || CUSTOM_EMBEDDING_DEFAULTS.baseUrl);
+      sanitizedBaseUrl = sanitizedBaseUrl.replace(/\/$/, "");
       if (sanitizedBaseUrl.endsWith("/embeddings")) {
         sanitizedBaseUrl = sanitizedBaseUrl.slice(0, -"/embeddings".length);
       }
@@ -81,7 +93,8 @@ export async function POST(request) {
     if (nodeType === "anthropic-compatible") {
       // Sanitize Base URL: remove trailing slash, and remove trailing /messages if user added it
       // This prevents double-appending /messages at runtime
-      let sanitizedBaseUrl = (baseUrl || ANTHROPIC_COMPATIBLE_DEFAULTS.baseUrl).trim().replace(/\/$/, "");
+      let sanitizedBaseUrl = await validateBaseUrl(baseUrl || ANTHROPIC_COMPATIBLE_DEFAULTS.baseUrl);
+      sanitizedBaseUrl = sanitizedBaseUrl.replace(/\/$/, "");
       if (sanitizedBaseUrl.endsWith("/messages")) {
         sanitizedBaseUrl = sanitizedBaseUrl.slice(0, -9); // remove /messages
       }
@@ -99,6 +112,7 @@ export async function POST(request) {
     return NextResponse.json({ error: "Invalid provider node type" }, { status: 400 });
   } catch (error) {
     console.log("Error creating provider node:", error);
-    return NextResponse.json({ error: "Failed to create provider node" }, { status: 500 });
+    const status = /Base URL|URL must|Invalid URL|Blocked URL/.test(error.message || "") ? 400 : 500;
+    return NextResponse.json({ error: status === 400 ? error.message : "Failed to create provider node" }, { status });
   }
 }
