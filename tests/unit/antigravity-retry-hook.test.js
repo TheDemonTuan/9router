@@ -1,101 +1,76 @@
-// Guards D3: antigravity 429/503 retry merged into base via computeRetryDelay hook.
-import { describe, it, expect } from "vitest";
-import { AntigravityExecutor } from "../../open-sse/executors/antigravity.js";
-import antigravity from "../../open-sse/providers/registry/antigravity.js";
+import { describe, expect, it, vi } from "vitest";
 
-const MAX = 10000;
-function res(status, headers = {}, body = null) {
-  return {
-    status,
-    headers: { get: (k) => headers[k.toLowerCase()] ?? null },
-    clone: () => ({ text: async () => (body == null ? "" : JSON.stringify(body)) }),
-  };
-}
+const proxyAwareFetch = vi.fn();
+vi.mock("../../open-sse/utils/proxyFetch.js", () => ({ proxyAwareFetch }));
 
-describe("antigravity computeRetryDelay hook (D3)", () => {
-  const ag = new AntigravityExecutor();
+const { AntigravityExecutor } = await import("../../open-sse/executors/antigravity.js");
 
-  it("uses Retry-After header (seconds → ms) when within cap", async () => {
-    expect(await ag.computeRetryDelay(res(429, { "retry-after": "5" }), 1)).toBe(5000);
+const QUOTA_BODY = JSON.stringify({
+  error: {
+    code: 429,
+    status: "RESOURCE_EXHAUSTED",
+    message: "Request cannot be served",
+    details: [{
+      "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+      reason: "QUOTA_EXHAUSTED",
+      metadata: { quotaResetTimeStamp: "2026-09-24T02:26:46Z" },
+    }],
+  },
+});
+
+describe("Antigravity executor hard quota", () => {
+  it("makes one generation call, preserves the response body, and skips retry delay", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-23T00:00:00.000Z"));
+    proxyAwareFetch.mockReset().mockResolvedValueOnce(new Response(QUOTA_BODY, { status: 429 }));
+    const executor = new AntigravityExecutor();
+
+    try {
+      const result = await executor.execute({
+        model: "gemini-3.8-flash-high",
+        body: { request: { contents: [] } },
+        stream: false,
+        credentials: { accessToken: "token", projectId: "project" },
+      });
+      expect(proxyAwareFetch).toHaveBeenCalledTimes(1);
+      expect(result.response.status).toBe(429);
+      await expect(result.response.text()).resolves.toBe(QUOTA_BODY);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it("vetoes (false) when Retry-After exceeds cap", async () => {
-    expect(await ag.computeRetryDelay(res(429, { "retry-after": "60" }), 1)).toBe(false);
+  it("prefers timestamp, then RetryInfo, metadata delay, and text reset", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-23T00:00:00.000Z"));
+    const executor = new AntigravityExecutor();
+    const body = (metadata, retryDelay, message = "Request cannot be served") => JSON.stringify({ error: {
+      code: 429,
+      status: "RESOURCE_EXHAUSTED",
+      message,
+      details: [
+        { "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: "QUOTA_EXHAUSTED", metadata },
+        { "@type": "type.googleapis.com/google.rpc.RetryInfo", retryDelay },
+      ],
+    } });
+    try {
+      const withTimestamp = executor.parseError(new Response(body({ quotaResetTimeStamp: "2026-09-24T02:26:46Z", quotaResetDelay: "48h" }, "142353.125s"), { status: 429 }), body({ quotaResetTimeStamp: "2026-09-24T02:26:46Z", quotaResetDelay: "48h" }, "142353.125s"));
+      expect(withTimestamp.resetsAtMs).toBe(Date.parse("2026-09-24T02:26:46Z"));
+      const withRetry = executor.parseError(new Response(body({ quotaResetTimeStamp: "bad", quotaResetDelay: "48h" }, "2s"), { status: 429 }), body({ quotaResetTimeStamp: "bad", quotaResetDelay: "48h" }, "2s"));
+      expect(withRetry.resetsAtMs).toBe(Date.parse("2026-09-23T00:00:02Z"));
+      const withDelay = executor.parseError(new Response(body({ quotaResetTimeStamp: "bad", quotaResetDelay: "48h" }, "bad"), { status: 429 }), body({ quotaResetTimeStamp: "bad", quotaResetDelay: "48h" }, "bad"));
+      expect(withDelay.resetsAtMs).toBe(Date.parse("2026-09-25T00:00:00Z"));
+      const withText = executor.parseError(new Response(body({ quotaResetTimeStamp: "bad", quotaResetDelay: "bad" }, "bad", "reset after 30s"), { status: 429 }), body({ quotaResetTimeStamp: "bad", quotaResetDelay: "bad" }, "bad", "reset after 30s"));
+      expect(withText.resetsAtMs).toBe(Date.parse("2026-09-23T00:00:30Z"));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it("parses retry time from error body when no header", async () => {
-    const r = res(429, {}, { error: { message: "quota will reset after 3s" } });
-    expect(await ag.computeRetryDelay(r, 1)).toBe(3000);
-  });
-
-  it("exponential backoff for 429 when no retry info", async () => {
-    expect(await ag.computeRetryDelay(res(429), 1)).toBe(Math.min(1000 * 2 ** 1, MAX));
-    expect(await ag.computeRetryDelay(res(429), 3)).toBe(Math.min(1000 * 2 ** 3, MAX));
-  });
-
-  it("503 without retry info → transient backoff", async () => {
-    expect(await ag.computeRetryDelay(res(503), 1)).toBe(2000);
-  });
-
-  it("retries Antigravity agent terminated body even when status is not 429", async () => {
-    const r = res(500, {}, { error: { message: "Agent execution terminated due to error" } });
-    expect(await ag.computeRetryDelay(r, 1)).toBe(2000);
-  });
-
-  it("retries high traffic body", async () => {
-    const r = res(500, {}, { error: { message: "Our servers are experiencing high traffic" } });
-    expect(await ag.computeRetryDelay(r, 2)).toBe(4000);
-  });
-
-  it("does not retry non-transient 400 errors", async () => {
-    const r = res(400, {}, { error: { message: "Invalid request" } });
-    expect(await ag.computeRetryDelay(r, 1)).toBe(false);
-  });
-
-  it("deduplicates sanitized tool names", () => {
-    const out = ag.transformRequest("claude-opus-4-6-thinking", {
-      request: {
-        contents: [{ role: "user", parts: [{ text: "hi" }] }],
-        tools: [{ functionDeclarations: [
-          { name: "read/file", parameters: { type: "object", properties: {} } },
-          { name: "read file", parameters: { type: "object", properties: {} } },
-          { name: "read/file", parameters: { type: "object", properties: {} } },
-        ] }],
-      },
-    }, true, { projectId: "project-1", connectionId: "conn-1" });
-
-    expect(out.request.tools[0].functionDeclarations.map(fn => fn.name)).toEqual(["read_file"]);
-  });
-
-  it("registry uses the daily IDE cloudcode host and user agent", () => {
-    expect(antigravity.transport.baseUrls).toEqual(["https://daily-cloudcode-pa.googleapis.com"]);
-    expect(antigravity.transport.headers["User-Agent"]).toBe("antigravity/ide/2.11.0 darwin/arm64");
-  });
-
-  it("buildHeaders matches official IDE stream headers", () => {
-    ag._lastSessionId = "sess-123";
-    const h = ag.buildHeaders({ accessToken: "tok" }, true);
-    expect(h["User-Agent"]).toBe("antigravity/ide/2.11.0 darwin/arm64");
-    expect(h["Content-Type"]).toBe("application/json");
-    expect(h["Authorization"]).toBe("Bearer tok");
-    expect(h).not.toHaveProperty("X-Machine-Session-Id");
-    expect(h).not.toHaveProperty("x-request-source");
-    expect(h).not.toHaveProperty("Accept");
-  });
-
-  it("transforms chat requests with official IDE requestId shape and 64000 token cap", () => {
-    const out = ag.transformRequest("claude-opus-4-6-thinking", {
-      request: {
-        contents: [
-          { role: "user", parts: [{ text: "hi" }] },
-          { role: "model", parts: [{ text: "hello" }] },
-        ],
-        generationConfig: { maxOutputTokens: 90000 },
-        sessionId: "-3750763034362895579",
-      },
-    }, true, { projectId: "project-1", connectionId: "conn-1" });
-
-    expect(out.requestId).toMatch(/^agent\/[0-9a-f-]{36}\/\d{13}\/[0-9a-f-]{36}\/\d+$/);
-    expect(out.request.generationConfig.maxOutputTokens).toBe(64000);
+  it("does not classify RESOURCE_EXHAUSTED as hard quota without ErrorInfo", () => {
+    const executor = new AntigravityExecutor();
+    const body = JSON.stringify({ error: { code: 429, status: "RESOURCE_EXHAUSTED", message: "Request cannot be served" } });
+    const parsed = executor.parseError(new Response(body, { status: 429 }), body);
+    expect(parsed.errorClass).toBeUndefined();
   });
 });

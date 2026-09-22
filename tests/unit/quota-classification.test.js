@@ -37,7 +37,11 @@ beforeEach(() => {
   mocks.getSettings.mockResolvedValue({});
   mocks.resolveConnectionProxyConfig.mockResolvedValue({});
   mocks.updateProviderConnection.mockImplementation(async (id, patch) => {
-    Object.assign(mocks.connections.find((connection) => connection.id === id), patch);
+    const connection = mocks.connections.find((entry) => entry.id === id);
+    if (!connection) return null;
+    const resolved = typeof patch === "function" ? patch(connection) : patch;
+    if (resolved !== null) Object.assign(connection, resolved);
+    return connection;
   });
 });
 

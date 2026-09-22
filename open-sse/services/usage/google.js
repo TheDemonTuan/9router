@@ -190,29 +190,28 @@ export async function getAntigravityUsage(accessToken, providerSpecificData, pro
       ];
 
       for (const [modelKey, info] of Object.entries(data.models)) {
-        // Skip models without quota info
-        if (!info.quotaInfo) {
-          continue;
-        }
+        if (!info.quotaInfo) continue;
+        if (info.isInternal || !importantModels.includes(modelKey)) continue;
 
-        // Skip internal models and non-important models
-        if (info.isInternal || !importantModels.includes(modelKey)) {
-          continue;
-        }
-
-        const remainingFraction = info.quotaInfo.remainingFraction || 0;
-        const remainingPercentage = remainingFraction * 100;
+        // Unnamed reset-only rows are provider metadata, not renderable model quotas.
+        const resetAt = parseResetTime(info.quotaInfo.resetTime);
+        const hasRemainingFraction = typeof info.quotaInfo.remainingFraction === "number"
+          && Number.isFinite(info.quotaInfo.remainingFraction)
+          && info.quotaInfo.remainingFraction >= 0
+          && info.quotaInfo.remainingFraction <= 1;
+        if (!hasRemainingFraction && (!resetAt || !info.displayName)) continue;
+        const remainingFraction = hasRemainingFraction ? info.quotaInfo.remainingFraction : 0;
 
         // Convert percentage to used/total for UI compatibility
         const total = 1000; // Normalized base
         const remaining = Math.round(total * remainingFraction);
         const used = total - remaining;
+        const remainingPercentage = remainingFraction * 100;
 
-        // Use modelKey as key (matches PROVIDER_MODELS id)
         quotas[modelKey] = {
           used,
           total,
-          resetAt: parseResetTime(info.quotaInfo.resetTime),
+          resetAt,
           remainingPercentage,
           unlimited: false,
           displayName: info.displayName || modelKey,

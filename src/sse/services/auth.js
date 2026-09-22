@@ -1,6 +1,6 @@
 import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings, getProxyPools } from "@/lib/localDb";
 import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/connectionProxy";
-import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, buildModelLockMetadataUpdate, buildClearModelLockMetadataUpdate, getModelLockUntil, getModelLockMetadata } from "open-sse/services/accountFallback.js";
+import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockMetadataUpdate, buildClearModelLockMetadataUpdate, getModelLockKey, getModelLockUntil, getModelLockMetadata } from "open-sse/services/accountFallback.js";
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
 import { isAlitpModelAvailableForEdition } from "open-sse/providers/alibabaTokenPlanCatalog.js";
@@ -9,7 +9,6 @@ import {
   hasChatGptWebModel,
   chatGptWebModelSupportsCapabilities,
 } from "open-sse/services/chatgptWebBridge.js";
-import { getAntigravityQuotaCache } from "./antigravityQuota.js";
 import * as log from "../utils/logger.js";
 
 // Mutex to prevent race conditions during account selection
@@ -24,16 +23,18 @@ function githubMonthlyResetMs(status, errorText, provider) {
   return Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1);
 }
 
-function getAntigravityQuotaBlock(cache, connectionId, model) {
-  const quota = cache?.get(connectionId)?.[model];
-  const resetAtMs = Date.parse(quota?.resetAt);
-  return quota?.remainingPercentage <= 0 && Number.isFinite(resetAtMs) && resetAtMs > Date.now()
-    ? { resetAt: quota.resetAt, resetAtMs }
-    : null;
+function getExactModelLockMetadata(connection, model) {
+  const suffix = model || "__all";
+  return {
+    unavailabilityReason: connection?.[`modelLockReason_${suffix}`] ?? (model === null ? connection?.unavailabilityReason : null),
+    errorCode: connection?.[`modelLockErrorCode_${suffix}`] ?? (model === null ? connection?.errorCode : null),
+    lastError: connection?.[`modelLockLastError_${suffix}`] ?? (model === null ? connection?.lastError : null),
+    backoffLevel: connection?.[`modelLockBackoffLevel_${suffix}`] ?? (model === null ? connection?.backoffLevel : 0),
+  };
 }
 
-function getUnavailabilityReason(connections, lockedConns, quotaBlocks, model) {
-  if (quotaBlocks.length === connections.length) return "quota_exhausted";
+
+function getUnavailabilityReason(connections, lockedConns, model) {
   if (lockedConns.length !== connections.length) return "unavailable";
   const metadata = lockedConns.map((connection) => getModelLockMetadata(connection, model));
   const reasons = metadata.map(({ unavailabilityReason }) => unavailabilityReason);
@@ -117,19 +118,8 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         : null;
     }
 
-    // Antigravity quota cache is lazy: only populated after that account returns 409/429.
-    const isAntigravity = providerId === "antigravity";
-    const antigravityQuotaCache = isAntigravity && model ? getAntigravityQuotaCache() : null;
 
-    const quotaBlocks = new Map();
-    if (isAntigravity && model && antigravityQuotaCache) {
-      for (const connection of connections) {
-        const quotaBlock = getAntigravityQuotaBlock(antigravityQuotaCache, connection.id, model);
-        if (quotaBlock) quotaBlocks.set(connection.id, quotaBlock);
-      }
-    }
-
-      const bridgeEligible = new Set();
+    const bridgeEligible = new Set();
     if (providerId === "chatgpt-web" && model) {
       await Promise.all(connections.map(async (connection) => {
         try {
@@ -144,7 +134,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       }));
     }
 
-    // Filter out model-locked, excluded, and Antigravity quota-exhausted connections.
+    // Filter out model-locked, excluded, and capability-ineligible connections.
     const availableConnections = connections.filter(c => {
       if (excludeSet.has(c.id)) return false;
       if (pinConnectionId && c.id !== pinConnectionId) return false;
@@ -154,13 +144,6 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       // (metadata check on the cached connection — no network during selection).
       if (providerId === "alitp-intl" && model &&
           !isAlitpModelAvailableForEdition(model, c.providerSpecificData?.tokenPlanEdition)) {
-        return false;
-      }
-      // Antigravity: skip only verified exhausted quota with a future reset.
-      const quotaBlock = quotaBlocks.get(c.id);
-      if (quotaBlock) {
-        const account = c.id?.slice(0, 8) || "unknown";
-        log.info("AG_QUOTA", `${account} | CACHE_BLOCK ${model} — skip upstream until ${quotaBlock.resetAt}`);
         return false;
       }
       return true;
@@ -178,15 +161,11 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
 
     if (availableConnections.length === 0) {
       if (pinConnectionId) return { pinnedConnectionUnavailable: true, connectionId: pinConnectionId };
-      // Classify only a provider-wide, future-dated quota cache block as quota exhaustion.
+      // Classify only persisted, future-dated model locks.
       const lockedConns = connections.filter(c => isModelLockActive(c, model));
-      const quotaEntries = [...quotaBlocks.values()];
-      const unavailabilityReason = getUnavailabilityReason(connections, lockedConns, quotaEntries, model);
-      const expiries = [
-        ...lockedConns.map(c => ({ connection: c, expiry: getModelLockUntil(c, model) })).filter(({ expiry }) => expiry),
-        ...quotaEntries.map((entry) => ({ connection: null, expiry: entry.resetAt })),
-      ]
-        .map(({ connection, expiry }) => ({ connection, expiry, at: Date.parse(expiry) }))
+      const unavailabilityReason = getUnavailabilityReason(connections, lockedConns, model);
+      const expiries = lockedConns
+        .map(c => ({ connection: c, expiry: getModelLockUntil(c, model), at: Date.parse(getModelLockUntil(c, model)) }))
         .filter(({ at }) => Number.isFinite(at) && at > Date.now())
         .sort((a, b) => a.at - b.at);
       const earliestEntry = expiries[0] || null;
@@ -314,116 +293,144 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
  */
 export async function markAccountUnavailable(connectionId, status, errorText, provider = null, model = null, resetsAtMs = null, errorClass = null) {
   if (!connectionId || connectionId === "noauth") return { shouldFallback: false, cooldownMs: 0 };
-  const connections = await getProviderConnections({ provider });
-  const conn = connections.find(c => c.id === connectionId);
-
-  // GitHub premium-request exhaustion is account-wide until the next UTC month.
-  const githubResetAtMs = githubMonthlyResetMs(status, errorText, provider);
-  const lockModel = githubResetAtMs ? null : model;
-  const backoffLevel = lockModel === null
-    ? (conn?.backoffLevel || 0)
-    : (getModelLockMetadata(conn, lockModel).backoffLevel || 0);
-
-  // Provider-specific precise cooldown (e.g. codex usage_limit_reached resets_at) overrides backoff
-  let shouldFallback, cooldownMs, newBackoffLevel;
-  if (githubResetAtMs) {
-    shouldFallback = true;
-    cooldownMs = githubResetAtMs - Date.now();
-    newBackoffLevel = 0;
-  } else if (resetsAtMs && resetsAtMs > Date.now()) {
-    shouldFallback = true;
-    // Confirmed quota and Antigravity cache resets are provider commitments, not retry hints.
-    cooldownMs = errorClass === "quota_exhausted" || resolveProviderId(provider) === "antigravity"
-      ? resetsAtMs - Date.now()
-      : Math.min(resetsAtMs - Date.now(), MAX_RATE_LIMIT_COOLDOWN_MS);
-    newBackoffLevel = 0;
-  } else {
-    ({ shouldFallback, cooldownMs, newBackoffLevel } = checkFallbackError(status, errorText, backoffLevel));
-  }
-  if (!shouldFallback) return { shouldFallback: false, cooldownMs: 0 };
 
   const reason = typeof errorText === "string" ? errorText.slice(0, 200) : "Provider error";
-  const lockUpdate = buildModelLockUpdate(lockModel, cooldownMs);
-  const unavailabilityReason = errorClass || (githubResetAtMs ? "quota_exhausted" : null);
-  const nextBackoffLevel = newBackoffLevel ?? backoffLevel;
+  let effective = null;
+  let lockKey = null;
+  let connectionName = connectionId.slice(0, 8);
 
-  await updateProviderConnection(connectionId, {
-    ...lockUpdate,
-    ...buildModelLockMetadataUpdate(lockModel, {
-      unavailabilityReason, errorCode: status, lastError: reason, backoffLevel: nextBackoffLevel,
-    }),
-    testStatus: "unavailable",
-    lastError: reason,
-    errorCode: status,
-    unavailabilityReason,
-    lastErrorAt: new Date().toISOString(),
-    ...(lockModel === null ? { backoffLevel: nextBackoffLevel } : {})
-  });
+  const updated = await updateProviderConnection(connectionId, (current) => {
+    const now = Date.now();
+    const resolvedProvider = provider || current.provider;
+    const githubResetAtMs = githubMonthlyResetMs(status, errorText, resolvedProvider);
+    const lockModel = githubResetAtMs ? null : model;
+    lockKey = getModelLockKey(lockModel);
+    connectionName = current.displayName || current.name || current.email || connectionName;
 
-  const lockKey = Object.keys(lockUpdate)[0];
-  const connName = conn?.displayName || conn?.name || conn?.email || connectionId.slice(0, 8);
-  log.warn("AUTH", `${connName} locked ${lockKey} for ${Math.round(cooldownMs / 1000)}s [${status}]`);
+    const exactMetadata = getExactModelLockMetadata(current, lockModel);
+    const backoffLevel = Number(exactMetadata.backoffLevel) || 0;
+    const currentExpiryMs = Date.parse(current[lockKey]);
+    const currentActive = Number.isFinite(currentExpiryMs) && currentExpiryMs > now;
 
-  if (provider && status && reason) {
-    console.error(`❌ ${provider} [${status}]: ${reason}`);
-  }
+    let shouldFallback = false;
+    let candidateExpiryMs = null;
+    let newBackoffLevel = backoffLevel;
+    if (githubResetAtMs && githubResetAtMs > now) {
+      shouldFallback = true;
+      candidateExpiryMs = githubResetAtMs;
+      newBackoffLevel = 0;
+    } else if (typeof resetsAtMs === "number" && Number.isFinite(resetsAtMs)) {
+      const resetDate = new Date(resetsAtMs);
+      if (Number.isFinite(resetDate.getTime()) && resetsAtMs > now) {
+        shouldFallback = true;
+        candidateExpiryMs = errorClass === "quota_exhausted"
+          ? resetDate.getTime()
+          : Math.min(resetDate.getTime(), now + MAX_RATE_LIMIT_COOLDOWN_MS);
+        newBackoffLevel = 0;
+      }
+    }
+    if (!shouldFallback) {
+      const fallback = checkFallbackError(status, errorText, backoffLevel);
+      shouldFallback = fallback.shouldFallback;
+      candidateExpiryMs = shouldFallback ? now + fallback.cooldownMs : null;
+      newBackoffLevel = fallback.newBackoffLevel ?? backoffLevel;
+    }
 
-  return { shouldFallback: true, cooldownMs };
+    if (!shouldFallback || !Number.isFinite(candidateExpiryMs) || candidateExpiryMs <= now) {
+      effective = currentActive
+        ? { shouldFallback: true, cooldownMs: currentExpiryMs - now }
+        : { shouldFallback: false, cooldownMs: 0 };
+      return null;
+    }
+
+    const candidateReason = errorClass || (githubResetAtMs ? "quota_exhausted" : null);
+    let effectiveExpiryMs = candidateExpiryMs;
+    let effectiveReason = candidateReason;
+    let effectiveErrorCode = status;
+    let effectiveLastError = reason;
+    let effectiveBackoffLevel = newBackoffLevel;
+    const currentIsQuota = exactMetadata.unavailabilityReason === "quota_exhausted";
+    const candidateIsQuota = candidateReason === "quota_exhausted";
+
+    if (currentActive && currentExpiryMs > candidateExpiryMs) {
+      effectiveExpiryMs = currentExpiryMs;
+      effectiveReason = exactMetadata.unavailabilityReason;
+      effectiveErrorCode = exactMetadata.errorCode;
+      effectiveLastError = exactMetadata.lastError;
+      effectiveBackoffLevel = exactMetadata.backoffLevel;
+    } else if (currentActive && currentExpiryMs === candidateExpiryMs && !(candidateIsQuota && !currentIsQuota)) {
+      effective = { shouldFallback: true, cooldownMs: currentExpiryMs - now };
+      return null;
+    }
+
+    effective = { shouldFallback: true, cooldownMs: Math.max(0, effectiveExpiryMs - now) };
+    return {
+      [lockKey]: new Date(effectiveExpiryMs).toISOString(),
+      ...buildModelLockMetadataUpdate(lockModel, {
+        unavailabilityReason: effectiveReason,
+        errorCode: effectiveErrorCode,
+        lastError: effectiveLastError,
+        backoffLevel: effectiveBackoffLevel,
+      }),
+      testStatus: "unavailable",
+      lastError: effectiveLastError,
+      errorCode: effectiveErrorCode,
+      unavailabilityReason: effectiveReason,
+      lastErrorAt: new Date(now).toISOString(),
+      ...(lockModel === null ? { backoffLevel: effectiveBackoffLevel } : {}),
+    };
+  }, { resetHealth: false });
+
+  if (!updated) return { shouldFallback: false, cooldownMs: 0 };
+  log.warn("AUTH", `${connectionName} locked ${lockKey} for ${Math.round(effective.cooldownMs / 1000)}s [${status}]`);
+  if (provider && status && reason) console.error(`❌ ${provider} [${status}]: ${reason}`);
+  return effective;
 }
 
 /**
- * Clear account error status on successful request.
- * - Clears modelLock_${model} (the model that just succeeded)
- * - Lazy-cleans any other expired modelLock_* keys
- * - Resets error state only if no active locks remain
- * @param {string} connectionId
- * @param {object} currentConnection - credentials object (has _connection) or raw connection
- * @param {string|null} model - model that succeeded
+ * Clear the successful model lock and expired locks from the latest DB row.
  */
 export async function clearAccountError(connectionId, currentConnection, model = null) {
   if (!connectionId || connectionId === "noauth") return;
-  const conn = currentConnection._connection || currentConnection;
-  const now = Date.now();
-  const allLockKeys = Object.keys(conn).filter(k => k.startsWith("modelLock_"));
+  const snapshot = currentConnection?._connection || currentConnection || {};
+  const snapshotTargetKey = getModelLockKey(model);
+  const snapshotTargetExpiry = snapshot[snapshotTargetKey];
 
-  if (!conn.testStatus && !conn.lastError && allLockKeys.length === 0) return;
-
-  // Keys to clear: current model's lock + all expired locks
-  const keysToClear = allLockKeys.filter(k => {
-    if (model && k === `modelLock_${model}`) return true; // succeeded model
-    if (model === null && k === "modelLock___all") return true; // account-scoped success
-    const expiry = conn[k];
-    return expiry && new Date(expiry).getTime() <= now;   // expired
-  });
-
-  if (keysToClear.length === 0 && conn.testStatus !== "unavailable" && !conn.lastError) return;
-
-  // Check if any active locks remain after clearing
-  const remainingActiveLocks = allLockKeys.filter(k => {
-    if (keysToClear.includes(k)) return false;
-    const expiry = conn[k];
-    return expiry && new Date(expiry).getTime() > now;
-  });
-
-  const clearObj = Object.fromEntries(keysToClear.map(k => [k, null]));
-  for (const lockKey of keysToClear) {
-    const lockModel = lockKey === "modelLock___all" ? null : lockKey.slice("modelLock_".length);
-    Object.assign(clearObj, buildClearModelLockMetadataUpdate(lockModel));
-  }
-
-  // Only reset error state if no active locks remain
-  if (remainingActiveLocks.length === 0) {
-    Object.assign(clearObj, {
-      testStatus: "active",
-      lastError: null,
-      errorCode: null,
-      unavailabilityReason: null,
-      lastErrorAt: null,
-      backoffLevel: 0
+  await updateProviderConnection(connectionId, (current) => {
+    const now = Date.now();
+    const allLockKeys = Object.keys(current).filter(key => key.startsWith("modelLock_"));
+    const keysToClear = allLockKeys.filter((key) => {
+      const expiryMs = Date.parse(current[key]);
+      if (Number.isFinite(expiryMs) && expiryMs <= now) return true;
+      return key === snapshotTargetKey
+        && snapshotTargetExpiry != null
+        && current[key] === snapshotTargetExpiry;
     });
-  }
 
-  await updateProviderConnection(connectionId, clearObj);
+    const remainingActiveLocks = allLockKeys.filter((key) => {
+      if (keysToClear.includes(key)) return false;
+      const expiryMs = Date.parse(current[key]);
+      return Number.isFinite(expiryMs) && expiryMs > now;
+    });
+
+    const patch = Object.fromEntries(keysToClear.map(key => [key, null]));
+    for (const key of keysToClear) {
+      const lockModel = key === "modelLock___all" ? null : key.slice("modelLock_".length);
+      Object.assign(patch, buildClearModelLockMetadataUpdate(lockModel));
+    }
+    if (remainingActiveLocks.length === 0
+      && (current.testStatus === "unavailable" || current.lastError || current.errorCode || current.unavailabilityReason || current.backoffLevel)) {
+      Object.assign(patch, {
+        testStatus: "active",
+        lastError: null,
+        errorCode: null,
+        unavailabilityReason: null,
+        lastErrorAt: null,
+        backoffLevel: 0,
+      });
+    }
+    return Object.keys(patch).length > 0 ? patch : null;
+  }, { resetHealth: false });
 }
 
 /**

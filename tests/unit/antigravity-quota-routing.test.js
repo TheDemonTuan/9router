@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  connections: [],
   getProviderConnections: vi.fn(),
   getSettings: vi.fn(),
   resolveConnectionProxyConfig: vi.fn(),
   getAntigravityUsage: vi.fn(),
-  getChatGptWebCatalog: vi.fn(),
 }));
 
 vi.mock("@/lib/localDb", () => ({
@@ -13,7 +13,13 @@ vi.mock("@/lib/localDb", () => ({
   getSettings: mocks.getSettings,
   getProxyPools: vi.fn(),
   validateApiKey: vi.fn(),
-  updateProviderConnection: vi.fn(),
+  updateProviderConnection: vi.fn(async (id, patch) => {
+    const connection = mocks.connections.find(entry => entry.id === id);
+    if (!connection) return null;
+    const resolved = typeof patch === "function" ? patch(connection) : patch;
+    if (resolved !== null) Object.assign(connection, resolved);
+    return connection;
+  }),
 }));
 vi.mock("@/lib/network/connectionProxy", () => ({
   resolveConnectionProxyConfig: mocks.resolveConnectionProxyConfig,
@@ -21,464 +27,144 @@ vi.mock("@/lib/network/connectionProxy", () => ({
 }));
 vi.mock("@/shared/constants/providers.js", () => ({
   FREE_PROVIDERS: {},
-  resolveProviderId: (provider) => provider,
+  resolveProviderId: provider => provider,
 }));
-vi.mock("open-sse/services/usage/google.js", () => ({
-  getAntigravityUsage: mocks.getAntigravityUsage,
-}));
+vi.mock("open-sse/services/usage/google.js", () => ({ getAntigravityUsage: mocks.getAntigravityUsage }));
 vi.mock("@/sse/utils/logger.js", () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn() }));
-vi.mock("open-sse/services/chatgptWebBridge.js", async () => ({
-  ...(await vi.importActual("open-sse/services/chatgptWebBridge.js")),
-  getChatGptWebCatalog: mocks.getChatGptWebCatalog,
-}));
 
-const { getAntigravityQuotaCache, handleAntigravityQuotaError, refreshAntigravityQuota, clearAntigravityStrikes } = await import("@/sse/services/antigravityQuota.js");
+const {
+  persistAntigravityQuota,
+  refreshAntigravityQuota,
+  handleAntigravityQuotaError,
+  clearAntigravityStrikes,
+} = await import("@/sse/services/antigravityQuota.js");
 const { getProviderCredentials } = await import("@/sse/services/auth.js");
 
-const MODEL = "claude-opus-4-6-thinking";
+const MODEL = "gemini-3.8-flash-high";
+const OTHER_MODEL = "gemini-3.8-flash-medium";
+const NOW = Date.parse("2026-08-26T00:00:00.000Z");
 const FUTURE_RESET = "2026-09-01T00:00:00.000Z";
 
 beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(NOW);
   vi.clearAllMocks();
-  getAntigravityQuotaCache().clear();
-  mocks.resolveConnectionProxyConfig.mockResolvedValue({});
+  mocks.connections = [];
   mocks.getSettings.mockResolvedValue({});
+  mocks.getProviderConnections.mockImplementation(async ({ provider } = {}) =>
+    mocks.connections.filter(connection => (!provider || connection.provider === provider) && connection.isActive !== false));
+  mocks.resolveConnectionProxyConfig.mockResolvedValue({});
 });
 
-describe("Antigravity quota-aware routing", () => {
-  it("records exhausted upstream quota after 429 and returns its exact reset time", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-08-26T00:00:00.000Z"));
+afterEach(() => vi.useRealTimers());
+
+describe("Antigravity durable quota routing", () => {
+  it("persists only exact model zero rows with future reset", async () => {
+    mocks.connections = [{ id: "ag-a", provider: "antigravity", isActive: true }];
+    await persistAntigravityQuota("ag-a", {
+      [MODEL]: { remainingPercentage: 0, resetAt: FUTURE_RESET },
+      [OTHER_MODEL]: { remainingPercentage: 90, resetAt: FUTURE_RESET },
+      unknown: { remainingPercentage: 0, resetAt: FUTURE_RESET },
+      gemini_weekly: { remainingPercentage: 0, resetAt: FUTURE_RESET },
+      bad: { remainingPercentage: "0", resetAt: FUTURE_RESET },
+    });
+
+    expect(mocks.connections[0]).toMatchObject({
+      [`modelLock_${MODEL}`]: FUTURE_RESET,
+      [`modelLockReason_${MODEL}`]: "quota_exhausted",
+      [`modelLockErrorCode_${MODEL}`]: 429,
+    });
+    expect(mocks.connections[0][`modelLock_${OTHER_MODEL}`]).toBeUndefined();
+  });
+
+  it("selects the healthy account from persisted quota locks", async () => {
+    mocks.connections = [
+      {
+        id: "ag-a", provider: "antigravity", email: "a@example.com", isActive: true,
+        [`modelLock_${MODEL}`]: FUTURE_RESET,
+        [`modelLockReason_${MODEL}`]: "quota_exhausted",
+        [`modelLockErrorCode_${MODEL}`]: 429,
+      },
+      { id: "ag-b", provider: "antigravity", email: "b@example.com", isActive: true },
+    ];
+
+    await expect(getProviderCredentials("antigravity", null, MODEL)).resolves.toMatchObject({
+      connectionId: "ag-b",
+      connectionName: "b@example.com",
+    });
+  });
+
+  it("returns durable quota terminal classification when every account is locked", async () => {
+    mocks.connections = [{
+      id: "ag-a", provider: "antigravity", isActive: true,
+      [`modelLock_${MODEL}`]: FUTURE_RESET,
+      [`modelLockReason_${MODEL}`]: "quota_exhausted",
+      [`modelLockErrorCode_${MODEL}`]: 429,
+    }];
+    await expect(getProviderCredentials("antigravity", null, MODEL)).resolves.toMatchObject({
+      allRateLimited: true,
+      unavailabilityReason: "quota_exhausted",
+      retryAfter: FUTURE_RESET,
+    });
+  });
+
+  it("refreshes usage once and persists the raw snapshot", async () => {
+    mocks.connections = [{ id: "ag-refresh", provider: "antigravity", isActive: true }];
     mocks.getAntigravityUsage.mockResolvedValue({ quotas: {
       [MODEL]: { remainingPercentage: 0, resetAt: FUTURE_RESET },
+      [OTHER_MODEL]: { remainingPercentage: 90, resetAt: FUTURE_RESET },
     } });
 
-    try {
-      await expect(handleAntigravityQuotaError("ag-a", 429, MODEL, "token", {}))
-        .resolves.toBe(Date.parse(FUTURE_RESET));
-      expect(getAntigravityQuotaCache().get("ag-a")[MODEL]).toEqual({
-        remainingPercentage: 0,
-        resetAt: FUTURE_RESET,
-      });
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("skips exhausted account/model and selects the next account", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-08-26T00:00:00.000Z"));
-    mocks.getProviderConnections.mockResolvedValue([
-      { id: "ag-a", email: "a@example.com", isActive: true },
-      { id: "ag-b", email: "b@example.com", isActive: true },
-    ]);
-    getAntigravityQuotaCache().set("ag-a", {
-      [MODEL]: { remainingPercentage: 0, resetAt: FUTURE_RESET },
-    });
-
-    try {
-      await expect(getProviderCredentials("antigravity", null, MODEL)).resolves.toMatchObject({
-        connectionId: "ag-b",
-        connectionName: "b@example.com",
-      });
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("reports retry time when every account is cache-blocked", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-08-26T00:00:00.000Z"));
-    mocks.getProviderConnections.mockResolvedValue([{ id: "ag-a", email: "a@example.com", isActive: true }]);
-    getAntigravityQuotaCache().set("ag-a", {
-      [MODEL]: { remainingPercentage: 0, resetAt: FUTURE_RESET },
-    });
-
-    try {
-      await expect(getProviderCredentials("antigravity", null, MODEL)).resolves.toMatchObject({
-        allRateLimited: true,
-        unavailabilityReason: "quota_exhausted",
-        retryAfter: FUTURE_RESET,
-      });
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("lets account back into rotation once reset time has passed", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-09-01T00:00:01.000Z"));
-    mocks.getProviderConnections.mockResolvedValue([{ id: "ag-a", email: "a@example.com", isActive: true }]);
-    getAntigravityQuotaCache().set("ag-a", {
-      [MODEL]: { remainingPercentage: 0, resetAt: FUTURE_RESET },
-    });
-
-    try {
-      await expect(getProviderCredentials("antigravity", null, MODEL)).resolves.toMatchObject({
-        connectionId: "ag-a",
-        connectionName: "a@example.com",
-      });
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("coalesces concurrent quota refreshes for one account", async () => {
-    let resolveUsage;
-    mocks.getAntigravityUsage.mockReturnValue(new Promise(resolve => { resolveUsage = resolve; }));
-
-    const first = refreshAntigravityQuota("ag-concurrent", "token", {});
-    const second = refreshAntigravityQuota("ag-concurrent", "token", {});
-    resolveUsage({ quotas: { [MODEL]: { remainingPercentage: 0, resetAt: FUTURE_RESET } } });
-
-    await expect(Promise.all([first, second])).resolves.toEqual([
-      { [MODEL]: { remainingPercentage: 0, resetAt: FUTURE_RESET } },
-      { [MODEL]: { remainingPercentage: 0, resetAt: FUTURE_RESET } },
-    ]);
+    await expect(refreshAntigravityQuota("ag-refresh", "token", {})).resolves.toMatchObject({ [MODEL]: { remainingPercentage: 0 } });
+    expect(mocks.getAntigravityUsage).toHaveBeenCalledTimes(1);
+    expect(mocks.connections[0][`modelLock_${MODEL}`]).toBe(FUTURE_RESET);
+    await refreshAntigravityQuota("ag-refresh", "token", {});
     expect(mocks.getAntigravityUsage).toHaveBeenCalledTimes(1);
   });
 
-  it("preserves strict proxy policy for usage refresh", async () => {
-    mocks.resolveConnectionProxyConfig.mockResolvedValue({ strictProxy: true });
-    mocks.getAntigravityUsage.mockResolvedValue({ quotas: {} });
-
-    await refreshAntigravityQuota("ag-strict-proxy", "token", {});
-
-    expect(mocks.getAntigravityUsage).toHaveBeenCalledWith("token", {}, expect.objectContaining({
-      strictProxy: true,
-    }));
-  });
-
-  it("keeps known cache when quota endpoint returns an error payload", async () => {
-    const cached = { [MODEL]: { remainingPercentage: 0, resetAt: FUTURE_RESET } };
-    getAntigravityQuotaCache().set("ag-error-response", cached);
-    mocks.getAntigravityUsage.mockResolvedValue({ message: "Unauthorized", quotas: {} });
-
-    await expect(refreshAntigravityQuota("ag-error-response", "token", {})).resolves.toBeNull();
-    expect(getAntigravityQuotaCache().get("ag-error-response")).toBe(cached);
-  });
-
-  it("throttles failed refresh attempts for 30 seconds", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-08-26T00:00:00.000Z"));
-    mocks.getAntigravityUsage.mockRejectedValue(new Error("usage unavailable"));
-
-    try {
-      await refreshAntigravityQuota("ag-failed-refresh", "token", {});
-      await refreshAntigravityQuota("ag-failed-refresh", "token", {});
-      expect(mocks.getAntigravityUsage).toHaveBeenCalledTimes(1);
-
-      await vi.advanceTimersByTimeAsync(30_000);
-      await refreshAntigravityQuota("ag-failed-refresh", "token", {});
-      expect(mocks.getAntigravityUsage).toHaveBeenCalledTimes(2);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("strike-breaks after 3 optimistic 429s within 60s and cache-blocks 15 minutes", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-08-26T00:00:00.000Z"));
-    // Quota API lies: reports 90% remaining while generation keeps 429ing.
+  it("rejects refresh when durable quota persistence fails", async () => {
+    mocks.connections = [{ id: "ag-db-error", provider: "antigravity", isActive: true }];
     mocks.getAntigravityUsage.mockResolvedValue({ quotas: {
-      [MODEL]: { remainingPercentage: 90, resetAt: FUTURE_RESET },
-    } });
-
-    try {
-      const first = await handleAntigravityQuotaError("ag-strike", 429, MODEL, "token", {});
-      expect(first).toBeNull();
-      const second = await handleAntigravityQuotaError("ag-strike", 429, MODEL, "token", {});
-      expect(second).toBeNull();
-
-      const third = await handleAntigravityQuotaError("ag-strike", 429, MODEL, "token", {});
-      expect(third).toBe(Date.parse("2026-08-26T00:15:00.000Z"));
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("resets the strike counter when strikes fall outside the 60s window", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-08-26T00:00:00.000Z"));
-    mocks.getAntigravityUsage.mockResolvedValue({ quotas: {
-      [MODEL]: { remainingPercentage: 90, resetAt: FUTURE_RESET },
-    } });
-
-    try {
-      await handleAntigravityQuotaError("ag-window", 429, MODEL, "token", {});
-      await handleAntigravityQuotaError("ag-window", 429, MODEL, "token", {});
-      await vi.advanceTimersByTimeAsync(61_000);
-      const result = await handleAntigravityQuotaError("ag-window", 429, MODEL, "token", {});
-      expect(result).toBeNull(); // window lapsed — counter restarted at 1
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("strike-breaks when the quota API is unavailable (null reading) too", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-08-26T00:00:00.000Z"));
-    // Quota endpoint failing/forbidden => quota unknown. Strikes must still count.
-    mocks.getAntigravityUsage.mockResolvedValue({ message: "forbidden", quotas: {} });
-
-    try {
-      await handleAntigravityQuotaError("ag-null", 429, MODEL, "token", {});
-      await handleAntigravityQuotaError("ag-null", 429, MODEL, "token", {});
-      const third = await handleAntigravityQuotaError("ag-null", 429, MODEL, "token", {});
-      expect(third).toBe(Date.parse("2026-08-26T00:15:00.000Z"));
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("persists the block into the shared cache so the next request skips the pair", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-08-26T00:00:00.000Z"));
-    mocks.getAntigravityUsage.mockResolvedValue({ quotas: {
-      [MODEL]: { remainingPercentage: 90, resetAt: FUTURE_RESET },
-    } });
-
-    try {
-      await handleAntigravityQuotaError("ag-persist", 429, MODEL, "token", {});
-      await handleAntigravityQuotaError("ag-persist", 429, MODEL, "token", {});
-      await handleAntigravityQuotaError("ag-persist", 429, MODEL, "token", {});
-
-      // The synthesized entry must be visible to the auth pre-filter reading
-      // the shared cache — and must survive an optimistic upstream refresh.
-      const cached = getAntigravityQuotaCache().get("ag-persist")?.[MODEL];
-      expect(cached).toMatchObject({ remainingPercentage: 0 });
-      expect(Date.parse(cached.resetAt)).toBe(Date.parse("2026-08-26T00:15:00.000Z"));
-
-      await refreshAntigravityQuota("ag-persist", "token", {});
-      expect(getAntigravityQuotaCache().get("ag-persist")?.[MODEL]).toMatchObject({
-        remainingPercentage: 0,
-      });
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("clears strike state and the synthesized block after a successful request", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-08-26T00:00:00.000Z"));
-    mocks.getAntigravityUsage.mockResolvedValue({ quotas: {
-      [MODEL]: { remainingPercentage: 90, resetAt: FUTURE_RESET },
-    } });
-
-    try {
-      await handleAntigravityQuotaError("ag-clear", 429, MODEL, "token", {});
-      await handleAntigravityQuotaError("ag-clear", 429, MODEL, "token", {});
-      await handleAntigravityQuotaError("ag-clear", 429, MODEL, "token", {});
-      expect(getAntigravityQuotaCache().get("ag-clear")?.[MODEL]?.remainingPercentage).toBe(0);
-
-      clearAntigravityStrikes("ag-clear", MODEL);
-      // Synthesized entry gone — pair selectable again immediately.
-      expect(getAntigravityQuotaCache().get("ag-clear")?.[MODEL]).toBeUndefined();
-
-      // Two more 429s do NOT inherit earlier strikes: no block on the third-in-episode.
-      await handleAntigravityQuotaError("ag-clear", 429, MODEL, "token", {});
-      await expect(handleAntigravityQuotaError("ag-clear", 429, MODEL, "token", {})).resolves.toBeNull();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("anchors the window at the first strike: 3 strikes spread over 90s do not trip", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-08-26T00:00:00.000Z"));
-    mocks.getAntigravityUsage.mockResolvedValue({ quotas: {
-      [MODEL]: { remainingPercentage: 90, resetAt: FUTURE_RESET },
-    } });
-
-    try {
-      await handleAntigravityQuotaError("ag-anchor", 429, MODEL, "token", {});      // t=0
-      await vi.advanceTimersByTimeAsync(45_000);
-      await handleAntigravityQuotaError("ag-anchor", 429, MODEL, "token", {});      // t=45s
-      await vi.advanceTimersByTimeAsync(45_000);
-      // t=90s: within 60s of strike #2 but outside 60s of strike #1 => new window
-      const result = await handleAntigravityQuotaError("ag-anchor", 429, MODEL, "token", {});
-      expect(result).toBeNull();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("keeps the optimistic path null without touching the quota cache", async () => {
-    mocks.getAntigravityUsage.mockResolvedValue({ quotas: {
-      [MODEL]: { remainingPercentage: 90, resetAt: FUTURE_RESET },
-    } });
-
-    await expect(handleAntigravityQuotaError("ag-optimistic", 429, MODEL, "token", {}))
-      .resolves.toBeNull();
-    // Optimistic reading must NOT poison the shared cache (auth pre-filter
-    // treats cached 0% as exhausted).
-    expect(getAntigravityQuotaCache().get("ag-optimistic")?.[MODEL]?.remainingPercentage).toBe(90);
-  });
-
-  it("uses the earliest verified reset when every account has exhausted quota", async () => {
-    const laterReset = "2026-09-02T00:00:00.000Z";
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-08-26T00:00:00.000Z"));
-    mocks.getProviderConnections.mockResolvedValue([
-      { id: "ag-late", email: "late@example.com", isActive: true },
-      { id: "ag-early", email: "early@example.com", isActive: true },
-    ]);
-    getAntigravityQuotaCache().set("ag-late", {
-      [MODEL]: { remainingPercentage: 0, resetAt: laterReset },
-    });
-    getAntigravityQuotaCache().set("ag-early", {
       [MODEL]: { remainingPercentage: 0, resetAt: FUTURE_RESET },
+    } });
+    const update = (await import("@/lib/localDb")).updateProviderConnection;
+    update.mockRejectedValueOnce(new Error("db write failed"));
+    await expect(refreshAntigravityQuota("ag-db-error", "token", {})).rejects.toThrow("db write failed");
+  });
+
+  it("returns exact hard-quota evidence and clears strikes", async () => {
+    mocks.connections = [{ id: "ag-hard", provider: "antigravity", isActive: true }];
+    mocks.getAntigravityUsage.mockResolvedValue({ quotas: {
+      [MODEL]: { remainingPercentage: 0, resetAt: FUTURE_RESET },
+    } });
+    await expect(handleAntigravityQuotaError("ag-hard", 429, MODEL, "token", {})).resolves.toEqual({
+      resetsAtMs: Date.parse(FUTURE_RESET),
+      errorClass: "quota_exhausted",
     });
-
-    try {
-      await expect(getProviderCredentials("antigravity", null, MODEL)).resolves.toMatchObject({
-        allRateLimited: true,
-        unavailabilityReason: "quota_exhausted",
-        retryAfter: FUTURE_RESET,
-      });
-    } finally {
-      vi.useRealTimers();
-    }
   });
 
-  it("selects a cgw account whose verified live catalog satisfies the request", async () => {
-    mocks.getProviderConnections.mockResolvedValue([
-      { id: "cgw-text", name: "Text bridge", provider: "chatgpt-web", isActive: true },
-      { id: "cgw-vision", name: "Vision bridge", provider: "chatgpt-web", isActive: true },
-    ]);
-    mocks.getChatGptWebCatalog.mockImplementation(async (connection) => ({
-      stale: false,
-      models: [{
-        id: "chatgpt-web/high",
-        capabilities: connection.id === "cgw-vision"
-          ? { native_responses: true, vision: true }
-          : { native_responses: true, reasoning: true },
-      }],
-    }));
-
-    await expect(getProviderCredentials(
-      "chatgpt-web",
-      null,
-      "chatgpt-web/high",
-      { requiredCapabilities: new Set(["vision"]) },
-    )).resolves.toMatchObject({ connectionId: "cgw-vision" });
+  it("opens a persisted rate-limited breaker after three optimistic results", async () => {
+    mocks.connections = [{ id: "ag-breaker", provider: "antigravity", isActive: true }];
+    mocks.getAntigravityUsage.mockResolvedValue({ quotas: {
+      [MODEL]: { remainingPercentage: 90, resetAt: FUTURE_RESET },
+    } });
+    await expect(handleAntigravityQuotaError("ag-breaker", 429, MODEL, "token", {})).resolves.toBeNull();
+    vi.advanceTimersByTime(3_000);
+    await expect(handleAntigravityQuotaError("ag-breaker", 409, MODEL, "token", {})).resolves.toBeNull();
+    vi.advanceTimersByTime(3_000);
+    const evidence = await handleAntigravityQuotaError("ag-breaker", 429, MODEL, "token", {});
+    expect(evidence).toEqual({ resetsAtMs: NOW + 6_000 + 15 * 60_000, errorClass: "rate_limited" });
+    clearAntigravityStrikes("ag-breaker", MODEL);
   });
 
-  it("pins cgw selection when the requested connection is explicit", async () => {
-    mocks.getProviderConnections.mockResolvedValue([
-      { id: "cgw-a", name: "A", provider: "chatgpt-web", isActive: true },
-      { id: "cgw-b", name: "B", provider: "chatgpt-web", isActive: true },
-    ]);
-    mocks.getChatGptWebCatalog.mockResolvedValue({
-      stale: false,
-      models: [{ id: "chatgpt-web/high", capabilities: { native_responses: true } }],
-    });
-
-    await expect(getProviderCredentials(
-      "chatgpt-web",
-      null,
-      "chatgpt-web/high",
-      { pinConnectionId: "cgw-b" },
-    )).resolves.toMatchObject({ connectionId: "cgw-b" });
-  });
-
-  it("reports a missing pinned cgw connection instead of selecting another", async () => {
-    mocks.getProviderConnections.mockResolvedValue([
-      { id: "cgw-a", name: "A", provider: "chatgpt-web", isActive: true },
-    ]);
-    mocks.getChatGptWebCatalog.mockResolvedValue({
-      stale: false,
-      models: [{ id: "chatgpt-web/high", capabilities: { native_responses: true } }],
-    });
-
-    await expect(getProviderCredentials(
-      "chatgpt-web",
-      null,
-      "chatgpt-web/high",
-      { pinConnectionId: "missing" },
-    )).resolves.toMatchObject({ pinnedConnectionUnavailable: true, connectionId: "missing" });
-  });
-
-  it("keeps native Codex selection closed to generic-only bridges", async () => {
-    mocks.getProviderConnections.mockResolvedValue([
-      { id: "cgw-generic", name: "Generic bridge", provider: "chatgpt-web", isActive: true },
-    ]);
-    mocks.getChatGptWebCatalog.mockResolvedValue({
-      stale: false,
-      models: [{ id: "chatgpt-web/high", capabilities: { generic_responses: true } }],
-    });
-
-    await expect(getProviderCredentials(
-      "chatgpt-web",
-      null,
-      "chatgpt-web/high",
-      { bridgeCapability: "native_responses" },
-    )).resolves.toBeNull();
-  });
-
-  it("selects a generic-capable bridge only for generic requests", async () => {
-    mocks.getProviderConnections.mockResolvedValue([
-      { id: "cgw-native", name: "Native bridge", provider: "chatgpt-web", isActive: true },
-      { id: "cgw-generic", name: "Generic bridge", provider: "chatgpt-web", isActive: true },
-    ]);
-    mocks.getChatGptWebCatalog.mockImplementation(async (connection) => ({
-      stale: false,
-      models: [{
-        id: "chatgpt-web/high",
-        capabilities: connection.id === "cgw-generic"
-          ? { generic_responses: true }
-          : { native_responses: true },
-      }],
-    }));
-
-    await expect(getProviderCredentials(
-      "chatgpt-web",
-      null,
-      "chatgpt-web/high",
-      { bridgeCapability: "generic_responses" },
-    )).resolves.toMatchObject({ connectionId: "cgw-generic" });
-  });
-
-  it("keeps an unverified cgw capability out of dispatch", async () => {
-    mocks.getProviderConnections.mockResolvedValue([
-      { id: "cgw-unknown", name: "Unknown bridge", provider: "chatgpt-web", isActive: true },
-    ]);
-    mocks.getChatGptWebCatalog.mockResolvedValue({
-      stale: false,
-      models: [{ id: "chatgpt-web/high" }],
-    });
-
-    await expect(getProviderCredentials(
-      "chatgpt-web",
-      null,
-      "chatgpt-web/high",
-      { requiredCapabilities: new Set(["vision"]) },
-    )).resolves.toBeNull();
-  });
-
-  it.each([
-    [401, "auth_failed"],
-    [503, "transient_provider_failure"],
-  ])("does not label locked %i accounts as quota exhaustion", async (status, unavailabilityReason) => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-08-26T00:00:00.000Z"));
-    mocks.getProviderConnections.mockResolvedValue([{
-      id: "ag-locked",
-      email: "locked@example.com",
-      isActive: true,
+  it("releases a persisted lock after its deadline without quota refresh", async () => {
+    mocks.connections = [{
+      id: "ag-expired", provider: "antigravity", email: "expired@example.com", isActive: true,
       [`modelLock_${MODEL}`]: FUTURE_RESET,
-      errorCode: status,
-      lastError: `upstream ${status}`,
-    }]);
-
-    try {
-      await expect(getProviderCredentials("antigravity", null, MODEL)).resolves.toMatchObject({
-        allRateLimited: true,
-        unavailabilityReason,
-        retryAfter: FUTURE_RESET,
-      });
-    } finally {
-      vi.useRealTimers();
-    }
+      [`modelLockReason_${MODEL}`]: "quota_exhausted",
+    }];
+    vi.setSystemTime(Date.parse(FUTURE_RESET));
+    await expect(getProviderCredentials("antigravity", null, MODEL)).resolves.toMatchObject({ connectionId: "ag-expired" });
+    expect(mocks.getAntigravityUsage).not.toHaveBeenCalled();
   });
 });

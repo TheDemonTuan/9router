@@ -54,10 +54,23 @@ const QUOTA_CODES = new Set([
   "organization_spend_limit_exceeded", "project_spend_limit_exceeded",
 ]);
 
+const parsedErrorCache = new WeakMap();
+
+function normalizedRetryAfterMs(value) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function normalizedResetMs(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) && date.getTime() > Date.now() ? date.getTime() : undefined;
+}
+
 export function classifyUpstreamError(statusCode, message, error = {}) {
-  const code = String(error?.code || error?.type || "").toLowerCase();
-  const text = `${code} ${String(message || "")}`.toLowerCase();
-  if (QUOTA_CODES.has(code) ||
+  const code = String(error?.code || "").toLowerCase();
+  const type = String(error?.type || "").toLowerCase();
+  const text = `${code} ${type} ${String(message || "")}`.toLowerCase();
+  if (QUOTA_CODES.has(code) || QUOTA_CODES.has(type) ||
     (statusCode === 402 && /additional usage limit for your plan/.test(text)) ||
     /(?:free )?usage (?:limit |is )?exhausted|quota (?:is )?exhausted|quota remaining\s*[=:]\s*0/.test(text)) {
     return { errorClass: "quota_exhausted", retryable: false };
@@ -71,37 +84,55 @@ export function classifyUpstreamError(statusCode, message, error = {}) {
 }
 
 /**
- * Parse upstream provider error response.
+ * Parse upstream provider error response without consuming the original body.
  */
 export async function parseUpstreamError(response, executor = null) {
-  let bodyText = "";
-  try {
-    bodyText = await response.text();
-  } catch {
-    bodyText = "";
+  let byExecutor = parsedErrorCache.get(response);
+  if (!byExecutor) {
+    byExecutor = new Map();
+    parsedErrorCache.set(response, byExecutor);
   }
+  if (byExecutor.has(executor)) return byExecutor.get(executor);
 
-  let body = null;
-  try { body = JSON.parse(bodyText); } catch { /* non-JSON provider error */ }
-  const providerError = body?.error && typeof body.error === "object" ? body.error : body || {};
-  let parsed = null;
-  if (executor && typeof executor.parseError === "function") {
-    try { parsed = executor.parseError(response, bodyText); } catch { /* default parser below */ }
-  }
-  const statusCode = parsed?.status || response.status;
-  const message = parsed?.message || providerError.message || body?.message || (typeof body?.error === "string" ? body.error : "") || bodyText || DEFAULT_ERROR_MESSAGES[statusCode] || `Upstream error: ${statusCode}`;
-  const classification = classifyUpstreamError(statusCode, message, {
-    type: parsed?.type || providerError.type,
-    code: parsed?.code || providerError.code,
-  });
-  return {
-    statusCode,
-    message: typeof message === "string" ? message : JSON.stringify(message),
-    resetsAtMs: parsed?.resetsAtMs,
-    ...(parsed?.resolvedModel ? { resolvedModel: parsed.resolvedModel } : {}),
-    ...classification,
-    ...(typeof parsed?.retryable === "boolean" ? { retryable: parsed.retryable } : {}),
-  };
+  const promise = (async () => {
+    let bodyText = "";
+    try {
+      bodyText = await response.clone().text();
+    } catch {
+      try { bodyText = await response.text(); } catch { bodyText = ""; }
+    }
+
+    let body = null;
+    try { body = JSON.parse(bodyText); } catch { /* non-JSON provider error */ }
+    const providerError = body?.error && typeof body.error === "object" ? body.error : body || {};
+    let parsed = null;
+    if (executor && typeof executor.parseError === "function") {
+      try { parsed = await executor.parseError(response, bodyText); } catch { parsed = null; }
+    }
+    const statusCode = parsed?.status || response.status;
+    const message = parsed?.message || providerError.message || body?.message || (typeof body?.error === "string" ? body.error : "") || bodyText || DEFAULT_ERROR_MESSAGES[statusCode] || `Upstream error: ${statusCode}`;
+    const fallback = classifyUpstreamError(statusCode, message, {
+      type: parsed?.type || providerError.type,
+      code: parsed?.code || providerError.code,
+    });
+    const errorClass = parsed?.errorClass || fallback.errorClass;
+    const retryable = errorClass === "quota_exhausted"
+      ? false
+      : (typeof parsed?.retryable === "boolean" ? parsed.retryable : fallback.retryable);
+    const resetsAtMs = normalizedResetMs(parsed?.resetsAtMs);
+    const retryAfterMs = normalizedRetryAfterMs(parsed?.retryAfterMs);
+    return {
+      statusCode,
+      message: typeof message === "string" ? message : JSON.stringify(message),
+      ...(resetsAtMs !== undefined ? { resetsAtMs } : {}),
+      ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+      ...(parsed?.resolvedModel ? { resolvedModel: parsed.resolvedModel } : {}),
+      errorClass,
+      retryable,
+    };
+  })();
+  byExecutor.set(executor, promise);
+  return promise;
 }
 
 /**

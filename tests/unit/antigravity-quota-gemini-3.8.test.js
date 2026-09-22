@@ -17,8 +17,10 @@ const proxyAwareFetch = vi.fn(async (url) => ({
           },
           "gemini-3.8-flash-low": {
             displayName: "Gemini 3.8 Flash (Low)",
-            quotaInfo: { remainingFraction: 0.35, resetTime: "2026-08-25T12:00:00Z" },
+            quotaInfo: { remainingFraction: 0, resetTime: "2026-08-25T12:00:00Z" },
           },
+          "gemini-3.7-flash-high": { quotaInfo: { resetTime: "2026-08-25T12:00:00Z" } },
+          "gemini-3.6-flash-high": { quotaInfo: { remainingFraction: null, resetTime: "2026-08-25T12:00:00Z" } },
           "internal-model": {
             displayName: "Internal",
             isInternal: true,
@@ -53,9 +55,11 @@ describe("Antigravity quota tracker: Gemini 3.8 Flash usage bars", () => {
       remainingPercentage: 60,
     });
     expect(usage.quotas["gemini-3.8-flash-low"]).toMatchObject({
-      used: 650,
+      used: 1000,
       total: 1000,
-      remainingPercentage: 35,
+      remainingPercentage: 0,
     });
+    expect(usage.quotas["gemini-3.7-flash-high"]).toBeUndefined();
+    expect(usage.quotas["gemini-3.6-flash-high"]).toBeUndefined();
   });
 });

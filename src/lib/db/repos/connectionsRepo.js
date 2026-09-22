@@ -212,17 +212,22 @@ export async function createProviderConnection(data) {
 }
 
 // Critical: OAuth refresh token race — atomic merge inside transaction
-export async function updateProviderConnection(id, data) {
+export async function updateProviderConnection(id, data, { resetHealth = true } = {}) {
   const db = await getAdapter();
   let result;
   db.transaction(() => {
     const row = db.get(`SELECT * FROM providerConnections WHERE id = ?`, [id]);
     if (!row) { result = null; return; }
     const existing = rowToConn(row);
-    const normalized = resetHealthStateOnActivation(existing, data);
+    const resolvedPatch = typeof data === "function" ? data(existing) : data;
+    if (resolvedPatch && typeof resolvedPatch.then === "function") {
+      throw new TypeError("updateProviderConnection updater must be synchronous");
+    }
+    if (resolvedPatch === null) { result = existing; return; }
+    const normalized = resetHealth ? resetHealthStateOnActivation(existing, resolvedPatch) : resolvedPatch;
     const merged = { ...existing, ...normalized, updatedAt: new Date().toISOString() };
     upsert(db, merged);
-    if (data.priority !== undefined) reorderInTx(db, existing.provider);
+    if (resolvedPatch?.priority !== undefined) reorderInTx(db, existing.provider);
     result = merged;
   });
   return result;

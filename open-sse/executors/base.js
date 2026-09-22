@@ -1,6 +1,7 @@
 import { HTTP_STATUS, RETRY_CONFIG, DEFAULT_RETRY_CONFIG, resolveRetryEntry, FETCH_CONNECT_TIMEOUT_MS } from "../config/runtimeConfig.js";
 import { shouldRefreshCredentials } from "../services/oauthCredentialManager.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
+import { parseUpstreamError } from "../utils/error.js";
 import { dbg } from "../utils/debugLog.js";
 import { ANTHROPIC_API_VERSION, OPENAI_COMPAT_BASE, ANTHROPIC_COMPAT_BASE } from "../providers/shared.js";
 import { resolveOpenAICompatibleApiType } from "../services/provider.js";
@@ -181,11 +182,18 @@ export class BaseExecutor {
           signal: mergedSignal
         }, proxyOptions);
         cleanupAbort();
-        const ct = response.headers?.get?.("content-type") || "";
-        const cl = response.headers?.get?.("content-length") || "?";
-        dbg("FETCH", `${this.provider.toUpperCase()} ← ${response.status} | ttft=${Date.now() - fetchT0}ms | ct=${ct} | cl=${cl}`);
+        if (response.ok) return { response, url, headers, transformedBody };
 
-        if (await tryRetry(urlIndex, response.status, `status ${response.status}`, response)) { urlIndex--; continue; }
+        const parsedError = await parseUpstreamError(response, this);
+        if (parsedError.errorClass === "quota_exhausted") {
+          return { response, url, headers, transformedBody };
+        }
+
+        if (parsedError.retryable !== false
+          && await tryRetry(urlIndex, response.status, `status ${response.status}`, response)) {
+          urlIndex--;
+          continue;
+        }
 
         if (this.shouldRetry(response.status, urlIndex)) {
           log?.debug?.("RETRY", `${response.status} on ${url}, trying fallback ${urlIndex + 1}`);

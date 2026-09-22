@@ -8,6 +8,7 @@ import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { cleanJSONSchemaForAntigravity, cleanToolJsonSchemaForGemini, normalizeGeminiContents } from "../translator/formats/gemini.js";
 import { DEFAULT_THINKING_AG_SIGNATURE } from "../config/defaultThinkingSignature.js";
 import { getGeminiThoughtSignatureSync } from "../services/thoughtSignatureStore.js";
+import { parseUpstreamError } from "../utils/error.js";
 
 // Sanitize function name: Gemini requires [a-zA-Z_][a-zA-Z0-9_.:\-]{0,63}
 function sanitizeFunctionName(name) {
@@ -38,6 +39,29 @@ const ANTIGRAVITY_TRANSIENT_STATUSES = new Set([
   HTTP_STATUS.SERVICE_UNAVAILABLE,
   HTTP_STATUS.GATEWAY_TIMEOUT,
 ]);
+
+function parseQuotaDurationMs(value, mode = "protobuf") {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  const pattern = mode === "protobuf"
+    ? /^(\d+(?:\.\d{1,9})?)s$/
+    : /^(?:(\d+(?:\.\d{1,9})?)h)?(?:(\d+(?:\.\d{1,9})?)m)?(?:(\d+(?:\.\d{1,9})?)s)?$/;
+  const match = text.match(pattern);
+  if (!match || (mode !== "protobuf" && !match[0])) return null;
+  if (mode !== "protobuf" && !/[hms]/.test(text)) return null;
+  const hours = mode === "protobuf" ? 0 : Number(match[1] || 0);
+  const minutes = mode === "protobuf" ? 0 : Number(match[2] || 0);
+  const seconds = Number(mode === "protobuf" ? match[1] : match[3] || 0);
+  const total = (hours * 3600 + minutes * 60 + seconds) * 1000;
+  return Number.isFinite(total) && total > 0 ? Math.ceil(total) : null;
+}
+
+function futureDeadline(now, durationMs) {
+  if (!Number.isFinite(durationMs) || durationMs <= 0) return null;
+  const deadline = now + durationMs;
+  const date = new Date(deadline);
+  return Number.isFinite(deadline) && Number.isFinite(date.getTime()) && deadline > now ? deadline : null;
+}
 
 // Fields Google generateContent rejects (Claude/OpenAI/Qwen thinking fields set at body root by thinkingUnified.js)
 const ANTIGRAVITY_REQUEST_BLACKLIST = [
@@ -350,61 +374,41 @@ export class AntigravityExecutor extends BaseExecutor {
     }
   }
 
-  generateProjectId() {
-    const adj = ["useful", "bright", "swift", "calm", "bold"][Math.floor(Math.random() * 5)];
-    const noun = ["fuze", "wave", "spark", "flow", "core"][Math.floor(Math.random() * 5)];
-    return `${adj}-${noun}-${crypto.randomUUID().slice(0, 5)}`;
-  }
-
-  generateSessionId() {
-    return crypto.randomUUID() + Date.now().toString();
-  }
-
   parseRetryHeaders(headers) {
     if (!headers?.get) return null;
 
-    const retryAfter = headers.get('retry-after');
+    const retryAfter = headers.get("retry-after");
     if (retryAfter) {
-      const seconds = parseInt(retryAfter, 10);
-      if (!isNaN(seconds) && seconds > 0) return seconds * 1000;
-
+      const seconds = Number(retryAfter);
+      if (Number.isFinite(seconds) && seconds > 0) return seconds * 1000;
       const date = new Date(retryAfter);
-      if (!isNaN(date.getTime())) {
+      if (Number.isFinite(date.getTime())) {
         const diff = date.getTime() - Date.now();
         return diff > 0 ? diff : null;
       }
     }
 
-    const resetAfter = headers.get('x-ratelimit-reset-after');
+    const resetAfter = headers.get("x-ratelimit-reset-after");
     if (resetAfter) {
-      const seconds = parseInt(resetAfter, 10);
-      if (!isNaN(seconds) && seconds > 0) return seconds * 1000;
+      const seconds = Number(resetAfter);
+      if (Number.isFinite(seconds) && seconds > 0) return seconds * 1000;
     }
 
-    const resetTimestamp = headers.get('x-ratelimit-reset');
+    const resetTimestamp = headers.get("x-ratelimit-reset");
     if (resetTimestamp) {
-      const ts = parseInt(resetTimestamp, 10) * 1000;
-      const diff = ts - Date.now();
-      return diff > 0 ? diff : null;
+      const timestamp = Number(resetTimestamp) * 1000;
+      const diff = timestamp - Date.now();
+      return Number.isFinite(diff) && diff > 0 ? diff : null;
     }
-
     return null;
   }
 
-  // Parse retry time from Antigravity error message body
-  // Format: "Your quota will reset after 2h7m23s" or "1h30m" or "45m" or "30s"
+  // Parse retry time from Antigravity error message body.
   parseRetryFromErrorMessage(errorMessage) {
     if (!errorMessage || typeof errorMessage !== "string") return null;
-
-    const match = errorMessage.match(/reset after (\d+h)?(\d+m)?(\d+s)?/i);
-    if (!match) return null;
-
-    let totalMs = 0;
-    if (match[1]) totalMs += parseInt(match[1]) * 3600 * 1000; // hours
-    if (match[2]) totalMs += parseInt(match[2]) * 60 * 1000; // minutes
-    if (match[3]) totalMs += parseInt(match[3]) * 1000; // seconds
-
-    return totalMs > 0 ? totalMs : null;
+    const match = errorMessage.match(/reset\s+after\s+((?:\d+(?:\.\d{1,9})?h)?(?:\d+(?:\.\d{1,9})?m)?(?:\d+(?:\.\d{1,9})?s)?)/i);
+    if (!match || /[a-z0-9]/i.test(errorMessage[match.index + match[0].length] || "")) return null;
+    return parseQuotaDurationMs(match[1], "metadata");
   }
 
   extractErrorMessage(errorJson, bodyText = "") {
@@ -416,40 +420,72 @@ export class AntigravityExecutor extends BaseExecutor {
     ].filter(Boolean).map(v => typeof v === "string" ? v : JSON.stringify(v)).join("\n");
   }
 
+  parseError(response, bodyText) {
+    let errorJson = null;
+    try { errorJson = bodyText ? JSON.parse(bodyText) : null; } catch { /* common parser supplies status/text */ }
+
+    const providerError = errorJson?.error && typeof errorJson.error === "object" ? errorJson.error : errorJson || {};
+    const details = Array.isArray(providerError.details) ? providerError.details : [];
+    const errorInfo = details.find(detail =>
+      detail && detail["@type"] === "type.googleapis.com/google.rpc.ErrorInfo" && detail.reason === "QUOTA_EXHAUSTED"
+    );
+    const retryInfo = details.find(detail =>
+      detail && detail["@type"] === "type.googleapis.com/google.rpc.RetryInfo"
+    );
+    const message = this.extractErrorMessage(errorJson, bodyText);
+    const now = Date.now();
+    const retryAfterMs = this.parseRetryHeaders(response.headers)
+      || parseQuotaDurationMs(retryInfo?.retryDelay, "protobuf")
+      || this.parseRetryFromErrorMessage(message);
+
+    if (errorInfo) {
+      const metadata = errorInfo.metadata || {};
+      const timestamp = metadata.quotaResetTimeStamp;
+      const timestampMs = typeof timestamp === "string" ? Date.parse(timestamp) : NaN;
+      const resetMs = Number.isFinite(timestampMs) && timestampMs > now && Number.isFinite(new Date(timestampMs).getTime())
+        ? timestampMs
+        : futureDeadline(now, parseQuotaDurationMs(retryInfo?.retryDelay, "protobuf"))
+          || futureDeadline(now, parseQuotaDurationMs(metadata.quotaResetDelay, "metadata"))
+          || futureDeadline(now, this.parseRetryFromErrorMessage(message));
+      return {
+        status: response.status,
+        message,
+        code: providerError.code,
+        type: providerError.type,
+        errorClass: "quota_exhausted",
+        retryable: false,
+        ...(resetMs ? { resetsAtMs: resetMs } : {}),
+        ...(retryAfterMs ? { retryAfterMs } : {}),
+      };
+    }
+
+    return {
+      status: response.status,
+      message,
+      code: providerError.code,
+      type: providerError.type,
+      ...(retryAfterMs ? { retryAfterMs } : {}),
+    };
+  }
+
   isTransientAntigravityError(status, message) {
     if (status === HTTP_STATUS.RATE_LIMITED) return true;
     if (ANTIGRAVITY_TRANSIENT_STATUSES.has(status)) return true;
     return ANTIGRAVITY_TRANSIENT_ERROR_PATTERNS.some(pattern => pattern.test(message || ""));
   }
 
-  // Hook called by BaseExecutor.tryRetry: derive delay from Retry-After (header → body),
-  // cap at MAX_RETRY_AFTER_MS, else retry transient Antigravity failures with backoff.
-  // Return false to veto (fallback URL / final error).
+  // Hook called by BaseExecutor.tryRetry: derive delay from headers/body, then backoff.
   async computeRetryDelay(response, attempt) {
-    let bodyText = "";
-    let errorJson = null;
-    let retryMs = this.parseRetryHeaders(response.headers);
-
-    try {
-      bodyText = await response.clone().text();
-      errorJson = bodyText ? JSON.parse(bodyText) : null;
-    } catch {
-      // ignore parse errors → fall through to status/message based retry
-    }
-
-    const errorMessage = this.extractErrorMessage(errorJson, bodyText);
-
-    if (!retryMs) {
-      retryMs = this.parseRetryFromErrorMessage(errorMessage);
-    }
+    const parsed = await parseUpstreamError(response, this);
+    if (parsed.errorClass === "quota_exhausted") return false;
+    const retryMs = parsed.retryAfterMs;
     if (retryMs) return retryMs <= MAX_RETRY_AFTER_MS ? retryMs : false;
-
-    if (!this.isTransientAntigravityError(response.status, errorMessage)) return false;
+    if (!this.isTransientAntigravityError(response.status, parsed.message)) return false;
 
     const cap = response.status === HTTP_STATUS.RATE_LIMITED
       ? MAX_RETRY_AFTER_MS
       : ANTIGRAVITY_TRANSIENT_RETRY_MAX_MS;
-    return Math.min(1000 * (2 ** attempt), cap); // exponential backoff
+    return Math.min(1000 * (2 ** attempt), cap);
   }
 
   /**

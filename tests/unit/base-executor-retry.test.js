@@ -9,8 +9,8 @@ vi.mock("../../open-sse/utils/proxyFetch.js", () => ({
 
 const { BaseExecutor } = await import("../../open-sse/executors/base.js");
 
-function res(status) {
-  return { status, headers: { get: () => "" } };
+function res(status, body = "", headers = {}) {
+  return new Response(body, { status, headers });
 }
 
 function makeExec(config) {
@@ -57,6 +57,41 @@ describe("BaseExecutor.execute — baseUrls fallback", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
+
+  it("does not retry or change URL for hard quota evidence", async () => {
+    const ex = makeExec({ baseUrls: ["https://a/api", "https://b/api"], retry: { 429: { attempts: 2, delayMs: 0 } } });
+    const quota = JSON.stringify({ error: { code: "insufficient_quota", message: "quota" } });
+    fetchMock.mockResolvedValueOnce(res(429, quota)).mockResolvedValueOnce(res(200, "ok"));
+    const out = await ex.execute({ model: "m", body: {}, stream: false, credentials: creds });
+    expect(out.response.status).toBe(429);
+    expect(out.url).toBe("https://a/api");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps transient 429 and 503 retries", async () => {
+    const ex = makeExec({ baseUrl: "https://x/api", retry: {
+      429: { attempts: 1, delayMs: 0 },
+      503: { attempts: 2, delayMs: 0 },
+    } });
+    fetchMock
+      .mockResolvedValueOnce(res(429, "too many requests"))
+      .mockResolvedValueOnce(res(503, "capacity"))
+      .mockResolvedValueOnce(res(200, "ok"));
+    const out = await ex.execute({ model: "m", body: {}, stream: false, credentials: creds });
+    expect(out.response.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("allows endpoint fallback when a subclass marks auth errors non-retryable", async () => {
+    const { KiroExecutor } = await import("../../open-sse/executors/kiro.js");
+    const ex = makeExec({ baseUrls: ["https://a/api", "https://b/api"], retry: { 401: { attempts: 2, delayMs: 0 } } });
+    ex.shouldRetry = KiroExecutor.prototype.shouldRetry;
+    fetchMock.mockResolvedValueOnce(res(401, "unauthorized")).mockResolvedValueOnce(res(200, "ok"));
+    const out = await ex.execute({ model: "m", body: {}, stream: false, credentials: creds });
+    expect(out.response.status).toBe(200);
+    expect(out.url).toBe("https://b/api");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 
 describe("BaseExecutor.execute — network error retry/fallback", () => {
   it("maps network exception to 502 retry config", async () => {

@@ -105,6 +105,22 @@ describe("DB SQLite layer — public API parity", () => {
     expect(back.providerSpecificData).toEqual({ foo: "bar" });
   });
 
+  it("providerConnections: updater merges latest row and rejects async callbacks", async () => {
+    const c = await sqliteDb.createProviderConnection({ provider: "updater", authType: "oauth", email: "updater@example.com" });
+    const merged = await sqliteDb.updateProviderConnection(c.id, current => ({
+      lastError: "atomic",
+      providerSpecificData: { ...(current.providerSpecificData || {}), marker: true },
+    }), { resetHealth: false });
+    expect(merged.lastError).toBe("atomic");
+    expect(merged.providerSpecificData.marker).toBe(true);
+    await expect(sqliteDb.updateProviderConnection(c.id, async () => ({ lastError: "invalid" })))
+      .rejects.toThrow("updateProviderConnection updater must be synchronous");
+    const before = await sqliteDb.getProviderConnectionById(c.id);
+    const unchanged = await sqliteDb.updateProviderConnection(c.id, () => null);
+    expect(unchanged.updatedAt).toBe(before.updatedAt);
+    expect((await sqliteDb.getProviderConnectionById(c.id)).lastError).toBe("atomic");
+  });
+
   it("providerConnections: successful validation clears stale routing locks", async () => {
     const c = await sqliteDb.createProviderConnection({
       provider: "health-reset-update",
