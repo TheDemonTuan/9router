@@ -5,6 +5,7 @@ import {
   deriveSessionId,
   getChatGptWebPinnedConnection,
   pinChatGptWebConnection,
+  withChatGptWebConversationLock,
   resolveChatGptWebConversationKey,
   resolveContinuationId,
   resolveSessionId,
@@ -219,6 +220,28 @@ describe("ChatGPT Web conversation routing", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("serializes concurrent first-turn pin selection", async () => {
+    const order = [];
+    let releaseFirst;
+    const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
+    const first = withChatGptWebConversationLock("conversation-race", async () => {
+      order.push("first-start");
+      await firstGate;
+      order.push("first-end");
+      return "connection-1";
+    });
+    const second = withChatGptWebConversationLock("conversation-race", async () => {
+      order.push("second");
+      return "connection-2";
+    });
+    await Promise.resolve();
+    expect(order).toEqual(["first-start"]);
+    releaseFirst();
+    await expect(first).resolves.toBe("connection-1");
+    await expect(second).resolves.toBe("connection-2");
+    expect(order).toEqual(["first-start", "first-end", "second"]);
   });
 });
 

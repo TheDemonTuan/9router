@@ -80,4 +80,18 @@ grep -q 'Deployment left old slot running after drain timeout' "$tmp/deploy.log"
 grep -q 'http://9router-blue:20128' "$tmp/traefik/9router.yml"
 test "$(cat "$tmp/.active-slot")" = blue
 
-echo 'deploy reconcile and unknown-drain safety passed'
+rm -f "$tmp/.active-slot" "$tmp/.deployed-image"
+printf 'stale-slot' > "$tmp/.previous-slot"
+if (cd "$tmp" && ./deploy.sh bootstrap-image) >"$tmp/bootstrap.log" 2>&1; then
+  :
+else
+  echo 'expected bootstrap deployment to succeed without an old slot' >&2
+  exit 1
+fi
+
+test "$(cat "$tmp/.active-slot")" = blue
+! test -e "$tmp/.previous-slot"
+grep -q 'Initial deployment complete; no previous slot to drain.' "$tmp/bootstrap.log"
+! grep -q 'Stopping idle container' "$tmp/bootstrap.log"
+
+echo 'deploy reconcile, bootstrap, and unknown-drain safety passed'

@@ -294,8 +294,14 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
   }
   const isClaudeMessageResponse = sourceFormat === FORMATS.CLAUDE && translatedResponse?.type === "message";
   // Responses-format translation produces a `object:"response"` body with no
-  // `choices`; skip the Chat-Completions-specific post-processing below for it.
-  const isResponsesResponse = sourceFormat === FORMATS.OPENAI_RESPONSES && translatedResponse?.object === "response";
+  // `choices`; native compact responses may omit `object`, so preserve those
+  // unary `{ output: [...] }` bodies without Chat-Completions decoration.
+  const isNativeResponsesBody = sourceFormat === FORMATS.OPENAI_RESPONSES
+    && Array.isArray(translatedResponse?.output)
+    && !translatedResponse?.choices
+    && !translatedResponse?.object;
+  const isResponsesResponse = sourceFormat === FORMATS.OPENAI_RESPONSES
+    && (translatedResponse?.object === "response" || isNativeResponsesBody);
 
   // Fix finish_reason for tool_calls: some providers return non-standard values (e.g. "other")
   if (translatedResponse?.choices?.[0]) {

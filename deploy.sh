@@ -440,9 +440,12 @@ if [[ -z "$IMAGE_REF" ]]; then
 fi
 export IMAGE_REF
 
-CURRENT_SLOT="green"
+CURRENT_SLOT=""
+HAS_CURRENT_SLOT=false
 if [[ -f "$ACTIVE_SLOT_FILE" ]]; then
   CURRENT_SLOT="$(tr -d '[:space:]' < "$ACTIVE_SLOT_FILE")"
+  [[ "$CURRENT_SLOT" == "blue" || "$CURRENT_SLOT" == "green" ]] || die "Invalid active slot: $CURRENT_SLOT"
+  HAS_CURRENT_SLOT=true
 fi
 
 if [[ "$CURRENT_SLOT" == "blue" ]]; then
@@ -453,7 +456,7 @@ fi
 
 log "Starting deployment:"
 log "  Image          : $IMAGE_REF"
-log "  Current slot   : $CURRENT_SLOT"
+log "  Current slot   : ${CURRENT_SLOT:-none}"
 log "  Target slot    : $TARGET_SLOT"
 if [[ -n "$DASHBOARD_ALIAS_HOST" ]]; then
   log "  Dashboard Host : $DASHBOARD_HOST ($DASHBOARD_ALIAS_HOST)"
@@ -477,7 +480,7 @@ compose up -d --no-deps --pull never "9router-$TARGET_SLOT"
 
 # Healthcheck candidate slot
 if ! wait_healthy "$TARGET_SLOT"; then
-  log "ABORT: Target slot $TARGET_SLOT unhealthy! Keeping $CURRENT_SLOT live."
+  log "ABORT: Target slot $TARGET_SLOT unhealthy! Keeping ${CURRENT_SLOT:-no existing slot} live."
   compose stop "9router-$TARGET_SLOT" || true
   exit 1
 fi
@@ -488,21 +491,24 @@ render_traefik_config "$TARGET_SLOT" "$TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME"
 
 # Update state files
 printf '%s' "$TARGET_SLOT" > "$ACTIVE_SLOT_FILE"
-printf '%s' "$CURRENT_SLOT" > "$PREVIOUS_SLOT_FILE"
+if [[ "$HAS_CURRENT_SLOT" == true ]]; then
+  printf '%s' "$CURRENT_SLOT" > "$PREVIOUS_SLOT_FILE"
+else
+  # A bootstrap deploy has no valid rollback target; discard stale metadata.
+  rm -f "$PREVIOUS_SLOT_FILE"
+fi
 printf '%s' "$IMAGE_REF" > "$DEPLOYED_IMAGE_FILE"
 log "Route updated. Active slot is now: $TARGET_SLOT"
 
-# Graceful drain then stop idle slot
-log "Draining old slot ($CURRENT_SLOT)..."
-if ! wait_slot_idle "$CURRENT_SLOT"; then
+# Graceful drain then stop idle slot. Bootstrap has no old container to drain.
+if [[ "$HAS_CURRENT_SLOT" != true ]]; then
+  log "Initial deployment complete; no previous slot to drain."
+elif ! wait_slot_idle "$CURRENT_SLOT"; then
   log "Deployment left old slot running after drain timeout; no active SSE was cut."
   exit 1
-fi
-if [[ "$CURRENT_SLOT" == "blue" || "$CURRENT_SLOT" == "green" ]]; then
-  if [[ "$CURRENT_SLOT" != "$TARGET_SLOT" ]]; then
-    log "Stopping idle container: 9router-$CURRENT_SLOT"
-    compose stop "9router-$CURRENT_SLOT" || true
-  fi
+elif [[ "$CURRENT_SLOT" != "$TARGET_SLOT" ]]; then
+  log "Stopping idle container: 9router-$CURRENT_SLOT"
+  compose stop "9router-$CURRENT_SLOT" || true
 fi
 
 log "Deployment to $TARGET_SLOT completed successfully!"

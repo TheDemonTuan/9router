@@ -3,6 +3,7 @@ import { getSettings, updateSettings } from "@/lib/localDb";
 import { applyOutboundProxyEnv } from "@/lib/network/outboundProxy";
 import { resetComboRotation } from "open-sse/services/combo.js";
 import bcrypt from "bcryptjs";
+import { getInitialPassword, isUnsafeProductionInitialPassword } from "@/lib/auth/passwordPolicy.js";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -57,10 +58,19 @@ export async function PATCH(request) {
           return NextResponse.json({ error: "Invalid current password" }, { status: 401 });
         }
       } else {
-        // First time setting password, no current password needed
-        // Allow empty currentPassword or default "123456"
-        if (body.currentPassword && body.currentPassword !== "123456") {
-           return NextResponse.json({ error: "Invalid current password" }, { status: 401 });
+        // First-time setup accepts the configured initial password, or no password locally.
+        const initialPassword = getInitialPassword();
+        if (isUnsafeProductionInitialPassword(initialPassword)) {
+          return NextResponse.json(
+            { error: "Set a unique INITIAL_PASSWORD before changing the production password." },
+            { status: 503 },
+          );
+        }
+        if (process.env.NODE_ENV === "production" && !body.currentPassword) {
+          return NextResponse.json({ error: "Current password required" }, { status: 400 });
+        }
+        if (body.currentPassword && body.currentPassword !== initialPassword) {
+          return NextResponse.json({ error: "Invalid current password" }, { status: 401 });
         }
       }
 

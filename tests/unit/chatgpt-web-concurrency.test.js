@@ -42,6 +42,28 @@ describe("ChatGPT Web per-connection concurrency", () => {
     await Promise.all(reads);
   });
 
+  it("shares the five-turn limit across connection rows using one bridge", async () => {
+    const pending = [];
+    const fetchImpl = vi.fn(async () => {
+      const item = streamResponse();
+      pending.push(item);
+      return item.response;
+    });
+    const sameBridge = (id) => ({ id, providerSpecificData: { bridgeId: "personal" } });
+
+    const results = await Promise.all(Array.from({ length: 6 }, (_, index) => requestChatGptWebBridge(
+      sameBridge(`connection-${index}`),
+      "/v1/responses",
+      { method: "POST" },
+      { socketPath: "fixture", fetchImpl, turn: true },
+    )));
+
+    expect(fetchImpl).toHaveBeenCalledTimes(5);
+    expect(results.filter((result) => result.status === 503)).toHaveLength(1);
+    pending.forEach(({ controller }) => controller.close());
+    await Promise.all(results.filter((result) => result.status === 200).map((result) => result.text()));
+  });
+
   it("releases a slot after an error body is consumed", async () => {
     const fetchImpl = vi.fn()
       .mockResolvedValueOnce(new Response("busy", { status: 429 }))

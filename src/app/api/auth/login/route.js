@@ -7,6 +7,11 @@ import { isOidcConfigured } from "@/lib/auth/oidc";
 import { isSamlConfigured } from "@/lib/auth/saml.js";
 import { checkLock, recordFail, recordSuccess, getClientIp } from "@/lib/auth/loginLimiter";
 import { isLocalRequest } from "@/dashboardGuard";
+import {
+  getInitialPassword,
+  hasConfiguredInitialPassword,
+  isUnsafeProductionInitialPassword,
+} from "@/lib/auth/passwordPolicy.js";
 
 const RESET_HINT = "Forgot password? Reset to default via 9Router CLI → Settings → Reset Password to Default.";
 const NO_STORE_HEADERS = { "Cache-Control": "no-store" };
@@ -37,8 +42,10 @@ export async function POST(request) {
       return NextResponse.json({ error: "Dashboard access via tunnel is disabled" }, { status: 403 });
     }
 
-    // Default password is '123456' if not set
+    // A production deployment must provide a deliberate initial password. Local setup may still use the legacy fallback.
     const storedHash = settings.password;
+    const initialPassword = getInitialPassword();
+    const unsafeProductionPassword = isUnsafeProductionInitialPassword(initialPassword);
 
     if (settings.authMode === "sso" || settings.authMode === "saml" || settings.authMode === "oidc") {
       const ssoType = settings.ssoType || (settings.authMode === "saml" ? "saml" : "oidc");
@@ -50,13 +57,18 @@ export async function POST(request) {
       }
     }
 
+    if (!storedHash && (!initialPassword || unsafeProductionPassword)) {
+      return NextResponse.json(
+        { success: false, error: "Set a unique INITIAL_PASSWORD before production password login is available." },
+        { status: 503, headers: NO_STORE_HEADERS },
+      );
+    }
+
     let isValid = false;
     if (storedHash) {
       isValid = await bcrypt.compare(password, storedHash);
     } else {
-      // Use env var or default
-      const initialPassword = process.env.INITIAL_PASSWORD || "123456";
-      isValid = password === initialPassword;
+      isValid = Boolean(initialPassword) && password === initialPassword;
     }
 
     if (isValid) {
@@ -65,7 +77,7 @@ export async function POST(request) {
       // Default password still in use on a remote client → force a password
       // change before the dashboard is exposed remotely (keeps local UX intact).
       const mustChangePassword =
-        !storedHash && !process.env.INITIAL_PASSWORD && !isLocalRequest(request);
+        !storedHash && !hasConfiguredInitialPassword() && !isLocalRequest(request);
 
       if (mustChangePassword) {
         // Do NOT issue a session token: a fresh install's default password is

@@ -16,6 +16,7 @@ import { makeKv } from "../../src/lib/db/helpers/kvStore.js";
 const runtimeSessionStore = new Map();
 const continuationStore = new Map();
 const chatGptWebConnectionStore = new Map();
+const chatGptWebConversationLocks = new Map();
 const chatGptWebPinsKv = makeKv("chatgptWebPins");
 
 // Periodically evict entries that haven't been used within TTL
@@ -86,6 +87,7 @@ export function clearSessionStore() {
     assistantSessionStore.clear();
     continuationStore.clear();
     chatGptWebConnectionStore.clear();
+    chatGptWebConversationLocks.clear();
     chatGptWebPinsKv.clear().catch(() => {});
 }
 
@@ -340,6 +342,23 @@ export async function pinChatGptWebConnection(conversationKey, connectionId) {
         await chatGptWebPinsKv.set(conversationKey, entry);
     } catch {
         // Keep the live-process pin; persistence is best effort during DB shutdown.
+    }
+}
+
+export async function withChatGptWebConversationLock(conversationKey, task) {
+    if (!conversationKey) return task();
+    const previous = chatGptWebConversationLocks.get(conversationKey) || Promise.resolve();
+    let release;
+    const current = new Promise((resolve) => { release = resolve; });
+    chatGptWebConversationLocks.set(conversationKey, current);
+    await previous;
+    try {
+        return await task();
+    } finally {
+        release();
+        if (chatGptWebConversationLocks.get(conversationKey) === current) {
+            chatGptWebConversationLocks.delete(conversationKey);
+        }
     }
 }
 
