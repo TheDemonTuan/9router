@@ -63,6 +63,8 @@ jobs:
             translator/alibaba-token-plan-pipeline.test.js
       - name: Run h2c and Bun disconnect regressions
         run: |
+          node --version
+          bun --version
           set -euo pipefail
           node --test --test-concurrency=1 tests/unit/custom-server-h2c.test.cjs tests/unit/custom-server-h2c-concurrent.test.cjs
           bun test tests/unit/custom-server-h2c.test.cjs tests/unit/custom-server-h2c-concurrent.test.cjs tests/unit/bun-client-disconnect.test.cjs tests/unit/bun-next-request-disconnect.test.cjs
@@ -193,6 +195,82 @@ jobs:
             docker logs "$cid"
             exit 1
           fi
+          echo "Running native h2c image smoke..."
+          docker exec "$cid" bun -e '
+          const assert = require("node:assert/strict");
+          const http = require("node:http");
+          const HTTP2_SETTINGS = "AAEAAEAAAAIAAAAAAAMAAAAAAAQBAAAAAAUAAEAAAAYABgAA";
+          const headersFor = (body) => ({
+            Connection: "keep-alive, Upgrade, HTTP2-Settings",
+            Upgrade: "h2c",
+            "HTTP2-Settings": HTTP2_SETTINGS,
+            "Content-Type": "application/json",
+            "Content-Length": Buffer.byteLength(body),
+          });
+          function post(agent, body, expectedStatus, expectedMessage) {
+            return new Promise((resolve, reject) => {
+              let settled = false;
+              const finish = (error) => {
+                if (settled) return;
+                settled = true;
+                if (error) reject(error);
+                else resolve();
+              };
+              const request = http.request({
+                host: "127.0.0.1",
+                port: 20128,
+                path: "/v1/chat/completions",
+                method: "POST",
+                agent,
+                headers: headersFor(body),
+              }, (response) => {
+                const chunks = [];
+                response.on("aborted", () => finish(new Error("response aborted")));
+                response.on("error", finish);
+                response.on("data", (chunk) => chunks.push(chunk));
+                response.on("end", () => {
+                  try {
+                    assert.equal(response.statusCode, expectedStatus);
+                    assert.equal(response.headers.upgrade, undefined);
+                    const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+                    assert.equal(parsed.error?.message, expectedMessage);
+                    finish();
+                  } catch (error) {
+                    finish(error);
+                  }
+                });
+              });
+              request.setTimeout(5_000, () => request.destroy(new Error("request timed out")));
+              request.on("upgrade", (_response, socket) => {
+                socket.destroy();
+                finish(new Error("unexpected HTTP upgrade"));
+              });
+              request.on("error", finish);
+              request.end(body);
+            });
+          }
+          async function chain(agent, prefix) {
+            for (let index = 0; index < 3; index += 1) {
+              const body = JSON.stringify({
+                model: "cx/gpt-5.6-luna",
+                messages: [{ role: "user", content: `${prefix}-${index}` }],
+                stream: false,
+              });
+              await post(agent, body, 401, "Missing API key");
+            }
+          }
+          const agents = [
+            new http.Agent({ keepAlive: true, maxSockets: 1 }),
+            new http.Agent({ keepAlive: true, maxSockets: 1 }),
+          ];
+          try {
+            await Promise.all([chain(agents[0], "smoke-a"), chain(agents[1], "smoke-b")]);
+            await post(agents[0], "{", 400, "Invalid JSON body");
+          } finally {
+            for (const agent of agents) agent.destroy();
+          }
+          '
+          echo "Native h2c image smoke passed."
 
           echo "Waiting 12s for initial background token refresh tick..."
           sleep 12

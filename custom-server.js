@@ -20,7 +20,21 @@ http.createServer = (...args) => {
   const handler = args.find((a) => typeof a === "function");
   const rest = args.filter((a) => typeof a !== "function");
   if (!handler) return origCreate(...args);
+  const options = rest[0] ?? {};
   const wrapped = (req, res, requestSignal = req.signal) => {
+    const isBunH2c = process.versions.bun && String(req.headers.upgrade || "").toLowerCase() === "h2c";
+    if (isBunH2c) {
+      delete req.headers.upgrade;
+      delete req.headers["http2-settings"];
+      if (req.headers.connection !== undefined) {
+        const connectionTokens = String(req.headers.connection)
+          .split(",")
+          .map((token) => token.trim())
+          .filter((token) => token && token.toLowerCase() !== "upgrade" && token.toLowerCase() !== "http2-settings");
+        if (connectionTokens.length) req.headers.connection = connectionTokens.join(", ");
+        else delete req.headers.connection;
+      }
+    }
     const socketIp = req.socket && req.socket.remoteAddress ? req.socket.remoteAddress : "";
     const xff = req.headers["x-forwarded-for"];
     const xRealIp = req.headers["x-real-ip"];
@@ -42,6 +56,7 @@ http.createServer = (...args) => {
     // ServerResponse.close. Bridge the two so route-level request.signal aborts.
     if (requestSignal && typeof requestSignal.addEventListener === "function") {
       const abortResponse = () => {
+        if (process.versions.bun && req.complete && req.destroyed && !req.socket?.destroyed) return;
         if (!res.destroyed && !res.writableFinished) res.destroy();
       };
       const cleanup = () => {
@@ -59,10 +74,25 @@ http.createServer = (...args) => {
 
     return handler(req, res);
   };
+  if (process.versions.bun) {
+    const callerShouldUpgradeCallback = options.shouldUpgradeCallback;
+    if (callerShouldUpgradeCallback !== undefined && typeof callerShouldUpgradeCallback !== "function") {
+      return origCreate(...rest, wrapped);
+    }
+    const nativeOptions = {
+      ...options,
+      shouldUpgradeCallback(req) {
+        if (String(req.headers.upgrade || "").toLowerCase() === "h2c") return false;
+        if (callerShouldUpgradeCallback) return callerShouldUpgradeCallback.call(this, req);
+        return this.listenerCount("upgrade") > 0;
+      },
+    };
+    return origCreate(nativeOptions, wrapped);
+  }
 
   const server = origCreate(...rest, wrapped);
   const origEmit = server.emit;
-  // JBR 25 sends h2c upgrades that the HTTP/1.1 server would otherwise close.
+  // Node-only h2c replay for runtimes without Bun's native shouldUpgradeCallback handling.
   server.emit = function (event, ...eventArgs) {
     const [req, socket, head] = eventArgs;
     if (event !== "upgrade" || String(req.headers.upgrade || "").toLowerCase() !== "h2c") {
@@ -72,91 +102,6 @@ http.createServer = (...args) => {
     const contentLength = Number(req.headers["content-length"] || 0);
     if (!Number.isSafeInteger(contentLength) || contentLength < 0) {
       socket.destroy();
-      return true;
-    }
-    if (process.versions.bun && head.length === 0) {
-      const replayHeaders = { ...req.headers, connection: "close" };
-      delete replayHeaders.upgrade;
-      delete replayHeaders["http2-settings"];
-      req.headers = replayHeaders;
-      const res = new http.ServerResponse(req);
-      res.shouldKeepAlive = false;
-      res.assignSocket(socket);
-      let overflow = Buffer.alloc(0);
-      let responseFinished = false;
-      let pipelinedDispatched = false;
-      const dispatchPipelined = (buffer, previousResponse) => {
-        const headerEnd = buffer.indexOf("\r\n\r\n");
-        if (headerEnd < 0) return null;
-        const lines = buffer.subarray(0, headerEnd).toString("latin1").split("\r\n");
-        const [method, url] = (lines.shift() || "").split(" ");
-        if (!method || !url) return false;
-        const headers = {};
-        for (const line of lines) {
-          const separator = line.indexOf(":");
-          if (separator <= 0) return false;
-          const name = line.slice(0, separator).toLowerCase();
-          const value = line.slice(separator + 1).trim();
-          headers[name] = headers[name] ? `${headers[name]}, ${value}` : value;
-        }
-        const length = Number(headers["content-length"] || 0);
-        if (!Number.isSafeInteger(length) || length < 0) return false;
-        const bodyStart = headerEnd + 4;
-        const bodyEnd = bodyStart + length;
-        if (buffer.length < bodyEnd) return null;
-        const remaining = buffer.subarray(bodyEnd);
-        delete headers.upgrade;
-        delete headers["http2-settings"];
-        headers.connection = "close";
-        previousResponse?.detachSocket(socket);
-        const replay = new http.IncomingMessage(socket);
-        Object.assign(replay, { method, url, headers, complete: true });
-        if (length) replay.push(buffer.subarray(bodyStart, bodyEnd));
-        replay.push(null);
-        const nextResponse = new http.ServerResponse(replay);
-        nextResponse.shouldKeepAlive = remaining.length > 0;
-        nextResponse.assignSocket(socket);
-        nextResponse.once("finish", () => {
-          if (!remaining.length) {
-            socket.end();
-            return;
-          }
-          if (!dispatchPipelined(remaining, nextResponse)) socket.destroy();
-        });
-        Promise.resolve().then(() => wrapped(replay, nextResponse, null)).catch((error) => {
-          console.error("Failed to replay pipelined h2c request", error);
-          socket.destroy();
-        });
-        return true;
-      };
-      const flushOverflow = () => {
-        if (!responseFinished || pipelinedDispatched || !overflow.length) return false;
-        const status = dispatchPipelined(overflow, res);
-        if (status === null) return false;
-        pipelinedDispatched = true;
-        overflow = Buffer.alloc(0);
-        socket.off("data", onSocketData);
-        if (!status) socket.destroy();
-        return true;
-      };
-      const onSocketData = (chunk) => {
-        overflow = Buffer.concat([overflow, chunk]);
-        flushOverflow();
-      };
-      socket.on("data", onSocketData);
-      socket.resume();
-      res.once("finish", () => {
-        responseFinished = true;
-        setTimeout(() => {
-          if (pipelinedDispatched || flushOverflow()) return;
-          socket.off("data", onSocketData);
-          socket.end();
-        }, 10);
-      });
-      Promise.resolve().then(() => wrapped(req, res, null)).catch((error) => {
-        console.error("Failed to downgrade h2c request", error);
-        socket.destroy();
-      });
       return true;
     }
     const chunks = [head];
@@ -187,10 +132,8 @@ http.createServer = (...args) => {
           socket.end();
           return;
         }
-        // Upgrade parsing consumes bytes beyond the first body. Put them back
-        // through the public connection event instead of silently dropping
-        // pipelined data. This public event path works on Node and Bun; Bun
-        // does not expose Node's private parser entry point.
+        // Node's upgrade parser consumes bytes beyond the first body. Put them back through
+        // the public connection event instead of silently dropping pipelined data.
         res.detachSocket(socket);
         socket.unshift(overflow);
         setImmediate(() => server.emit("connection", socket));
