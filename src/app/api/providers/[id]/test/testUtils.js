@@ -19,6 +19,10 @@ import {
   KIMCHI_CONFIG,
 } from "@/lib/oauth/constants/oauth";
 import { buildClineHeaders } from "@/shared/utils/clineAuth";
+import {
+  getChatGptWebCatalog,
+  getChatGptWebHealth,
+} from "open-sse/services/chatgptWebBridge.js";
 
 // OAuth provider test endpoints
 const OAUTH_TEST_CONFIG = {
@@ -855,7 +859,28 @@ export async function testSingleConnection(id) {
   const start = Date.now();
   let result;
 
-  if (connection.authType === "apikey" || connection.authType === "cookie") {
+  if (connection.authType === "bridge" && connection.provider === "chatgpt-web") {
+    try {
+      const [health, catalog] = await Promise.all([
+        getChatGptWebHealth(connection),
+        getChatGptWebCatalog(connection, { force: true }),
+      ]);
+      const usableModels = catalog.stale ? [] : catalog.models.filter((model) => {
+        const capabilities = model?.capabilities;
+        return capabilities?.native_responses === true || capabilities?.generic_responses === true;
+      });
+      const valid = health.status === "ok" && health.accepting_turns !== false && !catalog.stale && usableModels.length > 0;
+      result = {
+        valid,
+        error: valid ? null : catalog.stale ? "Bridge catalog is stale" : usableModels.length === 0 ? "Bridge has no usable models" : "Bridge is not healthy",
+        health,
+        models: usableModels,
+        stale: catalog.stale,
+      };
+    } catch (error) {
+      result = { valid: false, error: error.message };
+    }
+  } else if (connection.authType === "apikey" || connection.authType === "cookie") {
     result = await testApiKeyConnection(connection, effectiveProxy);
   } else {
     result = await testOAuthConnection(connection, effectiveProxy);
@@ -898,5 +923,12 @@ export async function testSingleConnection(id) {
 
   await updateProviderConnection(id, updateData);
 
-  return { valid: result.valid, error: result.error, refreshed: !!result.refreshed, latencyMs, testedAt: new Date().toISOString() };
+  return {
+    valid: result.valid,
+    error: result.error,
+    refreshed: !!result.refreshed,
+    latencyMs,
+    testedAt: new Date().toISOString(),
+    ...(connection.authType === "bridge" ? { health: result.health, models: result.models || [], stale: !!result.stale } : {}),
+  };
 }

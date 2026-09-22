@@ -21,11 +21,43 @@ import { capabilitiesFromServiceKind, getCapabilitiesForModel } from "open-sse/p
 import { getAdvertisedThinkingLevels } from "open-sse/providers/thinkingLevels.js";
 import { resolveEffectiveProviderModels } from "open-sse/services/alibabaTokenPlanModels.js";
 import { isAlitpModelAvailableForEdition } from "open-sse/providers/alibabaTokenPlanCatalog.js";
+import {
+  getChatGptWebCatalog,
+} from "open-sse/services/chatgptWebBridge.js";
 
 // Per-provider live model resolvers. Each receives a connection record and
 // returns { models: [{ id, name? }, ...] } | null on failure.
 // Adding a provider here makes /v1/models prefer the live catalog for it.
 const LIVE_MODEL_RESOLVERS = {
+  "chatgpt-web": async (conn, ctx) => {
+    const connections = (ctx?.connections || []).filter((entry) => entry.provider === "chatgpt-web");
+    const candidates = connections.length > 0 ? connections : [conn];
+    const merged = new Map();
+    await Promise.all(candidates.map(async (connection) => {
+      try {
+        const result = await getChatGptWebCatalog(connection);
+        if (result.stale) return;
+        for (const model of result.models || []) {
+          const liveCapabilities = model.capabilities || {};
+          if (liveCapabilities.native_responses !== true && liveCapabilities.generic_responses !== true) continue;
+          const existing = merged.get(model.id);
+          if (!existing) {
+            merged.set(model.id, model);
+            continue;
+          }
+          const capabilities = { ...(existing.capabilities || {}) };
+          for (const [key, value] of Object.entries(model.capabilities || {})) {
+            if (value === true) capabilities[key] = true;
+            else if (!(key in capabilities) && value === false) capabilities[key] = false;
+          }
+          merged.set(model.id, { ...existing, capabilities });
+        }
+      } catch {
+        // Offline/unknown connections contribute no public model evidence.
+      }
+    }));
+    return { models: [...merged.values()] };
+  },
   kiro: async (conn) => {
     const result = await resolveKiroModels({
       accessToken: conn.accessToken,
@@ -465,6 +497,9 @@ export async function buildModelsList(kindFilter, options = {}) {
 
       const modelIds = rawModelIds
         .map((modelId) => {
+          if (providerId === "chatgpt-web") {
+            return modelId.startsWith("chatgpt-web/") ? modelId : `chatgpt-web/${modelId}`;
+          }
           if (modelId.startsWith(`${outputAlias}/`)) {
             return modelId.slice(outputAlias.length + 1);
           }

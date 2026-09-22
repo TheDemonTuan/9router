@@ -8,7 +8,7 @@ const NATIVE_PAIRS = {
   "claude": ["claude", "anthropic"],
   "gemini-cli": ["gemini-cli"],
   "antigravity": ["antigravity"],
-  "codex": ["codex"],
+  "codex": ["codex", "chatgpt-web"],
 };
 
 /**
@@ -60,7 +60,7 @@ export function detectClientTool(headers = {}, body = {}) {
  * @param {string} provider        - Provider ID (e.g. "claude", "gemini-cli")
  */
 export function getResponsesDialect(clientTool, provider) {
-  if (clientTool === "codex" || provider === "codex") return "codex-native";
+  if (clientTool === "codex" || provider === "codex" || provider === "chatgpt-web") return "codex-native";
   if (clientTool === "grok-build") return "grok-build";
   return "standard-openai";
 }

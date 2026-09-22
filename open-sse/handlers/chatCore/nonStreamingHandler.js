@@ -234,7 +234,6 @@ export function translateNonStreamingResponse(responseBody, targetFormat, source
  * Handle non-streaming response from provider.
  */
 export async function handleNonStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, body, stream, translatedBody, finalBody, responseSchemaValidation, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, trackDone, appendLog, pxpipe, reqTag, log }) {
-  trackDone();
   const contentType = providerResponse.headers.get("content-type") || "";
   let responseBody;
 
@@ -242,6 +241,7 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
     const sseText = await providerResponse.text();
     const parsed = parseSSEToOpenAIResponse(sseText, model);
     if (!parsed) {
+      trackDone();
       appendLog({ status: `FAILED ${HTTP_STATUS.BAD_GATEWAY}` });
       return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Invalid SSE response for non-streaming request");
     }
@@ -250,11 +250,15 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
     try {
       responseBody = await providerResponse.json();
     } catch (err) {
+      trackDone();
       appendLog({ status: `FAILED ${HTTP_STATUS.BAD_GATEWAY}` });
       console.error(`[ChatCore] Failed to parse JSON from ${provider}:`, err.message);
       return createErrorResult(HTTP_STATUS.BAD_GATEWAY, `Invalid JSON response from ${provider}`);
     }
   }
+
+  // The pending request remains live until the upstream body has been fully consumed.
+  trackDone();
 
   // Unwrap before any consumer reads choices/usage so non-stream clients get a
   // bare OpenAI body and usage tracking sees data.usage. No-op unless the
@@ -284,7 +288,6 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
   if (responseSchemaValidation) {
     const validation = validateStructuredResponse(translatedResponse, responseSchemaValidation);
     if (!validation.valid) {
-      trackDone();
       appendLog({ status: `FAILED ${HTTP_STATUS.BAD_GATEWAY}` });
       return createErrorResult(HTTP_STATUS.BAD_GATEWAY, `Structured output failed JSON Schema validation: ${validation.errors.join("; ")}`);
     }

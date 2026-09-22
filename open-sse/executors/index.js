@@ -7,6 +7,7 @@ import { QoderExecutor } from "./qoder.js";
 import { KiroExecutor } from "./kiro.js";
 import { KimchiExecutor } from "./kimchi.js";
 import { CodexExecutor } from "./codex.js";
+import { ChatGPTWebExecutor } from "./chatgpt-web.js";
 import { CursorExecutor } from "./cursor.js";
 import { VertexExecutor } from "./vertex.js";
 import { OpenCodeExecutor } from "./opencode.js";
@@ -37,6 +38,7 @@ const executors = {
   kiro: new KiroExecutor(),
   kimchi: new KimchiExecutor(),
   codex: new CodexExecutor(),
+  "chatgpt-web": new ChatGPTWebExecutor(),
   cursor: new CursorExecutor(),
   cu: new CursorExecutor(), // Alias for cursor
   vertex: new VertexExecutor("vertex"),
@@ -84,6 +86,7 @@ export { QoderExecutor } from "./qoder.js";
 export { KiroExecutor } from "./kiro.js";
 export { KimchiExecutor } from "./kimchi.js";
 export { CodexExecutor } from "./codex.js";
+export { ChatGPTWebExecutor } from "./chatgpt-web.js";
 export { CursorExecutor } from "./cursor.js";
 export { VertexExecutor } from "./vertex.js";
 export { DefaultExecutor } from "./default.js";

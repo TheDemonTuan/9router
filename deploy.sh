@@ -9,7 +9,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-COMPOSE_FILE="docker-compose.prod.yml"
+COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.prod.yml}"
+CHATGPT_WEB_COMPOSE_FILE="${CHATGPT_WEB_COMPOSE_FILE:-}"
 ACTIVE_SLOT_FILE=".active-slot"
 PREVIOUS_SLOT_FILE=".previous-slot"
 DEPLOYED_IMAGE_FILE=".deployed-image"
@@ -47,6 +48,24 @@ TRAEFIK_DYNAMIC_DIR="${TRAEFIK_DYNAMIC_DIR:-/opt/platform/edge/dynamic}"
 
 log() { printf '[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 die() { log "ERROR: $*" >&2; exit 1; }
+
+COMPOSE_ARGS=(-f "$COMPOSE_FILE")
+if [[ -z "$CHATGPT_WEB_COMPOSE_FILE" && -n "${CHATGPT_WEB_SOCKET_GID:-}" ]]; then
+  CHATGPT_WEB_COMPOSE_FILE="$SCRIPT_DIR/docker-compose.chatgpt-web.yml"
+fi
+if [[ -n "$CHATGPT_WEB_COMPOSE_FILE" ]]; then
+  [[ -f "$CHATGPT_WEB_COMPOSE_FILE" ]] || die "ChatGPT Web compose override not found: $CHATGPT_WEB_COMPOSE_FILE"
+  [[ "${CHATGPT_WEB_SOCKET_GID:-}" =~ ^[0-9]+$ ]] || die "CHATGPT_WEB_SOCKET_GID must be numeric when ChatGPT Web bridge is enabled"
+  CHATGPT_WEB_SOCKET_ROOT="${CHATGPT_WEB_SOCKET_ROOT:-/run/9router-chatgpt-web}"
+  [[ -d "$CHATGPT_WEB_SOCKET_ROOT" ]] || die "ChatGPT Web socket root is missing: $CHATGPT_WEB_SOCKET_ROOT"
+  [[ ! -L "$CHATGPT_WEB_SOCKET_ROOT" ]] || die "ChatGPT Web socket root must not be a symlink: $CHATGPT_WEB_SOCKET_ROOT"
+  CHATGPT_WEB_SOCKET_PATH="$(find "$CHATGPT_WEB_SOCKET_ROOT" -maxdepth 1 -type s -print -quit 2>/dev/null || true)"
+  [[ -n "$CHATGPT_WEB_SOCKET_PATH" ]] || die "ChatGPT Web socket is missing under: $CHATGPT_WEB_SOCKET_ROOT"
+  [[ "$(stat -c '%a' "$CHATGPT_WEB_SOCKET_PATH")" == "660" ]] || die "ChatGPT Web socket must have mode 0660: $CHATGPT_WEB_SOCKET_PATH"
+  [[ "$(stat -c '%g' "$CHATGPT_WEB_SOCKET_PATH")" == "$CHATGPT_WEB_SOCKET_GID" ]] || die "ChatGPT Web socket GID does not match CHATGPT_WEB_SOCKET_GID: $CHATGPT_WEB_SOCKET_PATH"
+  COMPOSE_ARGS+=(-f "$CHATGPT_WEB_COMPOSE_FILE")
+fi
+compose() { docker compose "${COMPOSE_ARGS[@]}" "$@"; }
 
 ensure_network() {
   if ! docker network inspect "$EDGE_NETWORK" >/dev/null 2>&1; then
@@ -191,7 +210,7 @@ show_status() {
   printf 'API Host         : %s\n' "$API_HOST"
   printf 'Traefik config   : %s/%s\n' "$TRAEFIK_DYNAMIC_DIR" "$TRAEFIK_CONFIG_NAME"
   printf '\nContainer states:\n'
-  docker compose -f "$COMPOSE_FILE" ps
+  compose ps
 }
 
 do_rollback() {
@@ -203,7 +222,7 @@ do_rollback() {
   [[ "$prev_slot" == "blue" || "$prev_slot" == "green" ]] || die "Invalid previous slot: $prev_slot"
 
   log "Initiating rollback to slot: $prev_slot"
-  docker compose -f "$COMPOSE_FILE" up -d "9router-$prev_slot"
+  compose up -d "9router-$prev_slot"
   wait_healthy "$prev_slot" || die "Previous slot failed healthcheck. Rollback aborted."
 
   render_traefik_config "$prev_slot" "$TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME"
@@ -211,74 +230,13 @@ do_rollback() {
   printf '%s' "$active_slot" > "$PREVIOUS_SLOT_FILE"
   log "Route successfully rolled back to slot: $prev_slot"
 
-  log "Draining active slot ($active_slot) for 5 seconds..."
-  sleep 5
-  docker compose -f "$COMPOSE_FILE" stop "9router-$active_slot" || true
+  log "Draining active slot ($active_slot)..."
+  if ! wait_slot_idle "$active_slot"; then
+    die "Rollback drain timed out; active slot remains running."
+  fi
+  compose stop "9router-$active_slot" || true
   log "Rollback completed."
 }
-
-# ------------------------------------------------------------------------------
-# Main Dispatcher
-# ------------------------------------------------------------------------------
-cmd="${1:-}"
-
-if [[ "$cmd" == "--status" ]]; then
-  show_status
-  exit 0
-fi
-
-if [[ "$cmd" == "--rollback" ]]; then
-  do_rollback
-  exit 0
-fi
-
-if [[ "$cmd" == "--setup-host" ]]; then
-  configure_docker_concurrency
-  exit 0
-fi
-
-if [[ "$cmd" == "--diagnostics" ]]; then
-  run_diagnostics
-  exit 0
-fi
-
-IMAGE_REF="${1:-}"
-if [[ -z "$IMAGE_REF" ]]; then
-  if [[ -f "$DEPLOYED_IMAGE_FILE" ]]; then
-    IMAGE_REF="$(cat "$DEPLOYED_IMAGE_FILE")"
-  else
-    die "Usage: $0 <IMAGE_REF> | --rollback | --status | --setup-host | --diagnostics"
-  fi
-fi
-export IMAGE_REF
-
-CURRENT_SLOT="green"
-if [[ -f "$ACTIVE_SLOT_FILE" ]]; then
-  CURRENT_SLOT="$(tr -d '[:space:]' < "$ACTIVE_SLOT_FILE")"
-fi
-
-if [[ "$CURRENT_SLOT" == "blue" ]]; then
-  TARGET_SLOT="green"
-else
-  TARGET_SLOT="blue"
-fi
-
-log "Starting deployment:"
-log "  Image          : $IMAGE_REF"
-log "  Current slot   : $CURRENT_SLOT"
-log "  Target slot    : $TARGET_SLOT"
-  if [[ -n "$DASHBOARD_ALIAS_HOST" ]]; then
-    log "  Dashboard Host : $DASHBOARD_HOST ($DASHBOARD_ALIAS_HOST)"
-  else
-    log "  Dashboard Host : $DASHBOARD_HOST"
-  fi
-log "  API Host       : $API_HOST"
-log "  Traefik config : $TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME"
-
-ensure_network
-
-# Start headroom helper service if not already up
-docker compose -f "$COMPOSE_FILE" up -d headroom
 
 run_diagnostics() {
   log "=== [DIAG] Docker disk/cache ==="
@@ -368,6 +326,28 @@ configure_docker_concurrency() {
 
 PULL_TIMEOUT="${PULL_TIMEOUT:-300}"
 PULL_ATTEMPTS="${PULL_ATTEMPTS:-2}"
+DRAIN_TIMEOUT="${DRAIN_TIMEOUT:-120}"
+DRAIN_POLL_SECONDS="${DRAIN_POLL_SECONDS:-2}"
+
+wait_slot_idle() {
+  local slot="$1"
+  local deadline=$((SECONDS + DRAIN_TIMEOUT))
+  local container="9router-$slot"
+  while (( SECONDS < deadline )); do
+    local health active known
+    health="$(docker exec "$container" wget -qO- http://127.0.0.1:20128/api/health 2>/dev/null || true)"
+    active="$(printf '%s' "$health" | sed -n 's/.*"active_requests"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
+    known="$(printf '%s' "$health" | sed -n 's/.*"active_requests_known"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p')"
+    if [[ "$known" == "true" && "$active" == "0" ]]; then
+      log "Slot $slot is idle."
+      return 0
+    fi
+    log "Waiting for slot $slot to drain (active_requests=${active:-unknown}, known=${known:-unknown})..."
+    sleep "$DRAIN_POLL_SECONDS"
+  done
+  log "Drain timeout for slot $slot; keeping it running to avoid cutting active requests."
+  return 1
+}
 
 pull_image() {
   if docker image inspect "$IMAGE_REF" >/dev/null 2>&1; then
@@ -398,17 +378,82 @@ pull_image() {
   die "Unable to pull image: $IMAGE_REF"
 }
 
+# ------------------------------------------------------------------------------
+# Main Dispatcher
+# ------------------------------------------------------------------------------
+cmd="${1:-}"
+
+if [[ "$cmd" == "--status" ]]; then
+  show_status
+  exit 0
+fi
+
+if [[ "$cmd" == "--rollback" ]]; then
+  do_rollback
+  exit 0
+fi
+
+if [[ "$cmd" == "--setup-host" ]]; then
+  configure_docker_concurrency
+  exit 0
+fi
+
+if [[ "$cmd" == "--diagnostics" ]]; then
+  IMAGE_REF="${2:-}"
+  export IMAGE_REF
+  run_diagnostics
+  exit 0
+fi
+
+IMAGE_REF="${1:-}"
+if [[ -z "$IMAGE_REF" ]]; then
+  if [[ -f "$DEPLOYED_IMAGE_FILE" ]]; then
+    IMAGE_REF="$(cat "$DEPLOYED_IMAGE_FILE")"
+  else
+    die "Usage: $0 <IMAGE_REF> | --rollback | --status | --setup-host | --diagnostics"
+  fi
+fi
+export IMAGE_REF
+
+CURRENT_SLOT="green"
+if [[ -f "$ACTIVE_SLOT_FILE" ]]; then
+  CURRENT_SLOT="$(tr -d '[:space:]' < "$ACTIVE_SLOT_FILE")"
+fi
+
+if [[ "$CURRENT_SLOT" == "blue" ]]; then
+  TARGET_SLOT="green"
+else
+  TARGET_SLOT="blue"
+fi
+
+log "Starting deployment:"
+log "  Image          : $IMAGE_REF"
+log "  Current slot   : $CURRENT_SLOT"
+log "  Target slot    : $TARGET_SLOT"
+if [[ -n "$DASHBOARD_ALIAS_HOST" ]]; then
+  log "  Dashboard Host : $DASHBOARD_HOST ($DASHBOARD_ALIAS_HOST)"
+else
+  log "  Dashboard Host : $DASHBOARD_HOST"
+fi
+log "  API Host       : $API_HOST"
+log "  Traefik config : $TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME"
+
+ensure_network
+
+# Start headroom helper service if not already up
+compose up -d headroom
+
 # Pull and start target slot
 export IMAGE_REF
 pull_image
 
 log "Starting target container: 9router-$TARGET_SLOT"
-docker compose -f "$COMPOSE_FILE" up -d --no-deps --pull never "9router-$TARGET_SLOT"
+compose up -d --no-deps --pull never "9router-$TARGET_SLOT"
 
 # Healthcheck candidate slot
 if ! wait_healthy "$TARGET_SLOT"; then
   log "ABORT: Target slot $TARGET_SLOT unhealthy! Keeping $CURRENT_SLOT live."
-  docker compose -f "$COMPOSE_FILE" stop "9router-$TARGET_SLOT" || true
+  compose stop "9router-$TARGET_SLOT" || true
   exit 1
 fi
 
@@ -423,12 +468,15 @@ printf '%s' "$IMAGE_REF" > "$DEPLOYED_IMAGE_FILE"
 log "Route updated. Active slot is now: $TARGET_SLOT"
 
 # Graceful drain then stop idle slot
-log "Draining old slot ($CURRENT_SLOT) for 5 seconds..."
-sleep 5
+log "Draining old slot ($CURRENT_SLOT)..."
+if ! wait_slot_idle "$CURRENT_SLOT"; then
+  log "Deployment left old slot running after drain timeout; no active SSE was cut."
+  exit 1
+fi
 if [[ "$CURRENT_SLOT" == "blue" || "$CURRENT_SLOT" == "green" ]]; then
   if [[ "$CURRENT_SLOT" != "$TARGET_SLOT" ]]; then
     log "Stopping idle container: 9router-$CURRENT_SLOT"
-    docker compose -f "$COMPOSE_FILE" stop "9router-$CURRENT_SLOT" || true
+    compose stop "9router-$CURRENT_SLOT" || true
   fi
 fi
 

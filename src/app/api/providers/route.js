@@ -7,8 +7,9 @@ import {
   getProxyPoolById,
 } from "@/models";
 import { APIKEY_PROVIDERS } from "@/shared/constants/config";
-import { AI_PROVIDERS, FREE_TIER_PROVIDERS, WEB_COOKIE_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isCustomEmbeddingProvider } from "@/shared/constants/providers";
-import { normalizeProviderId, normalizeProviderSpecificData } from "@/lib/providerNormalization";
+import { AI_PROVIDERS, FREE_TIER_PROVIDERS, LOCAL_BRIDGE_PROVIDERS, WEB_COOKIE_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isCustomEmbeddingProvider } from "@/shared/constants/providers";
+import { normalizeProviderId, normalizeProviderSpecificData, sanitizeProviderSpecificData } from "@/lib/providerNormalization";
+import { validateChatGptWebBridgeId } from "open-sse/services/chatgptWebBridge.js";
 
 export const dynamic = "force-dynamic";
 
@@ -66,14 +67,16 @@ export async function GET() {
       const name = isCompatible
         ? (c.name || nodeNameMap[c.provider] || c.providerSpecificData?.nodeName || c.provider)
         : c.name;
-      return {
+      const safe = {
         ...c,
         name,
-        apiKey: undefined,
-        accessToken: undefined,
-        refreshToken: undefined,
-        idToken: undefined,
+        providerSpecificData: sanitizeProviderSpecificData(c.providerSpecificData),
       };
+      delete safe.apiKey;
+      delete safe.accessToken;
+      delete safe.refreshToken;
+      delete safe.idToken;
+      return safe;
     });
 
     return NextResponse.json({ connections: safeConnections });
@@ -102,6 +105,7 @@ export async function POST(request) {
 
     // Validation
     const isWebCookieProvider = !!WEB_COOKIE_PROVIDERS[provider];
+    const isLocalBridgeProvider = !!LOCAL_BRIDGE_PROVIDERS[provider];
     // Dual-auth providers (e.g. codebuddy-cn, xai) live under category "oauth" but also
     // accept an API key via authModes — they aren't in APIKEY_PROVIDERS, so allow them here.
     const supportsApiKeyMode = !!AI_PROVIDERS[provider]?.authModes?.includes("apikey");
@@ -109,6 +113,7 @@ export async function POST(request) {
       FREE_TIER_PROVIDERS[provider] ||
       supportsApiKeyMode ||
       isWebCookieProvider ||
+      isLocalBridgeProvider ||
       isOpenAICompatibleProvider(provider) ||
       isAnthropicCompatibleProvider(provider) ||
       isCustomEmbeddingProvider(provider);
@@ -116,7 +121,7 @@ export async function POST(request) {
     if (!provider || !isValidProvider) {
       return NextResponse.json({ error: "Invalid provider" }, { status: 400 });
     }
-    if (!apiKey && provider !== "ollama-local") {
+    if (!apiKey && provider !== "ollama-local" && !isLocalBridgeProvider) {
       return NextResponse.json({ error: `${isWebCookieProvider ? "Cookie value" : "API Key"} is required` }, { status: 400 });
     }
     const connectionName = name || displayName || AI_PROVIDERS[provider]?.name;
@@ -125,6 +130,13 @@ export async function POST(request) {
     }
 
     let providerSpecificData = normalizeProviderSpecificData(provider, body, body.providerSpecificData);
+    if (isLocalBridgeProvider) {
+      try {
+        providerSpecificData = { bridgeId: validateChatGptWebBridgeId(providerSpecificData?.bridgeId) };
+      } catch (error) {
+        return NextResponse.json({ error: error.message }, { status: 400 });
+      }
+    }
 
     // Compatible LLM nodes support multiple API-key connections (key pool); runtime
     // rotates/fails over via getProviderCredentials. Embedding nodes stay single-connection.
@@ -174,7 +186,7 @@ export async function POST(request) {
 
     const newConnection = await createProviderConnection({
       provider,
-      authType: isWebCookieProvider ? "cookie" : "apikey",
+      authType: isLocalBridgeProvider ? "bridge" : isWebCookieProvider ? "cookie" : "apikey",
       name: connectionName,
       apiKey: apiKey || "",
       priority: priority || 1,
@@ -188,6 +200,10 @@ export async function POST(request) {
     // Hide sensitive fields
     const result = { ...newConnection };
     delete result.apiKey;
+    delete result.accessToken;
+    delete result.refreshToken;
+    delete result.idToken;
+    result.providerSpecificData = sanitizeProviderSpecificData(result.providerSpecificData);
 
     return NextResponse.json({ connection: result }, { status: 201 });
   } catch (error) {

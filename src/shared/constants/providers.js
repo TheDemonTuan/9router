@@ -65,6 +65,7 @@ export const THINKING_CONFIG = {
 
 export const OAUTH_PROVIDERS = byCategory("oauth");
 export const APIKEY_PROVIDERS = byCategory("apikey");
+export const LOCAL_BRIDGE_PROVIDERS = byCategory("localBridge");
 
 // Web Cookie Providers (use browser session cookie instead of API key)
 export const WEB_COOKIE_PROVIDERS = byCategory("webCookie");
@@ -99,7 +100,7 @@ export function isCustomEmbeddingProvider(providerId) {
 }
 
 // All providers (combined)
-export const AI_PROVIDERS = { ...FREE_PROVIDERS, ...FREE_TIER_PROVIDERS, ...OAUTH_PROVIDERS, ...APIKEY_PROVIDERS, ...WEB_COOKIE_PROVIDERS };
+export const AI_PROVIDERS = { ...FREE_PROVIDERS, ...FREE_TIER_PROVIDERS, ...OAUTH_PROVIDERS, ...APIKEY_PROVIDERS, ...WEB_COOKIE_PROVIDERS, ...LOCAL_BRIDGE_PROVIDERS };
 
 // Auth methods
 export const AUTH_METHODS = {

@@ -64,7 +64,30 @@ export function extractUsageFromResponse(responseBody) {
   return null;
 }
 
+function redactChatGptWebDetail(base) {
+  if (base.provider !== "chatgpt-web") return base;
+  const request = base.request && typeof base.request === "object" ? base.request : {};
+  const response = base.response && typeof base.response === "object" ? base.response : {};
+  return {
+    ...base,
+    request: {
+      model: request.model,
+      stream: request.stream,
+      fields: Object.keys(request).filter((key) => !["messages", "input", "instructions", "tools", "metadata", "client_metadata", "reasoning"].includes(key)),
+      redacted: true,
+    },
+    providerRequest: base.providerRequest ? { redacted: true } : null,
+    providerResponse: base.providerResponse ? { redacted: true } : null,
+    response: {
+      status: response.status,
+      ...(response.error ? { error: "redacted" } : {}),
+      redacted: true,
+    },
+  };
+}
+
 export function buildRequestDetail(base, overrides = {}) {
+  base = redactChatGptWebDetail(base);
   return {
     provider: base.provider || "unknown",
     model: base.model || "unknown",

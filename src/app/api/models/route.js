@@ -1,10 +1,13 @@
 import { NextResponse } from "next/server";
-import { getModelAliases, setModelAlias, getCustomModels } from "@/models";
+import { getModelAliases, setModelAlias, getCustomModels, getProviderConnections } from "@/models";
 import { getDisabledModels } from "@/lib/disabledModelsDb";
 import { AI_MODELS } from "@/shared/constants/config";
 import { getProviderAlias } from "@/shared/constants/providers";
 import { getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
 import { isAlitpModelDeprecated, isAlitpModelAvailableForEdition } from "open-sse/providers/alibabaTokenPlanCatalog.js";
+import {
+  getChatGptWebCatalog,
+} from "open-sse/services/chatgptWebBridge.js";
 
 // GET /api/models - Get models with aliases
 export async function GET() {
@@ -43,6 +46,53 @@ export async function GET() {
           },
         };
       });
+
+    const bridgeConnections = await getProviderConnections({ provider: "chatgpt-web", isActive: true });
+    const bridgeModels = new Map();
+    for (const connection of bridgeConnections) {
+      try {
+        const catalog = await getChatGptWebCatalog(connection);
+        if (catalog.stale) continue;
+        for (const model of catalog.models) {
+          const caps = model.capabilities && typeof model.capabilities === "object" ? model.capabilities : {};
+          if (caps.native_responses !== true && caps.generic_responses !== true) continue;
+          const existing = bridgeModels.get(model.id);
+          bridgeModels.set(model.id, existing ? {
+            ...existing,
+            capabilities: Object.fromEntries(Object.keys({ ...existing.capabilities, ...caps }).map((key) => [
+              key,
+              existing.capabilities?.[key] === true || caps[key] === true,
+            ])),
+          } : { ...model, capabilities: caps });
+        }
+      } catch { /* Offline bridges advertise no models. */ }
+    }
+    const bridgeDisabled = disabled.cgw || disabled["chatgpt-web"] || [];
+    for (const model of bridgeModels.values()) {
+      if (bridgeDisabled.includes(model.id)) continue;
+      const fullModel = model.id.startsWith("chatgpt-web/")
+        ? model.id
+        : `chatgpt-web/${model.id}`;
+      const routedModel = `cgw/${model.id}`;
+      models.push({
+        provider: "chatgpt-web",
+        model: model.id,
+        name: model.name || model.id,
+        fullModel,
+        routedModel,
+        alias: modelAliases[fullModel] || model.id,
+        caps: {
+          vision: model.capabilities?.vision === true,
+          search: false,
+          // Unknown live capabilities stay unknown; never infer support from omission.
+          reasoning: model.capabilities?.reasoning === true,
+          contextWindow: model.context_window || null,
+          maxOutput: model.max_output || null,
+          tools: model.capabilities?.tools === true,
+          managedThinking: true,
+        },
+      });
+    }
 
     // Custom models ride along; their stored caps override the name heuristic
     const seenFull = new Set(models.map((m) => m.fullModel));

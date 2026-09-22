@@ -21,7 +21,7 @@ vi.mock("@/lib/network/connectionProxy", () => ({
 vi.mock("@/shared/constants/providers.js", () => ({ FREE_PROVIDERS: {}, resolveProviderId: (provider) => provider }));
 vi.mock("@/sse/utils/logger.js", () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn() }));
 
-const { parseUpstreamError, quotaExhaustedResponse, credentialUnavailableResponse } = await import("../../open-sse/utils/error.js");
+const { parseUpstreamError, createErrorResult, quotaExhaustedResponse, credentialUnavailableResponse } = await import("../../open-sse/utils/error.js");
 const { clearAccountError, getProviderCredentials, markAccountUnavailable } = await import("../../src/sse/services/auth.js");
 
 const MODEL = "gpt-5.6";
@@ -48,6 +48,18 @@ describe("upstream quota classification", () => {
       { parseError: () => ({ status: 429, message: "limit reached", resetsAtMs: Date.parse(RESET), type: "usage_limit_reached" }) },
     );
     expect(parsed).toMatchObject({ errorClass: "quota_exhausted", retryable: false, resetsAtMs: Date.parse(RESET) });
+  });
+
+  it("preserves retry and resolved-model headers when rebuilding an upstream error", async () => {
+    const result = createErrorResult(429, "busy", Date.parse(RESET), {
+      errorClass: "rate_limited",
+      retryable: true,
+      resolvedModel: "chatgpt-web/actual",
+    });
+
+    expect(result.response.headers.get("x-should-retry")).toBe("true");
+    expect(result.response.headers.get("x-9router-retry-at")).toBe(RESET);
+    expect(result.response.headers.get("x-9router-resolved-model")).toBe("chatgpt-web/actual");
   });
 
   it("classifies GitHub monthly 402 as terminal quota exhaustion through account selection", async () => {

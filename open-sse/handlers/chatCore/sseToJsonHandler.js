@@ -116,8 +116,6 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
   const isSSE = contentType.includes("text/event-stream") || (contentType === "" && isResponsesProvider(provider));
   if (!isSSE) return null; // not handled here
 
-  trackDone();
-
   const ctx = {
     provider, model, connectionId,
     request: extractRequestConfig(body, stream),
@@ -137,7 +135,10 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
 
       if (responseSchemaValidation) {
         const validation = validateStructuredResponse(jsonResponse, responseSchemaValidation);
-        if (!validation.valid) return createErrorResult(HTTP_STATUS.BAD_GATEWAY, `Structured output failed JSON Schema validation: ${validation.errors.join("; ")}`);
+        if (!validation.valid) {
+          trackDone();
+          return createErrorResult(HTTP_STATUS.BAD_GATEWAY, `Structured output failed JSON Schema validation: ${validation.errors.join("; ")}`);
+        }
       }
       const usage = jsonResponse.usage || {};
       appendLog({ tokens: usage, status: completed ? "200 OK" : `200 ${jsonResponse.status || "failed"}` });
@@ -162,6 +163,7 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
 
       // Client is Responses API → return as-is
       if (sourceFormat === FORMATS.OPENAI_RESPONSES) {
+        trackDone();
         return { success: true, response: new Response(JSON.stringify(jsonResponse), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
       }
 
@@ -218,8 +220,10 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
         };
       }
 
+      trackDone();
       return { success: true, response: new Response(JSON.stringify(finalResp), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
     } catch (err) {
+      trackDone();
       console.error("[ChatCore] Responses API SSE→JSON failed:", err);
       return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Failed to convert streaming response to JSON");
     }
@@ -229,8 +233,12 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
   try {
     const sseText = await providerResponse.text();
     const parsed = parseSSEToOpenAIResponse(sseText, model);
-    if (!parsed) return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Invalid SSE response for non-streaming request");
+    if (!parsed) {
+      trackDone();
+      return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Invalid SSE response for non-streaming request");
+    }
     if (parsed.error) {
+      trackDone();
       return createErrorResult(
         HTTP_STATUS.BAD_GATEWAY,
         parsed.error.message || "Upstream SSE stream failed"
@@ -241,7 +249,10 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
 
     if (responseSchemaValidation) {
       const validation = validateStructuredResponse(parsed, responseSchemaValidation);
-      if (!validation.valid) return createErrorResult(HTTP_STATUS.BAD_GATEWAY, `Structured output failed JSON Schema validation: ${validation.errors.join("; ")}`);
+      if (!validation.valid) {
+        trackDone();
+        return createErrorResult(HTTP_STATUS.BAD_GATEWAY, `Structured output failed JSON Schema validation: ${validation.errors.join("; ")}`);
+      }
     }
     const usage = parsed.usage || {};
     appendLog({ tokens: usage, status: "200 OK" });
@@ -292,9 +303,11 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
       ? openAICompletionToResponses(parsed, customToolNames)
       : parsed;
 
+    trackDone();
     return { success: true, response: new Response(JSON.stringify(finalBody), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
   } catch (err) {
     console.error("[ChatCore] Chat Completions SSE→JSON failed:", err);
+    trackDone();
     return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Failed to convert streaming response to JSON");
   }
 }

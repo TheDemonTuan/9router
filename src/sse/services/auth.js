@@ -4,6 +4,11 @@ import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLock
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
 import { isAlitpModelAvailableForEdition } from "open-sse/providers/alibabaTokenPlanCatalog.js";
+import {
+  getChatGptWebCatalog,
+  hasChatGptWebModel,
+  chatGptWebModelSupportsCapabilities,
+} from "open-sse/services/chatgptWebBridge.js";
 import { getAntigravityQuotaCache } from "./antigravityQuota.js";
 import * as log from "../utils/logger.js";
 
@@ -49,6 +54,7 @@ function getUnavailabilityReason(connections, lockedConns, quotaBlocks, model) {
  * @param {string} provider - Provider name
  * @param {Set<string>|string|null} excludeConnectionIds - Connection ID(s) to exclude (for retry with next account)
  * @param {string|null} model - Model name for per-model rate limit filtering
+ * @param {{ preferredConnectionId?: string, pinConnectionId?: string, requiredCapabilities?: Set<string>|string[], bridgeCapability?: "native_responses"|"generic_responses" }} options
  */
 export async function getProviderCredentials(provider, excludeConnectionIds = null, model = null, options = {}) {
   // Normalize to Set for consistent handling
@@ -56,6 +62,13 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     ? excludeConnectionIds
     : (excludeConnectionIds ? new Set([excludeConnectionIds]) : new Set());
   const preferredConnectionId = options?.preferredConnectionId || null;
+  const pinConnectionId = options?.pinConnectionId || null;
+  const bridgeCapability = options?.bridgeCapability === "generic_responses"
+    ? "generic_responses"
+    : "native_responses";
+  const requiredCapabilities = options?.requiredCapabilities instanceof Set
+    ? options.requiredCapabilities
+    : new Set(Array.isArray(options?.requiredCapabilities) ? options.requiredCapabilities : []);
   // Acquire mutex to prevent race conditions
   const currentMutex = selectionMutex;
   let resolveMutex;
@@ -99,7 +112,9 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
 
     if (connections.length === 0) {
       log.warn("AUTH", `No credentials for ${provider}`);
-      return null;
+      return pinConnectionId
+        ? { pinnedConnectionUnavailable: true, connectionId: pinConnectionId }
+        : null;
     }
 
     // Antigravity quota cache is lazy: only populated after that account returns 409/429.
@@ -114,9 +129,26 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       }
     }
 
+      const bridgeEligible = new Set();
+    if (providerId === "chatgpt-web" && model) {
+      await Promise.all(connections.map(async (connection) => {
+        try {
+          const catalog = await getChatGptWebCatalog(connection);
+          const liveModel = catalog.models?.find((entry) => entry.id === model);
+          if (!catalog.stale && hasChatGptWebModel(catalog, model)
+            && liveModel?.capabilities?.[bridgeCapability] === true
+            && chatGptWebModelSupportsCapabilities(liveModel, requiredCapabilities)) {
+            bridgeEligible.add(connection.id);
+          }
+        } catch { /* Offline/unknown bridges are not dispatch candidates. */ }
+      }));
+    }
+
     // Filter out model-locked, excluded, and Antigravity quota-exhausted connections.
     const availableConnections = connections.filter(c => {
       if (excludeSet.has(c.id)) return false;
+      if (pinConnectionId && c.id !== pinConnectionId) return false;
+      if (providerId === "chatgpt-web" && model && !bridgeEligible.has(c.id)) return false;
       if (isModelLockActive(c, model)) return false;
       // Alibaba Token Plan: Team-only models require a Team Edition connection
       // (metadata check on the cached connection — no network during selection).
@@ -145,6 +177,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     });
 
     if (availableConnections.length === 0) {
+      if (pinConnectionId) return { pinnedConnectionUnavailable: true, connectionId: pinConnectionId };
       // Classify only a provider-wide, future-dated quota cache block as quota exhaustion.
       const lockedConns = connections.filter(c => isModelLockActive(c, model));
       const quotaEntries = [...quotaBlocks.values()];

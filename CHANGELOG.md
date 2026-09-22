@@ -1,6 +1,7 @@
 # v0.5.81 (2026-09-18)
 
 ## Features
+- **ChatGPT Web bridge**: add opt-in `chatgpt-web`/`cgw` native Responses provider over a restricted Unix socket, dynamic web catalog, compact/abort terminal policy, dashboard CRUD/status flow, privacy-safe request details, and blue-green drain polling.
 - **Xiaomi MiMo**: merge MiMo Desktop support into `xiaomi-mimo` with dual auth (API key + Desktop/OAuth session), Preview models support, and encrypted-callback OAuth flow
 - **Claude Code**: add 1M-context toggle (`[1m]` marker) and drive `CLAUDE_CODE_AUTO_COMPACT_WINDOW` directly from the dashboard
 - **Models**: add DeepSeek-V4.1-Flash to DeepSeek provider, CodeBuddy-Intl, and Ollama (`deepseek-v4.1-flash:cloud`); enable `low`..`max` reasoning effort levels and vision capability for DeepSeek-V4.*

@@ -5,6 +5,8 @@ import {
   updateProviderConnection,
   deleteProviderConnection,
 } from "@/models";
+import { invalidateChatGptWebCatalog, validateChatGptWebBridgeId } from "open-sse/services/chatgptWebBridge.js";
+import { sanitizeProviderSpecificData } from "@/lib/providerNormalization";
 
 function normalizeProxyConfig(body = {}) {
   const hasAnyProxyField =
@@ -75,6 +77,7 @@ export async function GET(request, { params }) {
     delete result.accessToken;
     delete result.refreshToken;
     delete result.idToken;
+    result.providerSpecificData = sanitizeProviderSpecificData(result.providerSpecificData);
 
     return NextResponse.json({ connection: result });
   } catch (error) {
@@ -116,6 +119,15 @@ export async function PUT(request, { params }) {
       return NextResponse.json({ error: proxyPoolResult.error }, { status: 400 });
     }
 
+    let normalizedProviderSpecificData = providerSpecificData;
+    if (existing.provider === "chatgpt-web" && providerSpecificData !== undefined) {
+      try {
+        normalizedProviderSpecificData = { bridgeId: validateChatGptWebBridgeId(providerSpecificData?.bridgeId) };
+      } catch (error) {
+        return NextResponse.json({ error: error.message }, { status: 400 });
+      }
+    }
+
     const updateData = {};
     if (name !== undefined) updateData.name = name;
     if (priority !== undefined) updateData.priority = priority;
@@ -130,14 +142,14 @@ export async function PUT(request, { params }) {
     if (
       shouldMergeProviderSpecificData(
         existing.providerSpecificData,
-        providerSpecificData,
+        normalizedProviderSpecificData,
         proxyConfig.hasAnyProxyField,
         proxyPoolResult.hasProxyPoolField
       )
     ) {
       updateData.providerSpecificData = {
         ...(existing.providerSpecificData || {}),
-        ...(providerSpecificData || {}),
+        ...(normalizedProviderSpecificData || {}),
       };
 
       if (proxyConfig.hasAnyProxyField) {
@@ -156,6 +168,7 @@ export async function PUT(request, { params }) {
     }
 
     const updated = await updateProviderConnection(id, updateData);
+    if (existing.provider === "chatgpt-web") invalidateChatGptWebCatalog(id);
 
     // Hide sensitive fields
     const result = { ...updated };
@@ -163,6 +176,7 @@ export async function PUT(request, { params }) {
     delete result.accessToken;
     delete result.refreshToken;
     delete result.idToken;
+    result.providerSpecificData = sanitizeProviderSpecificData(result.providerSpecificData);
 
     return NextResponse.json({ connection: result });
   } catch (error) {
@@ -176,10 +190,12 @@ export async function DELETE(request, { params }) {
   try {
     const { id } = await params;
 
+    const existing = await getProviderConnectionById(id);
     const deleted = await deleteProviderConnection(id);
     if (!deleted) {
       return NextResponse.json({ error: "Connection not found" }, { status: 404 });
     }
+    if (existing?.provider === "chatgpt-web") invalidateChatGptWebCatalog(id);
 
     return NextResponse.json({ message: "Connection deleted successfully" });
   } catch (error) {
