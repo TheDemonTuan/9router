@@ -32,6 +32,7 @@ import {
 import {
   loadChatGptWebPinnedConnection,
   pinChatGptWebConnection,
+  withChatGptWebConversationLock,
   resolveChatGptWebConversationKey,
 } from "open-sse/utils/sessionManager.js";
 
@@ -82,7 +83,7 @@ function bridgeContinuationError(connectionId) {
  * unsupported; a capability is usable when at least one verified active bridge can provide it.
  */
 function bridgeCapabilityForRequest(clientRawRequest, body) {
-  return detectClientTool(clientRawRequest?.headers || {}, body) === "codex"
+  return body?._compact === true || detectClientTool(clientRawRequest?.headers || {}, body) === "codex"
     ? "native_responses"
     : "generic_responses";
 }
@@ -340,18 +341,28 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   const explicitConnectionId = provider === "chatgpt-web"
     ? getChatGptWebExplicitConnectionId(clientRawRequest)
     : null;
-  const pinnedConnectionId = provider === "chatgpt-web"
-    ? (explicitConnectionId || await loadChatGptWebPinnedConnection(conversationKey))
-    : null;
+  let pinnedConnectionId = explicitConnectionId;
   let lastError = null;
   let lastStatus = null;
 
   while (true) {
-    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, {
-      requiredCapabilities,
-      ...(pinnedConnectionId ? { pinConnectionId: pinnedConnectionId } : {}),
-      ...(provider === "chatgpt-web" ? { bridgeCapability } : {}),
-    });
+    const selectCredentials = async () => {
+      if (provider === "chatgpt-web") {
+        pinnedConnectionId = explicitConnectionId || await loadChatGptWebPinnedConnection(conversationKey);
+      }
+      const selected = await getProviderCredentials(provider, excludeConnectionIds, model, {
+        requiredCapabilities,
+        ...(pinnedConnectionId ? { pinConnectionId: pinnedConnectionId } : {}),
+        ...(provider === "chatgpt-web" ? { bridgeCapability } : {}),
+      });
+      if (provider === "chatgpt-web" && conversationKey && selected?.connectionId) {
+        await pinChatGptWebConnection(conversationKey, selected.connectionId);
+      }
+      return selected;
+    };
+    const credentials = provider === "chatgpt-web" && conversationKey
+      ? await withChatGptWebConversationLock(conversationKey, selectCredentials)
+      : await selectCredentials();
 
     if (credentials?.pinnedConnectionUnavailable) return bridgeContinuationError(pinnedConnectionId);
 
@@ -369,10 +380,6 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       }
       log.warn("CHAT", "No more accounts available", { provider });
       return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable");
-    }
-
-    if (provider === "chatgpt-web" && conversationKey && credentials.connectionId) {
-      await pinChatGptWebConnection(conversationKey, credentials.connectionId);
     }
 
     // Account selection shown in the unified "▶" line (acc:...)

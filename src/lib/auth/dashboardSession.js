@@ -5,8 +5,9 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { DATA_DIR } from "@/lib/dataDir";
 import { getSettings } from "@/lib/localDb";
+import { getInitialPassword, isUnsafeProductionInitialPassword } from "@/lib/auth/passwordPolicy.js";
 
-const DEFAULT_PASSWORD = "123456";
+const DEFAULT_PASSWORD = "123456"; // Local setup fallback; production login requires INITIAL_PASSWORD or a stored hash.
 const SESSION_MAX_AGE_SEC = 24 * 60 * 60;
 
 function loadJwtSecret() {
@@ -79,6 +80,7 @@ export async function verifyDashboardPassword(password) {
   const settings = await getSettings();
   const storedHash = settings?.password;
   if (storedHash) return bcrypt.compare(password, storedHash);
-  const initialPassword = process.env.INITIAL_PASSWORD || DEFAULT_PASSWORD;
-  return password === initialPassword;
+  const initialPassword = getInitialPassword() || DEFAULT_PASSWORD;
+  return !isUnsafeProductionInitialPassword(initialPassword)
+    && password === initialPassword;
 }

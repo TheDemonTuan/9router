@@ -114,7 +114,8 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const stripList = getModelStrip(alias, model);
   const upstreamModel = getModelUpstreamId(alias, model);
   const detectedClientTool = detectClientTool(clientRawRequest?.headers || {}, body);
-  const nativePassthrough = isNativePassthrough(detectedClientTool, provider);
+  const isChatGptWebCompact = provider === "chatgpt-web" && body?._compact === true;
+  const nativePassthrough = isNativePassthrough(detectedClientTool, provider) || isChatGptWebCompact;
 
   // Provider-level overrides are translation conveniences, never part of native passthrough.
   // Mutating a Codex request here would break opaque reasoning/tool state.
@@ -134,8 +135,8 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   }
 
   const clientRequestedStreaming = body.stream === true || sourceFormat === FORMATS.ANTIGRAVITY || sourceFormat === FORMATS.GEMINI || sourceFormat === FORMATS.GEMINI_CLI;
-  const providerRequiresStreaming = PROVIDERS[provider]?.forceStream === true;
-  let stream = providerRequiresStreaming ? true : (body.stream !== false);
+  const providerRequiresStreaming = PROVIDERS[provider]?.forceStream === true && !isChatGptWebCompact;
+  let stream = isChatGptWebCompact ? false : (providerRequiresStreaming ? true : (body.stream !== false));
 
   // Image generation models require non-streaming (Google v1internal:generateContent)
   const modelType = getModelType(alias, model);

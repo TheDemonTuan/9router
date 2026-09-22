@@ -17,12 +17,15 @@ vi.mock("../../open-sse/utils/requestLogger.js", () => ({
     logClientRawRequest: vi.fn(),
     logRawRequest: vi.fn(),
     logTargetRequest: vi.fn(),
+    logProviderResponse: vi.fn(),
+    logConvertedResponse: vi.fn(),
     logError: vi.fn(),
   })),
 }));
 
 vi.mock("../../open-sse/utils/clientDetector.js", () => ({
   detectClientTool: vi.fn(() => null),
+  getResponsesDialect: vi.fn(() => "standard-openai"),
   isNativePassthrough: vi.fn(() => false),
 }));
 
@@ -71,6 +74,7 @@ vi.mock("../../open-sse/rtk/index.js", () => ({
 vi.mock("../../open-sse/rtk/headroom.js", () => ({
   compressWithHeadroom: vi.fn(async () => null),
   formatHeadroomLog: vi.fn(() => ""),
+  formatHeadroomSizeLog: vi.fn(() => ""),
 }));
 
 vi.mock("../../open-sse/providers/capabilities.js", () => ({
@@ -88,6 +92,9 @@ vi.mock("../../open-sse/translator/concerns/prefetch.js", () => ({
 vi.mock("../../open-sse/handlers/chatCore/requestDetail.js", () => ({
   buildRequestDetail: vi.fn((detail) => detail),
   extractRequestConfig: vi.fn((body, stream) => ({ body, stream })),
+  extractUsageFromResponse: vi.fn(() => null),
+  saveUsageStats: vi.fn(),
+  formatDoneLine: vi.fn(() => ""),
 }));
 
 vi.mock("../../open-sse/utils/error.js", () => ({
@@ -149,5 +156,36 @@ describe("forceStream provider config", () => {
 
     expect(executeMock).toHaveBeenCalledTimes(1);
     expect(executeMock.mock.calls[0][0].stream).toBe(true);
+  });
+
+  it("keeps ChatGPT Web compact on the unary JSON path", async () => {
+    const { handleChatCore } = await import("../../open-sse/handlers/chatCore.js");
+    const body = { model: "chatgpt-web/high", _compact: true, stream: true, input: [] };
+    const compactBody = { output: [{ type: "message", role: "assistant", content: [] }] };
+    executeMock.mockResolvedValue({
+      response: new Response(JSON.stringify(compactBody), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+      url: "http://bridge/v1/responses/compact",
+      headers: {},
+      transformedBody: body,
+      responseFormat: "openai-responses",
+    });
+
+    const result = await handleChatCore({
+      body,
+      modelInfo: { provider: "chatgpt-web", model: "chatgpt-web/high" },
+      credentials: { providerSpecificData: { bridgeId: "personal" } },
+      clientRawRequest: { endpoint: "/v1/responses/compact", body, headers: { accept: "application/json" } },
+      connectionId: "compact-connection",
+      sourceFormatOverride: "openai-responses",
+      log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn() },
+    });
+
+    expect(result.success).toBe(true);
+    expect(await result.response.json()).toEqual(compactBody);
+    expect(executeMock).toHaveBeenCalledTimes(1);
+    expect(executeMock.mock.calls[0][0].stream).toBe(false);
   });
 });

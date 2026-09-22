@@ -156,8 +156,8 @@ export class ChatGPTWebExecutor {
     const operation = body?._compact === true ? "compact" : "responses";
     const outbound = { ...body, model };
     delete outbound._compact;
-    // The bridge emits SSE for both turn endpoints; chatCore may still receive stream:false.
-    outbound.stream = true;
+    // Normal browser turns use SSE; upstream compact returns unary JSON.
+    outbound.stream = operation === "compact" ? false : true;
 
     let catalog;
     try {
@@ -179,8 +179,9 @@ export class ChatGPTWebExecutor {
         transformedBody: outbound,
       };
     }
-    const requiredCapability = clientTool === "codex" ? "native_responses" : "generic_responses";
-    const capabilityVerified = clientTool === "codex"
+    const nativeOperation = clientTool === "codex" || operation === "compact";
+    const requiredCapability = nativeOperation ? "native_responses" : "generic_responses";
+    const capabilityVerified = nativeOperation
       ? chatGptWebModelSupportsNativeResponses(liveModel)
       : liveModel?.capabilities?.generic_responses === true;
     if (!capabilityVerified) {

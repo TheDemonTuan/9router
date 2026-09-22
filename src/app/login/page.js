@@ -251,7 +251,7 @@ export default function LoginPage() {
                 </Button>
 
                 <p className="text-xs text-center text-text-muted mt-2">
-                  Default password is <code className="bg-sidebar px-1 rounded">123456</code>
+                  Local development fallback: <code className="bg-sidebar px-1 rounded">123456</code>. Production requires <code className="bg-sidebar px-1 rounded">INITIAL_PASSWORD</code>.
                 </p>
                 {hasPassword === false && (
                   <p className="text-xs text-center text-amber-600 dark:text-amber-400">

@@ -109,7 +109,7 @@ describe("ChatGPT Web executor capability gate", () => {
     expect(mocks.requestChatGptWebBridge).not.toHaveBeenCalled();
   });
 
-  it("forces stream mode at the stream-only bridge boundary", async () => {
+  it("forces stream mode at the stream-only bridge boundary for normal turns", async () => {
     mocks.getChatGptWebCatalog.mockResolvedValue({
       stale: false,
       models: [{ id: "chatgpt-web/high", capabilities: { native_responses: true } }],
@@ -126,6 +126,32 @@ describe("ChatGPT Web executor capability gate", () => {
 
     const [, , init] = mocks.requestChatGptWebBridge.mock.calls[0];
     expect(JSON.parse(init.body).stream).toBe(true);
+  });
+
+  it("uses native compact JSON contract without Codex user agent", async () => {
+    mocks.getChatGptWebCatalog.mockResolvedValue({
+      stale: false,
+      models: [{ id: "chatgpt-web/high", capabilities: { native_responses: true } }],
+    });
+    mocks.requestChatGptWebBridge.mockResolvedValue(new Response(JSON.stringify({ output: [] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+
+    const result = await new ChatGPTWebExecutor().execute({
+      model: "chatgpt-web/high",
+      body: { model: "chatgpt-web/high", _compact: true, stream: true, input: [] },
+      credentials,
+      clientTool: null,
+      signal: new AbortController().signal,
+    });
+
+    expect(result.response.status).toBe(200);
+    expect(await result.response.json()).toEqual({ output: [] });
+    const [connection, path, init] = mocks.requestChatGptWebBridge.mock.calls[0];
+    expect(connection).toBe(credentials);
+    expect(path).toBe("/v1/responses/compact");
+    expect(JSON.parse(init.body)).toEqual({ model: "chatgpt-web/high", stream: false, input: [] });
   });
 
   it("dispatches generic requests only with live generic_responses evidence", async () => {

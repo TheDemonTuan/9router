@@ -76,7 +76,7 @@ export function sanitizeChatGptWebMaxConcurrency(value) {
 }
 
 function chatGptWebConnectionKey(connection) {
-  return String(connection?.id || connection?.providerSpecificData?.bridgeId || "unknown");
+  return String(connection?.providerSpecificData?.bridgeId || connection?.id || "unknown");
 }
 
 export function tryAcquireChatGptWebTurn(connection, requestedLimit) {
