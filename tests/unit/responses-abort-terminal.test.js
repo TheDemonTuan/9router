@@ -32,6 +32,50 @@ async function readAll(stream) {
   return text;
 }
 
+describe("stream controller lifecycle cleanup", () => {
+  it("releases AbortError and normal completion exactly once", () => {
+    let errors = 0;
+    let completes = 0;
+    const ctrl = createStreamController({
+      provider: "test",
+      model: "model",
+      onError: () => { errors += 1; },
+      onComplete: () => { completes += 1; },
+    });
+
+    const abort = new Error("upstream aborted");
+    abort.name = "AbortError";
+    ctrl.handleError(abort);
+    ctrl.handleError(abort);
+    ctrl.handleComplete();
+    expect(errors).toBe(1);
+    expect(completes).toBe(0);
+
+    const done = createStreamController({
+      provider: "test",
+      model: "model",
+      onComplete: () => { completes += 1; },
+    });
+    done.handleComplete();
+    done.handleComplete();
+    expect(completes).toBe(1);
+  });
+
+  it("releases a client abort and removes the listener after completion", () => {
+    const signal = new AbortController();
+    let disconnects = 0;
+    const ctrl = createStreamController({
+      provider: "test",
+      model: "model",
+      clientSignal: signal.signal,
+      onDisconnect: () => { disconnects += 1; },
+    });
+    ctrl.handleComplete();
+    signal.abort();
+    expect(disconnects).toBe(0);
+  });
+});
+
 describe("Responses abort terminal synthesis", () => {
   it("keeps model and abort message in the synthetic terminal", () => {
     const text = new TextDecoder().decode(buildAbortedResponsesTerminalBytes({ model: "gpt-5.5", message: "stream stall timeout" }));

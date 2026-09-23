@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { detectFormat, getTargetFormat, resolveTransport } from "../services/provider.js";
 import { translateRequest } from "../translator/index.js";
 import { applyThinking, extractThinking, stripThinkingSuffix } from "../translator/concerns/thinkingUnified.js";
@@ -370,13 +371,20 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   if (passthrough && clientTool === "claude") anchorClaudeCache(translatedBody);
 
   const executor = getExecutor(provider);
+  const pendingRequestId = randomUUID();
+  const pendingStartedAt = Date.now();
   let pendingReleased = false;
   const releasePending = (error = false) => {
     if (pendingReleased) return;
     pendingReleased = true;
-    trackPendingRequest(model, provider, connectionId, false, error);
+    trackPendingRequest(model, provider, connectionId, false, error, {
+      requestId: pendingRequestId,
+    });
   };
-  trackPendingRequest(model, provider, connectionId, true);
+  trackPendingRequest(model, provider, connectionId, true, false, {
+    requestId: pendingRequestId,
+    startedAt: pendingStartedAt,
+  });
   appendRequestLog({ model, provider, connectionId, status: "PENDING" }).catch(() => { });
 
   const msgCount = translatedBody.messages?.length || translatedBody.input?.length || translatedBody.contents?.length || translatedBody.request?.contents?.length || 0;
@@ -388,6 +396,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       if (onDisconnect) onDisconnect(reason);
     },
     onError: () => releasePending(true),
+    onComplete: () => releasePending(),
     log, provider, model, reqTag, clientSignal
   });
 
@@ -580,22 +589,45 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const appendLog = (extra) => appendRequestLog({ model, provider, connectionId, ...extra }).catch(() => { });
   const trackDone = () => releasePending();
 
+  const handlePostResponseFailure = (error) => {
+    releasePending(true);
+    streamController.handleError(error);
+    const message = error?.message || "Failed to process upstream response";
+    return createErrorResult(HTTP_STATUS.BAD_GATEWAY, formatProviderError(new Error(message), provider, model, HTTP_STATUS.BAD_GATEWAY), null, {
+      errorClass: "transient_provider_failure",
+      retryable: true,
+    });
+  };
+
   // Provider forced streaming but client wants JSON
   if (!clientRequestedStreaming && providerRequiresStreaming) {
-    const result = await handleForcedSSEToJson({ ...sharedCtx, providerResponse, sourceFormat, targetFormat: providerResponseFormat, customToolNames, toolNameMap, trackDone, appendLog });
-    if (result) { streamController.handleComplete(); return result; }
+    try {
+      const result = await handleForcedSSEToJson({ ...sharedCtx, providerResponse, sourceFormat, targetFormat: providerResponseFormat, customToolNames, toolNameMap, trackDone, appendLog });
+      if (result) { streamController.handleComplete(); return result; }
+    } catch (error) {
+      return handlePostResponseFailure(error);
+    }
   }
 
   // True non-streaming response
   if (!stream) {
-    const result = await handleNonStreamingResponse({ ...sharedCtx, providerResponse, sourceFormat, targetFormat: providerResponseFormat, reqLogger, toolNameMap, customToolNames, trackDone, appendLog });
-    streamController.handleComplete();
-    return result;
+    try {
+      const result = await handleNonStreamingResponse({ ...sharedCtx, providerResponse, sourceFormat, targetFormat: providerResponseFormat, reqLogger, toolNameMap, customToolNames, trackDone, appendLog });
+      streamController.handleComplete();
+      return result;
+    } catch (error) {
+      return handlePostResponseFailure(error);
+    }
   }
 
-  // Streaming response
-  const { onStreamComplete, streamDetailId } = buildOnStreamComplete({ ...sharedCtx });
-  return handleStreamingResponse({ ...sharedCtx, providerResponse, sourceFormat, targetFormat: providerResponseFormat, userAgent, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, credentials });
+  // Streaming response. Await setup so transform/Response construction failures
+  // release the pending request before the route returns an error.
+  try {
+    const { onStreamComplete, streamDetailId } = buildOnStreamComplete({ ...sharedCtx });
+    return await handleStreamingResponse({ ...sharedCtx, providerResponse, sourceFormat, targetFormat: providerResponseFormat, userAgent, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, credentials });
+  } catch (error) {
+    return handlePostResponseFailure(error);
+  }
 }
 
 export function isTokenExpiringSoon(expiresAt, bufferMs = 5 * 60 * 1000) {

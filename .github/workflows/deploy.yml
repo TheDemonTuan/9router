@@ -352,4 +352,7 @@ jobs:
               fi
               ./deploy.sh '$IMAGE_REF'
               ./deploy.sh --status
+              if [ -f .deployment-result ]; then
+                grep -E '^(cutover|cleanup|slot|reason)=' .deployment-result
+              fi
             "

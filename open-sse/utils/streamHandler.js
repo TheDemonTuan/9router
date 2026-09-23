@@ -15,26 +15,52 @@ function getTimeString() {
  * @param {string} options.provider - Provider name
  * @param {string} options.model - Model name
  */
-export function createStreamController({ onDisconnect, onError, log, provider, model, reqTag = "", clientSignal = null } = {}) {
+export function createStreamController({ onDisconnect, onError, onComplete, log, provider, model, reqTag = "", clientSignal = null } = {}) {
   const abortController = new AbortController();
   const startTime = Date.now();
   let disconnected = false;
   let abortTimeout = null;
+  let clientAbortHandler = null;
+
+  const clearAbortTimeout = () => {
+    if (!abortTimeout) return;
+    clearTimeout(abortTimeout);
+    abortTimeout = null;
+  };
+
+  const removeClientAbortListener = () => {
+    if (!clientSignal || !clientAbortHandler) return;
+    clientSignal.removeEventListener("abort", clientAbortHandler);
+    clientAbortHandler = null;
+  };
+
+  const notify = (callback, value) => {
+    try { callback?.(value); } catch (error) {
+      log?.warn?.(reqTag, `stream lifecycle callback failed: ${error?.message || error}`);
+    }
+  };
+
+  const abortNow = (reason) => {
+    try { abortController.abort(reason); } catch { /* AbortController is idempotent. */ }
+  };
 
   // If external client signal aborts, handle disconnect as client abort
   if (clientSignal) {
     if (clientSignal.aborted) {
       disconnected = true;
-      abortController.abort(clientSignal.reason);
-      onDisconnect?.({ reason: "client_aborted", duration: 0 });
+      abortNow(clientSignal.reason);
+      notify(onDisconnect, { reason: "client_aborted", duration: 0 });
     } else {
-      clientSignal.addEventListener("abort", () => {
+      clientAbortHandler = () => {
         if (disconnected) return;
         disconnected = true;
         dbg("CTRL", `${provider}/${model} | clientSignal aborted | dur=${Date.now() - startTime}ms`);
-        abortController.abort(clientSignal.reason);
-        onDisconnect?.({ reason: "client_aborted", duration: Date.now() - startTime });
-      }, { once: true });
+        clearAbortTimeout();
+        removeClientAbortListener();
+        abortNow(clientSignal.reason);
+        notify(onDisconnect, { reason: "client_aborted", duration: Date.now() - startTime });
+      };
+      clientSignal.addEventListener("abort", clientAbortHandler, { once: true });
     }
   }
 
@@ -57,50 +83,61 @@ export function createStreamController({ onDisconnect, onError, log, provider, m
     handleDisconnect: (reason = "client_closed") => {
       if (disconnected) return;
       disconnected = true;
+      removeClientAbortListener();
 
       // Debug-only: Responses API has no [DONE] sentinel, so codex/droid close the
       // socket on every completed request. "📊 done" is the authoritative outcome line.
       dbg("CTRL", `${provider}/${model} | disconnect=${reason} | dur=${Date.now() - startTime}ms`);
 
       // Delay abort to allow cleanup
+      clearAbortTimeout();
       abortTimeout = setTimeout(() => {
-        abortController.abort();
+        abortNow();
+        abortTimeout = null;
       }, 500);
 
-      onDisconnect?.({ reason, duration: Date.now() - startTime });
+      notify(onDisconnect, { reason, duration: Date.now() - startTime });
     },
 
     // Call when stream completes normally (no line here — "📊 done" is authoritative)
     handleComplete: () => {
       if (disconnected) return;
       disconnected = true;
-
-      if (abortTimeout) {
-        clearTimeout(abortTimeout);
-        abortTimeout = null;
-      }
+      clearAbortTimeout();
+      removeClientAbortListener();
+      notify(onComplete, { duration: Date.now() - startTime });
     },
 
     // Call on error
     handleError: (error) => {
       if (disconnected) return;
       disconnected = true;
+      clearAbortTimeout();
+      removeClientAbortListener();
 
-      if (abortTimeout) {
-        clearTimeout(abortTimeout);
-        abortTimeout = null;
-      }
-
-      if (error.name === "AbortError") {
+      if (error?.name === "AbortError") {
         logStream("⚡", "ABORTED");
+        notify(onError, error);
         return;
       }
 
       logStream("✗", `ERROR: ${error.message}${error.stack ? `\n    ${error.stack}` : ""}`, true);
-      onError?.(error);
+      notify(onError, error);
     },
 
-    abort: () => abortController.abort()
+    abort: (reason) => {
+      if (!disconnected) {
+        // Direct aborts are terminal too; otherwise a watchdog can leave the
+        // deployment counter live when no reader error is delivered.
+        disconnected = true;
+        clearAbortTimeout();
+        removeClientAbortListener();
+        const error = reason instanceof Error ? reason : new Error("stream aborted");
+        if (reason?.name === "AbortError") error.name = "AbortError";
+        notify(onError, error);
+      }
+      abortNow(reason);
+    }
   };
 }
 
