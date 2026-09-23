@@ -202,7 +202,17 @@ describe("resolveCodexModels", () => {
     const result = await resolveCodexModels({ id: "codex-offline", accessToken: "token" }, { fetchImpl });
 
     expect(result.source).toBe("static");
-    expect(result.models.map((model) => model.id)).toContain("gpt-6-sol");
+    const ids = result.models.map((model) => model.id);
+    expect(ids).toContain("gpt-6-sol");
+    expect(ids).toContain("gpt-5.6-sol");
+    expect(ids).toContain("codex-auto-review");
+    expect(ids).not.toContain("gpt-5.6-sol-review");
+    expect(ids).not.toContain("gpt-5.6-terra-review");
+    expect(ids).not.toContain("gpt-5.6-luna-review");
+    expect(ids).not.toContain("gpt-5.5-review");
+    expect(ids).not.toContain("gpt-5.4-review");
+    expect(ids).not.toContain("gpt-5.4-mini-review");
+    expect(ids).not.toContain("gpt-5.3-codex-spark-review");
     expect(result.models.find((model) => model.id === "gpt-6-sol").supportedReasoningLevels).toContain("ultra");
   });
 });
