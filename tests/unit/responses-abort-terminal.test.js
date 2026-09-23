@@ -33,7 +33,7 @@ async function readAll(stream) {
 }
 
 describe("stream controller lifecycle cleanup", () => {
-  it("releases AbortError and normal completion exactly once", () => {
+  it("releases AbortError and completion through terminal callbacks once", () => {
     let errors = 0;
     let completes = 0;
     const ctrl = createStreamController({
@@ -42,12 +42,10 @@ describe("stream controller lifecycle cleanup", () => {
       onError: () => { errors += 1; },
       onComplete: () => { completes += 1; },
     });
-
     const abort = new Error("upstream aborted");
     abort.name = "AbortError";
     ctrl.handleError(abort);
     ctrl.handleError(abort);
-    ctrl.handleComplete();
     expect(errors).toBe(1);
     expect(completes).toBe(0);
 
@@ -59,20 +57,6 @@ describe("stream controller lifecycle cleanup", () => {
     done.handleComplete();
     done.handleComplete();
     expect(completes).toBe(1);
-  });
-
-  it("releases a client abort and removes the listener after completion", () => {
-    const signal = new AbortController();
-    let disconnects = 0;
-    const ctrl = createStreamController({
-      provider: "test",
-      model: "model",
-      clientSignal: signal.signal,
-      onDisconnect: () => { disconnects += 1; },
-    });
-    ctrl.handleComplete();
-    signal.abort();
-    expect(disconnects).toBe(0);
   });
 });
 

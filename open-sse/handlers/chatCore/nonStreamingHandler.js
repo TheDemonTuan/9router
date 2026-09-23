@@ -239,7 +239,13 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
   let responseBody;
 
   if (contentType.includes("text/event-stream")) {
-    const sseText = await providerResponse.text();
+    let sseText;
+    try {
+      sseText = await providerResponse.text();
+    } catch (error) {
+      trackDone();
+      throw error;
+    }
     const parsed = parseSSEToOpenAIResponse(sseText, model);
     if (!parsed) {
       trackDone();
