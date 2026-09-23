@@ -1,3 +1,4 @@
+import os from "node:os";
 import { NextResponse } from "next/server";
 import { getActiveRequests } from "@/lib/usageDb";
 
@@ -18,10 +19,11 @@ export async function GET() {
     : null;
   return NextResponse.json({
     ok: true,
-    instance_id: `${process.env.HOSTNAME || "9router"}-${process.pid}`,
+    instance_id: `${os.hostname()}-${process.pid}`,
+    deployment_slot: process.env.DEPLOY_SLOT || null,
     active_requests: activeRequests,
     active_requests_known: activeRequestsKnown,
-  }, { headers: CORS_HEADERS });
+  }, { headers: { ...CORS_HEADERS, "Cache-Control": "no-store" } });
 }
 
 export async function OPTIONS() {

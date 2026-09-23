@@ -28,6 +28,7 @@ services:
       DATA_DIR: /app/data
       PORT: "20128"
       HOSTNAME: "0.0.0.0"
+      DEPLOY_SLOT: blue
       NODE_ENV: production
       INITIAL_PASSWORD: ${INITIAL_PASSWORD:?INITIAL_PASSWORD must be set for production}
       HEADROOM_URL: http://9router-headroom:8787
@@ -69,6 +70,7 @@ services:
       DATA_DIR: /app/data
       PORT: "20128"
       HOSTNAME: "0.0.0.0"
+      DEPLOY_SLOT: green
       NODE_ENV: production
       INITIAL_PASSWORD: ${INITIAL_PASSWORD:?INITIAL_PASSWORD must be set for production}
       HEADROOM_URL: http://9router-headroom:8787

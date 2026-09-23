@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import os from "node:os";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   getActiveRequests: vi.fn(),
@@ -8,10 +9,39 @@ vi.mock("@/lib/usageDb", () => ({
   getActiveRequests: mocks.getActiveRequests,
 }));
 
-const { GET } = await import("../../src/app/api/health/route.js");
+const { GET, OPTIONS } = await import("../../src/app/api/health/route.js");
 
 describe("GET /api/health", () => {
   beforeEach(() => vi.clearAllMocks());
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("identifies blue and green without treating the bind HOSTNAME as an instance or slot", async () => {
+    mocks.getActiveRequests.mockResolvedValue({ activeRequestsKnown: true, liveActiveRequests: [] });
+    vi.stubEnv("HOSTNAME", "0.0.0.0");
+    vi.stubEnv("DEPLOY_SLOT", "blue");
+    const blue = await GET();
+    expect(blue.headers.get("Cache-Control")).toBe("no-store");
+    expect(blue.headers.get("Access-Control-Allow-Origin")).toBe("*");
+    await expect(blue.json()).resolves.toMatchObject({
+      ok: true,
+      instance_id: `${os.hostname()}-${process.pid}`,
+      deployment_slot: "blue",
+    });
+
+    process.env.DEPLOY_SLOT = "green";
+    await expect((await GET()).json()).resolves.toMatchObject({ deployment_slot: "green" });
+
+    delete process.env.DEPLOY_SLOT;
+    await expect((await GET()).json()).resolves.toMatchObject({ deployment_slot: null });
+  });
+
+  it("keeps preflight OPTIONS at 204 with CORS", async () => {
+    const response = await OPTIONS();
+    expect(response.status).toBe(204);
+    expect(response.headers.get("Access-Control-Allow-Origin")).toBe("*");
+    expect(response.headers.get("Access-Control-Allow-Methods")).toBe("GET, OPTIONS");
+    expect(response.headers.get("Cache-Control")).toBeNull();
+  });
 
   it("reports the non-expiring live count used by deployment drain", async () => {
     mocks.getActiveRequests.mockResolvedValue({
