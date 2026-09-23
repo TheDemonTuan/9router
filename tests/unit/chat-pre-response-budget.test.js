@@ -15,14 +15,9 @@ const response = (status = 200, body = "{}") => new Response(body, {
   headers: { "content-type": "application/json" },
 });
 
-// beforeEach(() => fetchMock.mockReset());
-// afterEach(() => {
-//   vi.doUnmock("../../open-sse/utils/preResponseBudget.js");
-//   vi.doUnmock("../../src/sse/handlers/chat.js");
-//   vi.doUnmock("../../open-sse/translator/index.js");
-// });
 describe("pre-response budget end-to-end boundaries", () => {
   it("keeps fast headers but bounds a slow non-stream body read", async () => {
+    fetchMock.mockReset();
     const budget = createPreResponseBudget({ budgetMs: 500 });
     const body = new ReadableStream({
       start(controller) {
@@ -58,6 +53,7 @@ describe("pre-response budget end-to-end boundaries", () => {
   });
 
   it("allows one 504 retry (60s + 3s + 37s scaled) but never starts a third request", async () => {
+    fetchMock.mockReset();
     const budget = createPreResponseBudget({ budgetMs: 400 });
     const executor = new BaseExecutor("test", {
       baseUrl: "https://provider.test",
@@ -88,6 +84,7 @@ describe("pre-response budget end-to-end boundaries", () => {
     budget.dispose();
   });
   it("maps client abort to terminal 499", async () => {
+    fetchMock.mockReset();
     const client = new AbortController();
     const budget = createPreResponseBudget({ clientSignal: client.signal, budgetMs: 500 });
     const executor = new BaseExecutor("test", { baseUrl: "https://provider.test", timeoutMs: 100 });
