@@ -247,33 +247,58 @@ describe("resolveCodexModels", () => {
   });
 });
 
-describe("projectCodexModel compatibility", () => {
-  it("projects models with snake_case canonical fields and camelCase compatibility aliases", () => {
+describe("projectCodexModel public contract", () => {
+  it("projects an allowlisted base model and a metadata-free reasoning variant", () => {
     const levels = ["low", "medium", "high", "xhigh", "max", "ultra"];
-    const base = projectCodexModel({
+    const model = {
       id: "generic-model",
+      name: "Generic Model",
+      contextLength: 272000,
+      maxContextLength: 872000,
+      maxOutputTokens: 128000,
+      inputModalities: ["text", "image"],
+      kind: "llm",
+      outputModalities: ["text"],
       supportedReasoningLevels: levels,
       defaultReasoningLevel: "medium",
-    }, "cx");
-    const variant = projectCodexModel({
-      id: "generic-model",
-      supportedReasoningLevels: levels,
-      defaultReasoningLevel: "medium",
-    }, "cx", "ultra");
+      publicCapabilityEvidence: { tools: true, search: true, structured_output: false },
+      minimalClientVersion: "0.155.0",
+      priority: 10,
+      description: "Internal description",
+      capabilities: {
+        tools: true,
+        search: true,
+        reasoning: true,
+        vision: true,
+        contextWindow: 272000,
+        maxOutput: 128000,
+        thinkingFormat: "openai",
+        structured_output: false,
+        upstream_extra: true,
+      },
+    };
+    const base = projectCodexModel(model, "cx");
+    const variant = projectCodexModel(model, "cx", "ultra");
 
+    expect(Object.keys(base)).toEqual([
+      "id", "object", "owned_by", "name", "context_length", "max_completion_tokens",
+      "input_modalities", "default_reasoning_level", "supported_reasoning_levels", "capabilities",
+    ]);
     expect(base).toMatchObject({
-      supported_reasoning_levels: levels,
-      supportedReasoningLevels: levels,
-      supportedReasoningEfforts: levels,
-      default_reasoning_level: "medium",
-      defaultReasoningLevel: "medium",
+      id: "cx/generic-model",
+      input_modalities: ["text", "image"],
+      capabilities: { search: true },
     });
-
-    expect(variant).toMatchObject({
-      reasoning_effort: "ultra",
-      reasoningEffort: "ultra",
+    expect(Object.keys(variant)).toEqual([
+      "id", "object", "owned_by", "base_model", "reasoning_effort", "virtual",
+    ]);
+    expect(variant).toEqual({
+      id: "cx/generic-model(ultra)",
+      object: "model",
+      owned_by: "cx",
       base_model: "cx/generic-model",
-      baseModel: "cx/generic-model",
+      reasoning_effort: "ultra",
+      virtual: true,
     });
   });
 });

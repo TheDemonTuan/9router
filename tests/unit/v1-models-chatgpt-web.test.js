@@ -68,6 +68,7 @@ describe("/v1/models ChatGPT Web namespace", () => {
     const models = await buildModelsList(["llm"]);
     const model = models.find((entry) => entry.id === "cgw/chatgpt-web/high");
 
-    expect(model?.capabilities).toMatchObject({ reasoning: true, tools: true, vision: true });
+    expect(model?.capabilities).toEqual({ tools: true });
+    expect(model?.input_modalities).toEqual(["text", "image"]);
   });
 });

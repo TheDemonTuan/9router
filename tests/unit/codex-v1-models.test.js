@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { buildModelsList } from "@/app/api/v1/models/route.js";
+import { GET as getModelById } from "@/app/api/v1/models/[...model]/route.js";
 import { GET as getModelInfo } from "@/app/api/v1/models/info/route.js";
 import { CodexExecutor } from "../../open-sse/executors/codex.js";
 import {
@@ -15,34 +16,32 @@ describe("GPT-6 Codex /v1/models and capabilities", () => {
 
     const astra = models.find((m) => m.id === "cx/gpt-6-astra");
     expect(astra).toBeDefined();
+    expect(Object.keys(astra)).toEqual([
+      "id", "object", "owned_by", "name", "context_length", "max_completion_tokens",
+      "input_modalities", "default_reasoning_level", "supported_reasoning_levels", "capabilities",
+    ]);
     expect(astra.context_length).toBe(272000);
     expect(astra.max_completion_tokens).toBe(128000);
     expect(astra.default_reasoning_level).toBe("low");
     expect(astra.supported_reasoning_levels).toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
-    expect(astra.capabilities).toMatchObject({
-      reasoning: true,
-      thinkingCanDisable: false,
-      contextWindow: 272000,
-      maxOutput: 128000,
-      defaultReasoningLevel: "low",
-    });
+    expect(astra.capabilities).toEqual({ search: true, tools: true });
+    expect(astra.input_modalities).toEqual(["text", "image"]);
 
     const sol = models.find((m) => m.id === "cx/gpt-6-sol");
     expect(sol).toBeDefined();
+    expect(Object.keys(sol)).toEqual([
+      "id", "object", "owned_by", "name", "context_length", "max_completion_tokens",
+      "input_modalities", "default_reasoning_level", "supported_reasoning_levels", "capabilities",
+    ]);
     expect(sol.context_length).toBe(272000);
     expect(sol.max_completion_tokens).toBe(128000);
     expect(sol.default_reasoning_level).toBe("medium");
-    expect(sol.defaultReasoningLevel).toBe("medium");
     expect(sol.supported_reasoning_levels).toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
-    expect(sol.supportedReasoningLevels).toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
-    expect(sol.supportedReasoningEfforts).toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
-    expect(sol.capabilities).toMatchObject({
-      reasoning: true,
-      thinkingCanDisable: false,
-      contextWindow: 272000,
-      maxOutput: 128000,
-      defaultReasoningLevel: "medium",
-    });
+    expect(sol).not.toHaveProperty("description");
+    expect(sol).not.toHaveProperty("minimal_client_version");
+    expect(sol).not.toHaveProperty("max_context_length");
+    expect(sol.input_modalities).toEqual(["text", "image"]);
+    expect(sol.capabilities).toEqual({ search: true, tools: true });
 
     const luna = models.find((m) => m.id === "cx/gpt-6-luna");
     expect(luna).toBeDefined();
@@ -50,24 +49,21 @@ describe("GPT-6 Codex /v1/models and capabilities", () => {
     expect(luna.max_completion_tokens).toBe(128000);
     expect(luna.default_reasoning_level).toBe("medium");
     expect(luna.supported_reasoning_levels).toEqual(["low", "medium", "high", "xhigh", "max"]);
-    expect(luna.capabilities).toMatchObject({
-      reasoning: true,
-      thinkingCanDisable: false,
-      contextWindow: 272000,
-      maxOutput: 128000,
-      defaultReasoningLevel: "medium",
-    });
+    expect(luna.input_modalities).toEqual(["text", "image"]);
+    expect(luna.capabilities).toEqual({ search: true, tools: true });
 
     // Virtual thinking variants
     const solUltra = models.find((m) => m.id === "cx/gpt-6-sol(ultra)");
     expect(solUltra).toBeDefined();
     expect(solUltra.virtual).toBe(true);
-    expect(solUltra.base_model).toBe("cx/gpt-6-sol");
-    expect(solUltra.baseModel).toBe("cx/gpt-6-sol");
-    expect(solUltra.reasoning_effort).toBe("ultra");
-    expect(solUltra.reasoningEffort).toBe("ultra");
-    expect(solUltra.context_length).toBe(272000);
-    expect(solUltra.max_completion_tokens).toBe(128000);
+    expect(solUltra).toEqual({
+      id: "cx/gpt-6-sol(ultra)",
+      object: "model",
+      owned_by: "cx",
+      base_model: "cx/gpt-6-sol",
+      reasoning_effort: "ultra",
+      virtual: true,
+    });
 
     const lunaMax = models.find((m) => m.id === "cx/gpt-6-luna(max)");
     expect(lunaMax).toBeDefined();
@@ -79,6 +75,12 @@ describe("GPT-6 Codex /v1/models and capabilities", () => {
     // Review variants are no longer advertised
     expect(models.find((m) => m.id === "cx/gpt-6-sol-review")).toBeUndefined();
     expect(models.find((m) => m.id === "cx/gpt-6-luna-review")).toBeUndefined();
+
+    const response = await getModelById(
+      new Request("http://localhost/v1/models/cx/gpt-6-sol(ultra)"),
+      { params: Promise.resolve({ model: ["cx", "gpt-6-sol(ultra)"] }) },
+    );
+    expect(await response.json()).toEqual(solUltra);
   });
 
   it("handles partial upstream catalog without max_output_tokens without fabricating limits for unknown models", () => {
@@ -212,6 +214,11 @@ describe("GPT-6 Codex /v1/models and capabilities", () => {
     expect(baseData.maxOutput).toBe(128000);
     expect(baseData.defaultReasoningLevel).toBe("medium");
     expect(baseData.supportedReasoningLevels).toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
+    const astraInfo = await getModelInfo(new Request("http://localhost/v1/models/info?id=cx/gpt-6-astra"));
+    expect((await astraInfo.json()).description).toBeTruthy();
+    expect(baseData.maxContextLength).toBe(872000);
+    expect(baseData.minimalClientVersion).toBe("0.155.0");
+    expect(baseData.description).toBeUndefined();
 
     const variantRes = await getModelInfo(new Request("http://localhost/v1/models/info?id=cx/gpt-6-sol(ultra)"));
     expect(variantRes.status).toBe(200);

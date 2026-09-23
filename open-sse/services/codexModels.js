@@ -4,6 +4,7 @@ import { getModelsByProviderId } from "../config/providerModels.js";
 import { withCodexReviewModels } from "../providers/models/helpers.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { refreshProviderCredentials } from "./oauthCredentialManager.js";
+import { projectPublicModel } from "../providers/publicModel.js";
 
 export const CODEX_MODELS_URL = "https://chatgpt.com/backend-api/codex/models";
 export const CODEX_OFFICIAL_MODELS_URL = "https://raw.githubusercontent.com/openai/codex/main/codex-rs/models-manager/models.json";
@@ -140,6 +141,12 @@ export function normalizeCodexModel(record) {
   const kind = inferKind(id, record);
   const inputModalities = record.input_modalities || record.inputModalities;
   const reasoningLevels = getReasoningLevels(record);
+  const hasInputModalities = Array.isArray(inputModalities);
+  const input = hasInputModalities ? inputModalities.map((value) => String(value).toLowerCase()) : [];
+  const supportsTools = record.supports_tools ?? record.supportsTools;
+  const hasSearchType = Object.prototype.hasOwnProperty.call(record, "web_search_tool_type")
+    || Object.prototype.hasOwnProperty.call(record, "webSearchToolType");
+  const searchType = record.web_search_tool_type ?? record.webSearchToolType;
   const contextLength = firstPositive(
     record.context_window,
     record.contextWindow,
@@ -180,6 +187,12 @@ export function normalizeCodexModel(record) {
     ...(record.upstream_model_id || record.upstreamModelId
       ? { upstreamModelId: record.upstream_model_id || record.upstreamModelId }
       : {}),
+    ...(finitePositive(record.created) && record.created <= 253402300799 ? { created: record.created } : {}),
+    publicCapabilityEvidence: {
+      ...(supportsTools !== undefined ? { tools: Boolean(supportsTools) } : {}),
+      ...(hasSearchType ? { search: Boolean(searchType) } : {}),
+      ...(hasInputModalities ? { vision: input.includes("image") } : {}),
+    },
     capabilities: buildCapabilities({ kind, inputModalities, reasoningLevels, contextLength: effectiveContextLength, maxOutputTokens, record }),
   };
   return model;
@@ -230,69 +243,27 @@ function mergeCapabilities(...values) {
   return Object.keys(merged).length ? merged : undefined;
 }
 
-const CODEX_PUBLIC_CAPABILITIES = new Set([
-  "tools", "vision", "search", "reasoning", "thinkingFormat", "thinkingCanDisable",
-  "contextWindow", "maxOutput", "native_responses", "generic_responses",
-]);
-
-function projectCapabilities(capabilities) {
-  if (!capabilities || typeof capabilities !== "object" || Array.isArray(capabilities)) return undefined;
-  const projected = Object.fromEntries(Object.entries(capabilities).filter(([key]) => CODEX_PUBLIC_CAPABILITIES.has(key)));
-  return Object.keys(projected).length ? projected : undefined;
-}
-
 export function projectCodexModel(model, alias = "cx", variantSuffix = null) {
   if (!model?.id) return null;
-  const id = `${alias}/${model.id}${variantSuffix ? `(${variantSuffix})` : ""}`;
-  const result = {
-    id,
+  return projectPublicModel({
+    id: `${alias}/${model.id}${variantSuffix ? `(${variantSuffix})` : ""}`,
     object: "model",
     owned_by: alias,
-    ...(model.name ? { name: variantSuffix ? `${model.name} (${variantSuffix})` : model.name } : {}),
-    ...(model.description ? { description: model.description } : {}),
-    ...(model.kind ? { kind: model.kind } : {}),
-  };
-  // ponytail: bare model ids (e.g. gpt-6-sol) omitted to prevent provider collisions; add un-prefixed aliases only if clients strictly require them.
-  if (variantSuffix) {
-    const baseModelId = `${alias}/${model.id}`;
-    result.base_model = baseModelId;
-    result.baseModel = baseModelId;
-    result.reasoning_effort = variantSuffix;
-    result.reasoningEffort = variantSuffix;
-    result.virtual = true;
-  }
-  if (finitePositive(model.contextLength)) result.context_length = model.contextLength;
-  if (finitePositive(model.maxContextLength)) result.max_context_length = model.maxContextLength;
-  if (finitePositive(model.maxOutputTokens)) result.max_completion_tokens = model.maxOutputTokens;
-  if (Array.isArray(model.inputModalities)) result.input_modalities = [...model.inputModalities];
-  if (Array.isArray(model.outputModalities)) result.output_modalities = [...model.outputModalities];
-  if (model.minimalClientVersion) result.minimal_client_version = model.minimalClientVersion;
-  if (Number.isFinite(model.priority)) result.priority = model.priority;
-  const hasReasoningLevels = Array.isArray(model.supportedReasoningLevels);
-  const defaultReasoningLevel = model.defaultReasoningLevel
-    && (!hasReasoningLevels || model.supportedReasoningLevels.includes(model.defaultReasoningLevel))
-    ? model.defaultReasoningLevel
-    : null;
-  if (defaultReasoningLevel) {
-    result.default_reasoning_level = defaultReasoningLevel;
-    result.defaultReasoningLevel = defaultReasoningLevel;
-  }
-  if (hasReasoningLevels) {
-    const levels = [...model.supportedReasoningLevels];
-    result.supported_reasoning_levels = levels;
-    result.supportedReasoningLevels = levels;
-    result.supportedReasoningEfforts = levels;
-  }
-  const capabilities = projectCapabilities(model.capabilities) || {};
-  if (Array.isArray(model.supportedReasoningLevels)) {
-    capabilities.reasoning = model.supportedReasoningLevels.length > 0;
-    capabilities.thinkingCanDisable = model.supportedReasoningLevels.includes("none");
-  }
-  if (model.contextLength != null) capabilities.contextWindow = model.contextLength;
-  if (model.maxOutputTokens != null) capabilities.maxOutput = model.maxOutputTokens;
-  if (defaultReasoningLevel) capabilities.defaultReasoningLevel = defaultReasoningLevel;
-  if (Object.keys(capabilities).length) result.capabilities = capabilities;
-  return result;
+    name: model.name,
+    context_length: model.contextLength,
+    max_completion_tokens: model.maxOutputTokens,
+    input_modalities: model.inputModalities,
+    publicCapabilityEvidence: model.publicCapabilityEvidence,
+    supported_reasoning_levels: model.supportedReasoningLevels,
+    default_reasoning_level: model.defaultReasoningLevel,
+    capabilities: model.capabilities,
+    kind: model.kind,
+    ...(variantSuffix ? {
+      base_model: `${alias}/${model.id}`,
+      reasoning_effort: variantSuffix,
+      virtual: true,
+    } : {}),
+  });
 }
 
 export function projectCodexModels(models, alias = "cx") {
