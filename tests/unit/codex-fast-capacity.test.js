@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { CodexExecutor } from "../../open-sse/executors/codex.js";
+import { BaseExecutor } from "../../open-sse/executors/base.js";
+import { createPreResponseBudget } from "../../open-sse/utils/preResponseBudget.js";
 
 function streamFromText(text) {
   const encoder = new TextEncoder();
@@ -67,6 +69,42 @@ describe("Codex fast tier and capacity handling", () => {
     const peek = await executor._peekSseTransientError(response);
     expect(peek.matched).toBeNull();
     await expect(new Response(peek.replacementBody).text()).resolves.toBe(text);
+  });
+
+  it("cancels a pending peek read on the shared deadline", async () => {
+    const cancel = vi.fn();
+    const response = new Response(new ReadableStream({ pull() { return new Promise(() => {}); }, cancel }), {
+      headers: { "content-type": "text/event-stream" },
+    });
+    const budget = createPreResponseBudget({ budgetMs: 20 });
+    await expect(new CodexExecutor()._peekSseTransientError(response, { preResponse: budget })).rejects.toMatchObject({ code: "PRE_RESPONSE_DEADLINE_EXCEEDED" });
+    expect(cancel).toHaveBeenCalledTimes(1);
+    budget.dispose();
+  });
+
+  it("does not issue another transport attempt when retry delay exceeds the shared deadline", async () => {
+    const transport = vi.spyOn(BaseExecutor.prototype, "execute").mockImplementation(async () => ({
+      response: new Response(streamFromText('event: error\ndata: {"error":{"message":"server_is_overloaded"}}\n\n'), {
+        headers: { "content-type": "text/event-stream" },
+      }),
+    }));
+    const budget = createPreResponseBudget({ budgetMs: 100 });
+    try {
+      await expect(new CodexExecutor().execute({ body: {}, preResponse: budget })).rejects.toMatchObject({ code: "PRE_RESPONSE_DEADLINE_EXCEEDED" });
+      expect(transport).toHaveBeenCalledTimes(1);
+    } finally {
+      budget.dispose();
+      transport.mockRestore();
+    }
+  });
+
+  it("replays split prefix and remainder byte-for-byte", async () => {
+    const chunks = ["event: response.output_", "text.delta\ndata: {\"delta\":\"yes\"}\n\n", "data: [DONE]\n\n"];
+    const stream = new ReadableStream({
+      start(controller) { for (const chunk of chunks) controller.enqueue(new TextEncoder().encode(chunk)); controller.close(); },
+    });
+    const result = await new CodexExecutor()._peekSseTransientError(new Response(stream));
+    expect(await new Response(result.replacementBody).text()).toBe(chunks.join(""));
   });
 });
 

@@ -85,6 +85,32 @@ describe("native Responses forwarding", () => {
     }
   });
 
+  it("uses supplied upstream-header time for HDR, not the post-peek handler time", async () => {
+    const events = [];
+    const response = new Response('data: {"type":"response.completed","response":{"status":"completed"}}\n\n', {
+      headers: { "content-type": "text/event-stream" },
+    });
+    const result = await handleStreamingResponse({
+      providerResponse: response, provider: "codex", model: "gpt-5.5",
+      sourceFormat: FORMATS.OPENAI_RESPONSES, targetFormat: FORMATS.OPENAI_RESPONSES,
+      requestStartTime: 1000, upstreamHeadersAt: 1900, body: {}, translatedBody: {},
+      streamController: { isConnected: () => true, handleComplete() {}, handleError() {}, handleDisconnect() {}, signal: new AbortController().signal },
+      onStreamComplete: (_content, _usage, _ttft, _outcome, metrics) => events.push(metrics),
+    });
+    await read(result.response.body);
+    expect(events[0].hdrAt - 1000).toBe(900);
+    const missing = [];
+    const plain = await handleStreamingResponse({
+      providerResponse: new Response('data: {"type":"response.completed","response":{"status":"completed"}}\n\n', { headers: { "content-type": "text/event-stream" } }),
+      provider: "codex", model: "gpt-5.5", sourceFormat: FORMATS.OPENAI_RESPONSES, targetFormat: FORMATS.OPENAI_RESPONSES,
+      requestStartTime: 1000, body: {}, translatedBody: {},
+      streamController: { isConnected: () => true, handleComplete() {}, handleError() {}, handleDisconnect() {}, signal: new AbortController().signal },
+      onStreamComplete: (_content, _usage, _ttft, _outcome, metrics) => missing.push(metrics),
+    });
+    await read(plain.response.body);
+    expect(missing[0].hdrAt).toBeNull();
+  });
+
   it("finalizes usage, request detail, and pending state for every terminal outcome", () => {
     for (const [outcome, expectedStatus] of [
       [{ status: "completed", successful: true }, "success"],

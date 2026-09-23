@@ -235,6 +235,66 @@ describe("Gemini native v1beta endpoint", () => {
     expect(mocks.markAccountUnavailable).not.toHaveBeenCalled();
   });
 
+  it("shares the deadline across native header attempts without penalizing the deadline attempt", async () => {
+    vi.useFakeTimers();
+    const signals = [];
+    mocks.getProviderCredentials.mockImplementation(async (_provider, excluded) => ({
+      apiKey: "test-gemini-key", connectionId: `native-${excluded.size}`, providerSpecificData: {},
+    }));
+    mocks.markAccountUnavailable.mockResolvedValue({ shouldFallback: true });
+    global.fetch.mockImplementation((_url, options) => {
+      signals.push(options.signal);
+      return new Promise(() => {});
+    });
+    try {
+      const pending = POST(makeGeminiRequest("gemini-3.1-flash-tts-preview:generateContent", audioBody()), {
+        params: { path: ["gemini-3.1-flash-tts-preview:generateContent"] },
+      });
+      await vi.advanceTimersByTimeAsync(100_001);
+      const response = await pending;
+      expect(response.status).toBe(504);
+      expect(response.headers.get("x-should-retry")).toBe("true");
+      expect(signals).toHaveLength(3);
+      expect(signals[2].aborted).toBe(true);
+      expect(mocks.markAccountUnavailable).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("returns controlled 504 when native error body stalls without penalizing credentials", async () => {
+    vi.useFakeTimers();
+    const cancel = vi.fn();
+    global.fetch.mockResolvedValueOnce(new Response(new ReadableStream({
+      pull() { return new Promise(() => {}); }, cancel,
+    }), { status: 429, headers: { "content-type": "application/json" } }));
+    const pending = POST(makeGeminiRequest("gemini-3.1-flash-tts-preview:generateContent", audioBody()), {
+      params: { path: ["gemini-3.1-flash-tts-preview:generateContent"] },
+    });
+    await vi.advanceTimersByTimeAsync(100_001);
+    const response = await pending;
+    expect(response.status).toBe(504);
+    expect(response.headers.get("x-9router-no-fallback")).toBe("true");
+    expect(mocks.markAccountUnavailable).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
+  it("cancels the native body when the client leaves after headers", async () => {
+    const client = new AbortController();
+    const cancel = vi.fn();
+    global.fetch.mockResolvedValueOnce(new Response(new ReadableStream({
+      pull() { return new Promise(() => {}); }, cancel,
+    }), { headers: { "content-type": "application/json" } }));
+    const response = await POST(makeGeminiRequest("gemini-3.1-flash-tts-preview:generateContent", audioBody(), {}, client.signal), {
+      params: { path: ["gemini-3.1-flash-tts-preview:generateContent"] },
+    });
+    const pending = response.text();
+    client.abort(new Error("closed"));
+    await expect(pending).rejects.toThrow("closed");
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps non-audio Gemini requests on the existing chat conversion path", async () => {
     const body = {
       contents: [{ parts: [{ text: "hello" }] }],

@@ -100,6 +100,34 @@ describe("upstream quota classification", () => {
     });
   });
 
+  it("locks quota without reset for 15 minutes without changing transient backoff", async () => {
+    vi.setSystemTime(new Date("2026-09-23T00:00:00.000Z"));
+    mocks.connections = [{ id: "unknown-reset", provider: "codex", email: "unknown@example.com", isActive: true }];
+    await markAccountUnavailable("unknown-reset", 429, "quota exhausted", "codex", MODEL, null, "quota_exhausted");
+    expect(mocks.connections[0][`modelLock_${MODEL}`]).toBe("2026-09-23T00:15:00.000Z");
+    expect(mocks.connections[0][`modelLockReason_${MODEL}`]).toBe("quota_exhausted");
+    expect(mocks.connections[0][`modelLockBackoffLevel_${MODEL}`]).toBe(0);
+    await expect(getProviderCredentials("codex", null, MODEL)).resolves.toMatchObject({
+      allRateLimited: true, unavailabilityReason: "quota_exhausted",
+    });
+
+    mocks.connections = [{ id: "exact-reset", provider: "codex", email: "exact@example.com", isActive: true }];
+    await markAccountUnavailable("exact-reset", 429, "quota exhausted", "codex", MODEL, Date.parse("2026-09-25T00:00:00.000Z"), "quota_exhausted");
+    expect(mocks.connections[0][`modelLock_${MODEL}`]).toBe("2026-09-25T00:00:00.000Z");
+
+    mocks.connections = [{ id: "long-lock", provider: "codex", email: "long@example.com", isActive: true,
+      [`modelLock_${MODEL}`]: "2026-09-25T00:00:00.000Z",
+      [`modelLockReason_${MODEL}`]: "quota_exhausted",
+      [`modelLockErrorCode_${MODEL}`]: 429,
+    }];
+    await markAccountUnavailable("long-lock", 429, "quota exhausted", "codex", MODEL, null, "quota_exhausted");
+    expect(mocks.connections[0][`modelLock_${MODEL}`]).toBe("2026-09-25T00:00:00.000Z");
+
+    mocks.connections = [{ id: "transient", provider: "codex", email: "transient@example.com", isActive: true }];
+    await markAccountUnavailable("transient", 429, "too many requests", "codex", MODEL, null, "rate_limited");
+    expect(mocks.connections[0][`modelLock_${MODEL}`]).toBe("2026-09-23T00:00:02.000Z");
+  });
+
   it("keeps lock classification and retry time scoped to the requested model", async () => {
     const transientReset = "2026-09-20T00:00:30.000Z";
     mocks.connections = [{ id: "shared", provider: "codex", email: "shared@example.com", isActive: true }];

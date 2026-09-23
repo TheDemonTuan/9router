@@ -98,8 +98,12 @@ export async function parseUpstreamError(response, executor = null) {
     let bodyText = "";
     try {
       bodyText = await response.clone().text();
-    } catch {
-      try { bodyText = await response.text(); } catch { bodyText = ""; }
+    } catch (error) {
+      if (error?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" || error?.code === "CLIENT_ABORT") throw error;
+      try { bodyText = await response.text(); } catch (fallbackError) {
+        if (fallbackError?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" || fallbackError?.code === "CLIENT_ABORT") throw fallbackError;
+        bodyText = "";
+      }
     }
 
     let body = null;

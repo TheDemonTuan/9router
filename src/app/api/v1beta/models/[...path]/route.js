@@ -10,6 +10,9 @@ import { PROVIDER_MODELS } from "@/shared/constants/models";
 import { GEMINI_NATIVE_TTS_FETCH_TIMEOUT_MS } from "open-sse/config/runtimeConfig.js";
 import { credentialUnavailableResponse } from "open-sse/utils/error.js";
 import { initTranslators } from "open-sse/translator/index.js";
+import { withPreResponseBudget } from "open-sse/utils/preResponseBudget.js";
+import { bindResponseBody } from "open-sse/utils/responseLifecycle.js";
+import { withWireHeartbeat } from "open-sse/utils/streamHandler.js";
 
 let initialized = false;
 const GEMINI_NATIVE_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -52,9 +55,9 @@ export async function OPTIONS() {
  * Gemini SSE format on the fly via transformOpenAISSEToGeminiSSE().
  */
 export async function POST(request, { params }) {
-  await ensureInitialized();
-
-  try {
+  return withPreResponseBudget(request, async (preResponse) => {
+    await ensureInitialized();
+    try {
     const { path } = await params;
     // path = ["provider", "model:action"] or ["model:action"]
 
@@ -86,7 +89,7 @@ export async function POST(request, { params }) {
     const body = await request.json();
 
     if (isGeminiNativeTtsRequest(model, body)) {
-      return await forwardGeminiNativeRequest(request, body, model, action);
+      return await forwardGeminiNativeRequest(request, body, model, action, preResponse);
     }
 
     // Streaming is determined by URL action suffix:
@@ -102,26 +105,30 @@ export async function POST(request, { params }) {
       method: "POST",
       headers: request.headers,
       body: JSON.stringify(convertedBody),
+      signal: request.signal,
     });
 
-    const response = await handleChat(newRequest);
+    const response = await handleChat(newRequest, null, { preResponse });
 
     if (stream) {
       // Transform OpenAI SSE => Gemini SSE on the fly.
       // The @google/genai SDK always uses :streamGenerateContent?alt=sse and
       // expects Gemini SSE chunks (no [DONE] sentinel — stream just closes).
-      return transformOpenAISSEToGeminiSSE(response, model);
+      return withWireHeartbeat(transformOpenAISSEToGeminiSSE(response, model), { clientSignal: request.signal });
     } else {
       // Convert OpenAI JSON response => Gemini GenerateContentResponse
-      return await convertOpenAIResponseToGemini(response, model);
+      return await convertOpenAIResponseToGemini(response.ok ? bindResponseBody(response, { signal: preResponse.signal }) : response, model);
     }
   } catch (error) {
+    if (preResponse.signal.aborted) throw preResponse.signal.reason;
+    if (error?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" || error?.code === "CLIENT_ABORT") throw error;
     console.log("Error handling Gemini request:", error);
     return Response.json(
       { error: { message: error.message, code: 500 } },
       { status: 500 }
     );
   }
+  });
 }
 
 function extractGeminiClientApiKey(request) {
@@ -236,7 +243,7 @@ function getSafeGeminiNativeErrorText(error) {
   return `${message} (${code})`;
 }
 
-async function forwardGeminiNativeRequest(request, body, model, action) {
+async function forwardGeminiNativeRequest(request, body, model, action, preResponse) {
   const authError = await validateGeminiNativeClientKey(request);
   if (authError) return authError;
 
@@ -250,7 +257,9 @@ async function forwardGeminiNativeRequest(request, body, model, action) {
   let lastStatus = null;
 
   while (true) {
+    if (preResponse.signal.aborted) throw preResponse.signal.reason;
     const credentials = await getProviderCredentials("gemini", excludeConnectionIds, modelId);
+    if (preResponse.signal.aborted) throw preResponse.signal.reason;
     if (!credentials || credentials.allRateLimited) {
       const status = lastStatus || Number(credentials?.lastErrorCode) || 503;
       const errorMessage = lastError || credentials?.lastError || "No active credentials for provider: gemini";
@@ -276,40 +285,51 @@ async function forwardGeminiNativeRequest(request, body, model, action) {
     let timedOut = false;
     const timeout = setTimeout(() => {
       timedOut = true;
-      attemptController.abort();
+      attemptController.abort(new Error("Gemini upstream connect timeout"));
     }, GEMINI_NATIVE_TTS_FETCH_TIMEOUT_MS);
-    const abortAttempt = () => attemptController.abort();
-
-    if (request.signal?.aborted) {
-      console.log(`[GEMINI_NATIVE] client aborted model=${modelId} ms=0 conn=${safeConnection}`);
-      return Response.json({ error: { message: "Client closed request" } }, { status: 499 });
-    }
-
-    request.signal?.addEventListener("abort", abortAttempt, { once: true });
+    const abortClient = () => attemptController.abort(request.signal.reason);
+    const abortBudget = () => attemptController.abort(preResponse.signal.reason);
+    const cleanup = () => {
+      request.signal?.removeEventListener("abort", abortClient);
+      preResponse.signal.removeEventListener("abort", abortBudget);
+    };
+    if (request.signal?.aborted) abortClient();
+    else request.signal?.addEventListener("abort", abortClient, { once: true });
+    if (preResponse.signal.aborted) abortBudget();
+    else preResponse.signal.addEventListener("abort", abortBudget, { once: true });
     console.log(`[GEMINI_NATIVE] start model=${modelId} action=${action} conn=${safeConnection} body=${Buffer.byteLength(bodyText)}B timeout=${GEMINI_NATIVE_TTS_FETCH_TIMEOUT_MS}`);
 
     let upstreamResponse;
     try {
-      upstreamResponse = await fetch(upstreamUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": request.headers.get("Content-Type") || "application/json",
-          ...authHeaders,
-        },
-        body: bodyText,
-        signal: attemptController.signal,
-      });
+      upstreamResponse = await preResponse.run(() => new Promise((resolve, reject) => {
+        const onAbort = () => reject(attemptController.signal.reason);
+        if (attemptController.signal.aborted) return onAbort();
+        attemptController.signal.addEventListener("abort", onAbort, { once: true });
+        Promise.resolve().then(() => fetch(upstreamUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": request.headers.get("Content-Type") || "application/json",
+            ...authHeaders,
+          },
+          body: bodyText,
+          signal: attemptController.signal,
+        })).then((response) => {
+          attemptController.signal.removeEventListener("abort", onAbort);
+          if (attemptController.signal.aborted) {
+            response.body?.cancel(attemptController.signal.reason).catch(() => {});
+          } else resolve(response);
+        }, (error) => { attemptController.signal.removeEventListener("abort", onAbort); reject(error); });
+      }));
     } catch (error) {
+      if (preResponse.signal.aborted) throw preResponse.signal.reason;
       const durationMs = Date.now() - startedAt;
-      if (request.signal?.aborted && !timedOut) {
-        console.log(`[GEMINI_NATIVE] client aborted model=${modelId} ms=${durationMs} conn=${safeConnection}`);
-        return Response.json({ error: { message: "Client closed request" } }, { status: 499 });
-      }
+      if (request.signal?.aborted && !timedOut) throw preResponse.signal.reason || request.signal.reason;
 
       const status = isGeminiNativeTimeoutError(error, timedOut) ? 504 : 502;
       const errorText = getSafeGeminiNativeErrorText(error);
       console.log(`[GEMINI_NATIVE] fetch failed model=${modelId} status=${status} ms=${durationMs} conn=${safeConnection} error=${errorText}`);
 
+      if (preResponse.signal.aborted) throw preResponse.signal.reason;
       const { shouldFallback } = await markAccountUnavailable(
         credentials.connectionId,
         status,
@@ -317,6 +337,7 @@ async function forwardGeminiNativeRequest(request, body, model, action) {
         "gemini",
         modelId
       );
+      if (preResponse.signal.aborted) throw preResponse.signal.reason;
 
       if (shouldFallback) {
         excludeConnectionIds.add(credentials.connectionId);
@@ -329,21 +350,25 @@ async function forwardGeminiNativeRequest(request, body, model, action) {
       return Response.json({ error: { message: errorText } }, { status });
     } finally {
       clearTimeout(timeout);
-      request.signal?.removeEventListener("abort", abortAttempt);
+      if (!upstreamResponse) cleanup();
     }
 
     console.log(`[GEMINI_NATIVE] upstream model=${modelId} status=${upstreamResponse.status} ms=${Date.now() - startedAt} conn=${safeConnection} ct=${upstreamResponse.headers.get("content-type") || "?"} cl=${upstreamResponse.headers.get("content-length") || "?"}`);
+    if (preResponse.signal.aborted) { upstreamResponse.body?.cancel().catch(() => {}); throw preResponse.signal.reason; }
+    const guarded = bindResponseBody(upstreamResponse, { signal: attemptController.signal, onFinalize: cleanup });
 
     if (upstreamResponse.ok) {
       await clearAccountError(credentials.connectionId, credentials, modelId);
-      return new Response(upstreamResponse.body, {
+      if (preResponse.signal.aborted) throw preResponse.signal.reason;
+      return new Response(guarded.body, {
         status: upstreamResponse.status,
         statusText: upstreamResponse.statusText,
         headers: corsHeadersFrom(upstreamResponse),
       });
     }
 
-    const errorText = await upstreamResponse.text();
+    const errorText = await preResponse.run(() => guarded.text());
+    if (preResponse.signal.aborted) throw preResponse.signal.reason;
     const { shouldFallback } = await markAccountUnavailable(
       credentials.connectionId,
       upstreamResponse.status,
@@ -351,6 +376,7 @@ async function forwardGeminiNativeRequest(request, body, model, action) {
       "gemini",
       modelId
     );
+    if (preResponse.signal.aborted) throw preResponse.signal.reason;
 
     if (shouldFallback) {
       excludeConnectionIds.add(credentials.connectionId);
@@ -529,7 +555,8 @@ async function convertOpenAIResponseToGemini(response, model) {
   let body;
   try {
     body = await response.json();
-  } catch {
+  } catch (error) {
+    if (error?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" || error?.code === "CLIENT_ABORT") throw error;
     return response;
   }
 

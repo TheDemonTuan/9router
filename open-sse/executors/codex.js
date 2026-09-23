@@ -318,7 +318,7 @@ export class CodexExecutor extends BaseExecutor {
     let attempt = 0;
     while (true) {
       const result = await super.execute(args);
-      const peek = await this._peekSseTransientError(result.response);
+      const peek = await this._peekSseTransientError(result.response, { preResponse: args.preResponse, signal: args.signal });
       if (!peek.matched) {
         // Replace body with re-assembled stream (prefix bytes already read + rest)
         if (peek.replacementBody) {
@@ -343,14 +343,20 @@ export class CodexExecutor extends BaseExecutor {
       attempt++;
       args.log?.debug?.("RETRY", `CODEX | SSE "${peek.matched}" retry ${attempt}/${attempts} after ${delayMs / 1000}s`);
       dbg("CODEX", `SSE overloaded "${peek.matched}" → retry ${attempt}/${attempts} in ${delayMs}ms`);
-      await new Promise(r => setTimeout(r, delayMs));
+      if (args.preResponse) await args.preResponse.sleep(delayMs);
+      else await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => { args.signal?.removeEventListener("abort", onAbort); resolve(); }, delayMs);
+        const onAbort = () => { clearTimeout(timer); reject(args.signal.reason); };
+        if (args.signal?.aborted) onAbort();
+        else args.signal?.addEventListener("abort", onAbort, { once: true });
+      });
     }
   }
 
   // Peek first N bytes of SSE body to detect upstream transient errors.
   // Returns { matched: string|null, message: string|null, accountFallback: boolean, replacementBody: ReadableStream|null }.
   // Caller must use replacementBody when no error matched (original body has been read).
-  async _peekSseTransientError(response) {
+  async _peekSseTransientError(response, { preResponse = null, signal = null } = {}) {
     if (!response || !response.ok || !response.body) return { matched: null, message: null, accountFallback: false, replacementBody: null };
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -358,9 +364,23 @@ export class CodexExecutor extends BaseExecutor {
     let text = "";
     let matched = null;
     let accountFallback = false;
+    const cancel = (reason) => {
+      try { Promise.resolve(reader.cancel(reason)).catch(() => {}); } catch {}
+    };
+    const onAbort = () => cancel(preResponse?.signal.aborted ? preResponse.signal.reason : signal?.reason);
+    if (preResponse?.signal.aborted || signal?.aborted) onAbort();
+    else {
+      preResponse?.signal.addEventListener("abort", onAbort, { once: true });
+      signal?.addEventListener("abort", onAbort, { once: true });
+    }
+    const detach = () => {
+      preResponse?.signal.removeEventListener("abort", onAbort);
+      signal?.removeEventListener("abort", onAbort);
+    };
     try {
       while (text.length < CODEX_SSE_PEEK_BYTES) {
-        const { done, value } = await reader.read();
+        if (preResponse?.signal.aborted || signal?.aborted) throw preResponse?.signal.aborted ? preResponse.signal.reason : signal.reason;
+        const { done, value } = await (preResponse ? preResponse.run(() => reader.read()) : reader.read());
         if (done) break;
         chunks.push(value);
         text += decoder.decode(value, { stream: true });
@@ -371,35 +391,41 @@ export class CodexExecutor extends BaseExecutor {
         if (retryHit) { matched = retryHit; break; }
         if (CODEX_SSE_USER_OUTPUT_PATTERNS.some(p => lowerText.includes(p))) break;
       }
-    } catch (e) {
-      dbg("CODEX", `peek read error: ${e.message}`);
+      if (preResponse?.signal.aborted || signal?.aborted) throw preResponse?.signal.aborted ? preResponse.signal.reason : signal.reason;
+      detach();
+      if (matched) {
+        cancel();
+        reader.releaseLock();
+        return { matched, message: extractSseErrorMessage(text, matched), accountFallback, replacementBody: null };
+      }
+      reader.releaseLock();
+    } catch (error) {
+      detach();
+      cancel(error);
+      try { reader.releaseLock(); } catch {}
+      throw preResponse?.signal.aborted ? preResponse.signal.reason : error;
     }
 
-    if (matched) {
-      try { await reader.cancel(); } catch { /* noop */ }
-      try { reader.releaseLock(); } catch { /* noop */ }
-      return { matched, message: extractSseErrorMessage(text, matched), accountFallback, replacementBody: null };
-    }
-
-    reader.releaseLock();
-
-    // Re-assemble stream: prefix chunks + remaining upstream body
     const upstream = response.body;
     let upstreamReader = null;
     const replacementBody = new ReadableStream({
       start(controller) {
-        for (const c of chunks) controller.enqueue(c);
+        for (const chunk of chunks) controller.enqueue(chunk);
         upstreamReader = upstream.getReader();
       },
       async pull(controller) {
         try {
           const { done, value } = await upstreamReader.read();
-          if (done) { controller.close(); return; }
+          if (done) { upstreamReader.releaseLock(); controller.close(); return; }
           controller.enqueue(value);
-        } catch (e) { controller.error(e); }
+        } catch (error) {
+          try { upstreamReader.releaseLock(); } catch {}
+          controller.error(error);
+        }
       },
       cancel(reason) {
-        try { upstreamReader?.cancel(reason); } catch { /* noop */ }
+        try { Promise.resolve(upstreamReader?.cancel(reason)).catch(() => {}); } catch {}
+        try { upstreamReader?.releaseLock(); } catch {}
       },
     });
     return { matched: null, message: null, accountFallback: false, replacementBody };

@@ -2,6 +2,7 @@ import { HTTP_STATUS, RETRY_CONFIG, DEFAULT_RETRY_CONFIG, resolveRetryEntry, FET
 import { shouldRefreshCredentials } from "../services/oauthCredentialManager.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { parseUpstreamError } from "../utils/error.js";
+import { bindResponseBody } from "../utils/responseLifecycle.js";
 import { dbg } from "../utils/debugLog.js";
 import { ANTHROPIC_API_VERSION, OPENAI_COMPAT_BASE, ANTHROPIC_COMPAT_BASE } from "../providers/shared.js";
 import { resolveOpenAICompatibleApiType } from "../services/provider.js";
@@ -136,6 +137,8 @@ export class BaseExecutor {
     const requestContext = { compact: body?._compact === true };
 
     for (let urlIndex = 0; urlIndex < fallbackCount; urlIndex++) {
+      if (preResponse?.signal.aborted) throw preResponse.signal.reason;
+      if (signal?.aborted) throw signal.reason;
       const url = this.buildUrl(model, stream, urlIndex, credentials, requestContext);
       const transformedBody = this.transformRequest(model, body, stream, credentials);
       const headers = this.buildHeaders(credentials, stream, url, model, transformedBody, body);
@@ -181,8 +184,8 @@ export class BaseExecutor {
         if (preResponse.signal.aborted) preResponseListener();
         else preResponse.signal.addEventListener("abort", preResponseListener, { once: true });
       }
-      const connectTimer = setTimeout(() => connectCtrl.abort(timeoutError), timeoutMs);
       const mergedSignal = mergedCtrl.signal;
+      const connectTimer = mergedSignal.aborted ? null : setTimeout(() => connectCtrl.abort(timeoutError), timeoutMs);
       const cleanupAbort = () => {
         clearTimeout(connectTimer);
         connectCtrl.signal.removeEventListener("abort", onConnectAbort);
@@ -193,8 +196,7 @@ export class BaseExecutor {
       };
       try {
         const bodyStr = JSON.stringify(transformedBody);
-        const fetchT0 = Date.now();
-        const fetchPromise = proxyAwareFetch(url, {
+        const fetchPromise = mergedSignal.aborted ? Promise.reject(mergedSignal.reason) : proxyAwareFetch(url, {
           method: "POST",
           headers,
           body: bodyStr,
@@ -212,7 +214,10 @@ export class BaseExecutor {
           mergedSignal.addEventListener("abort", onAbort, { once: true });
           fetchPromise.then(
             (res) => {
-              if (settled) return;
+              if (settled) {
+                try { res.body?.cancel(firstAbortReason || mergedSignal.reason).catch(() => {}); } catch {}
+                return;
+              }
               settled = true;
               mergedSignal.removeEventListener("abort", onAbort);
               resolve(res);
@@ -225,27 +230,31 @@ export class BaseExecutor {
             }
           );
         });
-        cleanupAbort();
-        if (response.ok) return { response, url, headers, transformedBody };
+        clearTimeout(connectTimer);
+        const upstreamHeadersAt = Date.now();
+        const guarded = bindResponseBody(response, { signal: mergedSignal, onFinalize: cleanupAbort });
+        if (guarded.ok) return { response: guarded, url, headers, transformedBody, upstreamHeadersAt };
 
-        const parsedError = await parseUpstreamError(response, this);
+        const parsedError = await parseUpstreamError(guarded, this);
         if (parsedError.errorClass === "quota_exhausted") {
-          return { response, url, headers, transformedBody };
+          return { response: guarded, url, headers, transformedBody, upstreamHeadersAt };
         }
 
         if (parsedError.retryable !== false
-          && await tryRetry(urlIndex, response.status, `status ${response.status}`, response)) {
+          && await tryRetry(urlIndex, response.status, `status ${response.status}`, guarded)) {
+          guarded.body?.cancel().catch(() => {});
           urlIndex--;
           continue;
         }
 
         if (this.shouldRetry(response.status, urlIndex)) {
           log?.debug?.("RETRY", `${response.status} on ${url}, trying fallback ${urlIndex + 1}`);
+          guarded.body?.cancel().catch(() => {});
           lastStatus = response.status;
           continue;
         }
 
-        return { response, url, headers, transformedBody };
+        return { response: guarded, url, headers, transformedBody, upstreamHeadersAt };
       } catch (error) {
         cleanupAbort();
         const abortReason = firstAbortReason || mergedSignal.reason;

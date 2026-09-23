@@ -4,7 +4,7 @@
 
 import { CLIENT_METADATA } from "../../config/appConstants.js";
 import { ANTIGRAVITY_IDE_USER_AGENT, ANTIGRAVITY_IDE_VERSION, ANTIGRAVITY_OAUTH_CLIENT } from "../../providers/shared.js";
-import { U, parseResetTime, normalizeCloudCodeProjectId, fetchWithTimeout } from "./shared.js";
+import { U, parseResetTime, normalizeCloudCodeProjectId, fetchWithTimeout, cancelResponseBody } from "./shared.js";
 import { fetchAntigravityWeeklyQuota } from "./antigravity-weekly.js";
 
 // Antigravity API config (from Quotio) — urls from registry, oauth client + dynamic UA kept here
@@ -58,6 +58,7 @@ export async function getGeminiUsage(accessToken, providerSpecificData, proxyOpt
     );
 
     if (!response.ok) {
+      cancelResponseBody(response);
       return { plan, message: `Gemini CLI quota error (${response.status}).` };
     }
 
@@ -107,7 +108,10 @@ async function getGeminiSubscriptionInfo(accessToken, proxyOptions = null) {
       10000,
       proxyOptions
     );
-    if (!response.ok) return null;
+    if (!response.ok) {
+      cancelResponseBody(response);
+      return null;
+    }
     return await response.json();
   } catch {
     return null;
@@ -139,6 +143,7 @@ export async function getAntigravityUsage(accessToken, providerSpecificData, pro
     }, 10000, proxyOptions);
 
     if (response.status === 403) {
+      cancelResponseBody(response);
       return {
         message: "Antigravity quota API access forbidden. Chat may still work.",
         quotas: {}
@@ -146,6 +151,7 @@ export async function getAntigravityUsage(accessToken, providerSpecificData, pro
     }
 
     if (response.status === 401) {
+      cancelResponseBody(response);
       return {
         message: "Antigravity quota API authentication expired. Chat may still work.",
         quotas: {}
@@ -153,6 +159,7 @@ export async function getAntigravityUsage(accessToken, providerSpecificData, pro
     }
 
     if (!response.ok) {
+      cancelResponseBody(response);
       throw new Error(`Antigravity API error: ${response.status}`);
     }
 

@@ -5,6 +5,12 @@
 import { PROVIDERS } from "../../providers/index.js";
 import { proxyAwareFetch } from "../../utils/proxyFetch.js";
 
+import { bindResponseBody } from "../../utils/responseLifecycle.js";
+
+export function cancelResponseBody(response) {
+  try { Promise.resolve(response?.body?.cancel()).catch(() => {}); } catch { /* Body already consumed. */ }
+}
+
 // usage endpoints: single source from registry transport.usage
 export const U = (id) => PROVIDERS[id]?.usage || {};
 
@@ -61,22 +67,46 @@ export function normalizeCloudCodeProjectId(project) {
 
 export async function fetchWithTimeout(url, opts = {}, ms = 10000, proxyOptions = null) {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(new Error(`Timeout after ${ms}ms`)), ms);
   const externalSignal = opts?.signal;
-  const onExternalAbort = () => {
-    controller.abort(externalSignal.reason);
+  let finalized = false;
+  let abortFetch;
+  const abortPromise = new Promise((_, reject) => {
+    abortFetch = () => reject(controller.signal.reason);
+  });
+  abortPromise.catch(() => {});
+  const cleanup = () => {
+    if (finalized) return;
+    finalized = true;
+    clearTimeout(timeoutId);
+    externalSignal?.removeEventListener("abort", onExternalAbort);
+    controller.signal.removeEventListener("abort", abortFetch);
   };
+  const onExternalAbort = () => controller.abort(externalSignal.reason);
+  const timeoutId = setTimeout(() => controller.abort(new Error(`Timeout after ${ms}ms`)), ms);
   if (externalSignal) {
     if (externalSignal.aborted) onExternalAbort();
     else externalSignal.addEventListener("abort", onExternalAbort, { once: true });
   }
+
+
+  let fetchPromise;
+  controller.signal.addEventListener("abort", abortFetch, { once: true });
   try {
-    const response = await proxyAwareFetch(url, { ...opts, signal: controller.signal }, proxyOptions);
-    clearTimeout(timeoutId);
-    return response;
+    fetchPromise = Promise.resolve(proxyAwareFetch(url, { ...opts, signal: controller.signal }, proxyOptions));
+    fetchPromise.catch(() => {});
+    const response = await Promise.race([fetchPromise, abortPromise]);
+    controller.signal.removeEventListener("abort", abortFetch);
+    if (controller.signal.aborted) {
+      cancelResponseBody(response);
+      throw controller.signal.reason;
+    }
+    return bindResponseBody(response, { signal: controller.signal, onFinalize: cleanup });
   } catch (error) {
-    clearTimeout(timeoutId);
-    if (externalSignal) externalSignal.removeEventListener("abort", onExternalAbort);
+    cleanup();
     throw error;
+  } finally {
+    if (controller.signal.aborted) {
+      fetchPromise?.then(cancelResponseBody, () => {});
+    }
   }
 }

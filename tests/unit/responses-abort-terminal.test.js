@@ -77,7 +77,7 @@ describe("Responses abort terminal synthesis", () => {
     });
 
     const out = createDisconnectAwareStream(
-      { readable: upstream, writable: { getWriter: () => ({ abort: () => Promise.resolve() }) } },
+      upstream,
       makeController(),
       buildAbortedResponsesTerminalBytes
     );
@@ -96,7 +96,7 @@ describe("Responses abort terminal synthesis", () => {
     });
 
     const out = createDisconnectAwareStream(
-      { readable: upstream, writable: { getWriter: () => ({ abort: () => Promise.resolve() }) } },
+      upstream,
       makeController(),
       null
     );
@@ -172,5 +172,24 @@ describe("stall abort through pipeWithDisconnect", () => {
     expect(seen).toBe("stream stall timeout");
     expect(text).toContain('"stream stall timeout"');
     expect(text).toContain("data: [DONE]");
+  });
+});
+
+describe("heartbeat backpressure", () => {
+  it("does not accumulate keepalives while downstream pauses", async () => {
+    vi.useFakeTimers();
+    const ctrl = createStreamController({ provider: "test", model: "m" });
+    let source;
+    const body = new ReadableStream({ start(controller) { source = controller; } });
+    const out = createDisconnectAwareStream(body, ctrl, null, { heartbeatIntervalMs: 50 });
+    await vi.advanceTimersByTimeAsync(5_000);
+    const reader = out.getReader();
+    const first = await reader.read();
+    expect(new TextDecoder().decode(first.value)).toBe(": keepalive\n\n");
+    source.enqueue(new TextEncoder().encode("data: real\n\n"));
+    const second = await reader.read();
+    expect(new TextDecoder().decode(second.value)).toBe("data: real\n\n");
+    await reader.cancel("done");
+    vi.useRealTimers();
   });
 });

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // Mock proxyAwareFetch before any imports that use it
 vi.mock("../../open-sse/utils/proxyFetch.js", () => ({
@@ -285,7 +285,24 @@ describe("fetchAntigravityWeeklyQuota", () => {
       expect.any(Object),
     );
   });
+  it("settles a stalled quota body at timeout and allows a fresh request", async () => {
+    vi.useFakeTimers();
+    let sourceCancel;
+    proxyAwareFetch.mockImplementationOnce(async () => new Response(new ReadableStream({
+      pull() {},
+      cancel(reason) { sourceCancel = reason; },
+    }))).mockResolvedValueOnce(new Response(JSON.stringify(FULL_RESPONSE)));
+
+    const pending = fetchAntigravityWeeklyQuota("token", "project-timeout");
+    await vi.advanceTimersByTimeAsync(10_000);
+    await expect(pending).resolves.toEqual({});
+    expect(sourceCancel).toBeInstanceOf(Error);
+    await expect(fetchAntigravityWeeklyQuota("token", "project-timeout")).resolves.toHaveProperty("gemini_weekly");
+    expect(proxyAwareFetch).toHaveBeenCalledTimes(2);
+  });
 });
+
+afterEach(() => vi.useRealTimers());
 
 // — Integration: weekly failure does not affect existing quotas —————
 describe("weekly quota isolation from existing quota", () => {

@@ -3,7 +3,7 @@
  * Failure never breaks existing per-model quota display.
  */
 
-import { U, parseResetTime, fetchWithTimeout } from "./shared.js";
+import { U, parseResetTime, fetchWithTimeout, cancelResponseBody } from "./shared.js";
 import { ANTIGRAVITY_IDE_USER_AGENT, ANTIGRAVITY_IDE_VERSION } from "../../providers/shared.js";
 
 // — Weekly quota summary config ——————————————————————————————
@@ -140,7 +140,10 @@ export async function fetchAntigravityWeeklyQuota(accessToken, projectId, proxyO
         }),
       }, 10000, proxyOptions);
 
-      if (!response.ok) return {};
+      if (!response.ok) {
+        cancelResponseBody(response);
+        return {};
+      }
 
       const data = await response.json();
       return parseWeeklyQuotaSummary(data);

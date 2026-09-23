@@ -1,4 +1,5 @@
 import { ROUTER_PRE_RESPONSE_BUDGET_MS } from "../config/runtimeConfig.js";
+import { createErrorResult } from "./error.js";
 
 const now = () => performance.now();
 
@@ -148,6 +149,35 @@ export function createPreResponseBudget({ clientSignal = null, budgetMs = ROUTER
   };
 
   return { startedAt, deadlineAt, signal: controller.signal, remainingMs, run, sleep, dispose };
+}
+
+export async function withPreResponseBudget(request, run) {
+  const budget = createPreResponseBudget({ clientSignal: request?.signal });
+  try {
+    return await budget.run(() => run(budget));
+  } catch (error) {
+    if (error?.code === "CLIENT_ABORT" || error?.status === 499) {
+      return createErrorResult(499, "Client closed request", null, {
+        errorClass: "client_abort",
+        retryable: false,
+      }).response;
+    }
+    if (error?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" || error?.status === 504) {
+      return new Response(JSON.stringify({
+        error: { message: "Gateway timeout: pre-response budget exceeded", type: "gateway_timeout" },
+      }), {
+        status: 504,
+        headers: {
+          "content-type": "application/json",
+          "x-9router-no-fallback": "true",
+          "x-should-retry": "true",
+        },
+      });
+    }
+    throw error;
+  } finally {
+    budget.dispose();
+  }
 }
 
 export { createDeadlineError, createClientAbortError };

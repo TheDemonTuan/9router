@@ -1,5 +1,6 @@
 // Transform OpenAI SSE stream to Ollama JSON lines format
 export function transformToOllama(response, model) {
+  if (!response.ok || !response.body || !response.headers.get("content-type")?.toLowerCase().includes("text/event-stream")) return response;
   let buffer = "";
   let pendingToolCalls = {};
   

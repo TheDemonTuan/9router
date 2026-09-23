@@ -33,6 +33,7 @@ import { stripUnsupportedModalities } from "../translator/concerns/modality.js";
 import { prefetchRemoteImages } from "../translator/concerns/prefetch.js";
 import { defaultClaudeToolType, shouldDefaultClaudeToolType } from "../translator/concerns/toolCall.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
+import { bindResponseBody } from "../utils/responseLifecycle.js";
 
 /**
  * Core chat handler - shared between SSE and Worker
@@ -426,34 +427,35 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   }
 
   // Execute request
-  let providerResponse, providerUrl, providerHeaders, finalBody;
+  let providerResponse, providerUrl, providerHeaders, finalBody, upstreamHeadersAt = null;
   // Most executors return their registry format. Cursor AgentService is an
   // exception: it is decoded by the executor into OpenAI-compatible output.
   let providerResponseFormat = targetFormat;
   try {
-    const result = await executor.execute({
-      model,
-      body: translatedBody,
-      stream,
-      credentials,
-      providerSessionId: sessionSeed,
-      clientTool,
-      signal: streamController.signal,
-      log,
-      proxyOptions,
-      preResponse,
-    });
-    providerResponse = result.response;
+    const result = await (preResponse ? preResponse.run(() => executor.execute({
+      model, body: translatedBody, stream, credentials, providerSessionId: sessionSeed,
+      clientTool, signal: streamController.signal, log, proxyOptions, preResponse,
+    })) : executor.execute({
+      model, body: translatedBody, stream, credentials, providerSessionId: sessionSeed,
+      clientTool, signal: streamController.signal, log, proxyOptions, preResponse,
+    }));
+    providerResponse = bindResponseBody(result.response, { signal: preResponse ? AbortSignal.any([streamController.signal, preResponse.signal]) : streamController.signal });
     providerUrl = result.url;
     providerHeaders = result.headers;
     finalBody = result.transformedBody;
     providerResponseFormat = result.responseFormat || targetFormat;
+    upstreamHeadersAt = result.upstreamHeadersAt ?? null;
     const renamedToolNames = takeRenamedToolNames(translatedBody);
     if (renamedToolNames?.size) {
       toolNameMap = new Map([...(toolNameMap || []), ...renamedToolNames]);
     }
     reqLogger.logTargetRequest(providerUrl, providerHeaders, finalBody);
   } catch (error) {
+    if (preResponse?.signal.aborted || error?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" || error?.code === "CLIENT_ABORT") {
+      streamController.abort(error);
+      streamController.handleError(error);
+      throw preResponse?.signal.aborted ? preResponse.signal.reason : error;
+    }
     const isClientAbort = error.code === "CLIENT_ABORT" || (error.name === "AbortError" && (clientSignal?.aborted || error.message?.includes?.("Client closed")));
     const isConnectTimeout = error.code === "UPSTREAM_CONNECT_TIMEOUT" || error.status === HTTP_STATUS.GATEWAY_TIMEOUT;
     const failureStatus = isClientAbort ? 499 : (isConnectTimeout ? HTTP_STATUS.GATEWAY_TIMEOUT : HTTP_STATUS.BAD_GATEWAY);
@@ -495,6 +497,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     });
   }
 
+  try {
   // Handle 401/403 - try token refresh (skip for noAuth providers)
   if (!executor.noAuth && (providerResponse.status === HTTP_STATUS.UNAUTHORIZED || providerResponse.status === HTTP_STATUS.FORBIDDEN)) {
     try {
@@ -517,28 +520,32 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
           try { await onCredentialsRefreshed(newCredentials); } catch (e) { log?.warn?.("TOKEN", `onCredentialsRefreshed failed: ${e.message}`); }
         }
         try {
-          const retryResult = await executor.execute({
-            model,
-            body: translatedBody,
-            stream,
-            credentials,
-            providerSessionId: sessionSeed,
-            clientTool,
-            signal: streamController.signal,
-            log,
-            proxyOptions,
-            preResponse,
-          });
+          const retryResult = await (preResponse ? preResponse.run(() => executor.execute({
+            model, body: translatedBody, stream, credentials, providerSessionId: sessionSeed,
+            clientTool, signal: streamController.signal, log, proxyOptions, preResponse,
+          })) : executor.execute({
+            model, body: translatedBody, stream, credentials, providerSessionId: sessionSeed,
+            clientTool, signal: streamController.signal, log, proxyOptions, preResponse,
+          }));
+          retryResult.response = bindResponseBody(retryResult.response, { signal: preResponse ? AbortSignal.any([streamController.signal, preResponse.signal]) : streamController.signal });
           if (retryResult.response.ok) {
+            providerResponse.body?.cancel().catch(() => {});
             providerResponse = retryResult.response;
             providerUrl = retryResult.url;
+            providerHeaders = retryResult.headers;
+            finalBody = retryResult.transformedBody;
             providerResponseFormat = retryResult.responseFormat || targetFormat;
-          }
-        } catch { log?.warn?.("TOKEN", `${provider.toUpperCase()} | retry after refresh failed`); }
+            upstreamHeadersAt = retryResult.upstreamHeadersAt ?? null;
+          } else retryResult.response.body?.cancel().catch(() => {});
+        } catch (error) {
+          if (preResponse?.signal.aborted || error?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" || error?.code === "CLIENT_ABORT") throw preResponse?.signal.aborted ? preResponse.signal.reason : error;
+          log?.warn?.("TOKEN", `${provider.toUpperCase()} | retry after refresh failed`);
+        }
       } else {
         log?.warn?.("TOKEN", `${provider.toUpperCase()} | refresh failed`);
       }
     } catch (e) {
+      if (preResponse?.signal.aborted || e?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" || e?.code === "CLIENT_ABORT") throw preResponse?.signal.aborted ? preResponse.signal.reason : e;
       log?.warn?.("TOKEN", `${provider.toUpperCase()} | refresh threw: ${e.message}`);
     }
   }
@@ -579,7 +586,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     return errorResult;
   }
 
-  const sharedCtx = { provider, model, body, stream, translatedBody, finalBody, responseSchemaValidation, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag, log, responsesClientDialect, responsesProviderDialect, releasePending };
+  const sharedCtx = { provider, model, body, stream, translatedBody, finalBody, responseSchemaValidation, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag, log, responsesClientDialect, responsesProviderDialect, releasePending, preResponse, upstreamHeadersAt };
   const appendLog = (extra) => appendRequestLog({ model, provider, connectionId, ...extra }).catch(() => { });
   const trackDone = () => releasePending();
 
@@ -599,6 +606,13 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // Streaming response
   const { onStreamComplete, streamDetailId } = buildOnStreamComplete({ ...sharedCtx });
   return handleStreamingResponse({ ...sharedCtx, providerResponse, sourceFormat, targetFormat: providerResponseFormat, userAgent, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, credentials });
+  } catch (error) {
+    if (preResponse?.signal.aborted || error?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" || error?.code === "CLIENT_ABORT") {
+      streamController.abort(error);
+      streamController.handleError(error);
+    }
+    throw preResponse?.signal.aborted ? preResponse.signal.reason : error;
+  }
 }
 
 export function isTokenExpiringSoon(expiresAt, bufferMs = 5 * 60 * 1000) {

@@ -65,12 +65,16 @@ async function quotaWrite(now, tempRoot) {
   const generationCounts = {};
   installFetch("quota", generationCounts);
   const { createProviderConnection, getProviderConnectionById } = await import("../../src/lib/db/index.js");
-  const { resetAdapterForTest } = await import("../../src/lib/db/driver.js");
+  const { getAdapter, resetAdapterForTest } = await import("../../src/lib/db/driver.js");
   const { AntigravityExecutor } = await import("../../open-sse/executors/antigravity.js");
   const { parseUpstreamError } = await import("../../open-sse/utils/error.js");
-  const { markAccountUnavailable } = await import("../../src/sse/services/auth.js");
+  const { markAccountUnavailable, persistModelLocksBatch } = await import("../../src/sse/services/auth.js");
   const ids = [];
-  for (let index = 1; index <= 6; index++) {
+  const batchLocks = [
+    { model: "gemini-3.8-flash-high", resetMs: now + RESET_MS },
+    { model: "claude-sonnet-4-6", resetMs: now + RESET_MS },
+  ];
+  for (let index = 1; index <= 7; index++) {
     const connection = await createProviderConnection({
       provider: "antigravity",
       authType: "oauth",
@@ -107,6 +111,34 @@ async function quotaWrite(now, tempRoot) {
   const first = await getProviderConnectionById(ids[0]);
   assert.equal(first[`modelLock_${MODEL}`], new Date(now + RESET_MS).toISOString());
   assert.equal(first[`modelLockReason_${MODEL}`], "quota_exhausted");
+  assert.deepEqual(await persistModelLocksBatch(ids[6], batchLocks), { changed: 2 });
+  const adapter = await getAdapter();
+  const beforeReplay = adapter.get("SELECT updatedAt, data FROM providerConnections WHERE id = ?", [ids[6]]);
+  const changesBefore = adapter.get("SELECT total_changes() AS n").n;
+  const replayLogs = [];
+  const originalLog = console.log;
+  const originalWarn = console.warn;
+  const originalError = console.error;
+  console.log = (...args) => replayLogs.push(args.join(" "));
+  console.warn = (...args) => replayLogs.push(args.join(" "));
+  console.error = (...args) => replayLogs.push(args.join(" "));
+  let replay;
+  let changesAfter;
+  try {
+    replay = await persistModelLocksBatch(ids[6], batchLocks);
+    changesAfter = adapter.get("SELECT total_changes() AS n").n;
+  } finally {
+    console.log = originalLog;
+    console.warn = originalWarn;
+    console.error = originalError;
+  }
+  const afterReplay = adapter.get("SELECT updatedAt, data FROM providerConnections WHERE id = ?", [ids[6]]);
+  assert.equal(replay.changed, 0);
+  assert.equal(changesAfter - changesBefore, 0);
+  assert.equal(afterReplay.updatedAt, beforeReplay.updatedAt);
+  assert.equal(replayLogs.some((line) => /AG_QUOTA|WARN|ERROR/.test(line)), false);
+  assert.equal(JSON.parse(afterReplay.data).lastErrorAt, JSON.parse(beforeReplay.data).lastErrorAt);
+  console.log("PASS batch replay no-write");
   fs.writeFileSync(path.join(tempRoot, "quota-ids.json"), JSON.stringify(ids));
   await closeDb(resetAdapterForTest);
   console.log("PASS one-call quota");

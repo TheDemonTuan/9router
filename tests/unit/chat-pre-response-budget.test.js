@@ -8,6 +8,8 @@ vi.mock("../../open-sse/utils/proxyFetch.js", () => ({
 const { createPreResponseBudget } = await import("../../open-sse/utils/preResponseBudget.js");
 const { BaseExecutor } = await import("../../open-sse/executors/base.js");
 const { handleFusionChat } = await import("../../open-sse/services/combo.js");
+const { bindResponseBody } = await import("../../open-sse/utils/responseLifecycle.js");
+const { handleForcedSSEToJson } = await import("../../open-sse/handlers/chatCore/sseToJsonHandler.js");
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const response = (status = 200, body = "{}") => new Response(body, {
@@ -19,13 +21,16 @@ describe("pre-response budget end-to-end boundaries", () => {
   it("keeps fast headers but bounds a slow non-stream body read", async () => {
     fetchMock.mockReset();
     const budget = createPreResponseBudget({ budgetMs: 500 });
+    let cancelled = false;
     const body = new ReadableStream({
       start(controller) {
         setTimeout(() => {
+          if (cancelled) return;
           controller.enqueue(new TextEncoder().encode("{}"));
           controller.close();
         }, 700);
       },
+      cancel() { cancelled = true; },
     });
     fetchMock.mockResolvedValueOnce(new Response(body, {
       status: 200,
@@ -41,8 +46,65 @@ describe("pre-response budget end-to-end boundaries", () => {
     });
     expect(upstream.response.status).toBe(200);
     await expect(budget.run(() => upstream.response.json())).rejects.toMatchObject({ status: 504 });
+    expect(cancelled).toBe(true);
     budget.dispose();
   });
+  it("cancels HTTP error body reads instead of retrying after deadline", async () => {
+    fetchMock.mockReset();
+    const cancel = vi.fn();
+    let upstreamSignal;
+    fetchMock.mockImplementation((_url, options) => {
+      upstreamSignal = options.signal;
+      return Promise.resolve(new Response(new ReadableStream({ pull() { return new Promise(() => {}); }, cancel }), { status: 429 }));
+    });
+    const budget = createPreResponseBudget({ budgetMs: 25 });
+    const executor = new BaseExecutor("test", { baseUrl: "https://provider.test" });
+    await expect(executor.execute({ model: "m", body: {}, stream: false, credentials: { apiKey: "k" }, preResponse: budget })).rejects.toMatchObject({ code: "PRE_RESPONSE_DEADLINE_EXCEEDED" });
+    expect(upstreamSignal.aborted).toBe(true);
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    budget.dispose();
+  });
+
+  it("cancels a transport response that resolves after client cancellation", async () => {
+    fetchMock.mockReset();
+    let resolveFetch;
+    fetchMock.mockImplementationOnce(() => new Promise((resolve) => { resolveFetch = resolve; }));
+    const client = new AbortController();
+    const budget = createPreResponseBudget({ clientSignal: client.signal, budgetMs: 500 });
+    try {
+      const executor = new BaseExecutor("test", { baseUrl: "https://provider.test" });
+      const pending = executor.execute({ model: "m", body: {}, stream: false, credentials: { apiKey: "k" }, signal: client.signal, preResponse: budget });
+      client.abort(new Error("closed"));
+      await expect(pending).rejects.toMatchObject({ code: "CLIENT_ABORT" });
+      const cancel = vi.fn();
+      resolveFetch(new Response(new ReadableStream({ pull() {}, cancel })));
+      await vi.waitFor(() => expect(cancel).toHaveBeenCalledTimes(1));
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      budget.dispose();
+    }
+  });
+  it("cancels a forced SSE-to-JSON read instead of returning a synthetic 502", async () => {
+    const cancel = vi.fn();
+    const budget = createPreResponseBudget({ budgetMs: 20 });
+    try {
+      const upstream = new Response(new ReadableStream({ pull() { return new Promise(() => {}); }, cancel }), {
+        headers: { "content-type": "text/event-stream" },
+      });
+      const pending = handleForcedSSEToJson({
+        providerResponse: bindResponseBody(upstream, { signal: budget.signal }),
+        provider: "test", model: "m", sourceFormat: "openai", targetFormat: "openai", body: {}, stream: true,
+        trackDone: vi.fn(), appendLog: vi.fn(), requestStartTime: Date.now(), preResponse: budget,
+      });
+      await expect(pending).rejects.toMatchObject({ code: "PRE_RESPONSE_DEADLINE_EXCEEDED" });
+      expect(cancel).toHaveBeenCalledTimes(1);
+    } finally {
+      budget.dispose();
+    }
+  });
+
+
 
   it("shares one deadline across two account attempts", async () => {
     const budget = createPreResponseBudget({ budgetMs: 80 });
@@ -118,26 +180,62 @@ describe("pre-response budget end-to-end boundaries", () => {
   });
 
   it("returns controlled 504 before route initialization finishes", async () => {
-    const deadline = Object.assign(new Error("expired"), {
-      code: "PRE_RESPONSE_DEADLINE_EXCEEDED",
-      status: 504,
-      retryable: true,
-    });
-    vi.doMock("../../open-sse/utils/preResponseBudget.js", () => ({
-      createPreResponseBudget: () => ({
-        run: () => Promise.reject(deadline),
-        dispose: vi.fn(),
-      }),
-    }));
+    vi.useFakeTimers();
     vi.doMock("../../src/sse/handlers/chat.js", () => ({ handleChat: vi.fn() }));
-    vi.doMock("../../open-sse/translator/index.js", () => ({ initTranslators: vi.fn() }));
+    vi.doMock("../../open-sse/translator/index.js", () => ({ initTranslators: () => new Promise(() => {}) }));
     const { POST } = await import("../../src/app/api/v1/chat/completions/route.js");
-    const result = await POST(new Request("http://localhost/v1/chat/completions", {
-      method: "POST",
-      body: JSON.stringify({ model: "m", messages: [] }),
+    const pending = POST(new Request("http://localhost/v1/chat/completions", {
+      method: "POST", body: JSON.stringify({ model: "m", messages: [] }),
       headers: { "content-type": "application/json" },
     }));
+    await vi.advanceTimersByTimeAsync(100_001);
+    const result = await pending;
     expect(result.status).toBe(504);
     expect(result.headers.get("x-9router-no-fallback")).toBe("true");
+    vi.useRealTimers();
+  });
+});
+
+describe("response body ownership", () => {
+  it("rejects a pending body read immediately and cancels its source once", async () => {
+    const { bindResponseBody } = await import("../../open-sse/utils/responseLifecycle.js");
+    const abort = new AbortController();
+    const reason = new Error("deadline");
+    const cancel = vi.fn(() => new Promise(() => {}));
+    const finalize = vi.fn();
+    const source = new ReadableStream({ pull() { return new Promise(() => {}); }, cancel });
+    const response = bindResponseBody(new Response(source), { signal: abort.signal, onFinalize: finalize });
+    const pending = response.text();
+    abort.abort(reason);
+    await expect(pending).rejects.toBe(reason);
+    expect(cancel).toHaveBeenCalledExactlyOnceWith(reason);
+    expect(finalize).toHaveBeenCalledOnce();
+  });
+
+  it("forwards downstream cancellation and handles abort before reading", async () => {
+    const { bindResponseBody } = await import("../../open-sse/utils/responseLifecycle.js");
+    const cancel = vi.fn();
+    const source = () => new ReadableStream({ pull() { return new Promise(() => {}); }, cancel });
+    const abort = new AbortController();
+    const reason = new Error("closed");
+    abort.abort(reason);
+    const response = bindResponseBody(new Response(source()), { signal: abort.signal });
+    await expect(response.text()).rejects.toBe(reason);
+    expect(cancel).toHaveBeenCalledWith(reason);
+    const reader = bindResponseBody(new Response(source())).body.getReader();
+    await reader.cancel("reader closed");
+    expect(cancel).toHaveBeenCalledWith("reader closed");
+  });
+
+  it("finalizes at ordinary EOF without cancelling the source", async () => {
+    const { bindResponseBody } = await import("../../open-sse/utils/responseLifecycle.js");
+    const cancel = vi.fn();
+    const finalize = vi.fn();
+    const response = bindResponseBody(new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new TextEncoder().encode("ok")); controller.close(); }, cancel,
+    })), { onFinalize: finalize });
+    expect(await response.text()).toBe("ok");
+    expect(cancel).not.toHaveBeenCalled();
+    expect(finalize).toHaveBeenCalledOnce();
   });
 });

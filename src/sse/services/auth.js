@@ -1,7 +1,7 @@
 import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings, getProxyPools } from "@/lib/localDb";
 import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/connectionProxy";
 import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockMetadataUpdate, buildClearModelLockMetadataUpdate, getModelLockKey, getModelLockUntil, getModelLockMetadata } from "open-sse/services/accountFallback.js";
-import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
+import { MAX_RATE_LIMIT_COOLDOWN_MS, HARD_QUOTA_UNKNOWN_RESET_MS } from "open-sse/config/errorConfig.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
 import { isAlitpModelAvailableForEdition } from "open-sse/providers/alibabaTokenPlanCatalog.js";
 import {
@@ -320,15 +320,21 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
       shouldFallback = true;
       candidateExpiryMs = githubResetAtMs;
       newBackoffLevel = 0;
-    } else if (typeof resetsAtMs === "number" && Number.isFinite(resetsAtMs)) {
-      const resetDate = new Date(resetsAtMs);
-      if (Number.isFinite(resetDate.getTime()) && resetsAtMs > now) {
+    } else if ((typeof resetsAtMs === "number" && Number.isFinite(resetsAtMs)) || (resetsAtMs instanceof Date && Number.isFinite(resetsAtMs.getTime()))) {
+      const resetMs = resetsAtMs instanceof Date ? resetsAtMs.getTime() : resetsAtMs;
+      const resetDate = new Date(resetMs);
+      if (Number.isFinite(resetDate.getTime()) && resetMs > now) {
         shouldFallback = true;
         candidateExpiryMs = errorClass === "quota_exhausted"
           ? resetDate.getTime()
           : Math.min(resetDate.getTime(), now + MAX_RATE_LIMIT_COOLDOWN_MS);
         newBackoffLevel = 0;
       }
+    }
+    if (!shouldFallback && errorClass === "quota_exhausted") {
+      shouldFallback = true;
+      candidateExpiryMs = now + HARD_QUOTA_UNKNOWN_RESET_MS;
+      newBackoffLevel = 0;
     }
     if (!shouldFallback) {
       const fallback = checkFallbackError(status, errorText, backoffLevel);
