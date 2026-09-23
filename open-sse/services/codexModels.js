@@ -252,9 +252,13 @@ export function projectCodexModel(model, alias = "cx", variantSuffix = null) {
     ...(model.description ? { description: model.description } : {}),
     ...(model.kind ? { kind: model.kind } : {}),
   };
+  // ponytail: bare model ids (e.g. gpt-6-sol) omitted to prevent provider collisions; add un-prefixed aliases only if clients strictly require them.
   if (variantSuffix) {
-    result.base_model = `${alias}/${model.id}`;
+    const baseModelId = `${alias}/${model.id}`;
+    result.base_model = baseModelId;
+    result.baseModel = baseModelId;
     result.reasoning_effort = variantSuffix;
+    result.reasoningEffort = variantSuffix;
     result.virtual = true;
   }
   if (finitePositive(model.contextLength)) result.context_length = model.contextLength;
@@ -269,9 +273,15 @@ export function projectCodexModel(model, alias = "cx", variantSuffix = null) {
     && (!hasReasoningLevels || model.supportedReasoningLevels.includes(model.defaultReasoningLevel))
     ? model.defaultReasoningLevel
     : null;
-  if (defaultReasoningLevel) result.default_reasoning_level = defaultReasoningLevel;
+  if (defaultReasoningLevel) {
+    result.default_reasoning_level = defaultReasoningLevel;
+    result.defaultReasoningLevel = defaultReasoningLevel;
+  }
   if (hasReasoningLevels) {
-    result.supported_reasoning_levels = [...model.supportedReasoningLevels];
+    const levels = [...model.supportedReasoningLevels];
+    result.supported_reasoning_levels = levels;
+    result.supportedReasoningLevels = levels;
+    result.supportedReasoningEfforts = levels;
   }
   const capabilities = projectCapabilities(model.capabilities) || {};
   if (Array.isArray(model.supportedReasoningLevels)) {

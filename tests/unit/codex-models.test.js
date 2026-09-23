@@ -11,6 +11,7 @@ import {
   normalizeCodexCatalog,
   normalizeCodexModel,
   mergeCodexModelLists,
+  projectCodexModel,
   projectCodexModels,
   resolveCodexModels,
   resolveEffectiveCodexCatalog,
@@ -240,5 +241,36 @@ describe("resolveCodexModels", () => {
     expect(ids).not.toContain("gpt-5.4-mini-review");
     expect(ids).not.toContain("gpt-5.3-codex-spark-review");
     expect(result.models.find((model) => model.id === "gpt-6-sol").supportedReasoningLevels).toContain("ultra");
+  });
+});
+
+describe("projectCodexModel compatibility", () => {
+  it("projects models with snake_case canonical fields and camelCase compatibility aliases", () => {
+    const levels = ["low", "medium", "high", "xhigh", "max", "ultra"];
+    const base = projectCodexModel({
+      id: "generic-model",
+      supportedReasoningLevels: levels,
+      defaultReasoningLevel: "medium",
+    }, "cx");
+    const variant = projectCodexModel({
+      id: "generic-model",
+      supportedReasoningLevels: levels,
+      defaultReasoningLevel: "medium",
+    }, "cx", "ultra");
+
+    expect(base).toMatchObject({
+      supported_reasoning_levels: levels,
+      supportedReasoningLevels: levels,
+      supportedReasoningEfforts: levels,
+      default_reasoning_level: "medium",
+      defaultReasoningLevel: "medium",
+    });
+
+    expect(variant).toMatchObject({
+      reasoning_effort: "ultra",
+      reasoningEffort: "ultra",
+      base_model: "cx/generic-model",
+      baseModel: "cx/generic-model",
+    });
   });
 });
