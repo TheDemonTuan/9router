@@ -4,42 +4,6 @@ const fs = require("fs");
 const crypto = require("crypto");
 
 const origCreate = http.createServer.bind(http);
-const INSTANCE_ID = crypto.randomUUID();
-const drainResponses = globalThis.__ninerouterDrainResponses || {
-  active: 0,
-  known: true,
-  entries: new Map(),
-};
-globalThis.__ninerouterDrainResponses = drainResponses;
-globalThis.__ninerouterInstanceId = INSTANCE_ID;
-process.env.NINEROUTER_INSTANCE_ID = INSTANCE_ID;
-
-function isDrainProbe(pathname) {
-  return pathname === "/api/health" || pathname.startsWith("/api/health?");
-}
-
-function trackDrainResponse(req, res) {
-  let pathname = "";
-  try { pathname = new URL(req.url || "/", "http://localhost").pathname; } catch { return () => {}; }
-  if (isDrainProbe(pathname)) return () => {};
-
-  const id = crypto.randomUUID();
-  const entry = { id, startedAt: Date.now() };
-  drainResponses.entries.set(id, entry);
-  drainResponses.active += 1;
-  let released = false;
-  const release = () => {
-    if (released) return;
-    released = true;
-    res.off("finish", release);
-    res.off("close", release);
-    drainResponses.entries.delete(id);
-    drainResponses.active = Math.max(0, drainResponses.active - 1);
-  };
-  res.once("finish", release);
-  res.once("close", release);
-  return release;
-}
 
 // Per-process secret proving x-9r-real-ip was stamped below rather than sent by the client.
 // A bare `next start` / `next dev` never loads this file, so it cannot produce a matching
@@ -71,7 +35,6 @@ http.createServer = (...args) => {
         else delete req.headers.connection;
       }
     }
-    const releaseDrainResponse = trackDrainResponse(req, res);
     const socketIp = req.socket && req.socket.remoteAddress ? req.socket.remoteAddress : "";
     const xff = req.headers["x-forwarded-for"];
     const xRealIp = req.headers["x-real-ip"];
@@ -109,16 +72,7 @@ http.createServer = (...args) => {
       }
     }
 
-    try {
-      const result = handler(req, res);
-      if (result && typeof result.then === "function") {
-        result.catch(() => releaseDrainResponse());
-      }
-      return result;
-    } catch (error) {
-      releaseDrainResponse();
-      throw error;
-    }
+    return handler(req, res);
   };
   if (process.versions.bun) {
     const callerShouldUpgradeCallback = options.shouldUpgradeCallback;

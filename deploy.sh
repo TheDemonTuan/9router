@@ -14,10 +14,6 @@ CHATGPT_WEB_COMPOSE_FILE="${CHATGPT_WEB_COMPOSE_FILE:-}"
 ACTIVE_SLOT_FILE=".active-slot"
 PREVIOUS_SLOT_FILE=".previous-slot"
 DEPLOYED_IMAGE_FILE=".deployed-image"
-DEPLOYMENT_STATE_FILE=".deployment-state"
-DEPLOYMENT_RESULT_FILE=".deployment-result"
-DEPLOY_LOCK_FILE=".deployment.lock"
-SLOT_IMAGE_PREFIX=".slot-image-"
 
 # Load environment overrides if present
 if [[ -f .env ]]; then
@@ -30,11 +26,7 @@ DASHBOARD_ALIAS_HOST="${DASHBOARD_ALIAS_HOST:-}"
 API_HOST="${API_HOST:-9router-api.tuannguyenviet.site}"
 EDGE_NETWORK="${EDGE_NETWORK:-edge-9router}"
 READY_TIMEOUT="${READY_TIMEOUT:-60}"
-DRAIN_PROBE_TIMEOUT="${DRAIN_PROBE_TIMEOUT:-5}"
-CUTOVER_PROBE_ATTEMPTS="${CUTOVER_PROBE_ATTEMPTS:-8}"
-CUTOVER_PROBE_SUCCESSES="${CUTOVER_PROBE_SUCCESSES:-2}"
 TRAEFIK_CONFIG_NAME="${TRAEFIK_CONFIG_NAME:-9router.yml}"
-CUTOVER_PROBE_URL="${CUTOVER_PROBE_URL:-https://${API_HOST}/api/health}"
 
 # Auto-detect Traefik dynamic configuration directory
 if [[ -z "${TRAEFIK_DYNAMIC_DIR:-}" ]]; then
@@ -56,92 +48,6 @@ TRAEFIK_DYNAMIC_DIR="${TRAEFIK_DYNAMIC_DIR:-/opt/platform/edge/dynamic}"
 
 log() { printf '[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 die() { log "ERROR: $*" >&2; exit 1; }
-
-slot_image_file() {
-  local slot="$1"
-  printf '%s%s' "$SLOT_IMAGE_PREFIX" "$slot"
-}
-
-write_slot_image() {
-  local slot="$1" image="$2" tmp
-  tmp="$(slot_image_file "$slot").tmp.$$"
-  printf '%s' "$image" > "$tmp"
-  mv -f "$tmp" "$(slot_image_file "$slot")"
-}
-
-write_state() {
-  local phase="$1" active="$2" target="${3:-}" previous="${4:-}" image="${5:-}" cleanup_slot="${6:-}" cleanup_reason="${7:-}"
-  local tmp="${DEPLOYMENT_STATE_FILE}.tmp.$$"
-  cat > "$tmp" <<EOF
-version=1
-phase=$phase
-active_slot=$active
-target_slot=$target
-previous_slot=$previous
-image_ref=$image
-cleanup_slot=$cleanup_slot
-cleanup_reason=$cleanup_reason
-updated_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-EOF
-  mv -f "$tmp" "$DEPLOYMENT_STATE_FILE"
-}
-
-write_result() {
-  local cutover="$1" cleanup="$2" slot="$3" reason="${4:-}"
-  local tmp="${DEPLOYMENT_RESULT_FILE}.tmp.$$"
-  printf 'cutover=%s\ncleanup=%s\nslot=%s\nreason=%s\n' "$cutover" "$cleanup" "$slot" "$reason" > "$tmp"
-  mv -f "$tmp" "$DEPLOYMENT_RESULT_FILE"
-}
-
-with_deploy_lock() {
-  command -v flock >/dev/null 2>&1 || die "flock is required for deployment safety"
-  exec 9>"$DEPLOY_LOCK_FILE"
-  flock -n 9 || die "Another deployment operation is already running"
-}
-
-json_health_value() {
-  local payload="$1" key="$2"
-  python3 - "$payload" "$key" <<'PY'
-import json, sys
-try:
-    obj = json.loads(sys.argv[1])
-    value = obj[sys.argv[2]]
-    if isinstance(value, bool): print(str(value).lower())
-    elif isinstance(value, int) and value >= 0: print(value)
-    elif isinstance(value, str): print(value)
-    elif value is None: print("null")
-except Exception:
-    pass
-PY
-}
-
-health_is_idle() {
-  local payload="$1" active known responses responses_known
-  active="$(json_health_value "$payload" active_requests)"
-  known="$(json_health_value "$payload" active_requests_known)"
-  responses="$(json_health_value "$payload" active_responses)"
-  responses_known="$(json_health_value "$payload" active_responses_known)"
-  [[ "$known" == true && "$active" == 0 && "$responses_known" == true && "$responses" == 0 ]]
-}
-
-probe_route_identity() {
-  local expected="$1" attempts="${2:-$CUTOVER_PROBE_ATTEMPTS}" required="${CUTOVER_PROBE_SUCCESSES}" payload identity successes=0
-  for ((i=1; i<=attempts; i++)); do
-    payload="$(curl -fsS --max-time "$DRAIN_PROBE_TIMEOUT" -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' -H 'Accept: application/json' "$CUTOVER_PROBE_URL" 2>/dev/null || true)"
-    identity="$(json_health_value "$payload" instance_id)"
-    if [[ -n "$identity" && "$identity" != null && "$identity" == "$expected" ]]; then
-      ((successes += 1))
-      if (( successes >= required )); then
-        log "Traefik route converged to instance $expected."
-        return 0
-      fi
-    else
-      successes=0
-    fi
-    sleep 2
-  done
-  return 1
-}
 
 COMPOSE_ARGS=(-f "$COMPOSE_FILE")
 if [[ -z "$CHATGPT_WEB_COMPOSE_FILE" && -n "${CHATGPT_WEB_SOCKET_GID:-}" ]]; then
@@ -261,23 +167,6 @@ EOF
   mv -f "$tmp" "$dest"
 }
 
-slot_health() {
-  local slot="$1" timeout_seconds="${2:-$DRAIN_PROBE_TIMEOUT}"
-  timeout "$timeout_seconds" docker exec "9router-$slot" wget -qO- http://127.0.0.1:20128/api/health 2>/dev/null || true
-}
-
-slot_running() {
-  local slot="$1" state
-  state="$(docker inspect --format '{{.State.Running}}' "9router-$slot" 2>/dev/null || true)"
-  [[ "$state" == true ]]
-}
-
-slot_identity() {
-  local slot="$1" payload
-  payload="$(slot_health "$slot")"
-  json_health_value "$payload" instance_id
-}
-
 wait_healthy() {
   local slot="$1"
   local container="9router-${slot}"
@@ -286,9 +175,7 @@ wait_healthy() {
   log "Polling health check for $container on /api/health (timeout: ${READY_TIMEOUT}s)..."
 
   while true; do
-    local health
-    health="$(slot_health "$slot")"
-    if [[ "$(json_health_value "$health" ok)" == true ]]; then
+    if docker exec "$container" wget -qO- http://127.0.0.1:20128/api/health 2>/dev/null | grep -q '"ok":true'; then
       log "Slot $slot ($container) is HEALTHY."
       return 0
     fi
@@ -318,26 +205,10 @@ reconcile_active_slot() {
 
   log "Reconciling active slot: $active_slot"
   ensure_network
-  if slot_running "$active_slot"; then
-    log "Active slot $active_slot already running; preserving its container."
-  else
-    compose up -d --no-deps --pull never "9router-$active_slot"
-  fi
+  compose up -d --no-deps --pull never "9router-$active_slot"
   wait_healthy "$active_slot" || die "Active slot $active_slot failed healthcheck during reconcile"
   render_traefik_config "$active_slot" "$TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME"
-  local active_identity previous_slot
-  active_identity="$(slot_identity "$active_slot")"
-  [[ -n "$active_identity" && "$active_identity" != null ]] || die "Active slot $active_slot returned no instance identity"
-  previous_slot="$(cat "$PREVIOUS_SLOT_FILE" 2>/dev/null || true)"
-  write_state complete "$active_slot" "" "$previous_slot" "$IMAGE_REF" "" ""
-  write_slot_image "$active_slot" "$IMAGE_REF"
-  if ! probe_route_identity "$active_identity"; then
-    write_state cleanup_pending "$active_slot" "" "$previous_slot" "$IMAGE_REF" "$active_slot" "reconcile_route_not_verified"
-    write_result failed pending "$active_slot" "reconcile_route_not_verified"
-    die "Reconcile route identity verification failed"
-  fi
-  write_result verified complete "$active_slot"
-  log "Reconciled Traefik route and active slot: $active_slot (instance=$active_identity)"
+  log "Reconciled Traefik route and active slot: $active_slot"
 }
 
 show_status() {
@@ -358,70 +229,33 @@ show_status() {
   fi
   printf 'API Host         : %s\n' "$API_HOST"
   printf 'Traefik config   : %s/%s\n' "$TRAEFIK_DYNAMIC_DIR" "$TRAEFIK_CONFIG_NAME"
-  if [[ -f "$DEPLOYMENT_STATE_FILE" ]]; then
-    printf '\nDeployment state:\n'
-    while IFS= read -r line; do printf '  %s\n' "$line"; done < "$DEPLOYMENT_STATE_FILE"
-  else
-    printf 'Deployment state : none\n'
-  fi
-  if [[ -f "$DEPLOYMENT_RESULT_FILE" ]]; then
-    printf 'Last result:\n'
-    while IFS= read -r line; do printf '  %s\n' "$line"; done < "$DEPLOYMENT_RESULT_FILE"
-  fi
   printf '\nContainer states:\n'
   compose ps
 }
 
 do_rollback() {
   [[ -f "$PREVIOUS_SLOT_FILE" ]] || die "No previous slot recorded for rollback."
-  local prev_slot rollback_image
+  local prev_slot
   prev_slot="$(cat "$PREVIOUS_SLOT_FILE")"
   local active_slot
   active_slot="$(cat "$ACTIVE_SLOT_FILE" 2>/dev/null || echo "blue")"
   [[ "$prev_slot" == "blue" || "$prev_slot" == "green" ]] || die "Invalid previous slot: $prev_slot"
 
-  rollback_image="$(cat "$(slot_image_file "$prev_slot")" 2>/dev/null || true)"
-  [[ -n "$rollback_image" ]] || die "No immutable image recorded for rollback slot $prev_slot"
-  export IMAGE_REF="$rollback_image"
-  log "Initiating rollback to slot: $prev_slot (image=$rollback_image)"
-  if ! slot_running "$prev_slot"; then
-    compose up -d --no-deps --pull never "9router-$prev_slot"
-  else
-    log "Rollback slot $prev_slot already running; preserving its container."
-  fi
+  log "Initiating rollback to slot: $prev_slot"
+  compose up -d "9router-$prev_slot"
   wait_healthy "$prev_slot" || die "Previous slot failed healthcheck. Rollback aborted."
-  local rollback_identity
-  rollback_identity="$(slot_identity "$prev_slot")"
-  [[ -n "$rollback_identity" && "$rollback_identity" != null ]] || die "Rollback slot returned no instance identity"
 
-  write_state switching "$active_slot" "$prev_slot" "$active_slot" "$rollback_image" "" ""
   render_traefik_config "$prev_slot" "$TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME"
-  if ! probe_route_identity "$rollback_identity"; then
-    render_traefik_config "$active_slot" "$TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME"
-    write_state cleanup_pending "$active_slot" "$prev_slot" "$active_slot" "$rollback_image" "$prev_slot" "rollback_cutover_not_verified"
-    write_result failed pending "$active_slot" "rollback_cutover_not_verified"
-    die "Rollback route did not converge; route restored to $active_slot"
-  fi
   printf '%s' "$prev_slot" > "$ACTIVE_SLOT_FILE"
   printf '%s' "$active_slot" > "$PREVIOUS_SLOT_FILE"
-  printf '%s' "$rollback_image" > "$DEPLOYED_IMAGE_FILE"
-  write_slot_image "$prev_slot" "$rollback_image"
-  write_state cutover_verified "$prev_slot" "" "$active_slot" "$rollback_image" "$active_slot" "draining"
-  write_result verified pending "$prev_slot" "slot=$active_slot;draining"
   log "Route successfully rolled back to slot: $prev_slot"
 
   log "Draining active slot ($active_slot)..."
-  if wait_slot_idle "$active_slot"; then
-    compose stop "9router-$active_slot" || die "Unable to stop rolled-back slot $active_slot"
-    write_slot_image "$prev_slot" "$rollback_image"
-    write_state complete "$prev_slot" "" "$active_slot" "$rollback_image" "" ""
-    write_result verified complete "$prev_slot"
-    log "Rollback completed."
-  else
-    write_state cleanup_pending "$prev_slot" "" "$active_slot" "$rollback_image" "$active_slot" "drain_timeout"
-    write_result verified pending "$prev_slot" "slot=$active_slot;drain_timeout"
-    log "ROLLBACK_CLEANUP_PENDING slot=$active_slot; rollback remains successful"
+  if ! wait_slot_idle "$active_slot"; then
+    die "Rollback drain timed out; active slot remains running."
   fi
+  compose stop "9router-$active_slot" || true
+  log "Rollback completed."
 }
 
 run_diagnostics() {
@@ -520,18 +354,15 @@ wait_slot_idle() {
   local deadline=$((SECONDS + DRAIN_TIMEOUT))
   local container="9router-$slot"
   while (( SECONDS < deadline )); do
-    local health active known responses responses_known oldest
-    health="$(slot_health "$slot")"
-    active="$(json_health_value "$health" active_requests)"
-    known="$(json_health_value "$health" active_requests_known)"
-    responses="$(json_health_value "$health" active_responses)"
-    responses_known="$(json_health_value "$health" active_responses_known)"
-    oldest="$(json_health_value "$health" oldest_active_request_ms)"
-    if health_is_idle "$health"; then
+    local health active known
+    health="$(docker exec "$container" wget -qO- http://127.0.0.1:20128/api/health 2>/dev/null || true)"
+    active="$(printf '%s' "$health" | sed -n 's/.*"active_requests"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
+    known="$(printf '%s' "$health" | sed -n 's/.*"active_requests_known"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p')"
+    if [[ "$known" == "true" && "$active" == "0" ]]; then
       log "Slot $slot is idle."
       return 0
     fi
-    log "Waiting for slot $slot to drain (active_requests=${active:-unknown}, known=${known:-unknown}, active_responses=${responses:-unknown}, responses_known=${responses_known:-unknown}, oldest_ms=${oldest:-unknown})..."
+    log "Waiting for slot $slot to drain (active_requests=${active:-unknown}, known=${known:-unknown})..."
     sleep "$DRAIN_POLL_SECONDS"
   done
   log "Drain timeout for slot $slot; keeping it running to avoid cutting active requests."
@@ -578,37 +409,12 @@ if [[ "$cmd" == "--status" ]]; then
 fi
 
 if [[ "$cmd" == "--reconcile" ]]; then
-  with_deploy_lock
   reconcile_active_slot
   exit 0
 fi
 
 if [[ "$cmd" == "--rollback" ]]; then
-  with_deploy_lock
   do_rollback
-  exit 0
-fi
-
-if [[ "$cmd" == "--cleanup" ]]; then
-  with_deploy_lock
-  [[ -f "$DEPLOYMENT_STATE_FILE" ]] || die "No deployment state to clean up"
-  phase="$(sed -n 's/^phase=//p' "$DEPLOYMENT_STATE_FILE" | head -n1)"
-  [[ "$phase" == cleanup_pending || "$phase" == cutover_verified ]] || die "Deployment state is not cleanup-pending"
-  pending_slot="$(sed -n 's/^cleanup_slot=//p' "$DEPLOYMENT_STATE_FILE" | head -n1)"
-  [[ "$pending_slot" == blue || "$pending_slot" == green ]] || die "No cleanup-pending slot recorded"
-  active_slot="$(tr -d '[:space:]' < "$ACTIVE_SLOT_FILE")"
-  [[ "$pending_slot" != "$active_slot" ]] || die "Refusing to clean active slot $pending_slot"
-  if wait_slot_idle "$pending_slot"; then
-    compose stop "9router-$pending_slot" || die "Unable to stop cleanup slot $pending_slot"
-    if slot_running "$pending_slot"; then
-      die "Cleanup slot $pending_slot remains running after stop"
-    fi
-    write_state complete "$active_slot" "" "$pending_slot" "" "" ""
-    write_result verified complete "$active_slot"
-    log "Cleanup completed for slot $pending_slot."
-    exit 0
-  fi
-  write_result verified pending "$active_slot" "slot=$pending_slot;drain_timeout"
   exit 0
 fi
 
@@ -633,8 +439,6 @@ if [[ -z "$IMAGE_REF" ]]; then
   fi
 fi
 export IMAGE_REF
-
-with_deploy_lock
 
 CURRENT_SLOT=""
 HAS_CURRENT_SLOT=false
@@ -667,23 +471,10 @@ ensure_network
 # Start headroom helper service if not already up
 compose up -d headroom
 
-# Refuse to recreate a running inactive slot. It may still own long-lived SSE
-# connections after the previous cutover timed out.
-if [[ "$HAS_CURRENT_SLOT" == true ]] && slot_running "$TARGET_SLOT"; then
-  target_health="$(slot_health "$TARGET_SLOT")"
-  if ! health_is_idle "$target_health"; then
-    write_result verified pending "$CURRENT_SLOT" "target=$TARGET_SLOT;blocked_before_cutover"
-    die "Target slot $TARGET_SLOT is still occupied; run --cleanup after it becomes idle"
-  fi
-  log "Target slot $TARGET_SLOT is running but idle; stopping it before replacement."
-  compose stop "9router-$TARGET_SLOT" || die "Unable to stop idle target slot $TARGET_SLOT"
-fi
-
 # Pull and start target slot
 export IMAGE_REF
 pull_image
 
-write_state preparing "${CURRENT_SLOT:-none}" "$TARGET_SLOT" "${CURRENT_SLOT:-}" "$IMAGE_REF" "" ""
 log "Starting target container: 9router-$TARGET_SLOT"
 compose up -d --no-deps --pull never "9router-$TARGET_SLOT"
 
@@ -694,48 +485,30 @@ if ! wait_healthy "$TARGET_SLOT"; then
   exit 1
 fi
 
+# Switch Traefik route atomically
+log "Switching Traefik dynamic route to $TARGET_SLOT..."
+render_traefik_config "$TARGET_SLOT" "$TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME"
+
+# Update state files
+printf '%s' "$TARGET_SLOT" > "$ACTIVE_SLOT_FILE"
 if [[ "$HAS_CURRENT_SLOT" == true ]]; then
-  write_state switching "$CURRENT_SLOT" "$TARGET_SLOT" "$CURRENT_SLOT" "$IMAGE_REF" "" ""
-  log "Switching Traefik dynamic route to $TARGET_SLOT..."
-  render_traefik_config "$TARGET_SLOT" "$TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME"
-  candidate_identity="$(slot_identity "$TARGET_SLOT")"
-  [[ -n "$candidate_identity" && "$candidate_identity" != null ]] || {
-    render_traefik_config "$CURRENT_SLOT" "$TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME"
-    write_state cleanup_pending "$CURRENT_SLOT" "$TARGET_SLOT" "$CURRENT_SLOT" "$IMAGE_REF" "$TARGET_SLOT" "target_identity_missing"
-    write_result failed pending "$CURRENT_SLOT" "target=$TARGET_SLOT;target_identity_missing"
-    die "Target slot $TARGET_SLOT returned no instance identity; route restored to $CURRENT_SLOT"
-  }
-  if ! probe_route_identity "$candidate_identity"; then
-    render_traefik_config "$CURRENT_SLOT" "$TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME"
-    write_state cleanup_pending "$CURRENT_SLOT" "$TARGET_SLOT" "$CURRENT_SLOT" "$IMAGE_REF" "$TARGET_SLOT" "cutover_not_verified"
-    write_result failed pending "$CURRENT_SLOT" "target=$TARGET_SLOT;cutover_not_verified"
-    die "Cutover not verified; route restored to $CURRENT_SLOT"
-  fi
-  printf '%s' "$TARGET_SLOT" > "$ACTIVE_SLOT_FILE"
   printf '%s' "$CURRENT_SLOT" > "$PREVIOUS_SLOT_FILE"
-  printf '%s' "$IMAGE_REF" > "$DEPLOYED_IMAGE_FILE"
-  write_slot_image "$TARGET_SLOT" "$IMAGE_REF"
-  write_state cutover_verified "$TARGET_SLOT" "" "$CURRENT_SLOT" "$IMAGE_REF" "$CURRENT_SLOT" "draining"
-  write_result verified pending "$TARGET_SLOT" "slot=$CURRENT_SLOT;draining"
-  log "CUTOVER_VERIFIED target=$TARGET_SLOT instance=$candidate_identity"
-  if wait_slot_idle "$CURRENT_SLOT"; then
-    log "Stopping idle container: 9router-$CURRENT_SLOT"
-    compose stop "9router-$CURRENT_SLOT" || die "Unable to stop old slot $CURRENT_SLOT"
-    write_slot_image "$TARGET_SLOT" "$IMAGE_REF"
-    write_state complete "$TARGET_SLOT" "" "$CURRENT_SLOT" "$IMAGE_REF" "" ""
-    write_result verified complete "$TARGET_SLOT"
-  else
-    write_state cleanup_pending "$TARGET_SLOT" "" "$CURRENT_SLOT" "$IMAGE_REF" "$CURRENT_SLOT" "drain_timeout"
-    write_result verified pending "$TARGET_SLOT" "slot=$CURRENT_SLOT;drain_timeout"
-    log "DRAIN_CLEANUP_PENDING slot=$CURRENT_SLOT; cutover remains successful"
-  fi
 else
+  # A bootstrap deploy has no valid rollback target; discard stale metadata.
   rm -f "$PREVIOUS_SLOT_FILE"
-  printf '%s' "$TARGET_SLOT" > "$ACTIVE_SLOT_FILE"
-  printf '%s' "$IMAGE_REF" > "$DEPLOYED_IMAGE_FILE"
-  write_state complete "$TARGET_SLOT" "" "" "$IMAGE_REF" "" ""
-  write_result verified complete "$TARGET_SLOT"
+fi
+printf '%s' "$IMAGE_REF" > "$DEPLOYED_IMAGE_FILE"
+log "Route updated. Active slot is now: $TARGET_SLOT"
+
+# Graceful drain then stop idle slot. Bootstrap has no old container to drain.
+if [[ "$HAS_CURRENT_SLOT" != true ]]; then
   log "Initial deployment complete; no previous slot to drain."
+elif ! wait_slot_idle "$CURRENT_SLOT"; then
+  log "Deployment left old slot running after drain timeout; no active SSE was cut."
+  exit 1
+elif [[ "$CURRENT_SLOT" != "$TARGET_SLOT" ]]; then
+  log "Stopping idle container: 9router-$CURRENT_SLOT"
+  compose stop "9router-$CURRENT_SLOT" || true
 fi
 
-log "DEPLOY_SUCCESS slot=$TARGET_SLOT cleanup=$(sed -n 's/^cleanup=//p' "$DEPLOYMENT_RESULT_FILE" | head -n1)"
+log "Deployment to $TARGET_SLOT completed successfully!"

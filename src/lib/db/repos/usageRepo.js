@@ -18,7 +18,6 @@ const PERIOD_MS = { "24h": 86400000, "7d": 604800000, "30d": 2592000000, "60d": 
 if (!global._pendingRequests) global._pendingRequests = { byModel: {}, byAccount: {} };
 // Deployment drain uses this counter; unlike dashboard pending stats, it never expires.
 if (!global._livePendingRequests) global._livePendingRequests = { byModel: {}, byAccount: {} };
-if (!global._livePendingRequestEntries) global._livePendingRequestEntries = new Map();
 if (!global._lastErrorProvider) global._lastErrorProvider = { provider: "", ts: 0 };
 if (!global._statsEmitter) {
   global._statsEmitter = new EventEmitter();
@@ -31,7 +30,6 @@ if (!global._statsEmitTimers) global._statsEmitTimers = { pending: null, update:
 
 const pendingRequests = global._pendingRequests;
 const livePendingRequests = global._livePendingRequests;
-const livePendingRequestEntries = global._livePendingRequestEntries;
 const lastErrorProvider = global._lastErrorProvider;
 const pendingTimers = global._pendingTimers;
 const recentRing = global._recentRing;
@@ -154,19 +152,9 @@ async function calculateCost(provider, model, tokens) {
   }
 }
 
-export function trackPendingRequest(model, provider, connectionId, started, error = false, metadata = null) {
+export function trackPendingRequest(model, provider, connectionId, started, error = false) {
   const modelKey = provider ? `${model} (${provider})` : model;
   const timerKey = `${connectionId}|${modelKey}`;
-  const requestId = typeof metadata?.requestId === "string" && metadata.requestId ? metadata.requestId : null;
-  const startedAt = Number.isFinite(metadata?.startedAt) ? metadata.startedAt : null;
-
-  if (started && requestId) {
-    livePendingRequestEntries.set(requestId, { requestId, startedAt, model: String(model || "") });
-  } else if (!started && requestId && !livePendingRequestEntries.has(requestId)) {
-    return;
-  } else if (!started && requestId) {
-    livePendingRequestEntries.delete(requestId);
-  }
 
   const updateCounter = (counter) => {
     if (!counter.byModel[modelKey]) counter.byModel[modelKey] = 0;
@@ -282,25 +270,7 @@ export async function getActiveRequests() {
     .slice(0, 20);
 
   const errorProvider = (Date.now() - lastErrorProvider.ts < 10000) ? lastErrorProvider.provider : "";
-  const liveEntries = [...livePendingRequestEntries.values()];
-  const oldestStartedAt = liveEntries.reduce((oldest, entry) => {
-    if (!Number.isFinite(entry.startedAt)) return oldest;
-    return oldest === null || entry.startedAt < oldest ? entry.startedAt : oldest;
-  }, null);
-  return {
-    activeRequests,
-    liveActiveRequests,
-    activeRequestsKnown: true,
-    oldestActiveRequestMs: oldestStartedAt === null ? null : Math.max(0, Date.now() - oldestStartedAt),
-    activeRequestDetails: liveEntries.map(({ requestId, startedAt, model }) => ({
-      requestId,
-      startedAt,
-      ageMs: Number.isFinite(startedAt) ? Math.max(0, Date.now() - startedAt) : null,
-      model,
-    })),
-    recentRequests,
-    errorProvider,
-  };
+  return { activeRequests, liveActiveRequests, activeRequestsKnown: true, recentRequests, errorProvider };
 }
 
 export async function saveRequestUsage(entry) {
