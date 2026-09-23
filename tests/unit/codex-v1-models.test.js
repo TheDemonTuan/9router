@@ -32,7 +32,10 @@ describe("GPT-6 Codex /v1/models and capabilities", () => {
     expect(sol.context_length).toBe(272000);
     expect(sol.max_completion_tokens).toBe(128000);
     expect(sol.default_reasoning_level).toBe("medium");
+    expect(sol.defaultReasoningLevel).toBe("medium");
     expect(sol.supported_reasoning_levels).toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
+    expect(sol.supportedReasoningLevels).toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
+    expect(sol.supportedReasoningEfforts).toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
     expect(sol.capabilities).toMatchObject({
       reasoning: true,
       thinkingCanDisable: false,
@@ -60,7 +63,9 @@ describe("GPT-6 Codex /v1/models and capabilities", () => {
     expect(solUltra).toBeDefined();
     expect(solUltra.virtual).toBe(true);
     expect(solUltra.base_model).toBe("cx/gpt-6-sol");
+    expect(solUltra.baseModel).toBe("cx/gpt-6-sol");
     expect(solUltra.reasoning_effort).toBe("ultra");
+    expect(solUltra.reasoningEffort).toBe("ultra");
     expect(solUltra.context_length).toBe(272000);
     expect(solUltra.max_completion_tokens).toBe(128000);
 
