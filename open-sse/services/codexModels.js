@@ -71,13 +71,27 @@ function getRecordId(record) {
   return "";
 }
 
+const CODEX_REASONING_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+const CODEX_REASONING_RANK = new Map(CODEX_REASONING_ORDER.map((level, index) => [level, index]));
+
+function sortReasoningLevels(levels) {
+  return [...new Set(levels)].sort((left, right) => {
+    const leftRank = CODEX_REASONING_RANK.get(left);
+    const rightRank = CODEX_REASONING_RANK.get(right);
+    if (leftRank !== undefined || rightRank !== undefined) {
+      return (leftRank ?? CODEX_REASONING_ORDER.length) - (rightRank ?? CODEX_REASONING_ORDER.length);
+    }
+    return left.localeCompare(right);
+  });
+}
+
 function getReasoningLevels(record) {
   const raw = record?.supported_reasoning_levels ?? record?.supportedReasoningLevels;
   if (!Array.isArray(raw)) return undefined;
   const levels = raw
-    .map((item) => typeof item === "string" ? item.trim() : item?.effort?.trim?.())
+    .map((item) => typeof item === "string" ? item.trim().toLowerCase() : item?.effort?.trim?.().toLowerCase?.())
     .filter(Boolean);
-  return [...new Set(levels)];
+  return sortReasoningLevels(levels);
 }
 
 function inferKind(id, record) {
@@ -216,6 +230,149 @@ function mergeCapabilities(...values) {
   return Object.keys(merged).length ? merged : undefined;
 }
 
+const CODEX_PUBLIC_CAPABILITIES = new Set([
+  "tools", "vision", "search", "reasoning", "thinkingFormat", "thinkingCanDisable",
+  "contextWindow", "maxOutput", "native_responses", "generic_responses",
+]);
+
+function projectCapabilities(capabilities) {
+  if (!capabilities || typeof capabilities !== "object" || Array.isArray(capabilities)) return undefined;
+  const projected = Object.fromEntries(Object.entries(capabilities).filter(([key]) => CODEX_PUBLIC_CAPABILITIES.has(key)));
+  return Object.keys(projected).length ? projected : undefined;
+}
+
+export function projectCodexModel(model, alias = "cx", variantSuffix = null) {
+  if (!model?.id) return null;
+  const id = `${alias}/${model.id}${variantSuffix ? `(${variantSuffix})` : ""}`;
+  const result = {
+    id,
+    object: "model",
+    owned_by: alias,
+    ...(model.name ? { name: variantSuffix ? `${model.name} (${variantSuffix})` : model.name } : {}),
+    ...(model.description ? { description: model.description } : {}),
+    ...(model.kind ? { kind: model.kind } : {}),
+  };
+  if (variantSuffix) {
+    result.base_model = `${alias}/${model.id}`;
+    result.reasoning_effort = variantSuffix;
+    result.virtual = true;
+  }
+  if (finitePositive(model.contextLength)) result.context_length = model.contextLength;
+  if (finitePositive(model.maxContextLength)) result.max_context_length = model.maxContextLength;
+  if (finitePositive(model.maxOutputTokens)) result.max_completion_tokens = model.maxOutputTokens;
+  if (Array.isArray(model.inputModalities)) result.input_modalities = [...model.inputModalities];
+  if (Array.isArray(model.outputModalities)) result.output_modalities = [...model.outputModalities];
+  if (model.minimalClientVersion) result.minimal_client_version = model.minimalClientVersion;
+  if (Number.isFinite(model.priority)) result.priority = model.priority;
+  const hasReasoningLevels = Array.isArray(model.supportedReasoningLevels);
+  const defaultReasoningLevel = model.defaultReasoningLevel
+    && (!hasReasoningLevels || model.supportedReasoningLevels.includes(model.defaultReasoningLevel))
+    ? model.defaultReasoningLevel
+    : null;
+  if (defaultReasoningLevel) result.default_reasoning_level = defaultReasoningLevel;
+  if (hasReasoningLevels) {
+    result.supported_reasoning_levels = [...model.supportedReasoningLevels];
+  }
+  const capabilities = projectCapabilities(model.capabilities) || {};
+  if (Array.isArray(model.supportedReasoningLevels)) {
+    capabilities.reasoning = model.supportedReasoningLevels.length > 0;
+    capabilities.thinkingCanDisable = model.supportedReasoningLevels.includes("none");
+  }
+  if (model.contextLength != null) capabilities.contextWindow = model.contextLength;
+  if (model.maxOutputTokens != null) capabilities.maxOutput = model.maxOutputTokens;
+  if (defaultReasoningLevel) capabilities.defaultReasoningLevel = defaultReasoningLevel;
+  if (Object.keys(capabilities).length) result.capabilities = capabilities;
+  return result;
+}
+
+export function projectCodexModels(models, alias = "cx") {
+  const output = [];
+  const seen = new Set();
+  for (const model of models || []) {
+    const base = projectCodexModel(model, alias);
+    if (!base || seen.has(base.id)) continue;
+    seen.add(base.id);
+    output.push(base);
+    if (model.kind === "image" || !Array.isArray(model.supportedReasoningLevels)) continue;
+    for (const level of model.supportedReasoningLevels) {
+      const variant = projectCodexModel(model, alias, level);
+      if (variant && !seen.has(variant.id)) {
+        seen.add(variant.id);
+        output.push(variant);
+      }
+    }
+  }
+  return output;
+}
+
+export function getCodexBaseModelId(model) {
+  if (typeof model !== "string") return model;
+  return model.replace(/\([^()]+\)\s*$/, "").trim();
+}
+
+export function isCodexFallbackModel(model) {
+  const baseModel = getCodexBaseModelId(model);
+  return withReviews(staticModels()).some((entry) => entry?.id === baseModel);
+}
+
+function normalizeRequestedEffort(value) {
+  if (typeof value !== "string") return null;
+  const effort = value.trim().toLowerCase();
+  return effort || null;
+}
+
+export function getCodexRequestRequirements(model, body = null, catalog = null) {
+  const rawModel = typeof model === "string" ? model.trim() : "";
+  let baseModel = rawModel;
+  let effort = null;
+  const paren = rawModel.match(/^(.*)\(([^()]+)\)\s*$/);
+  if (paren) {
+    baseModel = paren[1].trim();
+    effort = normalizeRequestedEffort(paren[2]);
+  } else if (Array.isArray(catalog)) {
+    // Only strip legacy -level aliases when the resulting ID is a known catalog model.
+    for (const level of ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]) {
+      const suffix = `-${level}`;
+      if (!rawModel.endsWith(suffix)) continue;
+      const candidate = rawModel.slice(0, -suffix.length);
+      if (catalog.some((entry) => entry?.id === candidate)) {
+        baseModel = candidate;
+        effort = level;
+        break;
+      }
+    }
+  }
+  let conflictingEfforts = false;
+  if (!effort && body && typeof body === "object") {
+    const bodyEfforts = [
+      body.reasoning?.effort,
+      body.reasoning_effort,
+      body.output_config?.effort,
+    ].map(normalizeRequestedEffort).filter(Boolean);
+    conflictingEfforts = new Set(bodyEfforts).size > 1;
+    effort = bodyEfforts[0] || null;
+  }
+  return { baseModel, requestedEffort: effort, conflictingEfforts };
+}
+
+export function codexCatalogSupportsRequest(catalog, model, body = null) {
+  const requirements = getCodexRequestRequirements(model, body, catalog);
+  if (requirements.conflictingEfforts) return { supported: false, reason: "effort", ...requirements };
+  const entry = (catalog || []).find((candidate) => candidate?.id === requirements.baseModel);
+  if (!entry) return { supported: false, reason: "model", ...requirements };
+  if (!requirements.requestedEffort || requirements.requestedEffort === "auto") {
+    return { supported: true, reason: null, metadata: entry, ...requirements };
+  }
+  const levels = entry.supportedReasoningLevels;
+  if (!Array.isArray(levels)) {
+    return { supported: false, reason: "unknown_effort", metadata: entry, ...requirements };
+  }
+  if (levels.includes(requirements.requestedEffort)) {
+    return { supported: true, reason: null, metadata: entry, ...requirements };
+  }
+  return { supported: false, reason: "effort", metadata: entry, ...requirements };
+}
+
 function mergeModelMetadata(...models) {
   const present = models.filter(Boolean);
   if (!present.length) return null;
@@ -273,13 +430,19 @@ function mergeLiveEnrichment(staticModel, officialModel, liveModel) {
     result.supportedReasoningLevels = reasoningLevels;
   }
 
-  // Default effort: live > official > static
-  const defaultEffort = liveModel.defaultReasoningLevel
-    || officialModel?.defaultReasoningLevel
-    || staticModel?.defaultReasoningLevel;
-  if (defaultEffort) {
-    result.defaultReasoningLevel = defaultEffort;
-  }
+  // Default effort: live > official > static, but never advertise a level
+  // explicitly excluded by the selected catalog.
+  const defaultCandidates = [
+    liveModel.defaultReasoningLevel,
+    officialModel?.defaultReasoningLevel,
+    staticModel?.defaultReasoningLevel,
+  ];
+  const defaultEffort = defaultCandidates.find((candidate) => (
+    candidate && (!Array.isArray(result.supportedReasoningLevels)
+      || result.supportedReasoningLevels.includes(candidate))
+  ));
+  if (defaultEffort) result.defaultReasoningLevel = defaultEffort;
+  else delete result.defaultReasoningLevel;
 
   result.capabilities = {
     ...(staticModel?.capabilities || {}),
@@ -298,7 +461,25 @@ function mergeLiveEnrichment(staticModel, officialModel, liveModel) {
 function enrichModels(models, officialModels) {
   const staticCatalog = staticById();
   const officialById = new Map((officialModels || []).map((model) => [model.id, model]));
-  return models.map((model) => mergeLiveEnrichment(staticCatalog.get(model.id), officialById.get(model.id), model));
+  return models
+    .map((model) => mergeLiveEnrichment(staticCatalog.get(model.id), officialById.get(model.id), model))
+    .filter(Boolean);
+}
+
+function splitCompatibleModels(models, candidateModels = []) {
+  const compatible = [];
+  const candidates = [...candidateModels];
+  for (const model of models || []) {
+    if (model?.minimalClientVersion && compareCodexVersions(model.minimalClientVersion, CODEX_CLIENT_VERSION) > 0) {
+      candidates.push({ ...model, discoveryStatus: "candidate", compatibilityReason: "minimal_client_version" });
+    } else {
+      compatible.push(model);
+    }
+  }
+  return {
+    models: compatible,
+    candidateModels: [...new Map(candidates.filter((model) => model?.id).map((model) => [model.id, model])).values()],
+  };
 }
 
 function appendStaticMedia(models) {
@@ -587,17 +768,17 @@ export function mergeCodexModelLists(modelLists) {
       }
       if (maxOutputValues.length) merged.maxOutputTokens = Math.min(...maxOutputValues);
 
-      // Reasoning levels: intersection
+      // Reasoning capability is the union: each account is an eligible route for
+      // only the levels present in its own catalog (enforced by the caller).
       const leftLevels = Array.isArray(current.supportedReasoningLevels) ? current.supportedReasoningLevels : null;
       const rightLevels = Array.isArray(model.supportedReasoningLevels) ? model.supportedReasoningLevels : null;
-      if (leftLevels && rightLevels) {
-        const intersection = leftLevels.filter((level) => rightLevels.includes(level));
-        merged.supportedReasoningLevels = intersection;
+          if (leftLevels && rightLevels) {
+        merged.supportedReasoningLevels = sortReasoningLevels([...leftLevels, ...rightLevels]);
       } else if (leftLevels || rightLevels) {
-        merged.supportedReasoningLevels = leftLevels || rightLevels;
+        merged.supportedReasoningLevels = sortReasoningLevels(leftLevels || rightLevels);
       }
 
-      // Revalidate defaultReasoningLevel deterministically after intersection
+      // Revalidate defaultReasoningLevel deterministically after union
       if (Array.isArray(merged.supportedReasoningLevels)) {
         const levels = merged.supportedReasoningLevels;
         const currentDefault = current.defaultReasoningLevel;
@@ -645,9 +826,10 @@ export async function resolveCodexModels(connection, options = {}) {
     if (liveResult) {
       const official = await resolveOfficialCatalog(options);
       const enriched = enrichModels(liveResult.entry.models, official?.models);
+      const compatible = splitCompatibleModels(enriched, liveResult.entry.candidateModels || []);
       return {
-        models: withReviews(appendStaticMedia(enriched)),
-        candidateModels: liveResult.entry.candidateModels || [],
+        models: withReviews(appendStaticMedia(compatible.models)),
+        candidateModels: compatible.candidateModels,
         source: liveResult.source,
         access: liveResult.access,
         stale: false,
@@ -662,9 +844,10 @@ export async function resolveCodexModels(connection, options = {}) {
     if (stale && stale.staleAt > Date.now()) {
       const official = await resolveOfficialCatalog(options);
       const enriched = enrichModels(stale.models, official?.models);
+      const compatible = splitCompatibleModels(enriched, stale.candidateModels || []);
       return {
-        models: withReviews(appendStaticMedia(enriched)),
-        candidateModels: stale.candidateModels || [],
+        models: withReviews(appendStaticMedia(compatible.models)),
+        candidateModels: compatible.candidateModels,
         source: "cache",
         access: "stale",
         stale: true,
@@ -678,9 +861,10 @@ export async function resolveCodexModels(connection, options = {}) {
 
   const official = await resolveOfficialCatalog(options);
   if (official?.models?.length) {
+    const compatible = splitCompatibleModels(enrichModels(official.models, staticModels()), official.candidateModels || []);
     return {
-      models: withReviews(appendStaticMedia(enrichModels(official.models, staticModels()))),
-      candidateModels: official.candidateModels || [],
+      models: withReviews(appendStaticMedia(compatible.models)),
+      candidateModels: compatible.candidateModels,
       source: official.source,
       access: official.access,
       stale: official.stale,
@@ -694,6 +878,59 @@ export async function resolveCodexModels(connection, options = {}) {
     ...staticFallback,
     warning: warning || "Using the static Codex catalog.",
     resolved: true,
+  };
+}
+
+/**
+ * Resolve the effective public catalog while retaining account-scoped evidence.
+ * Public levels are a union; callers must use accountCatalogs for dispatch.
+ */
+export async function resolveEffectiveCodexCatalog(connections, options = {}) {
+  const candidates = (connections || [])
+    .filter(Boolean)
+    .slice()
+    .sort((left, right) => String(getConnectionId(left)).localeCompare(String(getConnectionId(right))));
+  const results = await Promise.all(candidates.map(async (connection) => {
+    try {
+      const result = await resolveCodexModels(connection, {
+        ...options,
+        onCredentialsRefreshed: async (refreshed) => {
+          await options.onCredentialsRefreshed?.(connection, refreshed);
+        },
+      });
+      return { connectionId: getConnectionId(connection), result };
+    } catch (error) {
+      options.log?.warn?.("CODEX_MODELS", `account discovery failed (${getConnectionId(connection)}): ${error?.message || error}`);
+      return { connectionId: getConnectionId(connection), result: null };
+    }
+  }));
+  const verified = results.filter(({ result }) => result?.access === "observed" || result?.access === "stale");
+  const usable = verified.length ? verified : results.filter(({ result }) => result);
+  const modelLists = usable.map(({ result }) => result.models || []);
+  const models = mergeCodexModelLists(modelLists);
+  const candidateModels = [...new Map(
+    usable.flatMap(({ result }) => result.candidateModels || []).map((model) => [model.id, model]),
+  ).values()];
+  const access = verified.length
+    ? (verified.some(({ result }) => result.access === "observed") ? "observed" : "stale")
+    : usable.length ? "unverified" : "unavailable";
+  return {
+    models,
+    candidateModels,
+    accountCatalogs: usable.map(({ connectionId, result }) => ({
+      connectionId,
+      models: result.models || [],
+      access: result.access,
+      source: result.source,
+      stale: result.stale === true,
+      fetchedAt: result.fetchedAt || null,
+    })),
+    resolved: usable.length > 0,
+    source: verified.length ? "effective" : (usable[0]?.result?.source || "static"),
+    access,
+    stale: usable.some(({ result }) => result.stale === true),
+    fetchedAt: usable.map(({ result }) => result.fetchedAt).filter(Boolean).sort().at(-1) || null,
+    warning: usable.map(({ result }) => result.warning).filter(Boolean).join(" ") || null,
   };
 }
 

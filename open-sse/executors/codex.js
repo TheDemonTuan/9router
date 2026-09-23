@@ -159,6 +159,14 @@ function resolveCacheSessionId(body, credentials) {
 function normalizeReasoningEffort(model, value, metadata = null) {
   const supportedLevels = getThinkingLevels("codex", model, metadata);
   if (supportedLevels?.includes(value)) return value;
+  // An account-scoped live catalog is authoritative. Never silently send a
+  // requested level at a weaker effort on that account.
+  if (value === "auto") return value;
+  if (Array.isArray(metadata?.supportedReasoningLevels) || Array.isArray(metadata?.supported_reasoning_levels)) {
+    throw Object.assign(new Error(`Unsupported Codex reasoning effort "${value}" for ${model}`), {
+      code: "invalid_thinking_level",
+    });
+  }
   if (value === "ultra" && supportedLevels?.includes("max")) return "max";
   if (value === "max" || value === "ultra") return "xhigh";
   if (supportedLevels?.length && !supportedLevels.includes(value)) {

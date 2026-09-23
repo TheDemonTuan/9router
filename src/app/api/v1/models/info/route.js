@@ -2,7 +2,8 @@ import { PROVIDER_MODELS } from "open-sse/config/providerModels.js";
 import { AI_PROVIDERS, ALIAS_TO_ID } from "@/shared/constants/providers";
 import { getModelKind } from "@/shared/constants/models";
 import { getProviderConnections } from "@/lib/localDb";
-import { resolveCodexModels } from "open-sse/services/codexModels.js";
+import { getDisabledModels } from "@/lib/disabledModelsDb";
+import { resolveEffectiveCodexCatalog } from "open-sse/services/codexModels.js";
 import { getAdvertisedThinkingLevels } from "open-sse/providers/thinkingLevels.js";
 
 const KIND_ENDPOINT = {
@@ -32,14 +33,27 @@ function buildInfo({ alias, providerId, model, kind, providerInfo, variantSuffix
     out.reasoning_effort = variantSuffix;
     out.virtual = true;
   }
+  if (model.description) out.description = model.description;
   if (model.params) out.params = model.params;
   if (model.capabilities) out.capabilities = model.capabilities;
   if (model.options) out.options = model.options;
   if (model.dimensions) out.dimensions = model.dimensions;
-  const contextLength = model.contextLength || model.contextWindow;
-  if (contextLength) out.contextWindow = contextLength;
-  const maxOutput = model.maxOutputTokens || model.maxOutput;
-  if (maxOutput) out.maxOutput = maxOutput;
+  if (model.maxContextLength) out.maxContextLength = model.maxContextLength;
+  if (Array.isArray(model.inputModalities)) out.inputModalities = [...model.inputModalities];
+  if (Array.isArray(model.outputModalities)) out.outputModalities = [...model.outputModalities];
+  if (model.minimalClientVersion) out.minimalClientVersion = model.minimalClientVersion;
+  if (Number.isFinite(model.priority)) out.priority = model.priority;
+  if (model.upstreamModelId) out.upstreamModelId = model.upstreamModelId;
+  const contextLength = model.contextLength ?? model.contextWindow;
+  if (contextLength != null) {
+    out.contextWindow = contextLength;
+    out.context_length = contextLength;
+  }
+  const maxOutput = model.maxOutputTokens ?? model.maxOutput;
+  if (maxOutput != null) {
+    out.maxOutput = maxOutput;
+    out.max_completion_tokens = maxOutput;
+  }
   if (model.defaultReasoningLevel) out.defaultReasoningLevel = model.defaultReasoningLevel;
   if (model.supportedReasoningLevels) out.supportedReasoningLevels = model.supportedReasoningLevels;
   if (kind === "tts" && TTS_VOICES_API.has(providerId)) {
@@ -126,13 +140,32 @@ export async function GET(request) {
 
   let codexCatalog = null;
   const slash = id.indexOf("/");
+  if (slash <= 0) {
+    return Response.json(
+      { error: { message: `Model not found: ${id}`, type: "not_found" } },
+      { status: 404, headers: { "Access-Control-Allow-Origin": "*" } },
+    );
+  }
   const alias = slash > 0 ? id.slice(0, slash) : id;
   const providerId = ALIAS_TO_ID[alias] || alias;
+  let disabled = {};
+  try { disabled = await getDisabledModels(); } catch { /* keep legacy behavior when DB is unavailable */ }
+  const disabledIds = new Set([
+    ...(Array.isArray(disabled[alias]) ? disabled[alias] : []),
+    ...(Array.isArray(disabled[providerId]) ? disabled[providerId] : []),
+  ]);
+  const requestedModelId = id.slice(slash + 1).replace(/\([^()]+\)\s*$/, "").trim();
+  if (disabledIds.has(requestedModelId)) {
+    return Response.json(
+      { error: { message: `Model not found: ${id}`, type: "not_found" } },
+      { status: 404, headers: { "Access-Control-Allow-Origin": "*" } },
+    );
+  }
   if (providerId === "codex") {
     try {
       const connections = await getProviderConnections({ provider: "codex", isActive: true });
       if (connections.length > 0) {
-        const resolved = await resolveCodexModels(connections[0]);
+        const resolved = await resolveEffectiveCodexCatalog(connections);
         if (resolved?.models?.length) codexCatalog = resolved.models;
       }
     } catch {

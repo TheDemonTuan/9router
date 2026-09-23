@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   handleAntigravityQuotaError: vi.fn(),
   clearAntigravityStrikes: vi.fn(),
   checkAndRefreshToken: vi.fn(),
+  resolveCodexModels: vi.fn(),
 }));
 
 vi.mock("open-sse/index.js", () => ({}));
@@ -31,6 +32,10 @@ vi.mock("@/sse/services/model.js", () => ({
   getComboModels: mocks.getComboModels,
 }));
 vi.mock("open-sse/handlers/chatCore.js", () => ({ handleChatCore: mocks.handleChatCore }));
+vi.mock("open-sse/services/codexModels.js", async () => {
+  const actual = await vi.importActual("open-sse/services/codexModels.js");
+  return { ...actual, resolveCodexModels: mocks.resolveCodexModels };
+});
 vi.mock("@/sse/services/tokenRefresh.js", () => ({
   checkAndRefreshToken: mocks.checkAndRefreshToken,
   updateProviderCredentials: vi.fn(),
@@ -60,10 +65,46 @@ beforeEach(() => {
   mocks.getSettings.mockResolvedValue({ requireApiKey: false });
   mocks.getComboModels.mockResolvedValue(null);
   mocks.getModelInfo.mockResolvedValue({ provider: "antigravity", model: "gemini-3.8-flash-high" });
+  mocks.resolveCodexModels.mockReset();
   mocks.checkAndRefreshToken.mockImplementation(async (_provider, credentials) => credentials);
   mocks.markAccountUnavailable.mockResolvedValue({ shouldFallback: true, cooldownMs: 1 });
   mocks.clearAccountError.mockResolvedValue(undefined);
   mocks.handleAntigravityQuotaError.mockResolvedValue(null);
+});
+
+describe("Codex account capability routing", () => {
+  it("skips an account without the requested effort and preserves Ultra", async () => {
+    const first = { connectionId: "cx-a", connectionName: "A", accessToken: "a", providerSpecificData: {} };
+    const second = { connectionId: "cx-b", connectionName: "B", accessToken: "b", providerSpecificData: {} };
+    mocks.getModelInfo.mockResolvedValue({ provider: "codex", model: "gpt-6-sol(ultra)" });
+    mocks.getProviderCredentials.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    mocks.resolveCodexModels
+      .mockResolvedValueOnce({ access: "observed", models: [{ id: "gpt-6-sol", supportedReasoningLevels: ["low", "max"] }] })
+      .mockResolvedValueOnce({ access: "observed", models: [{ id: "gpt-6-sol", supportedReasoningLevels: ["low", "ultra"] }] });
+    mocks.handleChatCore.mockResolvedValue({ success: true, response: new Response("ok", { status: 200 }) });
+
+    const response = await handleChat(new Request("http://localhost/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "cx/gpt-6-sol(ultra)",
+        messages: [{ role: "user", content: "hello" }],
+        reasoning_effort: "ultra",
+      }),
+    }));
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-9router-connection-id")).toBe("cx-b");
+    expect(mocks.resolveCodexModels).toHaveBeenCalledTimes(2);
+    expect(mocks.getProviderCredentials).toHaveBeenCalledTimes(2);
+    expect(mocks.getProviderCredentials.mock.calls[1][1]).toEqual(new Set(["cx-a"]));
+    expect(mocks.handleChatCore).toHaveBeenCalledTimes(1);
+    const args = mocks.handleChatCore.mock.calls[0][0];
+    expect(args.connectionId).toBe("cx-b");
+    expect(args.credentials.codexModelMetadata.supportedReasoningLevels).toContain("ultra");
+    expect(args.body.model).toBe("codex/gpt-6-sol(ultra)");
+    expect(args.body.reasoning_effort).toBe("ultra");
+  });
 });
 
 describe("chat credential exhaustion", () => {

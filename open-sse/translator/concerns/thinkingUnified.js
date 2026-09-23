@@ -147,9 +147,15 @@ function toLevel(cfg) {
   return null;
 }
 
-function normalizeOpenAILevel(level, supportedLevels) {
-  if (level !== "max" && level !== "ultra") return level;
+function normalizeOpenAILevel(level, supportedLevels, strict = false) {
+  if (level === "auto") return level;
   if (supportedLevels?.includes(level)) return level;
+  if (strict && supportedLevels && !supportedLevels.includes(level)) {
+    throw Object.assign(new Error(`Unsupported Codex reasoning effort "${level}"`), {
+      code: "invalid_thinking_level",
+    });
+  }
+  if (level !== "max" && level !== "ultra") return level;
   if (level === "ultra" && supportedLevels?.includes("max")) return "max";
   return "xhigh";
 }
@@ -237,7 +243,7 @@ function stripAll(body) {
 }
 
 // Apply unified thinking config to body in the resolved provider-native format.
-function applyFormat(fmt, body, cfg, caps, supportedLevels, display) {
+function applyFormat(fmt, body, cfg, caps, supportedLevels, display, strictCatalogLevels = false) {
   const none = cfg.mode === "none";
   const canDisable = caps.thinkingCanDisable !== false;
   // Model cannot disable thinking → clamp "none" to minimal effort instead.
@@ -247,7 +253,7 @@ function applyFormat(fmt, body, cfg, caps, supportedLevels, display) {
     case "openai": {
       if (none && canDisable) { body.reasoning_effort = "none"; break; }
       const level = toLevel(eff);
-      if (level) body.reasoning_effort = normalizeOpenAILevel(level, supportedLevels);
+      if (level) body.reasoning_effort = normalizeOpenAILevel(level, supportedLevels, strictCatalogLevels);
       break;
     }
     case "claude-adaptive": {
@@ -378,6 +384,10 @@ export function applyThinking(targetFormat, model, body, provider = null, intent
   const catalogLevels = effProvider === "codex"
     ? getThinkingLevels(effProvider, actualModel, metadata)
     : null;
+  const hasExplicitCatalogLevels = effProvider === "codex" && (
+    Array.isArray(metadata?.supportedReasoningLevels)
+    || Array.isArray(metadata?.supported_reasoning_levels)
+  );
   if (effProvider === "codex" && catalogLevels) {
     caps.reasoning = catalogLevels.length > 0;
     caps.thinkingFormat = "openai";
@@ -415,6 +425,6 @@ export function applyThinking(targetFormat, model, body, provider = null, intent
   // comes back at all; keep what the client asked for instead of resetting it.
   const display = typeof body.thinking?.display === "string" ? body.thinking.display : undefined;
   stripAll(body);
-  applyFormat(fmt, body, cfg, caps, supportedLevels, display);
+  applyFormat(fmt, body, cfg, caps, supportedLevels, display, hasExplicitCatalogLevels);
   return body;
 }

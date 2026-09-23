@@ -9,7 +9,7 @@ import { isAlitpModelDeprecated, isAlitpModelAvailableForEdition } from "open-ss
 import {
   getChatGptWebCatalog,
 } from "open-sse/services/chatgptWebBridge.js";
-import { mergeCodexModelLists, resolveCodexModels } from "open-sse/services/codexModels.js";
+import { resolveEffectiveCodexCatalog } from "open-sse/services/codexModels.js";
 
 // GET /api/models - Get models with aliases
 export async function GET() {
@@ -98,35 +98,30 @@ export async function GET() {
 
     const codexConnections = await getProviderConnections({ provider: "codex", isActive: true });
     if (codexConnections.length > 0) {
-      const codexResults = await Promise.all(codexConnections.slice().sort((a, b) => String(a.id || "").localeCompare(String(b.id || ""))).map(async (connection) => {
-        try {
-          return await resolveCodexModels(connection, {
-            onCredentialsRefreshed: async (refreshed) => {
-              await updateProviderCredentials(connection.id, {
-                ...refreshed,
-                existingProviderSpecificData: connection.providerSpecificData || {},
-              });
-            },
+      const effective = await resolveEffectiveCodexCatalog(codexConnections, {
+        onCredentialsRefreshed: async (connection, refreshed) => {
+          await updateProviderCredentials(connection.id, {
+            ...refreshed,
+            existingProviderSpecificData: connection.providerSpecificData || {},
           });
-        } catch {
-          return null;
-        }
-      }));
-      const verified = codexResults.filter((result) => result?.access === "observed" || result?.access === "stale");
-      const usable = verified.length ? verified : codexResults.filter(Boolean);
-      if (usable.some((result) => result.resolved === true)) {
+        },
+      });
+      if (effective.resolved) {
         for (let index = models.length - 1; index >= 0; index -= 1) {
           if (models[index].provider === "cx") models.splice(index, 1);
         }
-        const catalog = mergeCodexModelLists(usable.map((result) => result.models || []));
+        const disabledCodex = new Set([
+          ...(Array.isArray(disabled.cx) ? disabled.cx : []),
+          ...(Array.isArray(disabled.codex) ? disabled.codex : []),
+        ]);
+        const catalog = (effective.models || []).filter((model) => !disabledCodex.has(model.id));
         for (const model of catalog) {
-          const fallbackCaps = getCapabilitiesForModel("codex", model.id);
           const liveCaps = model.capabilities && typeof model.capabilities === "object" && !Array.isArray(model.capabilities)
             ? model.capabilities
             : {};
-          const caps = { ...(fallbackCaps || {}), ...liveCaps };
-          const contextWindow = model.contextLength || caps.contextWindow || fallbackCaps?.contextWindow || null;
-          const maxOutput = model.maxOutputTokens || caps.maxOutput || fallbackCaps?.maxOutput || null;
+          const caps = { ...liveCaps };
+          const contextWindow = model.contextLength ?? caps.contextWindow ?? null;
+          const maxOutput = model.maxOutputTokens ?? caps.maxOutput ?? null;
           models.push({
             provider: "cx",
             model: model.id,
@@ -141,6 +136,11 @@ export async function GET() {
               reasoning: caps.reasoning ?? false,
               contextWindow,
               maxOutput,
+              ...(model.maxContextLength ? { maxContextLength: model.maxContextLength } : {}),
+              ...(Array.isArray(model.inputModalities) ? { inputModalities: model.inputModalities } : {}),
+              ...(Array.isArray(model.outputModalities) ? { outputModalities: model.outputModalities } : {}),
+              ...(model.minimalClientVersion ? { minimalClientVersion: model.minimalClientVersion } : {}),
+              ...(model.priority !== undefined ? { priority: model.priority } : {}),
               ...(model.defaultReasoningLevel ? { defaultReasoningLevel: model.defaultReasoningLevel } : {}),
               ...(Array.isArray(model.supportedReasoningLevels)
                 ? { supportedReasoningLevels: model.supportedReasoningLevels }
