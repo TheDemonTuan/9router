@@ -233,6 +233,9 @@ describe("resolveCodexModels", () => {
     expect(ids).toContain("gpt-6-sol");
     expect(ids).toContain("gpt-5.6-sol");
     expect(ids).toContain("codex-auto-review");
+    expect(ids).not.toContain("gpt-6-sol-review");
+    expect(ids).not.toContain("gpt-6-luna-review");
+    expect(ids).not.toContain("gpt-6-astra-review");
     expect(ids).not.toContain("gpt-5.6-sol-review");
     expect(ids).not.toContain("gpt-5.6-terra-review");
     expect(ids).not.toContain("gpt-5.6-luna-review");

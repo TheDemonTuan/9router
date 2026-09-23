@@ -1,4 +1,3 @@
-import { withCodexReviewModels } from "../models/helpers.js";
 import { CODEX_CLIENT_VERSION } from "../../config/codexClient.js";
 
 // Codex CLI version seen by OpenAI's backend. Keep the value in codexClient.js
