@@ -10,7 +10,10 @@ import {
   getCodexCacheKey,
   normalizeCodexCatalog,
   normalizeCodexModel,
+  mergeCodexModelLists,
+  projectCodexModels,
   resolveCodexModels,
+  resolveEffectiveCodexCatalog,
 } from "../../open-sse/services/codexModels.js";
 
 const response = (body, status = 200, headers = {}) => ({
@@ -99,6 +102,29 @@ describe("Codex metadata boundaries", () => {
     })).toMatchObject({
       capabilities: { vision: false, reasoning: false, search: false, tools: false },
     });
+  });
+});
+
+describe("effective Codex catalogs", () => {
+  it("unions account reasoning levels while keeping conservative limits and variants", () => {
+    const models = mergeCodexModelLists([
+      [{ id: "gpt-6-sol", contextLength: 872000, maxOutputTokens: 128000, supportedReasoningLevels: ["low", "medium", "high", "xhigh", "max", "ultra"] }],
+      [{ id: "gpt-6-sol", contextLength: 272000, maxOutputTokens: 64000, supportedReasoningLevels: ["low", "medium", "high", "xhigh", "max"] }],
+      [{ id: "gpt-6-luna", supportedReasoningLevels: ["low", "medium", "high", "xhigh", "max"] }],
+    ]);
+    const sol = models.find((model) => model.id === "gpt-6-sol");
+    expect(sol.supportedReasoningLevels).toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
+    expect(sol.contextLength).toBe(272000);
+    expect(sol.maxOutputTokens).toBe(64000);
+    expect(projectCodexModels(models).map((model) => model.id)).toEqual(expect.arrayContaining([
+      "cx/gpt-6-sol", "cx/gpt-6-sol(ultra)", "cx/gpt-6-luna(max)",
+    ]));
+  });
+
+  it("does not treat an official-only model as account access", async () => {
+    const result = await resolveEffectiveCodexCatalog([], { fetchImpl: vi.fn() });
+    expect(result.access).toBe("unavailable");
+    expect(result.models).toEqual([]);
   });
 });
 

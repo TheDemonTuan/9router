@@ -19,7 +19,12 @@ describe("Codex live reasoning metadata", () => {
     expect(transform("gpt-6-sol", "ultra", [{ effort: "low" }, { effort: "ultra" }]).reasoning.effort).toBe("ultra");
   });
 
-  it("clamps Ultra to Max for Luna", () => {
-    expect(transform("gpt-6-luna", "ultra", [{ effort: "low" }, { effort: "max" }]).reasoning.effort).toBe("max");
+  it("keeps auto as an account default instruction", () => {
+    expect(transform("gpt-6-sol", "auto", [{ effort: "low" }, { effort: "ultra" }]).reasoning.effort).toBe("auto");
+  });
+
+  it("rejects Ultra for Luna when the live account catalog excludes it", () => {
+    expect(() => transform("gpt-6-luna", "ultra", [{ effort: "low" }, { effort: "max" }]))
+      .toThrow(/Unsupported Codex reasoning effort/);
   });
 });

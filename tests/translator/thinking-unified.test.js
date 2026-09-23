@@ -230,11 +230,11 @@ describe("applyThinking per provider format", () => {
     const sol = apply("openai-responses", "gpt-6-sol", { reasoning: { effort: "ultra" } }, "codex", {
       supportedReasoningLevels: [{ effort: "low" }, { effort: "ultra" }],
     });
-    const luna = apply("openai-responses", "gpt-6-luna", { reasoning: { effort: "ultra" } }, "codex", {
+    const luna = () => apply("openai-responses", "gpt-6-luna", { reasoning: { effort: "ultra" } }, "codex", {
       supportedReasoningLevels: [{ effort: "low" }, { effort: "max" }],
     });
     expect(sol.reasoning_effort).toBe("ultra");
-    expect(luna.reasoning_effort).toBe("max");
+    expect(luna).toThrow(/Unsupported Codex reasoning effort/);
   });
   it("keeps Codex-only GPT-5.6 levels out of Kiro translation", () => {
     const out = apply("openai", "gpt-5.6-sol", { reasoning_effort: "max" }, "kiro");

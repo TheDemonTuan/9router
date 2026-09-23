@@ -101,7 +101,7 @@ describe("GPT-6 Codex /v1/models and capabilities", () => {
     expect(future.capabilities.maxOutput).toBeUndefined();
   });
 
-  it("merges multi-account lists with min positive limits, intersected reasoning levels and revalidated defaults", () => {
+  it("merges multi-account lists with min positive limits, unioned reasoning levels and revalidated defaults", () => {
     const account1 = [
       {
         id: "gpt-6-sol",
@@ -126,8 +126,8 @@ describe("GPT-6 Codex /v1/models and capabilities", () => {
     const sol = merged[0];
     expect(sol.contextLength).toBe(272000); // min positive
     expect(sol.maxOutputTokens).toBe(64000); // min positive
-    expect(sol.supportedReasoningLevels).toEqual(["medium", "high", "xhigh"]);
-    expect(sol.defaultReasoningLevel).toBe("medium"); // revalidated: original default "medium" is in intersection
+    expect(sol.supportedReasoningLevels).toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
+    expect(sol.defaultReasoningLevel).toBe("medium"); // revalidated: original default remains supported by the union
     expect(sol.capabilities.contextWindow).toBe(272000);
     expect(sol.capabilities.maxOutput).toBe(64000);
     expect(sol.capabilities.thinkingCanDisable).toBe(false);

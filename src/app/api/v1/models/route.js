@@ -20,7 +20,10 @@ import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { capabilitiesFromServiceKind, getCapabilitiesForModel, aggregateComboCapabilities } from "open-sse/providers/capabilities.js";
 import { getAdvertisedThinkingLevels } from "open-sse/providers/thinkingLevels.js";
 import { resolveEffectiveProviderModels } from "open-sse/services/alibabaTokenPlanModels.js";
-import { mergeCodexModelLists, resolveCodexModels } from "open-sse/services/codexModels.js";
+import {
+  resolveEffectiveCodexCatalog,
+  projectCodexModel,
+} from "open-sse/services/codexModels.js";
 import { isAlitpModelAvailableForEdition } from "open-sse/providers/alibabaTokenPlanCatalog.js";
 import {
   getChatGptWebCatalog,
@@ -54,35 +57,17 @@ const LIVE_MODEL_RESOLVERS = {
   codex: async (conn, ctx) => {
     if (ctx?.kindFilter && !ctx.kindFilter.includes(LLM_KIND)) return null;
     const connections = (ctx?.connections || []).filter((entry) => entry.provider === "codex");
-    const candidates = (connections.length ? connections : [conn]).slice().sort((a, b) => String(a.id || "").localeCompare(String(b.id || "")));
-    const results = await Promise.all(candidates.map(async (connection) => {
-      try {
-        return await resolveCodexModels(connection, {
-          log: console,
-          onCredentialsRefreshed: async (refreshed) => {
-            await updateProviderCredentials(connection.id, {
-              ...refreshed,
-              existingProviderSpecificData: connection.providerSpecificData || {},
-            });
-          },
+    const resolved = await resolveEffectiveCodexCatalog(connections.length ? connections : [conn], {
+      log: console,
+      onCredentialsRefreshed: async (connection, refreshed) => {
+        await updateProviderCredentials(connection.id, {
+          ...refreshed,
+          existingProviderSpecificData: connection.providerSpecificData || {},
         });
-      } catch (error) {
-        console.log(`Codex live model fetch failed for ${connection.id}:`, error?.message || error);
-        return null;
-      }
-    }));
-    const verified = results.filter((result) => result?.access === "observed" || result?.access === "stale");
-    const usable = verified.length ? verified : results.filter(Boolean);
-    if (!usable.length) return null;
-    const models = mergeCodexModelLists(usable.map((result) => result.models || []));
-    const first = usable[0];
-    return {
-      models,
-      resolved: true,
-      source: verified.length ? "live" : first.source,
-      access: verified.length ? "observed" : "unverified",
-      stale: usable.some((result) => result.stale === true),
-    };
+      },
+    });
+    if (!resolved.resolved) return null;
+    return { ...resolved, models: resolved.models || [] };
   },
   "chatgpt-web": async (conn, ctx) => {
     const connections = (ctx?.connections || []).filter((entry) => entry.provider === "chatgpt-web");
@@ -437,6 +422,25 @@ export async function buildModelsList(kindFilter, options = {}) {
         if (providerId === "alitp-intl" && !isAlitpModelAvailableForEdition(model.id, "personal")) continue;
         // Deprecated compat aliases stay routable but are not discoverable.
         if (model.deprecated && providerId === "alitp-intl") continue;
+        if (providerId === "codex" && model.kind !== "image") {
+          const projected = projectCodexModel({
+            ...model,
+            capabilities: model.capabilities || getCapabilitiesForModel(providerId, model.id),
+          }, alias);
+          if (projected) {
+            models.push(projected);
+            if (providerInfo?.exposeThinkingVariants && Array.isArray(model.supportedReasoningLevels)) {
+              for (const level of model.supportedReasoningLevels) {
+                const variant = projectCodexModel({
+                  ...model,
+                  capabilities: model.capabilities || getCapabilitiesForModel(providerId, model.id),
+                }, alias, level);
+                if (variant) models.push(variant);
+              }
+            }
+            continue;
+          }
+        }
         const staticCaps = getCapabilitiesForModel(alias, model.id);
         const entry = {
           id: `${alias}/${model.id}`,
@@ -658,6 +662,26 @@ export async function buildModelsList(kindFilter, options = {}) {
         };
         const staticModel = providerModels.find((m) => m.id === modelId);
         const liveMetadata = liveModelMetadataById.get(modelId);
+        if (providerId === "codex" && (liveMetadata || staticModel)) {
+          const codexMetadata = liveMetadata || staticModel;
+
+          const projected = projectCodexModel({
+            ...codexMetadata,
+            capabilities: codexMetadata.capabilities || (
+              liveMetadata ? undefined : getCapabilitiesForModel(providerId, modelId)
+            ),
+          }, outputAlias);
+          if (projected) {
+            models.push(projected);
+            if (AI_PROVIDERS[providerId]?.exposeThinkingVariants && Array.isArray(codexMetadata.supportedReasoningLevels)) {
+              for (const level of codexMetadata.supportedReasoningLevels) {
+                const variant = projectCodexModel(codexMetadata, outputAlias, level);
+                if (variant) models.push(variant);
+              }
+            }
+            continue;
+          }
+        }
         if (liveMetadata?.name || staticModel?.name) model.name = liveMetadata?.name || staticModel?.name;
         if (liveMetadata?.description || staticModel?.description) model.description = liveMetadata?.description || staticModel?.description;
         const supportedLevels = Array.isArray(liveMetadata?.supportedReasoningLevels)

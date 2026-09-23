@@ -5,6 +5,7 @@ import { matchPattern } from "./pricing.js";
 import { resolveKiroEffortPath } from "../config/kiroConstants.js";
 import { getAlibabaTokenPlanThinkingRule } from "./alibabaTokenPlanThinking.js";
 import { getAlitpCatalogEntry } from "./alibabaTokenPlanCatalog.js";
+import CODEX_REGISTRY from "./registry/codex.js";
 
 // Shared level sets (deduped) — verified against provider docs + wire in thinkingUnified.applyFormat.
 const L = {
@@ -35,8 +36,6 @@ const FORMAT_LEVELS = {
 };
 
 const CODEX_GPT_5_6_LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
-const CODEX_GPT_6_LEVELS = ["low", "medium", "high", "xhigh", "max", "ultra"];
-const CODEX_GPT_6_LUNA_LEVELS = ["low", "medium", "high", "xhigh", "max"];
 
 function getCatalogThinkingLevels(metadata) {
   const raw = metadata?.supportedReasoningLevels ?? metadata?.supported_reasoning_levels;
@@ -50,9 +49,6 @@ function getCatalogThinkingLevels(metadata) {
 
 // Model-name pattern overrides (glob, first match wins) — more precise than format default.
 const PATTERN_THINKING = [
-  { provider: "codex", pattern: "*gpt-6-sol*", levels: CODEX_GPT_6_LEVELS },
-  { provider: "codex", pattern: "*gpt-6-luna*", levels: CODEX_GPT_6_LUNA_LEVELS },
-  { provider: "codex", pattern: "*gpt-6*", levels: CODEX_GPT_6_LEVELS },
   { provider: "codex", pattern: "*gpt-5.6-sol*", levels: [...CODEX_GPT_5_6_LEVELS, "ultra"] },
   { provider: "codex", pattern: "*gpt-5.6-terra*", levels: [...CODEX_GPT_5_6_LEVELS, "ultra"] },
   { provider: "codex", pattern: "*gpt-5.6-luna*", levels: CODEX_GPT_5_6_LEVELS },
@@ -83,6 +79,8 @@ export function getThinkingLevels(provider, model, metadata = null) {
   if (provider === "codex") {
     const catalogLevels = getCatalogThinkingLevels(metadata);
     if (catalogLevels) return catalogLevels;
+    const registryModel = CODEX_REGISTRY.models?.find((entry) => entry.id === model);
+    if (Array.isArray(registryModel?.supportedReasoningLevels)) return registryModel.supportedReasoningLevels;
   }
   if (provider === "kiro" && resolveKiroEffortPath(model) === null) return null;
   if (provider === "alitp-intl") {

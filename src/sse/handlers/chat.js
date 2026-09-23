@@ -25,7 +25,11 @@ import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
-import { resolveCodexModels } from "open-sse/services/codexModels.js";
+import {
+  resolveCodexModels,
+  codexCatalogSupportsRequest,
+  isCodexFallbackModel,
+} from "open-sse/services/codexModels.js";
 import { stripModelContextMarker } from "open-sse/utils/modelMarkers.js";
 import {
   getChatGptWebCatalog,
@@ -345,6 +349,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   let pinnedConnectionId = explicitConnectionId;
   let lastError = null;
   let lastStatus = null;
+  const codexCapabilityReasons = new Set();
 
   while (true) {
     const selectCredentials = async () => {
@@ -380,6 +385,16 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         return errorResponse(HTTP_STATUS.NOT_FOUND, `No active credentials for provider: ${provider}`);
       }
       log.warn("CHAT", "No more accounts available", { provider });
+      if (provider === "codex" && codexCapabilityReasons.size > 0) {
+        const status = codexCapabilityReasons.has("unverified catalog")
+          || codexCapabilityReasons.has("unknown_effort")
+          ? HTTP_STATUS.SERVICE_UNAVAILABLE
+          : codexCapabilityReasons.has("effort")
+            ? HTTP_STATUS.BAD_REQUEST
+            : HTTP_STATUS.NOT_FOUND;
+        const suffix = codexCapabilityReasons.has("effort") ? " (unsupported reasoning effort)" : "";
+        return errorResponse(status, `No Codex account supports ${model}${suffix}`);
+      }
       return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable");
     }
 
@@ -408,9 +423,31 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
             });
           },
         });
-        const baseModel = String(model || "").replace(/\([^()]+\)\s*$/, "").trim();
-        const modelMetadata = catalog?.models?.find((entry) => entry.id === baseModel);
-        if (modelMetadata) refreshedCredentials.codexModelMetadata = modelMetadata;
+        const eligibility = codexCatalogSupportsRequest(catalog?.models, model, body);
+        const catalogVerified = catalog?.access === "observed" || catalog?.access === "stale";
+        const exactEffort = eligibility.requestedEffort && eligibility.requestedEffort !== "auto";
+        if (!catalogVerified && (
+          exactEffort
+          || eligibility.reason === "unknown_effort"
+          || (eligibility.reason === "model" && !isCodexFallbackModel(model))
+        )) {
+          codexCapabilityReasons.add("unverified catalog");
+          // Discovery fallback is not entitlement evidence. Keep the account
+          // routable for a known base request, but never authorize an exact
+          // effort or infer that an unknown model is absent.
+          excludeConnectionIds.add(credentials.connectionId);
+          log.debug("CODEX_MODELS", `skip account ${credentials.connectionId} for ${model}: unverified catalog`);
+          continue;
+        }
+        if (!eligibility.supported) {
+          codexCapabilityReasons.add(eligibility.reason || "unsupported");
+          // Catalog mismatch is not an upstream failure: skip this account without
+          // creating a cooldown or poisoning its model lock state.
+          excludeConnectionIds.add(credentials.connectionId);
+          log.debug("CODEX_MODELS", `skip account ${credentials.connectionId} for ${model}: ${eligibility.reason}`);
+          continue;
+        }
+        refreshedCredentials.codexModelMetadata = eligibility.metadata;
       } catch (error) {
         log.warn("CODEX_MODELS", `metadata lookup failed: ${error?.message || error}`);
       }

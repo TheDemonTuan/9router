@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   getCustomModels: vi.fn(),
   getProviderConnections: vi.fn(),
   resolveCodexModels: vi.fn(),
+  resolveEffectiveCodexCatalog: vi.fn(),
   updateProviderCredentials: vi.fn(),
 }));
 
@@ -24,6 +25,7 @@ vi.mock("@/sse/services/tokenRefresh", () => ({
 vi.mock("open-sse/services/codexModels.js", () => ({
   mergeCodexModelLists: (lists) => lists.flat(),
   resolveCodexModels: mocks.resolveCodexModels,
+  resolveEffectiveCodexCatalog: mocks.resolveEffectiveCodexCatalog,
 }));
 
 const { GET } = await import("../../src/app/api/models/route.js");
@@ -42,6 +44,21 @@ describe("GET /api/models Codex catalog", () => {
     mocks.resolveCodexModels.mockResolvedValue({
       resolved: true,
       source: "live",
+      access: "observed",
+      stale: false,
+      models: [{
+        id: "gpt-6-sol",
+        name: "GPT-6-Sol",
+        description: "Sol",
+        contextLength: 272000,
+        maxOutputTokens: 128000,
+        supportedReasoningLevels: ["low", "ultra"],
+        capabilities: { reasoning: true, vision: true, contextWindow: 272000, maxOutput: 128000 },
+      }],
+    });
+    mocks.resolveEffectiveCodexCatalog.mockResolvedValue({
+      resolved: true,
+      source: "effective",
       access: "observed",
       stale: false,
       models: [{
@@ -74,8 +91,8 @@ describe("GET /api/models Codex catalog", () => {
       },
     });
     expect(models.some((entry) => entry.provider === "cx" && entry.model === "gpt-5.5")).toBe(false);
-    expect(mocks.resolveCodexModels).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "codex-account-a" }),
+    expect(mocks.resolveEffectiveCodexCatalog).toHaveBeenCalledWith(
+      [expect.objectContaining({ id: "codex-account-a" })],
       expect.any(Object),
     );
   });
