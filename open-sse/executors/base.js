@@ -12,7 +12,7 @@ import { resolveOpenAICompatibleApiType } from "../services/provider.js";
 export class BaseExecutor {
   constructor(provider, config) {
     this.provider = provider;
-    this.config = config;
+    this.config = config ? { ...config } : {};
     this.noAuth = config?.noAuth || false;
   }
 
@@ -98,7 +98,7 @@ export class BaseExecutor {
     return { status: response.status, message: bodyText || `HTTP ${response.status}` };
   }
 
-  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null }) {
+  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null, preResponse = null }) {
     const fallbackCount = this.getFallbackCount();
     let lastError = null;
     let lastStatus = 0;
@@ -119,9 +119,16 @@ export class BaseExecutor {
         if (dynamic === false) return false; // hook vetoes retry (e.g. Retry-After too long)
         if (dynamic != null) waitMs = dynamic;
       }
+      if (preResponse) {
+        if (preResponse.signal?.aborted || preResponse.remainingMs() <= waitMs) return false;
+      }
       retryAttemptsByUrl[urlIndex]++;
       log?.debug?.("RETRY", `${reason} retry ${retryAttemptsByUrl[urlIndex]}/${attempts} after ${waitMs / 1000}s`);
-      await new Promise(resolve => setTimeout(resolve, waitMs));
+      if (preResponse) {
+        await preResponse.sleep(waitMs);
+      } else {
+        await new Promise(resolve => setTimeout(resolve, waitMs));
+      }
       return true;
     };
 
@@ -138,9 +145,12 @@ export class BaseExecutor {
       // Keep the first abort origin in the merged signal reason.
       const connectCtrl = new AbortController();
       const clientCtrl = new AbortController();
+      const deadlineCtrl = new AbortController();
       let firstAbortReason = null;
       const mergedCtrl = new AbortController();
-      const timeoutMs = this.config?.timeoutMs || FETCH_CONNECT_TIMEOUT_MS;
+      const baseTimeout = this.config?.timeoutMs || FETCH_CONNECT_TIMEOUT_MS;
+      const budgetRemaining = preResponse ? preResponse.remainingMs() : Infinity;
+      const timeoutMs = Math.min(baseTimeout, Math.max(1, budgetRemaining));
       const timeoutError = new Error(`Upstream connect timeout after ${timeoutMs}ms`);
       timeoutError.code = "UPSTREAM_CONNECT_TIMEOUT";
       timeoutError.status = HTTP_STATUS.GATEWAY_TIMEOUT;
@@ -155,12 +165,21 @@ export class BaseExecutor {
       };
       const onConnectAbort = () => forwardAbort(connectCtrl.signal);
       const onClientAbort = () => forwardAbort(clientCtrl.signal);
+      const onDeadlineAbort = () => forwardAbort(deadlineCtrl.signal);
       connectCtrl.signal.addEventListener("abort", onConnectAbort, { once: true });
       clientCtrl.signal.addEventListener("abort", onClientAbort, { once: true });
+      deadlineCtrl.signal.addEventListener("abort", onDeadlineAbort, { once: true });
       const clientSignalListener = signal ? () => clientCtrl.abort(clientError) : null;
       if (clientSignalListener) {
         if (signal.aborted) clientSignalListener();
         else signal.addEventListener("abort", clientSignalListener, { once: true });
+      }
+      const preResponseListener = preResponse?.signal ? () => {
+        deadlineCtrl.abort(preResponse.signal.reason);
+      } : null;
+      if (preResponseListener) {
+        if (preResponse.signal.aborted) preResponseListener();
+        else preResponse.signal.addEventListener("abort", preResponseListener, { once: true });
       }
       const connectTimer = setTimeout(() => connectCtrl.abort(timeoutError), timeoutMs);
       const mergedSignal = mergedCtrl.signal;
@@ -168,19 +187,44 @@ export class BaseExecutor {
         clearTimeout(connectTimer);
         connectCtrl.signal.removeEventListener("abort", onConnectAbort);
         clientCtrl.signal.removeEventListener("abort", onClientAbort);
+        deadlineCtrl.signal.removeEventListener("abort", onDeadlineAbort);
         if (clientSignalListener) signal.removeEventListener("abort", clientSignalListener);
+        if (preResponseListener) preResponse.signal.removeEventListener("abort", preResponseListener);
       };
-
       try {
         const bodyStr = JSON.stringify(transformedBody);
         const fetchT0 = Date.now();
-        dbg("FETCH", `${this.provider.toUpperCase()} → ${url} | body=${bodyStr.length}B | connectTimeout=${timeoutMs}ms`);
-        const response = await proxyAwareFetch(url, {
+        const fetchPromise = proxyAwareFetch(url, {
           method: "POST",
           headers,
           body: bodyStr,
           signal: mergedSignal
         }, proxyOptions);
+
+        const response = await new Promise((resolve, reject) => {
+          let settled = false;
+          const onAbort = () => {
+            if (settled) return;
+            settled = true;
+            reject(firstAbortReason || mergedSignal.reason || new Error("aborted"));
+          };
+          if (mergedSignal.aborted) return onAbort();
+          mergedSignal.addEventListener("abort", onAbort, { once: true });
+          fetchPromise.then(
+            (res) => {
+              if (settled) return;
+              settled = true;
+              mergedSignal.removeEventListener("abort", onAbort);
+              resolve(res);
+            },
+            (err) => {
+              if (settled) return;
+              settled = true;
+              mergedSignal.removeEventListener("abort", onAbort);
+              reject(err);
+            }
+          );
+        });
         cleanupAbort();
         if (response.ok) return { response, url, headers, transformedBody };
 
@@ -205,11 +249,16 @@ export class BaseExecutor {
       } catch (error) {
         cleanupAbort();
         const abortReason = firstAbortReason || mergedSignal.reason;
-        const clientAborted = abortReason?.code === "CLIENT_ABORT";
-        const connectTimedOut = abortReason?.code === "UPSTREAM_CONNECT_TIMEOUT";
+        const clientAborted = abortReason?.code === "CLIENT_ABORT" || error?.code === "CLIENT_ABORT";
+        const connectTimedOut = abortReason?.code === "UPSTREAM_CONNECT_TIMEOUT" || error?.code === "UPSTREAM_CONNECT_TIMEOUT";
+        const deadlineExpired = abortReason?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" || error?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED";
         let activeError = error;
 
-        if (connectTimedOut) {
+        if (deadlineExpired) {
+          activeError = abortReason || error;
+          activeError.status = activeError.status || HTTP_STATUS.GATEWAY_TIMEOUT;
+          throw activeError;
+        } else if (connectTimedOut) {
           activeError = timeoutError;
           log?.warn?.("TIMEOUT", `${this.provider.toUpperCase()} connect timeout after ${timeoutMs}ms`);
         } else if (clientAborted) {
@@ -217,7 +266,6 @@ export class BaseExecutor {
           log?.debug?.("ABORT", `${this.provider.toUpperCase()} client closed request`);
           throw clientError;
         }
-
         lastError = activeError;
         dbg("FETCH", `${this.provider.toUpperCase()} ✖ ${activeError.name || "Error"}: ${activeError.message}${connectTimedOut ? " (connect timeout)" : ""}`);
 
@@ -227,9 +275,9 @@ export class BaseExecutor {
         }
 
         // Map timeout and network/fetch exceptions to retry config (504 for timeout, 502 for network)
-        const retryStatus = connectTimedOut ? HTTP_STATUS.GATEWAY_TIMEOUT : HTTP_STATUS.BAD_GATEWAY;
-        if (await tryRetry(urlIndex, retryStatus, connectTimedOut ? "connect timeout" : `network "${error.message}"`)) { urlIndex--; continue; }
-
+        const isTimeout = connectTimedOut || error.status === HTTP_STATUS.GATEWAY_TIMEOUT || error.code === "UPSTREAM_CONNECT_TIMEOUT";
+        const retryStatus = isTimeout ? HTTP_STATUS.GATEWAY_TIMEOUT : HTTP_STATUS.BAD_GATEWAY;
+        if (await tryRetry(urlIndex, retryStatus, isTimeout ? "connect timeout" : `network "${error.message}"`)) { urlIndex--; continue; }
         if (urlIndex + 1 < fallbackCount) {
           log?.debug?.("RETRY", `Error on ${url}, trying fallback ${urlIndex + 1}`);
           continue;

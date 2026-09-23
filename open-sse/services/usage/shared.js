@@ -59,12 +59,24 @@ export function normalizeCloudCodeProjectId(project) {
   return null;
 }
 
-export async function fetchWithTimeout(url, opts, ms = 10000, proxyOptions = null) {
+export async function fetchWithTimeout(url, opts = {}, ms = 10000, proxyOptions = null) {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), ms);
+  const timeoutId = setTimeout(() => controller.abort(new Error(`Timeout after ${ms}ms`)), ms);
+  const externalSignal = opts?.signal;
+  const onExternalAbort = () => {
+    controller.abort(externalSignal.reason);
+  };
+  if (externalSignal) {
+    if (externalSignal.aborted) onExternalAbort();
+    else externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+  }
   try {
-    return await proxyAwareFetch(url, { ...opts, signal: controller.signal }, proxyOptions);
-  } finally {
+    const response = await proxyAwareFetch(url, { ...opts, signal: controller.signal }, proxyOptions);
     clearTimeout(timeoutId);
+    return response;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (externalSignal) externalSignal.removeEventListener("abort", onExternalAbort);
+    throw error;
   }
 }

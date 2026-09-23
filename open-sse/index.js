@@ -1,6 +1,6 @@
 // Patch global fetch with proxy support (must be first)
 import "./utils/proxyFetch.js";
-
+import "./utils/perfWatchdog.js";
 // Config
 export { PROVIDERS } from "./config/providers.js";
 export { OAUTH_ENDPOINTS, CLAUDE_SYSTEM_PROMPT } from "./config/appConstants.js";

@@ -11,6 +11,7 @@ import { handleAntigravityQuotaError, clearAntigravityStrikes } from "../service
 import { getSettings, getProviderConnections } from "@/lib/localDb";
 import { getModelInfo, getComboModels } from "../services/model.js";
 import { handleChatCore } from "open-sse/handlers/chatCore.js";
+import { createDeadlineError } from "open-sse/utils/preResponseBudget.js";
 import { DEFAULT_HEADROOM_URL } from "@/lib/headroom/detect";
 import { getTransform as getPxpipeTransform } from "@/lib/pxpipe/loader.js";
 import { appendPxpipeEvent } from "@/lib/pxpipe/events.js";
@@ -135,7 +136,8 @@ async function loadChatGptWebComboCapabilities(models, bridgeCapability = "gener
  * Supports: OpenAI, Claude, Gemini, OpenAI Responses API formats
  * Format detection and translation handled by translator
  */
-export async function handleChat(request, clientRawRequest = null) {
+export async function handleChat(request, clientRawRequest = null, options = {}) {
+  const preResponse = options?.preResponse || clientRawRequest?.preResponse || request?.preResponse || null;
   let body;
   try {
     body = await request.json();
@@ -226,6 +228,7 @@ export async function handleChat(request, clientRawRequest = null) {
         comboName: modelStr,
         judgeModel: comboStrategies[modelStr]?.judgeModel,
         tuning: comboStrategies[modelStr]?.fusionTuning,
+        preResponse,
       });
     }
 
@@ -235,7 +238,7 @@ export async function handleChat(request, clientRawRequest = null) {
       body,
       models: augmentedModels,
       handleSingleModel: withCapacityAdapterStripping(
-        (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
+        (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, { preResponse }),
         adapterAdded
       ),
       log,
@@ -256,7 +259,7 @@ export async function handleChat(request, clientRawRequest = null) {
       body,
       models: soloAugmented,
       handleSingleModel: withCapacityAdapterStripping(
-        (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
+        (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, { preResponse }),
         adapterAdded
       ),
       log,
@@ -265,13 +268,13 @@ export async function handleChat(request, clientRawRequest = null) {
     });
   }
 
-  return handleSingleModelChat(body, modelStr, clientRawRequest, request, apiKey);
+  return handleSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, { preResponse });
 }
 
 /**
  * Handle single model chat request
  */
-async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null) {
+async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, { preResponse = null } = {}) {
   const modelInfo = await getModelInfo(modelStr);
 
   // If provider is null, this might be a combo name - check and handle
@@ -300,12 +303,13 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
               const { tools, tool_choice, ...cleanBody } = clientRawRequest.body || {};
               cleanRawReq = { ...clientRawRequest, body: cleanBody };
             }
-            return handleSingleModelChat(b, m, cleanRawReq, request, apiKey);
+            return handleSingleModelChat(b, m, cleanRawReq, request, apiKey, { preResponse });
           },
           log,
           comboName: modelStr,
           judgeModel: comboStrategies[modelStr]?.judgeModel,
           tuning: comboStrategies[modelStr]?.fusionTuning,
+          preResponse,
         });
       }
 
@@ -315,7 +319,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         body,
         models: augmentedModels,
         handleSingleModel: withCapacityAdapterStripping(
-          (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
+          (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, { preResponse }),
           adapterAdded
         ),
         log,
@@ -352,6 +356,9 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   const codexCapabilityReasons = new Set();
 
   while (true) {
+    if (preResponse && (preResponse.remainingMs() <= 0 || preResponse.signal?.aborted)) {
+      throw (preResponse.signal?.reason || createDeadlineError());
+    }
     const selectCredentials = async () => {
       if (provider === "chatgpt-web") {
         pinnedConnectionId = explicitConnectionId || await loadChatGptWebPinnedConnection(conversationKey);
@@ -460,6 +467,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       body: { ...body, model: `${provider}/${model}` },
       modelInfo: { provider, model },
       credentials: refreshedCredentials,
+      preResponse,
       log,
       clientRawRequest,
       connectionId: credentials.connectionId,
@@ -531,7 +539,8 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     if (provider === "antigravity" && (result.status === 409 || result.status === 429) && !hasFutureHardQuota) {
       const evidence = await handleAntigravityQuotaError(
         credentials.connectionId, result.status, model,
-        refreshedCredentials.accessToken, credentials.providerSpecificData
+        refreshedCredentials.accessToken, credentials.providerSpecificData,
+        { sync: false }
       );
       if (evidence) {
         resetsAtMs = evidence.resetsAtMs;

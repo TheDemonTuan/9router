@@ -30,6 +30,8 @@ import {
   QUOTA_CACHE_KEY,
   REFRESH_INTERVAL_MS,
   CLAUDE_REFRESH_INTERVAL_MS,
+  ANTIGRAVITY_REFRESH_INTERVAL_MS,
+  mapConcurrent,
   DEPLETED_QUOTA_THRESHOLD,
   AUTO_REFRESH_STORAGE_KEY,
   CONNECTIONS_PAGE_SIZE,
@@ -473,12 +475,16 @@ export default function ProviderLimits() {
     setRefreshingAll(true);
     setCountdown(60);
 
-    // Throttle Claude: poll its quota every Nth auto-tick (manual force bypasses)
+    // Throttle Claude and Antigravity: poll quota every Nth auto-tick (manual force bypasses)
     const tick = (tickCountRef.current += 1);
     const claudeEvery = Math.round(CLAUDE_REFRESH_INTERVAL_MS / REFRESH_INTERVAL_MS);
-    const shouldFetch = (conn) =>
-      force || conn.provider !== "claude" || tick % claudeEvery === 0;
-
+    const antigravityEvery = Math.round(ANTIGRAVITY_REFRESH_INTERVAL_MS / REFRESH_INTERVAL_MS);
+    const shouldFetch = (conn) => {
+      if (force) return true;
+      if (conn.provider === "claude") return tick % claudeEvery === 0;
+      if (conn.provider === "antigravity") return tick % antigravityEvery === 0;
+      return true;
+    };
     try {
       const visibleConnections = await fetchConnections(page);
 
@@ -490,10 +496,10 @@ export default function ProviderLimits() {
         filterQuotaStateByConnections(prev, visibleConnections),
       );
 
-      await Promise.all(
-        visibleConnections
-          .filter(shouldFetch)
-          .map((conn) => fetchQuota(conn.id, conn.provider)),
+      await mapConcurrent(
+        visibleConnections.filter(shouldFetch),
+        4,
+        (conn) => fetchQuota(conn.id, conn.provider, { force }),
       );
 
       setLastUpdated(new Date());
@@ -519,8 +525,10 @@ export default function ProviderLimits() {
         filterQuotaStateByConnections(prev, visibleConnections),
       );
 
-      await Promise.all(
-        visibleConnections.map((conn) => fetchQuota(conn.id, conn.provider)),
+      await mapConcurrent(
+        visibleConnections,
+        4,
+        (conn) => fetchQuota(conn.id, conn.provider),
       );
       setLastUpdated(new Date());
     };

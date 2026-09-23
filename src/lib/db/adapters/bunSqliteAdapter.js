@@ -2,7 +2,6 @@
 // Loaded only when process.versions.bun is present.
 import { PRAGMA_SQL } from "../schema.js";
 
-const CHECKPOINT_INTERVAL_MS = 60 * 1000;
 
 export async function createBunSqliteAdapter(filePath) {
   // Dynamic import — only resolves under Bun runtime
@@ -21,11 +20,7 @@ export async function createBunSqliteAdapter(filePath) {
     return stmt;
   }
 
-  const checkpointTimer = setInterval(() => {
-    if (closed) return;
-    try { db.exec("PRAGMA wal_checkpoint(TRUNCATE)"); } catch {}
-  }, CHECKPOINT_INTERVAL_MS);
-  if (typeof checkpointTimer.unref === "function") checkpointTimer.unref();
+// SQLite native WAL auto-checkpoint runs at 1000 pages passively. TRUNCATE is only run on graceful close or manual checkpoint().
 
   function gracefulClose() {
     if (closed) return;
@@ -62,7 +57,6 @@ export async function createBunSqliteAdapter(filePath) {
     },
     checkpoint() { try { db.exec("PRAGMA wal_checkpoint(TRUNCATE)"); } catch {} },
     close() {
-      clearInterval(checkpointTimer);
       gracefulClose();
     },
     raw: db,

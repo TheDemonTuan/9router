@@ -1,7 +1,7 @@
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { getModelsByProviderId } from "open-sse/config/providerModels.js";
 import { getAntigravityUsage } from "open-sse/services/usage/google.js";
-import { markAccountUnavailable } from "./auth.js";
+import { markAccountUnavailable, persistModelLocksBatch } from "./auth.js";
 import * as log from "../utils/logger.js";
 
 const quotaCache = new Map();
@@ -27,23 +27,23 @@ export function clearAntigravityStrikes(connectionId, model) {
 
 /** Persist only exact, future-dated zero-quota router models. */
 export async function persistAntigravityQuota(connectionId, quotas) {
-  if (!quotas || typeof quotas !== "object" || Array.isArray(quotas)) return;
+  if (!quotas || typeof quotas !== "object" || Array.isArray(quotas) || !connectionId || connectionId === "noauth") return;
+  const locks = [];
   for (const [model, quota] of Object.entries(quotas)) {
     if (DISPLAY_ONLY_KEYS.has(model) || !MODEL_IDS.has(model)) continue;
     if (quota?.unlimited === true || quota?.remainingPercentage !== 0) continue;
     if (typeof quota?.remainingPercentage !== "number" || !Number.isFinite(quota.remainingPercentage)) continue;
     const resetMs = new Date(quota.resetAt).getTime();
     if (!Number.isFinite(resetMs) || resetMs <= Date.now()) continue;
-    await markAccountUnavailable(
-      connectionId,
-      429,
-      "Antigravity quota remaining=0",
-      "antigravity",
-      model,
-      resetMs,
-      "quota_exhausted",
-    );
+    locks.push({ model, resetMs });
   }
+  if (locks.length === 0) return;
+  await persistModelLocksBatch(connectionId, locks, {
+    provider: "antigravity",
+    status: 429,
+    reason: "Antigravity quota remaining=0",
+    errorClass: "quota_exhausted",
+  });
 }
 
 export async function refreshAntigravityQuota(connectionId, accessToken, providerSpecificData) {
@@ -95,10 +95,48 @@ async function _doRefresh(connectionId, accessToken, providerSpecificData, now) 
  * Refresh Antigravity quota evidence after a generation 409/429.
  * @returns {null|{resetsAtMs:number,errorClass:string}}
  */
-export async function handleAntigravityQuotaError(connectionId, status, model, accessToken, providerSpecificData) {
-  if (status !== 409 && status !== 429) return null;
-  log.info("AG_QUOTA", `${connectionId.slice(0, 8)} | ${status} on ${model} — refreshing quota`);
+export function getAntigravityCachedQuotaEvidence(connectionId, model) {
+  const quota = quotaCache.get(connectionId)?.[model];
+  const now = Date.now();
+  const resetMs = new Date(quota?.resetAt).getTime();
+  if (quota?.remainingPercentage === 0 && Number.isFinite(resetMs) && resetMs > now) {
+    strikeCounts.delete(`${connectionId}|${model}`);
+    return { resetsAtMs: resetMs, errorClass: "quota_exhausted" };
+  }
+  return null;
+}
 
+export function recordAntigravityStrikeFast(connectionId, status, model) {
+  const now = Date.now();
+  const key = `${connectionId}|${model}`;
+  const strike = strikeCounts.get(key);
+  const windowStart = strike && now - strike.windowStart <= STRIKE_WINDOW_MS ? strike.windowStart : now;
+  const count = strike && windowStart === strike.windowStart ? strike.count + 1 : 1;
+  if (count < STRIKE_THRESHOLD) {
+    strikeCounts.set(key, { count, windowStart });
+    return null;
+  }
+  strikeCounts.delete(key);
+  const blockedUntil = now + STRIKE_BLOCK_MS;
+  log.warn("AG_QUOTA", `${connectionId.slice(0, 8)} | STRIKE_${status} ${model} — ${count}x within 60s; breaker 15m`);
+  return { resetsAtMs: blockedUntil, errorClass: "rate_limited" };
+}
+
+/**
+ * Refresh Antigravity quota evidence after a generation 409/429.
+ * @returns {null|{resetsAtMs:number,errorClass:string}}
+ */
+export async function handleAntigravityQuotaError(connectionId, status, model, accessToken, providerSpecificData, { sync = true } = {}) {
+  if (status !== 409 && status !== 429) return null;
+  if (!sync) {
+    const cached = getAntigravityCachedQuotaEvidence(connectionId, model);
+    if (cached) return cached;
+    if (accessToken) {
+      refreshAntigravityQuota(connectionId, accessToken, providerSpecificData).catch(() => {});
+    }
+    return recordAntigravityStrikeFast(connectionId, status, model);
+  }
+  log.info("AG_QUOTA", `${connectionId.slice(0, 8)} | ${status} on ${model} — refreshing quota`);
   const quota = (await refreshAntigravityQuota(connectionId, accessToken, providerSpecificData))?.[model];
   const now = Date.now();
   const resetMs = new Date(quota?.resetAt).getTime();

@@ -1,5 +1,7 @@
 // Stream handler with disconnect detection - shared for all providers
-import { STREAM_STALL_TIMEOUT_MS } from "../config/runtimeConfig.js";
+import { STREAM_STALL_TIMEOUT_MS, SSE_HEARTBEAT_INTERVAL_MS } from "../config/runtimeConfig.js";
+
+const SSE_KEEPALIVE_BYTES = new TextEncoder().encode(": keepalive\n\n");
 import { dbg, isDebugEnabled } from "./debugLog.js";
 
 // Get HH:MM:SS timestamp
@@ -118,10 +120,13 @@ export function createStreamController({ onDisconnect, onError, onComplete, log,
  * @param {function} [onAbortTerminal] - Receives a human-readable abort
  * message and returns terminal SSE bytes to emit downstream.
  */
-export function createDisconnectAwareStream(transformStream, streamController, onAbortTerminal = null) {
+export function createDisconnectAwareStream(transformStream, streamController, onAbortTerminal = null, { heartbeatIntervalMs = SSE_HEARTBEAT_INTERVAL_MS, onFirstByte = null } = {}) {
   const reader = transformStream.readable.getReader();
   const writer = transformStream.writable.getWriter();
   let terminalEmitted = false;
+  let heartbeatTimer = null;
+  let lastDownstreamAt = Date.now();
+  let firstByteEmitted = false;
 
   // Emit a synthesized terminal payload (e.g. Responses response.failed + [DONE]) once
   const emitTerminal = (controller) => {
@@ -129,13 +134,45 @@ export function createDisconnectAwareStream(transformStream, streamController, o
     terminalEmitted = true;
     try {
       const bytes = onAbortTerminal();
-      if (bytes) controller.enqueue(bytes);
+      if (bytes) {
+        if (!firstByteEmitted) { firstByteEmitted = true; onFirstByte?.(); }
+        controller.enqueue(bytes);
+      }
     } catch { /* best-effort terminal */ }
   };
 
+  const clearHeartbeat = () => {
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+    }
+  };
+
   return new ReadableStream({
+    start(controller) {
+      if (heartbeatIntervalMs > 0) {
+        heartbeatTimer = setInterval(() => {
+          if (!streamController.isConnected()) {
+            clearHeartbeat();
+            return;
+          }
+          const elapsed = Date.now() - lastDownstreamAt;
+          if (elapsed >= heartbeatIntervalMs) {
+            try {
+              controller.enqueue(SSE_KEEPALIVE_BYTES);
+              lastDownstreamAt = Date.now();
+              if (!firstByteEmitted) { firstByteEmitted = true; onFirstByte?.(); }
+            } catch {
+              clearHeartbeat();
+            }
+          }
+        }, Math.min(heartbeatIntervalMs, 5000));
+        heartbeatTimer.unref?.();
+      }
+    },
     async pull(controller) {
       if (!streamController.isConnected()) {
+        clearHeartbeat();
         emitTerminal(controller);
         controller.close();
         return;
@@ -145,12 +182,19 @@ export function createDisconnectAwareStream(transformStream, streamController, o
         const { done, value } = await reader.read();
 
         if (done) {
+          clearHeartbeat();
           streamController.handleComplete();
           controller.close();
           return;
         }
+        lastDownstreamAt = Date.now();
+        if (!firstByteEmitted && value && (value.byteLength > 0 || value.length > 0)) {
+          firstByteEmitted = true;
+          onFirstByte?.();
+        }
         controller.enqueue(value);
       } catch (error) {
+        clearHeartbeat();
         const wasConnected = streamController.isConnected();
         // Controller already closed = downstream ended; not an upstream error, skip noisy log.
         const msg0 = error?.message || "";
@@ -188,6 +232,7 @@ export function createDisconnectAwareStream(transformStream, streamController, o
     },
 
     cancel(reason) {
+      clearHeartbeat();
       streamController.handleDisconnect(reason || "cancelled");
       reader.cancel();
       writer.abort();
@@ -211,7 +256,7 @@ export function createDisconnectAwareStream(transformStream, streamController, o
  * @param {TransformStream} transformStream - Transform stream for SSE
  * @param {object} streamController - Stream controller from createStreamController
  */
-export function pipeWithDisconnect(providerResponse, transformStream, streamController, onAbortTerminal = null, stallTimeoutMs = STREAM_STALL_TIMEOUT_MS) {
+export function pipeWithDisconnect(providerResponse, transformStream, streamController, onAbortTerminal = null, stallTimeoutMs = STREAM_STALL_TIMEOUT_MS, { onUpstreamFirstByte = null, onDownstreamFirstByte = null, heartbeatIntervalMs = SSE_HEARTBEAT_INTERVAL_MS } = {}) {
   let stallTimer = null;
   let chunkCount = 0;
   let totalBytes = 0;
@@ -251,6 +296,7 @@ export function pipeWithDisconnect(providerResponse, transformStream, streamCont
 
   const upstreamTap = new TransformStream({
     transform(chunk, controller) {
+      if (chunkCount === 0) onUpstreamFirstByte?.();
       chunkCount++;
       const sz = chunk?.byteLength || chunk?.length || 0;
       totalBytes += sz;
@@ -273,7 +319,8 @@ export function pipeWithDisconnect(providerResponse, transformStream, streamCont
   return createDisconnectAwareStream(
     { readable: transformedBody, writable: { getWriter: () => ({ abort: () => Promise.resolve() }) } },
     wrappedController,
-    onAbortTerminal ? () => onAbortTerminal(abortMessage) : null
+    onAbortTerminal ? () => onAbortTerminal(abortMessage) : null,
+    { heartbeatIntervalMs, onFirstByte: onDownstreamFirstByte }
   );
 }
 

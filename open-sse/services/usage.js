@@ -71,8 +71,31 @@ async function getQoderUsageFor(c) {
   const resolved = await resolveQoderCredentials(c, c.proxyOptions).catch(() => null);
   return getQoderUsage(resolved?.accessToken || c.accessToken, c.proxyOptions, c.provider || "qoder");
 }
+const usageCache = new Map();
+const USAGE_CACHE_TTL_MS = 60_000;
+
+function buildUsageCacheKey(connection, proxyOptions) {
+  const provider = connection.provider || "";
+  const id = connection.id || "";
+  const token = connection.accessToken || "";
+  const key = connection.apiKey || "";
+  const psd = JSON.stringify(connection.providerSpecificData || {});
+  const proxy = proxyOptions?.connectionProxyUrl || "";
+  const project = provider === "antigravity" ? "" : (connection.projectId || "");
+  return `${provider}:${id}:${token}:${key}:${psd}:${proxy}:${project}`;
+}
 
 export async function getUsageForProvider(connection, proxyOptions = null, options = {}) {
+  const force = options.force === true;
+  const cacheKey = buildUsageCacheKey(connection, proxyOptions);
+
+  if (!force) {
+    const hit = usageCache.get(cacheKey);
+    if (hit && hit.expiresAt > Date.now()) {
+      return hit.result;
+    }
+  }
+
   const { provider, accessToken, apiKey, providerSpecificData, projectId } = connection;
   const providerDataWithProjectId = {
     ...(providerSpecificData || {}),
@@ -81,13 +104,24 @@ export async function getUsageForProvider(connection, proxyOptions = null, optio
 
   const handler = USAGE_HANDLERS[provider];
   if (!handler) return { message: `Usage API not implemented for ${provider}` };
-  return await handler({
+  const result = await handler({
     provider,
     accessToken,
     apiKey,
     providerSpecificData,
     providerDataWithProjectId,
     proxyOptions,
-    force: options.force === true,
+    force,
   });
+
+  if (result?.quotas && typeof result.quotas === "object") {
+    usageCache.set(cacheKey, {
+      result,
+      expiresAt: Date.now() + USAGE_CACHE_TTL_MS,
+    });
+  } else {
+    usageCache.delete(cacheKey);
+  }
+
+  return result;
 }

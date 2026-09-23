@@ -298,6 +298,7 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
   let effective = null;
   let lockKey = null;
   let connectionName = connectionId.slice(0, 8);
+  let didUpdate = false;
 
   const updated = await updateProviderConnection(connectionId, (current) => {
     const now = Date.now();
@@ -364,6 +365,7 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
     }
 
     effective = { shouldFallback: true, cooldownMs: Math.max(0, effectiveExpiryMs - now) };
+    didUpdate = true;
     return {
       [lockKey]: new Date(effectiveExpiryMs).toISOString(),
       ...buildModelLockMetadataUpdate(lockModel, {
@@ -381,10 +383,83 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
     };
   }, { resetHealth: false });
 
-  if (!updated) return { shouldFallback: false, cooldownMs: 0 };
+  if (!didUpdate) return effective || { shouldFallback: false, cooldownMs: 0 };
   log.warn("AUTH", `${connectionName} locked ${lockKey} for ${Math.round(effective.cooldownMs / 1000)}s [${status}]`);
-  if (provider && status && reason) console.error(`❌ ${provider} [${status}]: ${reason}`);
+  if (provider && status && reason && errorClass !== "quota_exhausted") console.error(`❌ ${provider} [${status}]: ${reason}`);
   return effective;
+}
+
+/**
+ * Batch persist model locks in a single transaction with idempotent no-op.
+ */
+export async function persistModelLocksBatch(connectionId, locks, {
+  provider = "antigravity",
+  status = 429,
+  reason = "Antigravity quota remaining=0",
+  errorClass = "quota_exhausted",
+} = {}) {
+  if (!connectionId || connectionId === "noauth" || !Array.isArray(locks) || locks.length === 0) {
+    return { changed: 0, effective: null };
+  }
+
+  let didUpdate = false;
+  let changedCount = 0;
+  let latestResetMs = 0;
+  let connectionName = connectionId.slice(0, 8);
+
+  await updateProviderConnection(connectionId, (current) => {
+    const now = Date.now();
+    connectionName = current.displayName || current.name || current.email || connectionName;
+    const patch = {};
+
+    for (const item of locks) {
+      const model = typeof item === "string" ? item : item.model;
+      const resetMs = typeof item === "object" && Number.isFinite(item.resetMs) ? item.resetMs : null;
+      if (!model || !Number.isFinite(resetMs) || resetMs <= now) continue;
+
+      const lockKey = getModelLockKey(model);
+      const exactMetadata = getExactModelLockMetadata(current, model);
+      const currentExpiryMs = Date.parse(current[lockKey]);
+      const currentActive = Number.isFinite(currentExpiryMs) && currentExpiryMs > now;
+      const currentIsQuota = exactMetadata.unavailabilityReason === "quota_exhausted";
+
+      if (currentActive && currentExpiryMs >= resetMs && currentIsQuota) {
+        continue;
+      }
+
+      changedCount++;
+      if (resetMs > latestResetMs) latestResetMs = resetMs;
+
+      patch[lockKey] = new Date(resetMs).toISOString();
+      Object.assign(patch, buildModelLockMetadataUpdate(model, {
+        unavailabilityReason: errorClass,
+        errorCode: status,
+        lastError: reason,
+        backoffLevel: 0,
+      }));
+    }
+
+    if (changedCount === 0) return null;
+
+    didUpdate = true;
+    return {
+      ...patch,
+      testStatus: "unavailable",
+      lastError: reason,
+      errorCode: status,
+      unavailabilityReason: errorClass,
+      lastErrorAt: new Date(now).toISOString(),
+    };
+  }, { resetHealth: false });
+
+  if (didUpdate && changedCount > 0) {
+    const diffMs = Math.max(0, latestResetMs - Date.now());
+    const hours = Math.floor(diffMs / 3600000);
+    const mins = Math.floor((diffMs % 3600000) / 60000);
+    const timeStr = `${hours}h${String(mins).padStart(2, "0")}m`;
+    log.info("AG_QUOTA", `${connectionName} · locked ${changedCount} models · reset ${timeStr}`);
+  }
+  return { changed: changedCount };
 }
 
 /**

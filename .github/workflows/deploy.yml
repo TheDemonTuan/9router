@@ -53,7 +53,13 @@ jobs:
             unit/quota-response-contract.test.js \
             unit/chat-quota-handler.test.js \
             unit/antigravity-quota-routing.test.js \
-            unit/continuity-strip.test.js \
+            unit/antigravity-retry-hook.test.js \
+            unit/base-executor-retry.test.js \
+            unit/chat-pre-response-budget.test.js \
+            unit/fetch-timeout-body-signal.test.js \
+            unit/google-usage-abort.test.js \
+            unit/claude-usage-cache.test.js \
+            unit/usage-cache-contract.test.js \
             unit/health-route.test.js \
             unit/alibaba-token-plan-thinking.test.js \
             unit/alibaba-token-plan-catalog.test.js \
@@ -69,6 +75,8 @@ jobs:
           set -euo pipefail
           node --test --test-concurrency=1 tests/unit/custom-server-h2c.test.cjs tests/unit/custom-server-h2c-concurrent.test.cjs
           bun test tests/unit/custom-server-h2c.test.cjs tests/unit/custom-server-h2c-concurrent.test.cjs tests/unit/bun-client-disconnect.test.cjs tests/unit/bun-next-request-disconnect.test.cjs
+      - name: Run quota persistence smoke test
+        run: bun tests/integration/quota-persistence-smoke.mjs
       - name: Verify blue-green reconcile and drain safety
         run: bash tests/unit/blue-green-reconcile.test.sh
       - name: Verify provider, alias, and OAuth baselines
