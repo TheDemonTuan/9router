@@ -75,6 +75,10 @@ describe("GPT-6 Codex /v1/models and capabilities", () => {
 
     const lunaUltra = models.find((m) => m.id === "cx/gpt-6-luna(ultra)");
     expect(lunaUltra).toBeUndefined();
+
+    // Review variants are no longer advertised
+    expect(models.find((m) => m.id === "cx/gpt-6-sol-review")).toBeUndefined();
+    expect(models.find((m) => m.id === "cx/gpt-6-luna-review")).toBeUndefined();
   });
 
   it("handles partial upstream catalog without max_output_tokens without fabricating limits for unknown models", () => {
