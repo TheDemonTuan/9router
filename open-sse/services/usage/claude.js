@@ -34,7 +34,9 @@ export async function getClaudeUsage(accessToken, proxyOptions = null, options =
     if (hit && hit.expiresAt > Date.now()) return hit.result;
   }
 
-  const stale = (!force && accessToken && usageCache.get(accessToken)?.result) || null;
+  const cachedEntry = accessToken ? usageCache.get(accessToken) : null;
+  const stale = cachedEntry?.result || null;
+  const staleExpiresAt = cachedEntry?.expiresAt || 0;
 
   const promise = (async () => {
     const result = await fetchClaudeUsageRaw(accessToken, proxyOptions);
@@ -47,7 +49,13 @@ export async function getClaudeUsage(accessToken, proxyOptions = null, options =
       return result;
     }
     // Soft failure (429/error): prefer the last good read over a transient error
-    if (stale) return stale;
+    if (stale) {
+      if (accessToken) {
+        usageCache.set(accessToken, { result: stale, expiresAt: staleExpiresAt });
+      }
+      return stale;
+    }
+    if (accessToken) usageCache.delete(accessToken);
     return result;
   })();
 

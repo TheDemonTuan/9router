@@ -6,7 +6,7 @@ import { checkFallbackError, formatRetryAfter } from "./accountFallback.js";
 import { unavailableResponse } from "../utils/error.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { extractTextContent } from "../translator/formats/gemini.js";
-
+import { createDeadlineError } from "../utils/preResponseBudget.js";
 // Hard capabilities = input modalities; missing one drops request data (e.g. image
 // stripped). Must be prioritized. Soft (e.g. search) only degrades a feature.
 const HARD_CAPS = new Set(["vision", "pdf", "audioInput", "videoInput"]);
@@ -605,7 +605,7 @@ function pickEarliestQuotaResponse(responses) {
  * @param {Object} [options.tuning] - Override FUSION_DEFAULTS (minPanel, grace, timeout)
  * @returns {Promise<Response>}
  */
-export async function handleFusionChat({ body, models, handleSingleModel, log, comboName, judgeModel, tuning }) {
+export async function handleFusionChat({ body, models, handleSingleModel, log, comboName, judgeModel, tuning, preResponse = null }) {
   const panel = Array.isArray(models) ? models.filter(Boolean) : [];
   const statefulBridgeModel = (value) => typeof value === "string" && (value.startsWith("cgw/") || value.startsWith("chatgpt-web/"));
   if (panel.some(statefulBridgeModel) || statefulBridgeModel(judgeModel)) {
@@ -644,12 +644,16 @@ export async function handleFusionChat({ body, models, handleSingleModel, log, c
   } else if (Array.isArray(panelBody.input)) {
     panelBody.input = flattenToolHistory(panelBody.input);
   }
-
+  if (preResponse && (preResponse.remainingMs() <= 0 || preResponse.signal?.aborted)) {
+    throw (preResponse.signal?.reason || createDeadlineError());
+  }
   const t0 = Date.now();
   const calls = panel.map((m) => withTimeout(Promise.resolve().then(() => handleSingleModel(panelBody, m, true)), cfg.panelHardTimeoutMs));
   const settled = await collectPanel(calls, { ...cfg, minPanel });
   log.info("FUSION", `fan-out collected in ${Date.now() - t0}ms`);
-
+  if (preResponse && (preResponse.remainingMs() <= 0 || preResponse.signal?.aborted)) {
+    throw (preResponse.signal?.reason || createDeadlineError());
+  }
   // 2. Collect successful answers and preserve an all-quota terminal result.
   const answers = [];
   const quotaResponses = [];
@@ -693,6 +697,9 @@ export async function handleFusionChat({ body, models, handleSingleModel, log, c
   if (answers.length === 1) {
     log.info("FUSION", `Only ${answers[0].model} succeeded — answering directly (no fusion)`);
     return handleSingleModel(body, answers[0].model);
+  }
+  if (preResponse && (preResponse.remainingMs() <= 0 || preResponse.signal?.aborted)) {
+    throw (preResponse.signal?.reason || createDeadlineError());
   }
 
   // 4. Judge analyzes + writes one final answer (streams to client if requested).

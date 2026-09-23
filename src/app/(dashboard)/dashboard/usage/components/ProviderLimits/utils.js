@@ -5,6 +5,7 @@ export const QUOTA_CACHE_KEY = "quotaCacheData";
 export const REFRESH_INTERVAL_MS = 60000;
 // Claude usage/quota endpoint rate-limits; poll it less often than other providers
 export const CLAUDE_REFRESH_INTERVAL_MS = 600000;
+export const ANTIGRAVITY_REFRESH_INTERVAL_MS = 180000;
 export const DEPLETED_QUOTA_THRESHOLD = 5;
 export const AUTO_REFRESH_STORAGE_KEY = "quotaAutoRefresh";
 export const CONNECTIONS_PAGE_SIZE = 20;
@@ -22,6 +23,22 @@ export const QUOTA_SORT_OPTIONS = [
 ];
 
 // ─── Pure helpers ─────────────────────────────────────────────────────────────
+export async function mapConcurrent(items, limit, fn) {
+  const results = [];
+  const executing = new Set();
+  for (const item of items) {
+    const p = Promise.resolve().then(() => fn(item));
+    results.push(p);
+    executing.add(p);
+    const clean = () => executing.delete(p);
+    p.then(clean, clean);
+    if (executing.size >= limit) {
+      await Promise.race(executing);
+    }
+  }
+  return Promise.all(results);
+}
+
 export function getConnectionLabel(connection) {
   return connection.name?.trim()
     || connection.email?.trim()

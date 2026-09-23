@@ -7,7 +7,7 @@ import { getExecutor } from "open-sse/executors/index.js";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { USAGE_APIKEY_PROVIDERS } from "@/shared/constants/providers";
 import { persistAntigravityQuota } from "@/sse/services/antigravityQuota.js";
-
+const inflightUsage = new Map();
 // Detect auth-expired messages returned by usage providers instead of throwing
 const AUTH_EXPIRED_PATTERNS = ["expired", "authentication", "unauthorized", "401", "re-authorize"];
 function isAuthExpiredMessage(usage) {
@@ -121,13 +121,19 @@ export async function refreshAndUpdateCredentials(connection, force = false, pro
  * GET /api/usage/[connectionId] - Get usage data for a specific connection
  */
 export async function GET(request, { params }) {
-  let connection;
-  try {
-    const { connectionId } = await params;
-    const force = new URL(request.url).searchParams.get("force") === "1";
+  const { connectionId } = await params;
+  const force = new URL(request.url).searchParams.get("force") === "1";
 
+  if (!force && inflightUsage.has(connectionId)) {
+    try {
+      const cachedResult = await inflightUsage.get(connectionId);
+      return Response.json(cachedResult);
+    } catch {}
+  }
 
-    // Get connection from database
+  const fetchTask = (async () => {
+    let connection;
+    try {
     connection = await getProviderConnectionById(connectionId);
     if (!connection) {
       return Response.json({ error: "Connection not found" }, { status: 404 });
@@ -187,10 +193,27 @@ export async function GET(request, { params }) {
     if (connection.provider === "antigravity" && !usage?.message) {
       await persistAntigravityQuota(connection.id, usage?.quotas);
     }
+      return usage;
+    } catch (error) {
+      const provider = connection?.provider ?? "unknown";
+      console.warn(`[Usage] ${provider}: ${error.message}`);
+      throw error;
+    }
+  })();
+
+  if (!force) {
+    inflightUsage.set(connectionId, fetchTask);
+    fetchTask.finally(() => {
+      if (inflightUsage.get(connectionId) === fetchTask) {
+        inflightUsage.delete(connectionId);
+      }
+    });
+  }
+
+  try {
+    const usage = await fetchTask;
     return Response.json(usage);
   } catch (error) {
-    const provider = connection?.provider ?? "unknown";
-    console.warn(`[Usage] ${provider}: ${error.message}`);
     return Response.json({ error: error.message }, { status: 500 });
   }
 }

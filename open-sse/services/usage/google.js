@@ -117,10 +117,10 @@ async function getGeminiSubscriptionInfo(accessToken, proxyOptions = null) {
 /**
  * Antigravity Usage - Fetch quota from Google Cloud Code API
  */
-export async function getAntigravityUsage(accessToken, providerSpecificData, proxyOptions = null) {
+export async function getAntigravityUsage(accessToken, providerSpecificData, proxyOptions = null, options = {}) {
   try {
     // Fetch subscription info once — reuse for both projectId and plan
-    const subscriptionInfo = await getAntigravitySubscriptionInfo(accessToken, proxyOptions);
+    const subscriptionInfo = await getAntigravitySubscriptionInfo(accessToken, proxyOptions, options);
     const projectId = subscriptionInfo?.cloudaicompanionProject || null;
 
     const response = await fetchWithTimeout(ANTIGRAVITY_CONFIG.quotaApiUrl, {
@@ -135,6 +135,7 @@ export async function getAntigravityUsage(accessToken, providerSpecificData, pro
       body: JSON.stringify({
         ...(projectId ? { project: projectId } : {})
       }),
+      signal: options?.signal,
     }, 10000, proxyOptions);
 
     if (response.status === 403) {
@@ -224,7 +225,8 @@ export async function getAntigravityUsage(accessToken, providerSpecificData, pro
       const weeklyQuotas = await fetchAntigravityWeeklyQuota(
         accessToken,
         projectId,
-        proxyOptions
+        proxyOptions,
+        options
       );
 
       // Reconcile short-window session quota if models are exhausted:
@@ -263,7 +265,8 @@ export async function getAntigravityUsage(accessToken, providerSpecificData, pro
       }
 
       Object.assign(quotas, weeklyQuotas);
-    } catch {
+    } catch (e) {
+      if (e?.name === "AbortError" || options?.signal?.aborted) throw e;
       // Silently ignore — weekly is best-effort
     }
 
@@ -273,6 +276,7 @@ export async function getAntigravityUsage(accessToken, providerSpecificData, pro
       subscriptionInfo,
     };
   } catch (error) {
+    if (error?.name === "AbortError" || options?.signal?.aborted) throw error;
     console.error("[Antigravity Usage] Error:", error.message, error.cause);
     return { message: `Antigravity error: ${error.message}` };
   }
@@ -281,7 +285,7 @@ export async function getAntigravityUsage(accessToken, providerSpecificData, pro
 /**
  * Get Antigravity subscription info
  */
-async function getAntigravitySubscriptionInfo(accessToken, proxyOptions = null) {
+async function getAntigravitySubscriptionInfo(accessToken, proxyOptions = null, options = {}) {
   try {
     const response = await fetchWithTimeout(ANTIGRAVITY_CONFIG.loadProjectApiUrl, {
       method: "POST",
@@ -291,11 +295,13 @@ async function getAntigravitySubscriptionInfo(accessToken, proxyOptions = null) 
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ metadata: CLIENT_METADATA, mode: 1 }),
+      signal: options?.signal,
     }, 10000, proxyOptions);
 
     if (!response.ok) return null;
     return await response.json();
   } catch (error) {
+    if (error?.name === "AbortError" || options?.signal?.aborted) throw error;
     console.error("[Antigravity Subscription] Error:", error.message);
     return null;
   }

@@ -119,8 +119,13 @@ export function formatDoneLine({ usage, latency }) {
     if (cacheCreate) parts.push(`+${cacheCreate}`);
     inStr += ` (CACHE ${parts.join(" ")})`;
   }
-  const ttftStr = latency?.ttft ? ` · TTFT ${latency.ttft}ms` : "";
-  return `DONE ${latency?.total ?? 0}ms${ttftStr} · ${inStr} · OUT ${outTok}`;
+  const hdrStr = latency?.hdr != null ? ` · HDR ${latency.hdr}ms` : "";
+  const ubyteStr = latency?.ubyte != null ? ` · UBYTE ${latency.ubyte}ms` : "";
+  const dbyteStr = latency?.dbyte != null ? ` · DBYTE ${latency.dbyte}ms` : "";
+  const ftextStr = latency?.ftext != null
+    ? ` · FTEXT ${latency.ftext}ms`
+    : (latency?.ttft != null ? ` · TTFT ${latency.ttft}ms` : "");
+  return `DONE ${latency?.total ?? 0}ms${hdrStr}${ubyteStr}${dbyteStr}${ftextStr} · ${inStr} · OUT ${outTok}`;
 }
 
 export function saveUsageStats({ provider, model, tokens, connectionId, apiKey, endpoint, label = "USAGE", silent = false }) {

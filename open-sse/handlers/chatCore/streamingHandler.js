@@ -52,6 +52,8 @@ export function buildTransformStream({ provider, sourceFormat, targetFormat, res
     const encoder = new TextEncoder();
     let buffer = "";
     let finalized = false;
+    let ttftAt = null;
+    let content = "";
     const finish = () => {
       if (finalized) return;
       finalized = true;
@@ -59,13 +61,19 @@ export function buildTransformStream({ provider, sourceFormat, targetFormat, res
       const diagnostics = accumulator.diagnostics();
       console.info(`[RESP] client=${responsesClientDialect} provider=${provider} source=${sourceFormat} providerDialect=${responsesProviderDialect} mode=normalize events=${diagnostics.events} doneItems=${diagnostics.doneItems} textChars=${diagnostics.textChars} toolCalls=${diagnostics.toolCalls} terminalOutputBefore=${diagnostics.terminalOutputBefore} terminalOutputAfter=${diagnostics.terminalOutputAfter} status=${snapshot.status}`);
       if (!diagnostics.textChars && !diagnostics.toolCalls) console.info(`[RESP_EMPTY] client=${responsesClientDialect} provider=${provider} textChars=0 doneItems=${diagnostics.doneItems} toolCalls=0 reasoningItems=${diagnostics.reasoningItems}`);
-      onStreamComplete?.({ content: "", thinking: "" }, snapshot.usage, null, { status: snapshot.status, successful: snapshot.status === "completed" });
+      onStreamComplete?.({ content, thinking: "" }, snapshot.usage, ttftAt, { status: snapshot.status, successful: snapshot.status === "completed" });
     };
     const writeRecord = (record, controller) => {
       const parsed = accumulator.observeRecord(record);
       if (!parsed?.data) {
         controller.enqueue(encoder.encode(`${record}\n\n`));
         return;
+      }
+      const isTextDelta = (parsed?.type === "response.output_text.delta" || parsed?.data?.type === "response.output_text.delta")
+        && typeof parsed?.data?.delta === "string";
+      if (isTextDelta) {
+        if (!ttftAt) ttftAt = Date.now();
+        content += parsed.data.delta;
       }
       const enriched = accumulator.enrichTerminal(parsed.data);
       if (enriched === parsed.data) {
@@ -165,10 +173,16 @@ export function buildTransformStream({ provider, sourceFormat, targetFormat, res
 export async function handleStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, responsesClientDialect = "standard-openai", responsesProviderDialect = "standard-openai", userAgent, body, stream, translatedBody, finalBody, responseSchemaValidation, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, pxpipe, reqTag, log, credentials, releasePending }) {
   const isResponsesPassthrough = sourceFormat === FORMATS.OPENAI_RESPONSES && targetFormat === FORMATS.OPENAI_RESPONSES && responsesClientDialect === responsesProviderDialect;
   let lifecycleFinalized = false;
+  const hdrAt = Date.now();
+  let ubyteAt = null;
+  let dbyteAt = null;
+  const onUpstreamFirstByte = () => { if (!ubyteAt) ubyteAt = Date.now(); };
+  const onDownstreamFirstByte = () => { if (!dbyteAt) dbyteAt = Date.now(); };
+
   const completeLifecycle = (content, usage, ttftAt, outcome) => {
     if (lifecycleFinalized) return;
     lifecycleFinalized = true;
-    onStreamComplete?.(content, usage, ttftAt, outcome);
+    onStreamComplete?.(content, usage, ttftAt, outcome, { hdrAt, ubyteAt, dbyteAt });
     if (outcome?.successful === false) return;
     Promise.resolve(onRequestSuccess?.()).catch(err => {
       console.error("[ChatCore] onRequestSuccess failed:", err?.message || err);
@@ -207,10 +221,13 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
       console.error("[ChatCore] onRequestSuccess failed:", err?.message || err);
     });
   }
+  const wrappedOnStreamComplete = (content, usage, ttftAt, outcome) => {
+    onStreamComplete?.(content, usage, ttftAt, outcome, { hdrAt, ubyteAt, dbyteAt });
+  };
   const transformStream = buildTransformStream({
     provider, sourceFormat, targetFormat, responsesClientDialect, responsesProviderDialect, userAgent, reqLogger, toolNameMap, customToolNames,
     model, connectionId, body,
-    onStreamComplete: isResponsesPassthrough ? completeLifecycle : onStreamComplete,
+    onStreamComplete: isResponsesPassthrough ? completeLifecycle : wrappedOnStreamComplete,
     apiKey, credentials, responseSchemaValidation, releasePending,
   });
 
@@ -225,7 +242,14 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
     }
     : (message) => buildStreamErrorBytes(HTTP_STATUS.GATEWAY_TIMEOUT, message, sourceFormat);
   const stallTimeoutMs = PROVIDERS[provider]?.stallTimeoutMs || STREAM_STALL_TIMEOUT_MS;
-  const transformedBody = pipeWithDisconnect(providerResponse, transformStream, streamController, onAbortTerminal, stallTimeoutMs);
+  const transformedBody = pipeWithDisconnect(
+    providerResponse,
+    transformStream,
+    streamController,
+    onAbortTerminal,
+    stallTimeoutMs,
+    { onUpstreamFirstByte, onDownstreamFirstByte }
+  );
 
   saveRequestDetail(buildRequestDetail({
     provider, model, connectionId,
@@ -255,9 +279,13 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
 export function buildOnStreamComplete({ provider, model, connectionId, apiKey, requestStartTime, body, stream, finalBody, translatedBody, clientRawRequest, pxpipe, reqTag, log, releasePending }) {
   const streamDetailId = `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
 
-  const onStreamComplete = (contentObj, usage, ttftAt, outcome = { status: "completed", successful: true }) => {
+  const onStreamComplete = (contentObj, usage, ttftAt, outcome = { status: "completed", successful: true }, metrics = {}) => {
     const latency = {
-      ttft: ttftAt ? ttftAt - requestStartTime : Date.now() - requestStartTime,
+      ttft: ttftAt ? ttftAt - requestStartTime : null,
+      ftext: ttftAt ? ttftAt - requestStartTime : null,
+      hdr: metrics?.hdrAt ? metrics.hdrAt - requestStartTime : null,
+      ubyte: metrics?.ubyteAt ? metrics.ubyteAt - requestStartTime : null,
+      dbyte: metrics?.dbyteAt ? metrics.dbyteAt - requestStartTime : null,
       total: Date.now() - requestStartTime
     };
     const safeContent = contentObj?.content || "[Empty streaming response]";
