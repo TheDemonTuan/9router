@@ -4,94 +4,472 @@ set -euo pipefail
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
-
-mkdir -p "$tmp/bin" "$tmp/traefik"
-cp "$repo_root/deploy.sh" "$tmp/deploy.sh"
-chmod +x "$tmp/deploy.sh"
+mkdir -p "$tmp/bin"
 
 cat > "$tmp/bin/docker" <<'DOCKER'
 #!/usr/bin/env bash
 set -euo pipefail
-log_file="${DOCKER_LOG:?}"
-printf '%s\n' "$*" >> "$log_file"
-
+printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
+slot_file="$FAKE_STATE/${2:-}"
 case "${1:-}" in
-  network)
-    exit 0
+  container)
+    if [[ "${2:-}" == ls ]]; then
+      [[ "${FAKE_INVENTORY_ERROR:-}" != 1 ]] || exit 1
+      name="${5#name=^/}"
+      name="${name%\$}"
+      [[ ! -f "$FAKE_STATE/$name" ]] || printf '%s\n' "$name"
+    elif [[ "${2:-}" == inspect ]]; then
+      [[ "${FAKE_INSPECT_ERROR:-}" != "${3:-}" ]] || exit 1
+      [[ -f "$FAKE_STATE/${3:-}" ]] || exit 1
+      printf '%s\n' "fake-container-id"
+    else
+      exit 1
+    fi
     ;;
   inspect)
-    exit 1
-    ;;
-  exec)
-    case "${2:-}" in
-      9router-green)
-        printf '%s\n' '{"ok":true,"active_requests":null,"active_requests_known":false}'
-        ;;
-      9router-blue)
-        printf '%s\n' '{"ok":true,"active_requests":0,"active_requests_known":true}'
+    if [[ "${2:-}" == edge-traefik ]]; then
+      case "${4:-}" in
+        '{{.State.Running}}') printf '%s\n' "${FAKE_TRAEFIK_RUNNING:-true}" ;;
+        '{{json .Mounts}}')
+          printf '[{"Type":"%s","Destination":"/etc/traefik/dynamic","Source":"%s","RW":false}' "${FAKE_MOUNT_TYPE:-bind}" "$FAKE_MOUNT_SOURCE"
+          if [[ "${FAKE_NESTED:-}" == 1 ]]; then printf ',{"Type":"bind","Destination":"/etc/traefik/dynamic/9router.yml","Source":"%s","RW":true}' "$FAKE_MOUNT_SOURCE"; fi
+          printf ']\n'
+          ;;
+        *) exit 1 ;;
+      esac
+      exit 0
+    fi
+    [[ -f "$slot_file" ]] || exit 1
+    IFS='|' read -r state image hostname < "$slot_file"
+    case "${4:-}" in
+      '{{.State.Status}}') printf '%s\n' "$state" ;;
+      '{{.Config.Hostname}}') printf '%s\n' "$hostname" ;;
+      '{{.Image}}') printf '%s\n' "$image" ;;
+      '{{json .NetworkSettings.Networks}}')
+        if [[ "${FAKE_DETACH_SLOT:-}" == "${2:-}" ]]; then printf '{}\n'; else printf '{"%s":{}}\n' "${EDGE_NETWORK:-edge-9router}"; fi
         ;;
     esac
     ;;
-  image)
-    exit 0
+  network)
+    [[ "${FAKE_NETWORK:-}" != missing ]] || exit 1
+    if [[ "${FAKE_NETWORK:-}" != detached ]]; then printf 'edge-traefik\n'; fi
+    for file in "$FAKE_STATE"/9router-*; do
+      [[ -f "$file" ]] || continue
+      IFS='|' read -r state image hostname < "$file"
+      if [[ "$state" == running && "${FAKE_DETACH_SLOT:-}" != "${file##*/}" ]]; then printf '%s\n' "${file##*/}"; fi
+    done
     ;;
   compose)
-    exit 0
+    [[ "${2:-}" == version ]] && exit 0
+    if [[ "$*" == *' up '* ]]; then
+      name="${!#}"
+      if [[ "$name" == 9router-* ]]; then
+        printf 'running|sha256:%s-new|fake-%s\n' "${name#9router-}" "${name#9router-}" > "$FAKE_STATE/$name"
+      fi
+    elif [[ "$*" == *' stop '* ]]; then
+      name="${!#}"
+      IFS='|' read -r state image hostname < "$FAKE_STATE/$name"
+      printf 'exited|%s|%s\n' "$image" "$hostname" > "$FAKE_STATE/$name"
+    fi
     ;;
-  logs)
-    exit 0
+  image) exit 0 ;;
+  start)
+    name="$2"
+    IFS='|' read -r state image hostname < "$FAKE_STATE/$name"
+    printf 'running|%s|%s\n' "$image" "$hostname" > "$FAKE_STATE/$name"
     ;;
+  exec)
+    name="$2"
+    IFS='|' read -r state image hostname < "$FAKE_STATE/$name"
+    [[ "$state" == running ]] || exit 1
+    slot="${name#9router-}"
+    if [[ "${FAKE_BAD_HEALTH_SLOT:-}" == "$slot" ]]; then printf '{invalid'; exit 0; fi
+    reported="$slot"
+    if [[ "${FAKE_WRONG_SLOT:-}" == "$slot" ]]; then
+      if [[ "$slot" == blue ]]; then reported=green; else reported=blue; fi
+    fi
+    count=0 known=true
+    if [[ "${FAKE_UNKNOWN_DRAIN_SLOT:-}" == "$slot" ]]; then count=null; known=false; fi
+    if [[ "${FAKE_BUSY_SLOT:-}" == "$slot" ]]; then count=1; fi
+    printf '{"ok":true,"deployment_slot":"%s","instance_id":"%s-123","active_requests":%s,"active_requests_known":%s}\n' "$reported" "$hostname" "$count" "$known"
+    ;;
+  logs) exit 0 ;;
+  *) exit 1 ;;
 esac
 DOCKER
-chmod +x "$tmp/bin/docker"
 
-export PATH="$tmp/bin:$PATH"
-export DOCKER_LOG="$tmp/docker.log"
-export COMPOSE_FILE="$tmp/compose.yml"
-export TRAEFIK_DYNAMIC_DIR="$tmp/traefik"
-export READY_TIMEOUT=2
-export DRAIN_TIMEOUT=1
-export DRAIN_POLL_SECONDS=1
-
-printf 'green' > "$tmp/.active-slot"
-printf 'blue' > "$tmp/.previous-slot"
-printf 'old-image' > "$tmp/.deployed-image"
-
-before_state="$(cat "$tmp/.active-slot")|$(cat "$tmp/.previous-slot")|$(cat "$tmp/.deployed-image")"
-(
-  cd "$tmp"
-  ./deploy.sh --reconcile
-)
-
-test "$(cat "$tmp/.active-slot")|$(cat "$tmp/.previous-slot")|$(cat "$tmp/.deployed-image")" = "$before_state"
-grep -q 'http://9router-green:20128' "$tmp/traefik/9router.yml"
-! grep -q 'http://9router-blue:20128' "$tmp/traefik/9router.yml"
-grep -q -- 'compose -f ' "$tmp/docker.log"
-grep -q -- '9router-green' "$tmp/docker.log"
-
-if (cd "$tmp" && ./deploy.sh new-image) >"$tmp/deploy.log" 2>&1; then
-  echo 'expected unknown drain to fail closed' >&2
+cat > "$tmp/bin/curl" <<'CURL'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$*" == *'--silent --show-error --connect-timeout 2'* ]]
+[[ "$*" == *'Cache-Control: no-cache'* && "$*" == *'Pragma: no-cache'* ]]
+[[ "$*" == *"https://${API_HOST}/api/health?deploy_probe="* ]]
+[[ " $* " != *' -L '* && " $* " != *' -k '* ]]
+header="" body="" max_time=""
+while (( $# )); do
+  case "$1" in
+    --dump-header) header="$2"; shift 2 ;;
+    --output) body="$2"; shift 2 ;;
+    --max-time) max_time="$2"; shift 2 ;;
+    --connect-timeout|--write-out|-H) shift 2 ;;
+    *) shift ;;
+  esac
+done
+[[ "$max_time" =~ ^[1-5]$ ]]
+counter=0
+[[ ! -f "$FAKE_CURL_COUNTER" ]] || counter="$(cat "$FAKE_CURL_COUNTER")"
+counter=$((counter + 1))
+printf '%s' "$counter" > "$FAKE_CURL_COUNTER"
+if [[ -n "${FAKE_HOLD_MARKER:-}" && ! -e "$FAKE_HOLD_MARKER" ]]; then
+  : > "$FAKE_HOLD_MARKER"
+  for ((hold=0; hold<100; hold++)); do
+    [[ ! -e "$FAKE_HOLD_RELEASE" ]] || break
+    sleep 0.1
+  done
+  [[ -e "$FAKE_HOLD_RELEASE" ]] || exit 1
+fi
+mode="${FAKE_CURL_MODE:-}"
+if [[ -n "${FAKE_CURL_SEQUENCE:-}" ]]; then mode="$(sed -n "${counter}p" "$FAKE_CURL_SEQUENCE")"; fi
+if [[ -z "$mode" ]]; then
+  mode="$(cat "$FAKE_LOADED_SLOT")"
+  disk=none
+  if [[ -f "$FAKE_ROUTE_FILE" ]]; then
+    disk="$(sed -n 's/^[[:space:]]*- url: "http:\/\/9router-\(blue\|green\):20128".*/\1/p' "$FAKE_ROUTE_FILE")"
+  fi
+  if [[ "$mode" != "$disk" && "$counter" -ge "${FAKE_RELOAD_AFTER:-0}" ]]; then
+    mode="$disk"
+    printf '%s' "$mode" > "$FAKE_LOADED_SLOT"
+  fi
+fi
+case "$mode" in
+  blue|green) status=200; payload="{\"ok\":true,\"deployment_slot\":\"$mode\"}" ;;
+  none) status=404; payload='not found' ;;
+  duplicate) status=200; payload='{"ok":true,"deployment_slot":"green","deployment_slot":"blue"}' ;;
+  cached|cf-hit) status=200; payload='{"ok":true,"deployment_slot":"green"}' ;;
+  *) status=403; payload='denied' ;;
+esac
+printf 'HTTP/2 %s\r\n' "$status" > "$header"
+[[ "$mode" != cached ]] || printf 'Age: 2\r\n' >> "$header"
+[[ "$mode" != cf-hit ]] || printf 'CF-Cache-Status: HIT\r\n' >> "$header"
+printf '\r\n' >> "$header"
+printf '%s' "$payload" > "$body"
+printf '%s' "$status"
+CURL
+cat > "$tmp/bin/mv" <<'MV'
+#!/usr/bin/env bash
+set -euo pipefail
+dest="${!#}"
+source="${@: -2:1}"
+if [[ "${FAKE_FAIL_METADATA:-}" == 1 && "$dest" == "$FAKE_CASE_DIR/.deployed-image" ]]; then
   exit 1
 fi
-
-grep -q 'active_requests=unknown, known=false' "$tmp/deploy.log"
-grep -q 'Deployment left old slot running after drain timeout' "$tmp/deploy.log"
-! grep -q 'compose .* stop 9router-green' "$tmp/docker.log"
-grep -q 'http://9router-blue:20128' "$tmp/traefik/9router.yml"
-test "$(cat "$tmp/.active-slot")" = blue
-
-rm -f "$tmp/.active-slot" "$tmp/.deployed-image"
-printf 'stale-slot' > "$tmp/.previous-slot"
-if (cd "$tmp" && ./deploy.sh bootstrap-image) >"$tmp/bootstrap.log" 2>&1; then
-  :
-else
-  echo 'expected bootstrap deployment to succeed without an old slot' >&2
-  exit 1
+/usr/bin/mv "$@"
+if [[ "${FAKE_SIGNAL_AFTER_WRITE:-}" == 1 && "$dest" == "$FAKE_ROUTE_FILE" && "$(cat "$dest")" == *'http://9router-green:20128'* ]]; then
+  kill -TERM "$PPID"
 fi
+MV
+chmod +x "$tmp/bin/docker" "$tmp/bin/curl" "$tmp/bin/mv"
 
-test "$(cat "$tmp/.active-slot")" = blue
-! test -e "$tmp/.previous-slot"
-grep -q 'Initial deployment complete; no previous slot to drain.' "$tmp/bootstrap.log"
-! grep -q 'Stopping idle container' "$tmp/bootstrap.log"
+new_case() {
+  case_dir="$(mktemp -d "$tmp/case.XXXXXXXX")"
+  mkdir -p "$case_dir/dynamic" "$case_dir/state"
+  cp "$repo_root/deploy.sh" "$case_dir/deploy.sh"
+  chmod +x "$case_dir/deploy.sh"
+  export PATH="$tmp/bin:$PATH" API_HOST=9router-api.example.test
+  export TRAEFIK_DYNAMIC_DIR="$case_dir/dynamic" FAKE_MOUNT_SOURCE="$case_dir/dynamic"
+  export FAKE_STATE="$case_dir/state" FAKE_DOCKER_LOG="$case_dir/docker.log" FAKE_CASE_DIR="$case_dir"
+  export FAKE_CURL_COUNTER="$case_dir/curl.count" FAKE_ROUTE_FILE="$case_dir/dynamic/9router.yml" FAKE_LOADED_SLOT="$case_dir/loaded.slot"
+  export READY_TIMEOUT=2 DRAIN_TIMEOUT=1 DRAIN_POLL_SECONDS=1 ROUTE_TIMEOUT=8
+  unset FAKE_CURL_MODE FAKE_CURL_SEQUENCE FAKE_RELOAD_AFTER FAKE_BAD_HEALTH_SLOT FAKE_WRONG_SLOT FAKE_UNKNOWN_DRAIN_SLOT FAKE_BUSY_SLOT FAKE_MOUNT_TYPE FAKE_NETWORK FAKE_DETACH_SLOT FAKE_NESTED FAKE_TRAEFIK_RUNNING FAKE_FAIL_METADATA FAKE_SIGNAL_AFTER_WRITE FAKE_HOLD_MARKER FAKE_HOLD_RELEASE FAKE_INVENTORY_ERROR FAKE_INSPECT_ERROR
+  printf none > "$FAKE_LOADED_SLOT"
+}
+route() {
+  cat > "$case_dir/dynamic/9router.yml" <<YAML
+http:
+  services:
+    9router-service:
+      loadBalancer:
+        servers:
+          - url: "http://9router-$1:20128"
+YAML
+}
+seed() {
+  route "$1"
+  printf '%s' "$1" > "$FAKE_LOADED_SLOT"
+  printf 'running|sha256:%s-old|fake-%s\n' "$1" "$1" > "$FAKE_STATE/9router-$1"
+  printf '%s' "$1" > "$case_dir/.active-slot"
+  printf 'sha256:%s-old' "$1" > "$case_dir/.deployed-image"
+}
+run() { (cd "$case_dir" && ./deploy.sh "$@"); }
+fail() {
+  if output="$(run "$@" 2>&1)"; then
+    printf 'unexpected success: %s\n' "$*" >&2
+    exit 1
+  fi
+}
+slot_on_disk() {
+  sed -n 's/^[[:space:]]*- url: "http:\/\/9router-\(blue\|green\):20128".*/\1/p' "$FAKE_ROUTE_FILE"
+}
+assert_route() {
+  [[ "$(slot_on_disk)" == "$1" ]]
+  [[ "$(cat "$case_dir/.active-slot")" == "$2" ]]
+}
 
-echo 'deploy reconcile, bootstrap, and unknown-drain safety passed'
+# Preflight rejects ambiguous grammar, duplicate dynamic configs, mount/network failures, FIFO.
+new_case; seed blue
+run --preflight
+printf '          - url: "http://9router-blue:20128"\n' >> "$case_dir/dynamic/9router.yml"
+fail --preflight
+route blue
+printf '# 9router-service\n' > "$case_dir/dynamic/other.yml"
+fail --preflight
+rm "$case_dir/dynamic/other.yml"
+mkfifo "$case_dir/dynamic/other.yml"
+fail --preflight
+rm "$case_dir/dynamic/other.yml"
+FAKE_MOUNT_TYPE=volume fail --preflight
+FAKE_NETWORK=detached fail --preflight
+TRAEFIK_CONFIG_NAME='../bad.yml' fail --preflight
+TRAEFIK_DYNAMIC_DIR="$case_dir/elsewhere" fail --preflight
+
+# Configured YAML wins over stale metadata; active container never recreated.
+new_case; seed green
+printf blue > "$case_dir/.active-slot"
+run --reconcile
+assert_route green green
+[[ "$(cat "$case_dir/.deployed-image")" == sha256:green-old ]]
+[[ "$(cat "$FAKE_DOCKER_LOG")" != *'up -d --no-deps'* ]]
+
+# Public ACK is independent of disk; failed cutover restores exact original bytes.
+new_case; seed blue
+cp "$case_dir/dynamic/9router.yml" "$case_dir/original"
+export FAKE_RELOAD_AFTER=999
+fail image-new
+assert_route blue blue
+cmp -s "$case_dir/original" "$case_dir/dynamic/9router.yml"
+[[ "$(cat "$FAKE_STATE/9router-blue")" == running* ]]
+[[ "$(cat "$FAKE_STATE/9router-green")" == running* ]]
+
+# Delayed reload, two consecutive ACKs; metadata follows ACK, then idle old stops.
+new_case; seed blue
+export FAKE_RELOAD_AFTER=7
+run --release image-new
+assert_route green green
+[[ "$(cat "$case_dir/.deployed-image")" == sha256:green-new ]]
+[[ "$(cat "$FAKE_STATE/9router-blue")" == exited* ]]
+[[ "$(cat "$FAKE_CURL_COUNTER")" -ge 8 ]]
+
+# Five-second delayed reload still needs two matching public observations.
+new_case; seed blue
+export FAKE_RELOAD_AFTER=8
+run image-new
+assert_route green green
+[[ "$(cat "$FAKE_CURL_COUNTER")" -ge 9 ]]
+
+# A mismatch between ACKs resets the streak; only CLI reconcile exercises it.
+new_case; seed blue
+printf '%s\n' blue green blue blue > "$case_dir/probe-sequence"
+export FAKE_CURL_SEQUENCE="$case_dir/probe-sequence"
+run --reconcile
+assert_route blue blue
+[[ "$(cat "$FAKE_CURL_COUNTER")" == 4 ]]
+
+# Reconcile after crash between YAML write and metadata: never restores stale mirror.
+new_case; seed blue
+route green
+printf green > "$FAKE_LOADED_SLOT"
+printf 'running|sha256:green-new|fake-green\n' > "$FAKE_STATE/9router-green"
+run --reconcile
+assert_route green green
+[[ "$(cat "$case_dir/.deployed-image")" == sha256:green-new ]]
+
+# Rollback rescues unhealthy current using stopped existing target, not compose recreate.
+new_case; seed blue
+printf 'exited|sha256:green-old|fake-green\n' > "$FAKE_STATE/9router-green"
+printf green > "$case_dir/.previous-slot"
+printf 'exited|sha256:blue-old|fake-blue\n' > "$FAKE_STATE/9router-blue"
+printf '%s\n' green green green > "$case_dir/probe-sequence"
+export FAKE_CURL_SEQUENCE="$case_dir/probe-sequence"
+export FAKE_BAD_HEALTH_SLOT=blue
+run --rollback
+assert_route green green
+[[ "$(cat "$case_dir/.deployed-image")" == sha256:green-old ]]
+[[ "$(cat "$FAKE_DOCKER_LOG")" == *'start 9router-green'* ]]
+[[ "$(cat "$FAKE_DOCKER_LOG")" != *'up -d --no-deps'* ]]
+
+# Unknown drain fails closed after ACK; both slots stay running, mirror tracks route.
+new_case; seed blue
+export FAKE_UNKNOWN_DRAIN_SLOT=blue
+fail image-new
+assert_route green green
+[[ "$(cat "$FAKE_STATE/9router-blue")" == running* ]]
+
+# A running broken old slot is never stopped when drain count is unknown.
+new_case; seed blue
+printf 'exited|sha256:green-old|fake-green\n' > "$FAKE_STATE/9router-green"
+printf green > "$case_dir/.previous-slot"
+export FAKE_UNKNOWN_DRAIN_SLOT=blue
+fail --rollback
+assert_route green green
+[[ "$(cat "$FAKE_STATE/9router-blue")" == running* ]]
+[[ "$(cat "$FAKE_STATE/9router-green")" == running* ]]
+
+# Bootstrap requires public 404; failed target ACK removes only generated route.
+new_case
+FAKE_CURL_MODE=denied fail --preflight
+unset FAKE_CURL_MODE
+export FAKE_RELOAD_AFTER=999
+fail image-new
+[[ ! -e "$case_dir/dynamic/9router.yml" ]]
+[[ "$(cat "$FAKE_STATE/9router-blue")" == running* ]]
+[[ ! -e "$case_dir/.active-slot" ]]
+
+# Missing YAML with surviving container is never guessed from mirrors.
+new_case
+printf 'running|sha256:blue-old|fake-blue\n' > "$FAKE_STATE/9router-blue"
+fail --reconcile
+[[ ! -e "$case_dir/dynamic/9router.yml" ]]
+
+# Docker inventory/inspection errors never prove an empty bootstrap.
+new_case
+FAKE_INVENTORY_ERROR=1 fail --preflight
+printf 'running|sha256:blue-old|fake-blue\n' > "$FAKE_STATE/9router-blue"
+FAKE_INSPECT_ERROR=9router-blue fail --preflight
+rm "$FAKE_STATE/9router-blue"
+ln -s "$case_dir/missing-slot" "$case_dir/.active-slot"
+fail --preflight
+rm "$case_dir/.active-slot"
+
+# Strict status reports mismatch without modifying route or mirror.
+new_case; seed blue
+printf green > "$FAKE_LOADED_SLOT"
+export FAKE_RELOAD_AFTER=999
+fail --status --strict
+status="$(run --status)"
+[[ "$status" == *'Route state: MISMATCH'* ]]
+assert_route blue blue
+
+# An exited idle slot remains configured on the external network; no live endpoint is required.
+new_case; seed blue
+printf 'exited|sha256:green-old|fake-green\n' > "$FAKE_STATE/9router-green"
+[[ "$(run --status --strict)" == *'Route state: HEALTHY'* ]]
+run --preflight
+
+# Parser rejects absent and conflicting backends; platform checks reject hidden mounts.
+new_case; seed blue
+cat > "$FAKE_ROUTE_FILE" <<'YAML'
+http:
+  services:
+    9router-service:
+      loadBalancer:
+        servers:
+YAML
+fail --preflight
+route blue
+printf '          - url: "http://9router-green:20128"\n' >> "$FAKE_ROUTE_FILE"
+fail --preflight
+route blue
+FAKE_NESTED=1 fail --preflight
+printf file > "$case_dir/not-directory"
+FAKE_MOUNT_SOURCE="$case_dir/not-directory" fail --preflight
+
+# Invalid direct health identity and public cache/JSON responses block recreation.
+new_case; seed blue
+export FAKE_WRONG_SLOT=blue
+fail image-new
+assert_route blue blue
+[[ ! -e "$FAKE_STATE/9router-green" ]]
+new_case; seed blue
+export FAKE_BAD_HEALTH_SLOT=blue
+fail image-new
+assert_route blue blue
+new_case; seed blue
+for mode in cached cf-hit duplicate denied; do
+  FAKE_CURL_MODE="$mode" fail image-new
+  assert_route blue blue
+  [[ ! -e "$FAKE_STATE/9router-green" ]]
+done
+
+# Running target with active requests cannot be recreated during next deploy.
+new_case; seed blue
+printf 'running|sha256:green-old|fake-green\n' > "$FAKE_STATE/9router-green"
+export FAKE_BUSY_SLOT=green
+fail image-new
+assert_route blue blue
+[[ "$(cat "$FAKE_STATE/9router-green")" == 'running|sha256:green-old|fake-green' ]]
+
+# Bootstrap ACK succeeds only after 404 and removes stale previous metadata.
+new_case
+printf stale > "$case_dir/.previous-slot"
+run image-new
+assert_route blue blue
+[[ ! -e "$case_dir/.previous-slot" ]]
+[[ "$(cat "$case_dir/.deployed-image")" == sha256:blue-new ]]
+
+# Rollback target ACK failure restores original route; both containers survive.
+new_case; seed blue
+printf 'exited|sha256:green-old|fake-green\n' > "$FAKE_STATE/9router-green"
+printf green > "$case_dir/.previous-slot"
+export FAKE_RELOAD_AFTER=999
+fail --rollback
+assert_route blue blue
+[[ "$(cat "$FAKE_STATE/9router-green")" == running* ]]
+
+# Metadata failure after target ACK never rolls route back or drains old slot.
+new_case; seed blue
+export FAKE_FAIL_METADATA=1
+fail image-new
+assert_route green blue
+[[ "$(cat "$FAKE_STATE/9router-blue")" == running* ]]
+[[ "$(cat "$case_dir/.deployed-image")" == sha256:blue-old ]]
+unset FAKE_FAIL_METADATA
+run --reconcile
+assert_route green green
+[[ "$(cat "$case_dir/.deployed-image")" == sha256:green-new ]]
+
+# SIGTERM after YAML rename triggers byte-for-byte restoration, no metadata writes.
+new_case; seed blue
+cp "$FAKE_ROUTE_FILE" "$case_dir/original"
+export FAKE_SIGNAL_AFTER_WRITE=1
+fail image-new
+cmp -s "$case_dir/original" "$FAKE_ROUTE_FILE"
+assert_route blue blue
+[[ "$(cat "$FAKE_STATE/9router-blue")" == running* ]]
+
+# A failed restore ACK remains an error and retains snapshot for manual recovery.
+new_case; seed blue
+printf '%s\n' blue blue denied denied denied denied denied denied denied denied denied denied denied denied denied denied denied denied denied denied > "$case_dir/probe-sequence"
+export FAKE_CURL_SEQUENCE="$case_dir/probe-sequence"
+fail image-new
+assert_route blue blue
+snapshots=("$case_dir"/dynamic/.9router-snapshot.*)
+[[ -f "${snapshots[0]}" ]]
+
+# Nonblocking lock covers the complete reconcile path.
+new_case; seed blue
+export FAKE_HOLD_MARKER="$case_dir/entered" FAKE_HOLD_RELEASE="$case_dir/release"
+run --reconcile > "$case_dir/first.log" 2>&1 & first=$!
+for ((attempt=0; attempt<50; attempt++)); do
+  [[ ! -e "$FAKE_HOLD_MARKER" ]] || break
+  sleep 0.1
+done
+[[ -e "$FAKE_HOLD_MARKER" ]]
+fail --reconcile
+[[ "$output" == *'.deployment.lock'* ]]
+: > "$FAKE_HOLD_RELEASE"
+wait "$first"
+
+# Strict status reports unknown/cache/network mismatches without repair.
+new_case; seed blue
+for mode in cached duplicate; do
+  FAKE_CURL_MODE="$mode" fail --status --strict
+  assert_route blue blue
+done
+FAKE_NETWORK=detached fail --status --strict
+assert_route blue blue
+FAKE_WRONG_SLOT=blue fail --status --strict
+API_HOST='https://invalid.example.test/path' fail --preflight
+DASHBOARD_ALIAS_HOST='bad/alias' fail --preflight
+assert_route blue blue
+
+printf 'CLI preflight, ACK, rollback, reconcile, bootstrap and drain scenarios passed\n'

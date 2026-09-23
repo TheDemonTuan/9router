@@ -26,25 +26,8 @@ DASHBOARD_ALIAS_HOST="${DASHBOARD_ALIAS_HOST:-}"
 API_HOST="${API_HOST:-9router-api.tuannguyenviet.site}"
 EDGE_NETWORK="${EDGE_NETWORK:-edge-9router}"
 READY_TIMEOUT="${READY_TIMEOUT:-60}"
-TRAEFIK_CONFIG_NAME="${TRAEFIK_CONFIG_NAME:-9router.yml}"
+TRAEFIK_CONFIG_NAME="${TRAEFIK_CONFIG_NAME-9router.yml}"
 
-# Auto-detect Traefik dynamic configuration directory
-if [[ -z "${TRAEFIK_DYNAMIC_DIR:-}" ]]; then
-  if docker inspect edge-traefik >/dev/null 2>&1; then
-    _detected="$(docker inspect edge-traefik --format '{{range .Mounts}}{{if eq .Destination "/etc/traefik/dynamic"}}{{.Source}}{{end}}{{end}}' 2>/dev/null || true)"
-    if [[ -n "$_detected" && -d "$_detected" ]]; then
-      TRAEFIK_DYNAMIC_DIR="$_detected"
-    fi
-  fi
-  if [[ -z "${TRAEFIK_DYNAMIC_DIR:-}" ]]; then
-    if [[ -d "/opt/platform/edge/dynamic" ]]; then
-      TRAEFIK_DYNAMIC_DIR="/opt/platform/edge/dynamic"
-    elif [[ -d "/opt/edge/dynamic" ]]; then
-      TRAEFIK_DYNAMIC_DIR="/opt/edge/dynamic"
-    fi
-  fi
-fi
-TRAEFIK_DYNAMIC_DIR="${TRAEFIK_DYNAMIC_DIR:-/opt/platform/edge/dynamic}"
 
 log() { printf '[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 die() { log "ERROR: $*" >&2; exit 1; }
@@ -67,23 +50,324 @@ if [[ -n "$CHATGPT_WEB_COMPOSE_FILE" ]]; then
 fi
 compose() { docker compose "${COMPOSE_ARGS[@]}" "$@"; }
 
-ensure_network() {
-  if ! docker network inspect "$EDGE_NETWORK" >/dev/null 2>&1; then
-    log "Creating edge network: $EDGE_NETWORK"
-    docker network create "$EDGE_NETWORK"
+
+validate_traefik_config_name() {
+  [[ "$TRAEFIK_CONFIG_NAME" =~ ^[A-Za-z0-9_-][A-Za-z0-9_.-]*\.(yml|yaml)$ && "$TRAEFIK_CONFIG_NAME" != *..* ]] ||
+    die "Invalid TRAEFIK_CONFIG_NAME (expected a .yml/.yaml basename): $TRAEFIK_CONFIG_NAME"
+}
+
+validate_hosts() {
+  python3 - "$API_HOST" "$DASHBOARD_HOST" "$DASHBOARD_ALIAS_HOST" <<'PY'
+import ipaddress
+import re
+import sys
+
+for name, host in zip(("API_HOST", "DASHBOARD_HOST", "DASHBOARD_ALIAS_HOST"), sys.argv[1:]):
+    if name == "DASHBOARD_ALIAS_HOST" and not host:
+        continue
+    labels = host.split(".")
+    if len(host) > 253 or not all(0 < len(label) <= 63 and
+            re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?", label) for label in labels):
+        sys.exit(f"Invalid DNS hostname in {name}")
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        sys.exit(f"Invalid DNS hostname in {name}")
+PY
+}
+
+resolve_traefik_dynamic_dir() {
+  local mounts resolved
+  [[ "$(docker inspect edge-traefik --format '{{.State.Running}}' 2>/dev/null)" == true ]] || die "edge-traefik is missing or stopped"
+  mounts="$(docker inspect edge-traefik --format '{{json .Mounts}}')" || die "Cannot inspect edge-traefik mounts"
+  resolved="$(python3 - "$mounts" <<'PY'
+import json
+import os
+import sys
+
+mounts = json.loads(sys.argv[1])
+target = "/etc/traefik/dynamic"
+matches = [mount for mount in mounts if mount.get("Destination") == target]
+if len(matches) != 1 or matches[0].get("Type") != "bind":
+    sys.exit("edge-traefik requires exactly one directory bind at " + target)
+if any(mount.get("Destination", "").startswith(target + "/") for mount in mounts):
+    sys.exit("edge-traefik has a nested mount hiding the generated route")
+mount = matches[0]
+source = mount.get("Source", "")
+if (os.path.islink(source) or not os.path.isdir(source)
+        or not os.stat(source).st_mode & 0o444 or not os.stat(source).st_mode & 0o222
+        or not os.access(source, os.R_OK | os.W_OK)):
+    sys.exit("edge-traefik dynamic bind source must be a readable, writable directory: " + source)
+print(os.path.realpath(source))
+PY
+  )" || die "Cannot resolve Traefik dynamic directory"
+  if [[ -n "${TRAEFIK_DYNAMIC_DIR:-}" ]]; then
+    [[ -d "$TRAEFIK_DYNAMIC_DIR" && "$(realpath -- "$TRAEFIK_DYNAMIC_DIR")" == "$resolved" ]] ||
+      die "TRAEFIK_DYNAMIC_DIR differs from edge-traefik bind source: $TRAEFIK_DYNAMIC_DIR"
   fi
-  for proxy_container in edge-traefik traefik; do
-    if docker inspect "$proxy_container" >/dev/null 2>&1; then
-      docker network connect "$EDGE_NETWORK" "$proxy_container" 2>/dev/null || true
-    fi
+  TRAEFIK_DYNAMIC_DIR="$resolved"
+}
+
+container_inventory() {
+  local name="$1" found identity
+  found="$(docker container ls -a --filter "name=^/$name$" --format '{{.Names}}')" || die "Cannot enumerate containers for $name"
+  if [[ -z "$found" ]]; then
+    printf 'absent\n'
+    return 0
+  fi
+  [[ "$found" == "$name" ]] || die "Ambiguous container inventory for $name"
+  identity="$(docker container inspect "$name" --format '{{.Id}}')" || die "Cannot inspect existing container $name"
+  [[ -n "$identity" ]] || die "Empty container identity for $name"
+  printf 'present\n'
+}
+
+verify_container_network() {
+  local name="$1" attached="$2" state networks
+  state="$(docker inspect "$name" --format '{{.State.Status}}')" || die "Cannot inspect $name state"
+  networks="$(docker inspect "$name" --format '{{json .NetworkSettings.Networks}}')" || die "Cannot inspect $name networks"
+  python3 - "$EDGE_NETWORK" "$networks" <<'PY' || die "$name is not configured on $EDGE_NETWORK"
+import json
+import sys
+
+networks = json.loads(sys.argv[2])
+if not isinstance(networks, dict) or sys.argv[1] not in networks:
+    sys.exit(1)
+PY
+  if [[ "$state" == running ]]; then
+    [[ $'\n'"$attached"$'\n' == *$'\n'"$name"$'\n'* ]] || die "$name is not attached to $EDGE_NETWORK"
+  fi
+}
+
+preflight() {
+  [[ "$(uname -s)" == Linux ]] || die "Deploy requires Linux Bash and coreutils"
+  local executable
+  for executable in bash python3 curl flock realpath stat timeout docker; do
+    command -v "$executable" >/dev/null 2>&1 || die "Missing required executable: $executable"
   done
+  docker compose version >/dev/null 2>&1 || die "Docker Compose is unavailable"
+  [[ "${ROUTE_TIMEOUT:-30}" =~ ^[0-9]+$ ]] && (( 10#${ROUTE_TIMEOUT:-30} >= 2 )) || die "ROUTE_TIMEOUT must be an integer >= 2"
+  validate_hosts || die "Invalid deployment hostname"
+  validate_traefik_config_name
+  resolve_traefik_dynamic_dir
+  local attached
+  attached="$(docker network inspect "$EDGE_NETWORK" --format '{{range .Containers}}{{println .Name}}{{end}}')" ||
+    die "Missing edge network: $EDGE_NETWORK"
+  [[ $'\n'"$attached"$'\n' == *$'\nedge-traefik\n'* ]] || die "edge-traefik is not attached to $EDGE_NETWORK"
+  BLUE_PRESENT="$(container_inventory 9router-blue)" || die "Cannot establish blue container inventory"
+  GREEN_PRESENT="$(container_inventory 9router-green)" || die "Cannot establish green container inventory"
+  if [[ "$BLUE_PRESENT" == present ]]; then verify_container_network 9router-blue "$attached"; fi
+  if [[ "$GREEN_PRESENT" == present ]]; then verify_container_network 9router-green "$attached"; fi
+  local route="$TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME"
+  local slot
+  slot="$(read_active_route_slot "$route")" || die "Unsupported generated route: $route"
+  if [[ -z "$slot" ]] && { [[ -e "$ACTIVE_SLOT_FILE" || -L "$ACTIVE_SLOT_FILE" || -e "$DEPLOYED_IMAGE_FILE" || -L "$DEPLOYED_IMAGE_FILE" ]] ||
+       [[ "$BLUE_PRESENT" == present || "$GREEN_PRESENT" == present ]]; }; then
+    die "Missing generated route $route; restore a verified backup before deployment"
+  fi
+  if [[ -z "$slot" && "${1:-}" != status ]]; then
+    [[ "$(probe_observed_slot 1 5 bootstrap)" == none ]] || die "Bootstrap requires public HTTP 404 without health identity"
+  fi
+  printf '%s\n' "$TRAEFIK_DYNAMIC_DIR"
+}
+
+probe_observed_slot() {
+  local attempt="${1:-1}" max_time="${2:-5}" mode="${3:-route}"
+  local temp_root=/tmp tmp status observed request_id
+  if [[ "${TRAEFIK_DYNAMIC_DIR:-}" == / ]]; then return 1; fi
+  if [[ "${TRAEFIK_DYNAMIC_DIR:-}" == /tmp ]]; then temp_root=/var/tmp; fi
+  tmp="$(mktemp -d -p "$temp_root" 9router-probe.XXXXXXXX)" || return 1
+  request_id="$(python3 -c 'import uuid; print(uuid.uuid4())')" || { rm -rf -- "$tmp"; return 1; }
+  if ! status="$(curl --silent --show-error --connect-timeout 2 --max-time "$max_time" \
+      -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
+      --dump-header "$tmp/headers" --output "$tmp/body" --write-out '%{http_code}' \
+      "https://${API_HOST}/api/health?deploy_probe=${request_id}-${attempt}")"; then
+    rm -rf -- "$tmp"
+    return 1
+  fi
+  if observed="$(python3 - "$status" "$tmp/headers" "$tmp/body" "$mode" <<'PY'
+import json
+import sys
+
+status, header_path, body_path, mode = sys.argv[1:]
+
+def fail(reason):
+    sys.exit("public route probe: " + reason)
+
+headers = {}
+try:
+    with open(header_path, encoding="iso-8859-1") as source:
+        for line in source:
+            if line.startswith("HTTP/"):
+                headers.clear()
+            elif ":" in line:
+                name, value = line.split(":", 1)
+                headers.setdefault(name.strip().lower(), []).append(value.strip())
+    for age in headers.get("age", []):
+        if not age.isdecimal() or int(age) > 0:
+            fail("cached response")
+    if any(value.upper() in ("HIT", "STALE", "UPDATING", "REVALIDATED")
+           for value in headers.get("cf-cache-status", [])):
+        fail("cached response")
+
+    def unique_pairs(pairs):
+        result = {}
+        for name, value in pairs:
+            if name in result:
+                raise ValueError("duplicate JSON key")
+            result[name] = value
+        return result
+
+    with open(body_path, encoding="utf-8") as source:
+        body = source.read()
+    try:
+        payload = json.loads(body, object_pairs_hook=unique_pairs)
+    except json.JSONDecodeError:
+        payload = None
+    valid = (isinstance(payload, dict) and payload.get("ok") is True
+             and payload.get("deployment_slot") in ("blue", "green"))
+    if status == "404" and mode == "bootstrap" and not valid:
+        print("none")
+    elif status == "200" and valid:
+        print(payload["deployment_slot"])
+    else:
+        fail("unexpected HTTP status or health identity")
+except (OSError, UnicodeError, ValueError) as error:
+    fail(str(error))
+PY
+  )"; then
+    rm -rf -- "$tmp"
+    printf '%s\n' "$observed"
+  else
+    rm -rf -- "$tmp"
+    return 1
+  fi
+}
+
+wait_route_slot() {
+  local expected="$1" timeout="${ROUTE_TIMEOUT:-30}" deadline attempt=0 streak=0 observed remaining
+  [[ "$timeout" =~ ^[0-9]+$ ]] && (( 10#$timeout >= 2 )) || die "ROUTE_TIMEOUT must be an integer >= 2"
+  deadline=$((SECONDS + 10#$timeout))
+  while (( SECONDS < deadline )); do
+    attempt=$((attempt + 1))
+    remaining=$((deadline - SECONDS))
+    if (( remaining > 5 )); then remaining=5; fi
+    if observed="$(probe_observed_slot "$attempt" "$remaining" "${expected/none/bootstrap}" 2>/dev/null)" && [[ "$observed" == "$expected" ]]; then
+      streak=$((streak + 1))
+      if (( streak == 2 )); then return 0; fi
+    else
+      streak=0
+    fi
+    sleep 1
+  done
+  return 1
+}
+read_active_route_slot() {
+
+  python3 - "$1" "$TRAEFIK_DYNAMIC_DIR" <<'PY'
+import os
+import re
+import stat
+import sys
+
+route, dynamic_dir = sys.argv[1:]
+
+def fail(path, reason):
+    sys.exit(f"{path}: {reason}")
+
+for directory, dirs, files in os.walk(dynamic_dir, onerror=lambda error: fail(error.filename, str(error))):
+    for name in dirs + files:
+        path = os.path.join(directory, name)
+        if os.path.islink(path):
+            fail(path, "symlink in Traefik dynamic directory")
+    for name in files:
+        path = os.path.join(directory, name)
+        if path == route or not name.lower().endswith((".yml", ".yaml", ".toml")):
+            continue
+        if not stat.S_ISREG(os.stat(path).st_mode):
+            fail(path, "Traefik configuration must be a regular file")
+        if not os.stat(path).st_mode & 0o444:
+            fail(path, "unreadable Traefik configuration")
+        try:
+            with open(path, encoding="utf-8") as other:
+                content = other.read()
+        except (OSError, UnicodeError) as error:
+            fail(path, f"unreadable Traefik configuration: {error}")
+        for token in ("9router-service", "9router-api-router", "9router-dashboard-router"):
+            if token in content:
+                fail(path, f"duplicate route token {token}")
+
+if not os.path.exists(route):
+    return_slot = None
+else:
+    if os.path.islink(route) or not os.path.isfile(route):
+        fail(route, "generated route must be a regular file")
+    if not os.stat(route).st_mode & 0o444:
+        fail(route, "unreadable generated route")
+    try:
+        with open(route, encoding="utf-8") as generated:
+            lines = generated.read().replace("\r\n", "\n").splitlines()
+    except (OSError, UnicodeError) as error:
+        fail(route, f"unreadable generated route: {error}")
+    nodes = []
+    stack = []
+    for line in lines:
+        if "\t" in line or re.match(r"^\s*(?:---|\.\.\.)(?:\s|$)", line) or re.search(r"(?:^|[\s:\[,{])[&*][\w-]+", line):
+            fail(route, "unsupported YAML tab, document marker, anchor, or alias")
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        while stack and nodes[stack[-1]][0] >= indent:
+            stack.pop()
+        parent = stack[-1] if stack else None
+        nodes.append((indent, stripped, parent))
+        stack.append(len(nodes) - 1)
+
+    for key in ("http", "services", "9router-service", "loadBalancer", "servers"):
+        if sum(bool(re.fullmatch(re.escape(key) + r"\s*:", text)) for _, text, _ in nodes) != 1:
+            fail(route, f"expected exactly one {key} key")
+
+    def children(parent, indentation, text):
+        return [index for index, (depth, value, owner) in enumerate(nodes)
+                if owner == parent and depth == indentation and re.fullmatch(text, value)]
+
+    def one(parent, indentation, text):
+        found = children(parent, indentation, text)
+        if len(found) != 1:
+            fail(route, f"expected exactly one {text} at indentation {indentation}")
+        return found[0]
+
+    http = one(None, 0, r"http:")
+    services = one(http, 2, r"services:")
+    service = one(services, 4, r"9router-service:")
+    balancer = one(service, 6, r"loadBalancer:")
+    servers = one(balancer, 8, r"servers:")
+    urls = [index for index, (_, _, owner) in enumerate(nodes) if owner == servers]
+    if len(urls) != 1 or nodes[urls[0]][0] != 10:
+        fail(route, "expected exactly one generated backend URL")
+    match = re.fullmatch(r'- url: "http://9router-(blue|green):20128"', nodes[urls[0]][1])
+    if not match:
+        fail(route, "unsupported generated backend URL")
+    for index, (_, text, _) in enumerate(nodes):
+        ancestor = index
+        while ancestor is not None and ancestor != service:
+            ancestor = nodes[ancestor][2]
+        if ancestor == service and index != urls[0] and (re.search(r"\burl\s*:", text) or re.search(r"9router-(?:blue|green)", text)):
+            fail(route, "extra backend in generated service")
+    return_slot = match.group(1)
+
+if return_slot is not None:
+    print(return_slot)
+PY
 }
 
 render_traefik_config() {
   local slot="$1"
   local dest="$2"
   local tmp="${dest}.tmp.$$"
-  mkdir -p "$(dirname "$dest")"
+  [[ -d "$(dirname "$dest")" ]] || die "Traefik dynamic directory is missing: $(dirname "$dest")"
 
   local dashboard_rule="Host(\`${DASHBOARD_HOST}\`)"
   local internal_hosts_rule="Host(\`${DASHBOARD_HOST}\`) || Host(\`${API_HOST}\`)"
@@ -164,98 +448,227 @@ http:
           interval: "5s"
           timeout: "2s"
 EOF
+  NEW_ROUTE_INODE="$(stat -c '%d:%i' "$tmp")" || return 1
   mv -f "$tmp" "$dest"
 }
 
 wait_healthy() {
-  local slot="$1"
-  local container="9router-${slot}"
-  local start_time
-  start_time="$(date +%s)"
-  log "Polling health check for $container on /api/health (timeout: ${READY_TIMEOUT}s)..."
-
-  while true; do
-    if docker exec "$container" wget -qO- http://127.0.0.1:20128/api/health 2>/dev/null | grep -q '"ok":true'; then
-      log "Slot $slot ($container) is HEALTHY."
+  local slot="$1" deadline=$((SECONDS + READY_TIMEOUT))
+  while (( SECONDS < deadline )); do
+    if direct_slot_healthy "$slot"; then
+      log "Slot $slot is healthy with matching identity."
       return 0
-    fi
-
-    local current_time
-    current_time="$(date +%s)"
-    if (( current_time - start_time >= READY_TIMEOUT )); then
-      log "ERROR: Health check timed out after ${READY_TIMEOUT}s for $container"
-      docker logs --tail 30 "$container" || true
-      return 1
     fi
     sleep 2
   done
+  log "Slot $slot failed direct health identity within ${READY_TIMEOUT}s"
+  return 1
+}
+
+container_image() {
+  local image
+  image="$(docker inspect "9router-$1" --format '{{.Image}}' 2>/dev/null)" || return 1
+  [[ -n "$image" ]] || return 1
+  printf '%s\n' "$image"
+}
+
+write_metadata() {
+  local dest="$SCRIPT_DIR/$1" value="$2" temp
+  temp="$(mktemp "$SCRIPT_DIR/.$1.tmp.XXXXXXXX")" || return 1
+  if ! printf '%s' "$value" > "$temp" || ! mv -f -- "$temp" "$dest"; then
+    rm -f -- "$temp"
+    return 1
+  fi
+}
+
+sync_metadata() {
+  local slot="$1" previous="$2" image="$3"
+  write_metadata "$DEPLOYED_IMAGE_FILE" "$image" || die "Metadata image update failed; reconcile from configured YAML"
+  if [[ -n "$previous" ]]; then
+    write_metadata "$PREVIOUS_SLOT_FILE" "$previous" || die "Metadata previous-slot update failed; reconcile from configured YAML"
+  else
+    rm -f -- "$PREVIOUS_SLOT_FILE" || die "Metadata previous-slot removal failed; reconcile from configured YAML"
+  fi
+  write_metadata "$ACTIVE_SLOT_FILE" "$slot" || die "Metadata active-slot update failed; reconcile from configured YAML"
+}
+
+report_route_state() {
+  local configured observed
+  configured="$(read_active_route_slot "$ROUTE_PATH" 2>/dev/null)" || configured=unknown
+  configured="${configured:-none}"
+  observed="$(probe_observed_slot recovery 5 bootstrap 2>/dev/null)" || observed=unknown
+  log "Configured route slot: $configured; observed Traefik slot: $observed"
+}
+
+recover_pending_route() {
+  local original_rc="$1" restore_tmp="" restored=false
+  trap - EXIT INT TERM
+  if [[ "${PENDING_ROUTE:-false}" == true ]]; then
+    if [[ -n "$SNAPSHOT_PATH" ]]; then
+      if restore_tmp="$(mktemp "$TRAEFIK_DYNAMIC_DIR/.9router-restore.XXXXXXXX")" &&
+         cp -- "$SNAPSHOT_PATH" "$restore_tmp" && mv -f -- "$restore_tmp" "$ROUTE_PATH"; then
+        restored=true
+      else
+        [[ -z "$restore_tmp" ]] || rm -f -- "$restore_tmp" || true
+      fi
+    elif [[ ! -e "$ROUTE_PATH" && ! -L "$ROUTE_PATH" ]]; then
+      restored=true
+    elif [[ -n "${NEW_ROUTE_INODE:-}" && "$(stat -c '%d:%i' "$ROUTE_PATH" 2>/dev/null)" == "$NEW_ROUTE_INODE" ]] &&
+         rm -f -- "$ROUTE_PATH"; then
+      restored=true
+    fi
+    if [[ "$restored" == true ]] && wait_route_slot "${ORIGINAL_ROUTE_SLOT:-none}"; then
+      log "Original route acknowledged after failure."
+      [[ -z "$SNAPSHOT_PATH" ]] || rm -f -- "$SNAPSHOT_PATH" || true
+    else
+      log "ERROR: Original route not acknowledged; keep both containers and snapshot: ${SNAPSHOT_PATH:-none}"
+      report_route_state
+    fi
+  fi
+  (( original_rc != 0 )) || original_rc=1
+  exit "$original_rc"
+}
+
+route_cutover() {
+  local new_slot="$1" old_slot="$2"
+  ROUTE_PATH="$TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME"
+  ORIGINAL_ROUTE_SLOT="$old_slot"
+  SNAPSHOT_PATH=""
+  NEW_ROUTE_INODE=""
+  if [[ -n "$old_slot" ]]; then
+    SNAPSHOT_PATH="$(mktemp "$TRAEFIK_DYNAMIC_DIR/.9router-snapshot.XXXXXXXX")" || return 1
+    cp -- "$ROUTE_PATH" "$SNAPSHOT_PATH" || { rm -f -- "$SNAPSHOT_PATH"; return 1; }
+  fi
+  PENDING_ROUTE=true
+  trap 'recover_pending_route $?' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  render_traefik_config "$new_slot" "$ROUTE_PATH" || return 1
+  wait_route_slot "$new_slot" || return 1
+  PENDING_ROUTE=false
+  trap - EXIT INT TERM
+  [[ -z "$SNAPSHOT_PATH" ]] || rm -f -- "$SNAPSHOT_PATH" || log "Snapshot cleanup deferred: $SNAPSHOT_PATH"
 }
 
 reconcile_active_slot() {
-  [[ -f "$ACTIVE_SLOT_FILE" ]] || die "Cannot reconcile: missing $ACTIVE_SLOT_FILE"
-  [[ -f "$DEPLOYED_IMAGE_FILE" ]] || die "Cannot reconcile: missing $DEPLOYED_IMAGE_FILE"
+  preflight mutation
+  local configured previous="" image
+  configured="$(read_active_route_slot "$TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME")" || die "Cannot read configured route"
+  if [[ -z "$configured" ]]; then
+    log "Verified bootstrap; no route to reconcile."
+    return 0
+  fi
+  wait_healthy "$configured" || die "Configured slot $configured failed direct health identity"
+  image="$(container_image "$configured")" || die "Cannot inspect configured container image"
+  if [[ -f "$PREVIOUS_SLOT_FILE" ]]; then
+    previous="$(cat "$PREVIOUS_SLOT_FILE")"
+    if [[ "$previous" == "$configured" || ( "$previous" != blue && "$previous" != green ) ]] ||
+       ! docker inspect "9router-$previous" >/dev/null 2>&1; then
+      previous=""
+    fi
+  fi
+  route_cutover "$configured" "$configured"
+  sync_metadata "$configured" "$previous" "$image"
+  log "Reconciled mirrors from configured route: $configured"
+}
 
-  local active_slot
-  active_slot="$(tr -d '[:space:]' < "$ACTIVE_SLOT_FILE")"
-  [[ "$active_slot" == "blue" || "$active_slot" == "green" ]] || die "Cannot reconcile: invalid active slot: $active_slot"
+direct_slot_healthy() {
+  local slot="$1" mode="${2:-health}" container="9router-$1" hostname health
+  hostname="$(docker inspect "$container" --format '{{.Config.Hostname}}' 2>/dev/null)" || return 1
+  [[ -n "$hostname" ]] || return 1
+  health="$(timeout 6 docker exec "$container" wget -T 5 -qO- http://127.0.0.1:20128/api/health 2>/dev/null)" || return 1
+  python3 - "$slot" "$hostname" "$health" "$mode" <<'PY' >/dev/null
+import json
+import sys
 
-  IMAGE_REF="$(tr -d '[:space:]' < "$DEPLOYED_IMAGE_FILE")"
-  [[ -n "$IMAGE_REF" ]] || die "Cannot reconcile: empty $DEPLOYED_IMAGE_FILE"
-  export IMAGE_REF
+def unique_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate key")
+        result[key] = value
+    return result
 
-  log "Reconciling active slot: $active_slot"
-  ensure_network
-  compose up -d --no-deps --pull never "9router-$active_slot"
-  wait_healthy "$active_slot" || die "Active slot $active_slot failed healthcheck during reconcile"
-  render_traefik_config "$active_slot" "$TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME"
-  log "Reconciled Traefik route and active slot: $active_slot"
+try:
+    payload = json.loads(sys.argv[3], object_pairs_hook=unique_pairs)
+    identity = payload.get("instance_id")
+    prefix = sys.argv[2] + "-"
+    if (payload.get("ok") is not True or payload.get("deployment_slot") != sys.argv[1]
+            or not isinstance(identity, str) or not identity.startswith(prefix)
+            or not identity[len(prefix):].isdecimal() or int(identity[len(prefix):]) <= 0):
+        sys.exit(1)
+    if sys.argv[4] == "idle" and (payload.get("active_requests_known") is not True
+            or type(payload.get("active_requests")) is not int or payload["active_requests"] != 0):
+        sys.exit(1)
+except (AttributeError, ValueError, TypeError):
+    sys.exit(1)
+PY
 }
 
 show_status() {
-  local active
-  active="$(cat "$ACTIVE_SLOT_FILE" 2>/dev/null || echo "none")"
-  local previous
-  previous="$(cat "$PREVIOUS_SLOT_FILE" 2>/dev/null || echo "none")"
-  local img
-  img="$(cat "$DEPLOYED_IMAGE_FILE" 2>/dev/null || echo "none")"
-  printf '=== 9router Deployment Status ===\n'
-  printf 'Active slot      : %s\n' "$active"
-  printf 'Previous slot    : %s\n' "$previous"
-  printf 'Deployed image   : %s\n' "$img"
-  if [[ -n "$DASHBOARD_ALIAS_HOST" ]]; then
-    printf 'Dashboard Host   : %s (alias: %s)\n' "$DASHBOARD_HOST" "$DASHBOARD_ALIAS_HOST"
+  local strict="${1:-false}" configured=unknown observed=unknown mirror=none
+  local blue green directory=unknown reason="" prepared health_ok=false
+  if prepared="$(preflight status 2>&1)"; then
+    directory="$prepared"
+    TRAEFIK_DYNAMIC_DIR="$directory"
+    configured="$(read_active_route_slot "$directory/$TRAEFIK_CONFIG_NAME" 2>/dev/null)" || configured=unknown
+    configured="${configured:-none}"
   else
-    printf 'Dashboard Host   : %s\n' "$DASHBOARD_HOST"
+    reason="preflight failed: ${prepared##*$'\n'}"
+    directory="${TRAEFIK_DYNAMIC_DIR:-unknown}"
   fi
-  printf 'API Host         : %s\n' "$API_HOST"
-  printf 'Traefik config   : %s/%s\n' "$TRAEFIK_DYNAMIC_DIR" "$TRAEFIK_CONFIG_NAME"
-  printf '\nContainer states:\n'
-  compose ps
+  if validate_hosts 2>/dev/null; then
+    observed="$(probe_observed_slot status 5 bootstrap 2>/dev/null)" || observed=unknown
+  else
+    reason="${reason:-invalid deployment hostname}"
+  fi
+  if [[ -f "$ACTIVE_SLOT_FILE" ]]; then mirror="$(cat "$ACTIVE_SLOT_FILE")"; fi
+  blue="$(docker inspect 9router-blue --format '{{.State.Status}}' 2>/dev/null)" || blue=missing
+  green="$(docker inspect 9router-green --format '{{.State.Status}}' 2>/dev/null)" || green=missing
+  if [[ "$configured" == blue && "$blue" == running ]] || [[ "$configured" == green && "$green" == running ]]; then
+    if direct_slot_healthy "$configured"; then health_ok=true; fi
+  fi
+  printf 'Configured route slot: %s\n' "$configured"
+  printf 'Observed Traefik slot: %s\n' "$observed"
+  printf 'Mirror .active-slot: %s\n' "$mirror"
+  printf 'Blue container: %s\n' "$blue"
+  printf 'Green container: %s\n' "$green"
+  printf 'Traefik dynamic dir: %s\n' "$directory"
+  if [[ -z "$reason" && ( "$configured" == blue || "$configured" == green ) &&
+        "$configured" == "$observed" && "$configured" == "$mirror" && "$health_ok" == true ]]; then
+    printf 'Route state: HEALTHY\n'
+  else
+    printf 'Route state: MISMATCH\n'
+    printf 'Reason: %s\n' "${reason:-configured/observed/mirror mismatch or direct health identity invalid}"
+    [[ "$strict" == false ]]
+  fi
 }
 
 do_rollback() {
-  [[ -f "$PREVIOUS_SLOT_FILE" ]] || die "No previous slot recorded for rollback."
-  local prev_slot
-  prev_slot="$(cat "$PREVIOUS_SLOT_FILE")"
-  local active_slot
-  active_slot="$(cat "$ACTIVE_SLOT_FILE" 2>/dev/null || echo "blue")"
-  [[ "$prev_slot" == "blue" || "$prev_slot" == "green" ]] || die "Invalid previous slot: $prev_slot"
-
-  log "Initiating rollback to slot: $prev_slot"
-  compose up -d "9router-$prev_slot"
-  wait_healthy "$prev_slot" || die "Previous slot failed healthcheck. Rollback aborted."
-
-  render_traefik_config "$prev_slot" "$TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME"
-  printf '%s' "$prev_slot" > "$ACTIVE_SLOT_FILE"
-  printf '%s' "$active_slot" > "$PREVIOUS_SLOT_FILE"
-  log "Route successfully rolled back to slot: $prev_slot"
-
-  log "Draining active slot ($active_slot)..."
-  if ! wait_slot_idle "$active_slot"; then
-    die "Rollback drain timed out; active slot remains running."
+  preflight mutation
+  local current target state old_state image observed
+  current="$(read_active_route_slot "$TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME")"
+  [[ "$current" == blue || "$current" == green ]] || die "Cannot rollback without a configured route"
+  [[ -f "$PREVIOUS_SLOT_FILE" ]] || die "No previous slot recorded for rollback"
+  target="$(cat "$PREVIOUS_SLOT_FILE")"
+  [[ ( "$target" == blue || "$target" == green ) && "$target" != "$current" ]] || die "Invalid previous slot: $target"
+  docker inspect "9router-$target" >/dev/null 2>&1 || die "Previous container is missing: 9router-$target"
+  observed="$(probe_observed_slot rollback 5 2>/dev/null)" || observed=unknown
+  log "Rollback configured=$current observed=$observed target=$target"
+  state="$(docker inspect "9router-$target" --format '{{.State.Status}}')" || die "Cannot inspect previous container"
+  if [[ "$state" != running ]]; then
+    docker start "9router-$target" || die "Cannot start existing previous container"
   fi
-  compose stop "9router-$active_slot" || true
-  log "Rollback completed."
+  wait_healthy "$target" || die "Previous slot failed direct health identity"
+  image="$(container_image "$target")" || die "Cannot inspect previous container image"
+  old_state="$(docker inspect "9router-$current" --format '{{.State.Status}}' 2>/dev/null)" || old_state=missing
+  route_cutover "$target" "$current"
+  sync_metadata "$target" "$current" "$image"
+  if [[ "$old_state" == running ]]; then
+    wait_slot_idle "$current" || die "Rollback drain timed out; old container remains running"
+    compose stop "9router-$current" || die "Rollback route acknowledged, but old container could not stop"
+  fi
+  log "Rollback completed to $target"
 }
 
 run_diagnostics() {
@@ -350,19 +763,13 @@ DRAIN_TIMEOUT="${DRAIN_TIMEOUT:-120}"
 DRAIN_POLL_SECONDS="${DRAIN_POLL_SECONDS:-2}"
 
 wait_slot_idle() {
-  local slot="$1"
-  local deadline=$((SECONDS + DRAIN_TIMEOUT))
-  local container="9router-$slot"
+  local slot="$1" deadline=$((SECONDS + DRAIN_TIMEOUT))
   while (( SECONDS < deadline )); do
-    local health active known
-    health="$(docker exec "$container" wget -qO- http://127.0.0.1:20128/api/health 2>/dev/null || true)"
-    active="$(printf '%s' "$health" | sed -n 's/.*"active_requests"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
-    known="$(printf '%s' "$health" | sed -n 's/.*"active_requests_known"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p')"
-    if [[ "$known" == "true" && "$active" == "0" ]]; then
+    if direct_slot_healthy "$slot" idle; then
       log "Slot $slot is idle."
       return 0
     fi
-    log "Waiting for slot $slot to drain (active_requests=${active:-unknown}, known=${known:-unknown})..."
+    log "Waiting for slot $slot to drain (count unknown or nonzero)..."
     sleep "$DRAIN_POLL_SECONDS"
   done
   log "Drain timeout for slot $slot; keeping it running to avoid cutting active requests."
@@ -398,117 +805,97 @@ pull_image() {
   die "Unable to pull image: $IMAGE_REF"
 }
 
+do_deploy() {
+  preflight mutation
+  local current target target_state image
+  current="$(read_active_route_slot "$TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME")" || die "Cannot read configured route"
+  if [[ "$current" == blue ]]; then target=green; else target=blue; fi
+  if [[ -n "$current" ]]; then
+    wait_healthy "$current" || die "Configured slot $current is unhealthy; deployment aborted"
+    wait_route_slot "$current" || die "Public route does not acknowledge configured slot $current"
+  fi
+  if [[ "$target" == blue && "$BLUE_PRESENT" == present || "$target" == green && "$GREEN_PRESENT" == present ]]; then
+    target_state="$(docker inspect "9router-$target" --format '{{.State.Status}}')" || die "Cannot inspect existing target $target"
+  else
+    target_state=missing
+  fi
+  if [[ "$target_state" == running ]]; then
+    wait_slot_idle "$target" || die "Target slot $target still has active or unknown requests"
+  fi
+  log "Deploying $IMAGE_REF from ${current:-bootstrap} to $target"
+  compose up -d headroom
+  pull_image
+  compose up -d --no-deps --pull never "9router-$target"
+  if ! wait_healthy "$target"; then
+    compose stop "9router-$target" || true
+    die "Candidate $target failed direct health identity; configured route unchanged"
+  fi
+  image="$(container_image "$target")" || die "Cannot inspect target immutable image"
+  route_cutover "$target" "$current"
+  sync_metadata "$target" "$current" "$image"
+  if [[ -n "$current" ]]; then
+    wait_slot_idle "$current" || die "Deployment route acknowledged but old slot remains running after drain timeout"
+    compose stop "9router-$current" || die "Route acknowledged but old slot could not stop"
+  fi
+  log "Deployment completed: $target"
+}
+
+acquire_deployment_lock() {
+  exec {DEPLOY_LOCK_FD}>"$SCRIPT_DIR/.deployment.lock"
+  flock -n "$DEPLOY_LOCK_FD" || die "Another deployment holds .deployment.lock"
+}
+
 # ------------------------------------------------------------------------------
 # Main Dispatcher
 # ------------------------------------------------------------------------------
 cmd="${1:-}"
-
-if [[ "$cmd" == "--status" ]]; then
-  show_status
-  exit 0
-fi
-
-if [[ "$cmd" == "--reconcile" ]]; then
-  reconcile_active_slot
-  exit 0
-fi
-
-if [[ "$cmd" == "--rollback" ]]; then
-  do_rollback
-  exit 0
-fi
-
-if [[ "$cmd" == "--setup-host" ]]; then
-  configure_docker_concurrency
-  exit 0
-fi
-
-if [[ "$cmd" == "--diagnostics" ]]; then
-  IMAGE_REF="${2:-}"
-  export IMAGE_REF
-  run_diagnostics
-  exit 0
-fi
-
-IMAGE_REF="${1:-}"
-if [[ -z "$IMAGE_REF" ]]; then
-  if [[ -f "$DEPLOYED_IMAGE_FILE" ]]; then
-    IMAGE_REF="$(cat "$DEPLOYED_IMAGE_FILE")"
-  else
-      die "Usage: $0 <IMAGE_REF> | --reconcile | --rollback | --status | --setup-host | --diagnostics"
-  fi
-fi
-export IMAGE_REF
-
-CURRENT_SLOT=""
-HAS_CURRENT_SLOT=false
-if [[ -f "$ACTIVE_SLOT_FILE" ]]; then
-  CURRENT_SLOT="$(tr -d '[:space:]' < "$ACTIVE_SLOT_FILE")"
-  [[ "$CURRENT_SLOT" == "blue" || "$CURRENT_SLOT" == "green" ]] || die "Invalid active slot: $CURRENT_SLOT"
-  HAS_CURRENT_SLOT=true
-fi
-
-if [[ "$CURRENT_SLOT" == "blue" ]]; then
-  TARGET_SLOT="green"
-else
-  TARGET_SLOT="blue"
-fi
-
-log "Starting deployment:"
-log "  Image          : $IMAGE_REF"
-log "  Current slot   : ${CURRENT_SLOT:-none}"
-log "  Target slot    : $TARGET_SLOT"
-if [[ -n "$DASHBOARD_ALIAS_HOST" ]]; then
-  log "  Dashboard Host : $DASHBOARD_HOST ($DASHBOARD_ALIAS_HOST)"
-else
-  log "  Dashboard Host : $DASHBOARD_HOST"
-fi
-log "  API Host       : $API_HOST"
-log "  Traefik config : $TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME"
-
-ensure_network
-
-# Start headroom helper service if not already up
-compose up -d headroom
-
-# Pull and start target slot
-export IMAGE_REF
-pull_image
-
-log "Starting target container: 9router-$TARGET_SLOT"
-compose up -d --no-deps --pull never "9router-$TARGET_SLOT"
-
-# Healthcheck candidate slot
-if ! wait_healthy "$TARGET_SLOT"; then
-  log "ABORT: Target slot $TARGET_SLOT unhealthy! Keeping ${CURRENT_SLOT:-no existing slot} live."
-  compose stop "9router-$TARGET_SLOT" || true
-  exit 1
-fi
-
-# Switch Traefik route atomically
-log "Switching Traefik dynamic route to $TARGET_SLOT..."
-render_traefik_config "$TARGET_SLOT" "$TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME"
-
-# Update state files
-printf '%s' "$TARGET_SLOT" > "$ACTIVE_SLOT_FILE"
-if [[ "$HAS_CURRENT_SLOT" == true ]]; then
-  printf '%s' "$CURRENT_SLOT" > "$PREVIOUS_SLOT_FILE"
-else
-  # A bootstrap deploy has no valid rollback target; discard stale metadata.
-  rm -f "$PREVIOUS_SLOT_FILE"
-fi
-printf '%s' "$IMAGE_REF" > "$DEPLOYED_IMAGE_FILE"
-log "Route updated. Active slot is now: $TARGET_SLOT"
-
-# Graceful drain then stop idle slot. Bootstrap has no old container to drain.
-if [[ "$HAS_CURRENT_SLOT" != true ]]; then
-  log "Initial deployment complete; no previous slot to drain."
-elif ! wait_slot_idle "$CURRENT_SLOT"; then
-  log "Deployment left old slot running after drain timeout; no active SSE was cut."
-  exit 1
-elif [[ "$CURRENT_SLOT" != "$TARGET_SLOT" ]]; then
-  log "Stopping idle container: 9router-$CURRENT_SLOT"
-  compose stop "9router-$CURRENT_SLOT" || true
-fi
-
-log "Deployment to $TARGET_SLOT completed successfully!"
+case "$cmd" in
+  --preflight)
+    [[ $# -eq 1 ]] || die "Usage: $0 --preflight"
+    preflight
+    ;;
+  --status)
+    [[ $# -eq 1 || ( $# -eq 2 && "$2" == --strict ) ]] || die "Usage: $0 --status [--strict]"
+    if [[ "${2:-}" == --strict ]]; then show_status true; else show_status false; fi
+    ;;
+  --reconcile)
+    [[ $# -eq 1 ]] || die "Usage: $0 --reconcile"
+    acquire_deployment_lock
+    reconcile_active_slot
+    ;;
+  --rollback)
+    [[ $# -eq 1 ]] || die "Usage: $0 --rollback"
+    acquire_deployment_lock
+    do_rollback
+    ;;
+  --release)
+    [[ $# -eq 2 && -n "$2" ]] || die "Usage: $0 --release <IMAGE_REF>"
+    acquire_deployment_lock
+    IMAGE_REF="$2"
+    export IMAGE_REF
+    preflight mutation
+    reconcile_active_slot
+    do_deploy
+    show_status true
+    ;;
+  --setup-host)
+    [[ $# -eq 1 ]] || die "Usage: $0 --setup-host"
+    configure_docker_concurrency
+    ;;
+  --diagnostics)
+    [[ $# -le 2 ]] || die "Usage: $0 --diagnostics [IMAGE_REF]"
+    IMAGE_REF="${2:-}"
+    export IMAGE_REF
+    run_diagnostics
+    ;;
+  -*|"")
+    die "Usage: $0 <IMAGE_REF> | --release <IMAGE_REF> | --reconcile | --rollback | --status [--strict] | --preflight"
+    ;;
+  *)
+    [[ $# -eq 1 ]] || die "Usage: $0 <IMAGE_REF>"
+    acquire_deployment_lock
+    IMAGE_REF="$cmd"
+    export IMAGE_REF
+    do_deploy
+    ;;
+esac

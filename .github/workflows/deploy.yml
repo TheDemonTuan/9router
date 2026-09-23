@@ -183,6 +183,7 @@ jobs:
 
           cid="$(docker run -d \
             -e DATA_DIR=/tmp/9router-smoke \
+            -e DEPLOY_SLOT=blue \
             "$IMAGE_REF")"
 
           echo "Container ID: $cid"
@@ -204,6 +205,16 @@ jobs:
             docker logs "$cid"
             exit 1
           fi
+          docker exec "$cid" bun -e '
+          const assert = require("node:assert/strict");
+          const response = await fetch("http://127.0.0.1:20128/api/health");
+          assert.equal(response.status, 200);
+          assert.equal(response.headers.get("cache-control"), "no-store");
+          const health = await response.json();
+          assert.equal(health.ok, true);
+          assert.equal(health.deployment_slot, "blue");
+          '
+
           echo "Running native h2c image smoke..."
           docker exec "$cid" bun -e '
           const assert = require("node:assert/strict");
@@ -325,15 +336,31 @@ jobs:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/opt/9router' }}
         run: |
           set -euo pipefail
+          [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9_./-]+$ && "$DEPLOY_PATH" != *..* ]] || { echo 'Invalid DEPLOY_PATH' >&2; exit 1; }
+          stage=".incoming-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" \
             -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
             -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o TCPKeepAlive=yes \
-            "$VPS_USER@$VPS_HOST" "mkdir -p '$DEPLOY_PATH'"
+            "$VPS_USER@$VPS_HOST" "mkdir -p '$DEPLOY_PATH/$stage'"
           scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" \
             -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
             -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o TCPKeepAlive=yes \
             docker-compose.prod.yml docker-compose.chatgpt-web.yml deploy.sh \
-            "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/"
+            "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/$stage/"
+          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" \
+            -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+            -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o TCPKeepAlive=yes \
+            "$VPS_USER@$VPS_HOST" "bash -se -- '$DEPLOY_PATH' '$stage'" <<'REMOTE'
+          set -euo pipefail
+          cd "$1"
+          flock -n .deployment.lock bash -e -c '
+            mv -- "$1/docker-compose.prod.yml" docker-compose.prod.yml
+            mv -- "$1/docker-compose.chatgpt-web.yml" docker-compose.chatgpt-web.yml
+            mv -- "$1/deploy.sh" deploy.sh
+            chmod +x deploy.sh
+            rmdir -- "$1"
+          ' _ "$2"
+          REMOTE
 
       - name: Execute Blue/Green Cutover on VPS
         env:
@@ -345,19 +372,18 @@ jobs:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9_./-]+$ && "$DEPLOY_PATH" != *..* ]] || { echo 'Invalid DEPLOY_PATH' >&2; exit 1; }
+          [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+:sha-[0-9a-f]{40}$ ]] || { echo 'Invalid IMAGE_REF' >&2; exit 1; }
+          [[ "$GITHUB_ACTOR" =~ ^[A-Za-z0-9-]+$ ]] || { echo 'Invalid actor' >&2; exit 1; }
+          printf '%s' "$GHCR_TOKEN" | ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" \
+            -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+            -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o TCPKeepAlive=yes \
+            "$VPS_USER@$VPS_HOST" "docker login ghcr.io -u '$GITHUB_ACTOR' --password-stdin"
           ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" \
             -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
             -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o TCPKeepAlive=yes \
-            "$VPS_USER@$VPS_HOST" "
-              set -euo pipefail
-              chmod +x '$DEPLOY_PATH/deploy.sh'
-              printf '%s' '$GHCR_TOKEN' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
-              cd '$DEPLOY_PATH'
-              if [ -f .active-slot ] && [ -f .deployed-image ]; then
-                ./deploy.sh --reconcile
-              else
-                echo 'No persisted deployment state; skipping reconcile for initial bootstrap.'
-              fi
-              ./deploy.sh '$IMAGE_REF'
-              ./deploy.sh --status
-            "
+            "$VPS_USER@$VPS_HOST" "bash -se -- '$DEPLOY_PATH' '$IMAGE_REF'" <<'REMOTE'
+          set -euo pipefail
+          cd "$1"
+          ./deploy.sh --release "$2"
+          REMOTE
