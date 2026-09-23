@@ -273,7 +273,7 @@ export default function BasicChatPageClient() {
               const models = parseProviderModelsPayload(data)
                 .map((model) => normalizeLiveModel(model, connection))
                 .filter(Boolean);
-              return { connection, models };
+              return { connection, models, resolved: data.resolved === true };
             } catch {
               return { connection, models: [] };
             }
@@ -284,6 +284,9 @@ export default function BasicChatPageClient() {
           const providerId = result.connection.provider || result.connection.id;
           const group = providerMap.get(providerId);
           if (!group) continue;
+          if (providerId === "codex" && result.resolved) {
+            group.models = group.models.filter((model) => getModelKind(model) === "image");
+          }
           group.models.push(...result.models);
         }
 

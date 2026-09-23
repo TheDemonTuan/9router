@@ -72,7 +72,8 @@ export default function ProviderDetailPage() {
   const [autoPing, setAutoPing] = useState({ enabled: false, connections: {} });
   const [suggestedModels, setSuggestedModels] = useState([]);
   const [liveModels, setLiveModels] = useState([]);
-  // Live-catalog fetch warning/error (surfaced for zed only; cursor behavior unchanged).
+  const [liveModelsRefreshNonce, setLiveModelsRefreshNonce] = useState(0);
+  // Live-catalog fetch warning/error (surfaced for live account catalogs).
   const [liveModelsError, setLiveModelsError] = useState(null);
   const [kiloFreeModels, setKiloFreeModels] = useState([]);
   const [disabledModelIds, setDisabledModelIds] = useState([]);
@@ -163,7 +164,7 @@ export default function ProviderDetailPage() {
   // Deprecated compat aliases (alitp preview) stay routable but leave the picker.
   const staticModels = getModelsByProviderId(providerId)
     .filter((m) => !(m.deprecated && providerId === "alitp-intl"));
-  const models = (providerId === "cursor" || providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web") && liveModels.length > 0
+  const models = (providerId === "codex" || providerId === "cursor" || providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web") && liveModels.length > 0
     ? liveModels
     : staticModels;
   const providerAlias = getProviderAlias(providerId);
@@ -185,7 +186,8 @@ export default function ProviderDetailPage() {
   // Resolve suffix "(level)" for a model when a thinking level is picked and the model supports it.
   const resolveThinkingSuffix = (modelId) => {
     if (!thinkingMode || thinkingMode === "auto") return null;
-    const levels = getThinkingLevels(providerId, modelId);
+    const liveModel = models.find((entry) => entry.id === modelId);
+    const levels = getThinkingLevels(providerId, modelId, liveModel);
     return levels && levels.includes(thinkingMode) ? thinkingMode : null;
   };
   const providerStorageAlias = isCompatible ? providerId : providerAlias;
@@ -194,14 +196,14 @@ export default function ProviderDetailPage() {
   const providerThinkingLevels = (() => {
     const set = new Set();
     const seen = new Set();
-    const addLevels = (modelId) => {
+    const addLevels = (modelId, metadata = null) => {
       if (!modelId || seen.has(modelId)) return;
       seen.add(modelId);
-      const lv = getThinkingLevels(providerId, modelId);
+      const lv = getThinkingLevels(providerId, modelId, metadata);
       if (lv) lv.forEach((l) => { if (l !== "none") set.add(l); });
     };
-    for (const m of models) addLevels(m.id);
-    for (const m of kiloFreeModels) addLevels(m.id);
+    for (const m of models) addLevels(m.id, m);
+    for (const m of kiloFreeModels) addLevels(m.id, m);
     for (const entry of customModels) {
       if (entry.providerAlias !== providerStorageAlias) continue;
       if ((entry.kind || entry.type || "llm") !== "llm") continue;
@@ -483,7 +485,7 @@ export default function ProviderDetailPage() {
   // Personal + Team account exposes the union; its API already falls back to the
   // official edition catalog, so a discovery failure never blanks the picker.
   useEffect(() => {
-    const isLiveCatalog = providerId === "cursor" || providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web";
+    const isLiveCatalog = providerId === "codex" || providerId === "cursor" || providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web";
     if (!isLiveCatalog) {
       setLiveModels([]);
       return;
@@ -492,35 +494,40 @@ export default function ProviderDetailPage() {
     const activeConnections = connections.filter((item) => item.isActive !== false && item.id);
     if (!activeConnections.length) {
       setLiveModels([]);
-      if (providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web") setLiveModelsError(null);
+      if (providerId === "codex" || providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web") setLiveModelsError(null);
       return;
     }
 
     let cancelled = false;
-    if (providerId === "zed" || providerId === "alitp-intl") setLiveModelsError(null);
-    const catalogConnections = providerId === "alitp-intl" || providerId === "chatgpt-web" ? activeConnections : [activeConnections[0]];
+    if (providerId === "codex" || providerId === "zed" || providerId === "alitp-intl") setLiveModelsError(null);
+    const catalogConnections = providerId === "codex" || providerId === "alitp-intl" || providerId === "chatgpt-web" ? activeConnections : [activeConnections[0]];
     Promise.all(catalogConnections.map((connection) =>
-      fetch(`/api/providers/${connection.id}/models`, { cache: "no-store" })
+      fetch(`/api/providers/${connection.id}/models${providerId === "codex" && liveModelsRefreshNonce > 0 ? "?refresh=true" : ""}`, { cache: "no-store" })
         .then(async (res) => ({ ok: res.ok, data: await res.json().catch(() => null) }))
         .catch(() => ({ ok: false, data: null })),
     )).then((results) => {
       if (cancelled) return;
       const merged = new Map();
       for (const { ok, data } of results) {
-        if (ok && !data?.stale && Array.isArray(data?.models)) {
+        if (ok && (!data?.stale || providerId === "codex") && Array.isArray(data?.models)) {
           for (const model of data.models) if (model?.id && !merged.has(model.id)) merged.set(model.id, model);
         }
       }
       if (merged.size) setLiveModels([...merged.values()]);
       else setLiveModels([]);
-      const warning = results.map((r) => r.data?.warning || (r.data?.stale ? "Showing stale bridge catalog; routing remains disabled until refresh succeeds." : null)).find(Boolean);
-      if ((providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web") && warning) setLiveModelsError(warning);
+      const warning = results.map((r) => r.data?.warning || (r.data?.stale
+        ? providerId === "codex"
+          ? "Showing stale Codex catalog."
+          : "Showing stale bridge catalog; routing remains disabled until refresh succeeds."
+        : null)).find(Boolean);
+      if ((providerId === "codex" || providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web") && warning) setLiveModelsError(warning);
       if (providerId === "zed" && !merged.size) setLiveModelsError(warning || "Zed returned no live models.");
+      if (providerId === "codex" && !merged.size) setLiveModelsError(warning || "No Codex models are available.");
       if (providerId === "chatgpt-web" && !merged.size) setLiveModelsError(warning || "No verified ChatGPT Web models are available.");
     });
 
     return () => { cancelled = true; };
-  }, [providerId, connections]);
+  }, [providerId, connections, liveModelsRefreshNonce]);
 
   // Fetch suggested models from provider's public API (if configured)
   useEffect(() => {
@@ -1822,8 +1829,15 @@ export default function ProviderDetailPage() {
             })()}
           </div>
         )}
-        {(providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web") && !!liveModelsError && (
+        {(providerId === "codex" || providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web") && !!liveModelsError && (
           <p className={`text-xs mb-3 break-words ${providerId === "alitp-intl" ? "text-text-muted" : "text-red-500"}`}>{liveModelsError}</p>
+        )}
+        {providerId === "codex" && connections.length > 0 && (
+          <div className="mb-3">
+            <Button size="sm" variant="secondary" icon="refresh" onClick={() => setLiveModelsRefreshNonce((value) => value + 1)}>
+              Refresh Codex catalog
+            </Button>
+          </div>
         )}
         {renderModelsSection()}
       </Card>

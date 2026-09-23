@@ -56,6 +56,12 @@ export {
 } from "./services/tokenRefresh.js";
 
 export {
+  resolveCodexModels,
+  normalizeCodexCatalog,
+  clearCodexModelCache,
+} from "./services/codexModels.js";
+
+export {
   CODEX_MAX_REFRESH_AGE_MS,
   shouldRefreshCredentials,
   refreshProviderCredentials,

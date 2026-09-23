@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getModelAliases, setModelAlias, getCustomModels, getProviderConnections } from "@/models";
 import { getDisabledModels } from "@/lib/disabledModelsDb";
+import { updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { AI_MODELS } from "@/shared/constants/config";
 import { getProviderAlias } from "@/shared/constants/providers";
 import { getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
@@ -8,6 +9,7 @@ import { isAlitpModelDeprecated, isAlitpModelAvailableForEdition } from "open-ss
 import {
   getChatGptWebCatalog,
 } from "open-sse/services/chatgptWebBridge.js";
+import { mergeCodexModelLists, resolveCodexModels } from "open-sse/services/codexModels.js";
 
 // GET /api/models - Get models with aliases
 export async function GET() {
@@ -92,6 +94,56 @@ export async function GET() {
           managedThinking: true,
         },
       });
+    }
+
+    const codexConnections = await getProviderConnections({ provider: "codex", isActive: true });
+    if (codexConnections.length > 0) {
+      const codexResults = await Promise.all(codexConnections.slice().sort((a, b) => String(a.id || "").localeCompare(String(b.id || ""))).map(async (connection) => {
+        try {
+          return await resolveCodexModels(connection, {
+            onCredentialsRefreshed: async (refreshed) => {
+              await updateProviderCredentials(connection.id, {
+                ...refreshed,
+                existingProviderSpecificData: connection.providerSpecificData || {},
+              });
+            },
+          });
+        } catch {
+          return null;
+        }
+      }));
+      const verified = codexResults.filter((result) => result?.access === "observed" || result?.access === "stale");
+      const usable = verified.length ? verified : codexResults.filter(Boolean);
+      if (usable.some((result) => result.resolved === true)) {
+        for (let index = models.length - 1; index >= 0; index -= 1) {
+          if (models[index].provider === "cx") models.splice(index, 1);
+        }
+        const catalog = mergeCodexModelLists(usable.map((result) => result.models || []));
+        for (const model of catalog) {
+          const caps = model.capabilities && typeof model.capabilities === "object" && !Array.isArray(model.capabilities)
+            ? model.capabilities
+            : getCapabilitiesForModel("codex", model.id);
+          models.push({
+            provider: "cx",
+            model: model.id,
+            name: model.name || model.id,
+            description: model.description,
+            fullModel: `cx/${model.id}`,
+            routedModel: `cx/${model.id}`,
+            alias: modelAliases[`cx/${model.id}`] || modelAliases[`codex/${model.id}`] || model.id,
+            caps: {
+              vision: caps.vision,
+              search: caps.search,
+              reasoning: caps.reasoning,
+              contextWindow: model.contextLength || caps.contextWindow || null,
+              maxOutput: model.maxOutputTokens || caps.maxOutput || null,
+              ...(Array.isArray(model.supportedReasoningLevels)
+                ? { supportedReasoningLevels: model.supportedReasoningLevels }
+                : {}),
+            },
+          });
+        }
+      }
     }
 
     // Custom models ride along; their stored caps override the name heuristic

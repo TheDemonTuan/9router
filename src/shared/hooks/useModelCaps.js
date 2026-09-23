@@ -5,7 +5,9 @@ import { getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
 
 // Module cache: one /api/models fetch shared by every useModelCaps instance.
 let cache = null; // { byFull, byId } | null
+let cacheAt = 0;
 let inflight = null;
+const MODEL_CAPS_TTL_MS = 5 * 60 * 1000;
 
 function buildMaps(models) {
   const byFull = {};
@@ -20,13 +22,14 @@ function buildMaps(models) {
 }
 
 function loadModelCaps() {
-  if (cache) return Promise.resolve(cache);
+  if (cache && Date.now() - cacheAt < MODEL_CAPS_TTL_MS) return Promise.resolve(cache);
   if (inflight) return inflight;
   inflight = fetch("/api/models")
     .then(async (res) => {
       if (!res.ok) throw new Error(`models ${res.status}`);
       const data = await res.json();
       cache = buildMaps(data.models);
+      cacheAt = Date.now();
       return cache;
     })
     .catch(() => {
@@ -71,6 +74,7 @@ export function useModelCaps() {
     // Custom models change at runtime — drop the shared cache and refetch
     const invalidate = () => {
       cache = null;
+      cacheAt = 0;
       loadModelCaps().then(sync);
     };
     window.addEventListener("customModelChanged", invalidate);

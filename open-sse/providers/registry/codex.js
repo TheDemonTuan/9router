@@ -1,8 +1,9 @@
 import { withCodexReviewModels } from "../models/helpers.js";
+import { CODEX_CLIENT_VERSION } from "../../config/codexClient.js";
 
-// Codex CLI version seen by OpenAI's backend — single source for the Version /
-// User-Agent identity headers. Bump when the installed codex CLI is upgraded.
-const CODEX_CLI_VERSION = "0.154.0";
+// Codex CLI version seen by OpenAI's backend. Keep the value in codexClient.js
+// so model discovery and request identity cannot drift apart.
+const CODEX_CLI_VERSION = CODEX_CLIENT_VERSION;
 
 export default {
   id: "codex",
@@ -50,7 +51,31 @@ export default {
     },
   },
   models: [
-    { id: "gpt-6-astra", name: "GPT 6.0 Astra" },
+    {
+      id: "gpt-6-astra",
+      name: "GPT-6-Astra",
+      description: "Frontier intelligence for the most demanding work.",
+      minimalClientVersion: "0.153.0",
+      contextLength: 272000,
+      maxContextLength: 872000,
+      supportedReasoningLevels: ["low", "medium", "high", "xhigh", "max", "ultra"],
+    },
+    {
+      id: "gpt-6-sol",
+      name: "GPT-6-Sol",
+      minimalClientVersion: "0.155.0",
+      contextLength: 272000,
+      maxContextLength: 872000,
+      supportedReasoningLevels: ["low", "medium", "high", "xhigh", "max", "ultra"],
+    },
+    {
+      id: "gpt-6-luna",
+      name: "GPT-6-Luna",
+      minimalClientVersion: "0.155.0",
+      contextLength: 272000,
+      maxContextLength: 872000,
+      supportedReasoningLevels: ["low", "medium", "high", "xhigh", "max"],
+    },
     { id: "gpt-5.6-sol", name: "GPT 5.6 Sol" },
     { id: "gpt-5.6-sol-review", name: "GPT 5.6 Sol Review", upstreamModelId: "gpt-5.6-sol", quotaFamily: "review" },
     { id: "gpt-5.6-terra", name: "GPT 5.6 Terra" },

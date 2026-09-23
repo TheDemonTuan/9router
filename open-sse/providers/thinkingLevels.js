@@ -35,10 +35,24 @@ const FORMAT_LEVELS = {
 };
 
 const CODEX_GPT_5_6_LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+const CODEX_GPT_6_LEVELS = [...CODEX_GPT_5_6_LEVELS, "ultra"];
+const CODEX_GPT_6_LUNA_LEVELS = CODEX_GPT_5_6_LEVELS;
+
+function getCatalogThinkingLevels(metadata) {
+  const raw = metadata?.supportedReasoningLevels ?? metadata?.supported_reasoning_levels;
+  if (!Array.isArray(raw)) return null;
+  const levels = raw
+    .map((item) => typeof item === "string" ? item.trim() : item?.effort?.trim?.())
+    .filter(Boolean);
+  if (levels.length === 0) return [];
+  return ["none", ...new Set(levels.filter((level) => level !== "none"))];
+}
 
 // Model-name pattern overrides (glob, first match wins) — more precise than format default.
 const PATTERN_THINKING = [
-  { provider: "codex", pattern: "*gpt-6*", levels: CODEX_GPT_5_6_LEVELS },
+  { provider: "codex", pattern: "*gpt-6-sol*", levels: CODEX_GPT_6_LEVELS },
+  { provider: "codex", pattern: "*gpt-6-luna*", levels: CODEX_GPT_6_LUNA_LEVELS },
+  { provider: "codex", pattern: "*gpt-6*", levels: CODEX_GPT_6_LEVELS },
   { provider: "codex", pattern: "*gpt-5.6-sol*", levels: [...CODEX_GPT_5_6_LEVELS, "ultra"] },
   { provider: "codex", pattern: "*gpt-5.6-terra*", levels: [...CODEX_GPT_5_6_LEVELS, "ultra"] },
   { provider: "codex", pattern: "*gpt-5.6-luna*", levels: CODEX_GPT_5_6_LEVELS },
@@ -64,7 +78,11 @@ const PATTERN_THINKING = [
 ];
 
 // Returns valid thinking levels for a model, or null when the model has no reasoning.
-export function getThinkingLevels(provider, model) {
+export function getThinkingLevels(provider, model, metadata = null) {
+  if (provider === "codex") {
+    const catalogLevels = getCatalogThinkingLevels(metadata);
+    if (catalogLevels) return catalogLevels;
+  }
   if (provider === "kiro" && resolveKiroEffortPath(model) === null) return null;
   if (provider === "alitp-intl") {
     const rule = getAlibabaTokenPlanThinkingRule(model);
@@ -86,7 +104,8 @@ export function getThinkingLevels(provider, model) {
 // verified canonical table advertise nothing, and deprecated aliases
 // (qwen3.8-max-preview) advertise nothing. Non-alitp providers keep the
 // existing getThinkingLevels behavior.
-export function getAdvertisedThinkingLevels(provider, model) {
+export function getAdvertisedThinkingLevels(provider, model, metadata = null) {
+  if (provider === "codex") return getThinkingLevels(provider, model, metadata);
   if (provider === "alitp-intl") {
     const bare = typeof model === "string" ? model.replace(/\([^()]+\)\s*$/, "").trim() : model;
     const entry = getAlitpCatalogEntry(bare);

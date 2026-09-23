@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { getProviderConnectionById } from "@/models";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/shared/constants/providers";
 import { GEMINI_CONFIG, ZED_HOSTED_CONFIG } from "@/lib/oauth/constants/oauth";
-import { refreshGoogleToken, refreshCodexToken, updateProviderCredentials } from "@/sse/services/tokenRefresh";
+import { refreshGoogleToken, updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { resolveOllamaLocalHost } from "open-sse/config/providers.js";
 import { getModelsByProviderId } from "open-sse/config/providerModels.js";
 import { resolveKiroModels } from "open-sse/services/kiroModels.js";
@@ -17,15 +17,9 @@ import { resolveEffectiveProviderModels } from "open-sse/services/alibabaTokenPl
 import {
   getChatGptWebCatalog,
 } from "open-sse/services/chatgptWebBridge.js";
+import { resolveCodexModels } from "open-sse/services/codexModels.js";
 
 const GEMINI_CLI_MODELS_URL = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
-
-// The /codex/models endpoint gates each entry by minimal_client_version against this
-// value, and codex CLI's own manifest (openai/codex codex-rs/models-manager/models.json)
-// already requires 0.144.0 for its newest models, so a stale client_version here comes
-// back 200 with those entries quietly missing instead of erroring.
-const CODEX_CLIENT_VERSION = "0.144.6";
-const CODEX_MODELS_URL = `https://chatgpt.com/backend-api/codex/models?client_version=${CODEX_CLIENT_VERSION}`;
 
 const parseOpenAIStyleModels = (data) => {
   if (Array.isArray(data)) return data;
@@ -54,27 +48,6 @@ const parseGeminiCliModels = (data) => {
 
   return [];
 };
-
-const appendCodexReviewModels = (models) => models.flatMap((model) => {
-  const id = model?.id || model?.slug || model?.model || model?.name;
-  if (!id) return [];
-  const name = model?.display_name || model?.displayName || model?.name || id;
-  const normalized = { ...model, id, name };
-  const isChatModel = (model?.type || "llm") !== "image" && !id.toLowerCase().includes("embed");
-  if (!isChatModel || id.endsWith("-review")) return [normalized];
-  return [
-    normalized,
-    {
-      ...normalized,
-      id: `${id}-review`,
-      name: `${name} Review`,
-      upstreamModelId: id,
-      quotaFamily: "review",
-    },
-  ];
-});
-
-const parseCodexModels = (data) => appendCodexReviewModels(parseOpenAIStyleModels(data));
 
 const createOpenAIModelsConfig = (url) => ({
   url,
@@ -194,20 +167,17 @@ const PROVIDER_MODELS_CONFIG = {
     parseResponse: (data) => data.models || []
   },
   codex: {
-    customResolver: buildOAuthResolver({
-      refreshFn: (conn) => refreshCodexToken(conn.refreshToken),
-      fetchFn: (token) => fetch(CODEX_MODELS_URL, {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-          "Accept": "application/json",
-          "Authorization": `Bearer ${token}`,
-          "originator": "codex_cli_rs"
-        }
-      }),
-      parseFn: parseCodexModels,
-      errorLabel: "Failed to fetch Codex models"
-    })
+    customResolver: async (connection, options = {}) => resolveCodexModels(connection, {
+      forceRefresh: options.forceRefresh === true,
+      signal: options.signal,
+      log: console,
+      onCredentialsRefreshed: async (refreshed) => {
+        await updateProviderCredentials(connection.id, {
+          ...refreshed,
+          existingProviderSpecificData: connection.providerSpecificData || {},
+        });
+      },
+    }),
   },
   antigravity: {
     url: "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:models",
@@ -659,16 +629,23 @@ export async function GET(request, { params }) {
 
     // Config-driven custom resolver path (OAuth refresh, non-OpenAI shape, etc.)
     if (typeof config.customResolver === "function") {
-      const result = await config.customResolver(connection);
+      const result = await config.customResolver(connection, {
+        forceRefresh: new URL(request.url).searchParams.get("refresh") === "true",
+        signal: request.signal,
+      });
       if (result.error) {
         return NextResponse.json({ error: result.error }, { status: result.status || 500 });
       }
       return NextResponse.json({
         provider: connection.provider,
         connectionId: connection.id,
-        models: result.models,
+        models: result.models || [],
         ...(result.warning ? { warning: result.warning } : {}),
         ...(result.source ? { source: result.source } : {}),
+        ...(result.access ? { access: result.access } : {}),
+        ...(result.stale !== undefined ? { stale: result.stale } : {}),
+        ...(result.resolved !== undefined ? { resolved: result.resolved } : {}),
+        ...(result.candidateModels?.length ? { candidateModels: result.candidateModels } : {}),
         ...(result.fetchedAt ? { fetchedAt: result.fetchedAt } : {})
       });
     }

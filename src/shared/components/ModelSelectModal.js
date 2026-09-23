@@ -23,14 +23,14 @@ const NO_AUTH_PROVIDER_IDS = Object.keys(FREE_PROVIDERS).filter(id => FREE_PROVI
 
 // Providers with per-account live catalogs via /api/providers/[id]/models.
 // Static registry stays as fallback when live fetch fails or is empty.
-const LIVE_CATALOG_PROVIDERS = ["cursor", "cline", "clinepass", "alitp-intl", "chatgpt-web"];
+const LIVE_CATALOG_PROVIDERS = ["codex", "cursor", "cline", "clinepass", "alitp-intl", "chatgpt-web"];
 
 // Fetch a provider's account-scoped catalog for every active connection and merge
 // the results. Entries collapse by model id on purpose: two connections of the
 // same provider produce the same picker value (`alias/id`), so keeping the first
 // avoids duplicate rows. Live capability fields are retained for strict capability filters.
 // Empty array means "nothing live" so callers keep the static fallback.
-function useLiveProviderModels(isOpen, connectionIds, label) {
+function useLiveProviderModels(isOpen, connectionIds, label, allowStale = false) {
   const [models, setModels] = useState([]);
   const idsKey = (connectionIds ?? []).join("|");
 
@@ -46,7 +46,7 @@ function useLiveProviderModels(isOpen, connectionIds, label) {
       const response = await fetch(`/api/providers/${connectionId}/models`, { cache: "no-store" });
       if (!response.ok) return [];
       const data = await response.json();
-      return data.stale === true ? [] : (Array.isArray(data.models) ? data.models : []);
+      return !allowStale && data.stale === true ? [] : (Array.isArray(data.models) ? data.models : []);
     }))
       .then((modelLists) => {
         if (cancelled) return;
@@ -64,7 +64,7 @@ function useLiveProviderModels(isOpen, connectionIds, label) {
       });
 
     return () => { cancelled = true; };
-  }, [isOpen, idsKey, label]);
+  }, [isOpen, idsKey, label, allowStale]);
 
   return models;
 }
@@ -110,12 +110,14 @@ export default function ModelSelectModal({
     }
     return map;
   }, [activeProviders]);
+  const codexConnectionIds = liveConnectionIdsByProvider.codex;
   const cursorConnectionIds = liveConnectionIdsByProvider.cursor;
   const clineConnectionIds = liveConnectionIdsByProvider.cline;
   const clinepassConnectionIds = liveConnectionIdsByProvider.clinepass;
   const alitpConnectionIds = liveConnectionIdsByProvider["alitp-intl"];
   const chatgptWebConnectionIds = liveConnectionIdsByProvider["chatgpt-web"];
 
+  const codexModels = useLiveProviderModels(isOpen, codexConnectionIds, "Codex", true);
   const cursorModels = useLiveProviderModels(isOpen, cursorConnectionIds, "Cursor");
   const clineModels = useLiveProviderModels(isOpen, clineConnectionIds, "Cline");
   const clinepassModels = useLiveProviderModels(isOpen, clinepassConnectionIds, "ClinePass");
@@ -353,7 +355,7 @@ export default function ModelSelectModal({
           hasModels: mergedModels.length > 0,
         };
       } else {
-        const liveModels = providerId === "cursor" ? cursorModels : providerId === "cline" ? clineModels : providerId === "clinepass" ? clinepassModels : providerId === "alitp-intl" ? alitpModels : providerId === "chatgpt-web" ? chatgptWebModels : [];
+        const liveModels = providerId === "codex" ? codexModels : providerId === "cursor" ? cursorModels : providerId === "cline" ? clineModels : providerId === "clinepass" ? clinepassModels : providerId === "alitp-intl" ? alitpModels : providerId === "chatgpt-web" ? chatgptWebModels : [];
         const hardcodedModels = providerId === "chatgpt-web"
           ? liveModels
           : liveModels.length > 0
@@ -435,7 +437,7 @@ export default function ModelSelectModal({
     });
 
     return groups;
-  }, [filteredActiveProviders, modelAliases, allProviders, providerNodes, customModels, disabledModels, kindFilter, activeProviders, cursorModels, clineModels, clinepassModels, alitpModels, chatgptWebModels]);
+  }, [filteredActiveProviders, modelAliases, allProviders, providerNodes, customModels, disabledModels, kindFilter, activeProviders, codexModels, cursorModels, clineModels, clinepassModels, alitpModels, chatgptWebModels]);
 
   // Filter combos by search query (and hide combos when kindFilter is set — combos are LLM-only by design)
   const filteredCombos = useMemo(() => {

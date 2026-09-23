@@ -1,5 +1,6 @@
 import { platform, arch, hostname } from "os";
 import { PROVIDERS, PROVIDER_OAUTH } from "./providers.js";
+import { CODEX_CLIENT_VERSION } from "./codexClient.js";
 import { ANTIGRAVITY_IDE_USER_AGENT } from "../providers/shared.js";
 import { createRequire } from "module";
 
@@ -7,8 +8,8 @@ import { createRequire } from "module";
 export const GEMINI_CLI_VERSION = PROVIDERS["gemini-cli"]?.cliVersion;
 export const GEMINI_CLI_API_CLIENT = PROVIDERS["gemini-cli"]?.apiClient;
 
-// === Codex CLI === derive từ registry codex.transport
-export const CODEX_CLI_VERSION = PROVIDERS["codex"]?.cliVersion;
+// === Codex CLI === one source for model discovery and request identity
+export const CODEX_CLI_VERSION = CODEX_CLIENT_VERSION;
 
 // Map Node arch to Gemini CLI arch string (x64/x86/arm64/...)
 function geminiCLIArch() {

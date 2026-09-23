@@ -112,11 +112,12 @@ export const captureThinking = extractThinking;
 
 const NATIVE_ONLY_FORMATS = new Set(["gemini-level", "gemini-budget", "claude-budget", "claude-adaptive", "kiro"]);
 
-function resolveFormat(targetFormat, model, provider) {
+function resolveFormat(targetFormat, model, provider, metadata = null) {
   if (targetFormat === "commandcode") return "commandcode";
   const providerFmt = provider ? PROVIDERS[provider]?.thinkingFormat : null;
   if (providerFmt) return providerFmt;
   const caps = getCapabilitiesForModel(provider, model);
+  if (provider === "codex" && metadata) caps.thinkingFormat = "openai";
   const isOpenAIWire = targetFormat === "openai" || targetFormat === "openai-responses";
   if (caps.thinkingFormat && !(isOpenAIWire && NATIVE_ONLY_FORMATS.has(caps.thinkingFormat))) {
     return caps.thinkingFormat;
@@ -366,7 +367,7 @@ function applyFormat(fmt, body, cfg, caps, supportedLevels, display) {
 // Mutates and returns body. No-op when model has no reasoning capability.
 // `intent` is a pre-captured config (from captureThinking on the original body);
 // falls back to extracting from the current body when omitted.
-export function applyThinking(targetFormat, model, body, provider = null, intent = undefined) {
+export function applyThinking(targetFormat, model, body, provider = null, intent = undefined, metadata = null) {
   if (!body || typeof body !== "object") return body;
 
   const { cleanModel, override, invalidSuffix } = parseSuffix(model);
@@ -374,6 +375,13 @@ export function applyThinking(targetFormat, model, body, provider = null, intent
   const actualModel = cleanModel.startsWith("alitp-intl/") ? cleanModel.slice("alitp-intl/".length) : cleanModel;
   const cfg = override || intent || extractThinking(body);
   const caps = getCapabilitiesForModel(effProvider, actualModel);
+  const catalogLevels = effProvider === "codex"
+    ? getThinkingLevels(effProvider, actualModel, metadata)
+    : null;
+  if (effProvider === "codex" && catalogLevels) {
+    caps.reasoning = catalogLevels.length > 0;
+    caps.thinkingFormat = "openai";
+  }
 
   if (effProvider === "alitp-intl") {
     const rule = getAlibabaTokenPlanThinkingRule(actualModel);
@@ -401,8 +409,8 @@ export function applyThinking(targetFormat, model, body, provider = null, intent
 
   if (!cfg) return body;
 
-  const fmt = resolveFormat(targetFormat, actualModel, effProvider);
-  const supportedLevels = getThinkingLevels(effProvider, actualModel);
+  const fmt = resolveFormat(targetFormat, actualModel, effProvider, metadata);
+  const supportedLevels = getThinkingLevels(effProvider, actualModel, metadata);
   // Anthropic's `display` (summarized | omitted) decides whether thinking text
   // comes back at all; keep what the client asked for instead of resetting it.
   const display = typeof body.thinking?.display === "string" ? body.thinking.display : undefined;

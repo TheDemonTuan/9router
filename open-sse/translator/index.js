@@ -149,8 +149,9 @@ export function translateRequest(sourceFormat, targetFormat, model, body, stream
     }
     // Alibaba mapper is copy-on-write; established provider mappers mutate the
     // translated body in place. Preserve that legacy contract elsewhere.
-    if (isAlibabaTokenPlan) result = applyThinking(targetFormat, model, result, provider, thinkingIntent);
-    else applyThinking(targetFormat, model, result, provider, thinkingIntent);
+    const modelMetadata = provider === "codex" ? credentials?.codexModelMetadata : null;
+    if (isAlibabaTokenPlan) result = applyThinking(targetFormat, model, result, provider, thinkingIntent, modelMetadata);
+    else applyThinking(targetFormat, model, result, provider, thinkingIntent, modelMetadata);
   }
 
   // Always normalize to clean OpenAI format when target is OpenAI

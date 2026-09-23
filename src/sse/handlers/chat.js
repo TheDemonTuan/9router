@@ -25,6 +25,7 @@ import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
+import { resolveCodexModels } from "open-sse/services/codexModels.js";
 import { stripModelContextMarker } from "open-sse/utils/modelMarkers.js";
 import {
   getChatGptWebCatalog,
@@ -392,6 +393,26 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         refreshedCredentials.projectId = pid;
         // Persist to DB in background so subsequent requests have it immediately
         updateProviderCredentials(credentials.connectionId, { projectId: pid }).catch(() => { });
+      }
+    }
+
+    if (provider === "codex") {
+      try {
+        const catalog = await resolveCodexModels(refreshedCredentials, {
+          signal: request?.signal,
+          log,
+          onCredentialsRefreshed: async (newCreds) => {
+            await updateProviderCredentials(credentials.connectionId, {
+              ...newCreds,
+              existingProviderSpecificData: credentials.providerSpecificData,
+            });
+          },
+        });
+        const baseModel = String(model || "").replace(/\([^()]+\)\s*$/, "").trim();
+        const modelMetadata = catalog?.models?.find((entry) => entry.id === baseModel);
+        if (modelMetadata) refreshedCredentials.codexModelMetadata = modelMetadata;
+      } catch (error) {
+        log.warn("CODEX_MODELS", `metadata lookup failed: ${error?.message || error}`);
       }
     }
 

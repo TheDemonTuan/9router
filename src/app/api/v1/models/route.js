@@ -20,6 +20,7 @@ import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { capabilitiesFromServiceKind, getCapabilitiesForModel, aggregateComboCapabilities } from "open-sse/providers/capabilities.js";
 import { getAdvertisedThinkingLevels } from "open-sse/providers/thinkingLevels.js";
 import { resolveEffectiveProviderModels } from "open-sse/services/alibabaTokenPlanModels.js";
+import { mergeCodexModelLists, resolveCodexModels } from "open-sse/services/codexModels.js";
 import { isAlitpModelAvailableForEdition } from "open-sse/providers/alibabaTokenPlanCatalog.js";
 import {
   getChatGptWebCatalog,
@@ -50,6 +51,39 @@ async function resolveQoderLiveModels(conn, provider) {
 // returns { models: [{ id, name? }, ...] } | null on failure.
 // Adding a provider here makes /v1/models prefer the live catalog for it.
 const LIVE_MODEL_RESOLVERS = {
+  codex: async (conn, ctx) => {
+    if (ctx?.kindFilter && !ctx.kindFilter.includes(LLM_KIND)) return null;
+    const connections = (ctx?.connections || []).filter((entry) => entry.provider === "codex");
+    const candidates = (connections.length ? connections : [conn]).slice().sort((a, b) => String(a.id || "").localeCompare(String(b.id || "")));
+    const results = await Promise.all(candidates.map(async (connection) => {
+      try {
+        return await resolveCodexModels(connection, {
+          log: console,
+          onCredentialsRefreshed: async (refreshed) => {
+            await updateProviderCredentials(connection.id, {
+              ...refreshed,
+              existingProviderSpecificData: connection.providerSpecificData || {},
+            });
+          },
+        });
+      } catch (error) {
+        console.log(`Codex live model fetch failed for ${connection.id}:`, error?.message || error);
+        return null;
+      }
+    }));
+    const verified = results.filter((result) => result?.access === "observed" || result?.access === "stale");
+    const usable = verified.length ? verified : results.filter(Boolean);
+    if (!usable.length) return null;
+    const models = mergeCodexModelLists(usable.map((result) => result.models || []));
+    const first = usable[0];
+    return {
+      models,
+      resolved: true,
+      source: verified.length ? "live" : first.source,
+      access: verified.length ? "observed" : "unverified",
+      stale: usable.some((result) => result.stale === true),
+    };
+  },
   "chatgpt-web": async (conn, ctx) => {
     const connections = (ctx?.connections || []).filter((entry) => entry.provider === "chatgpt-web");
     const candidates = connections.length > 0 ? connections : [conn];
@@ -466,6 +500,7 @@ export async function buildModelsList(kindFilter, options = {}) {
       );
       let liveModelKindById = new Map();
       let liveCapabilitiesById = new Map();
+      let liveModelMetadataById = new Map();
 
       let rawModelIds = hasExplicitEnabledModels
         ? Array.from(
@@ -490,9 +525,9 @@ export async function buildModelsList(kindFilter, options = {}) {
       const liveResolver = LIVE_MODEL_RESOLVERS[providerId];
       if (liveResolver && !hasExplicitEnabledModels) {
         try {
-          const live = await liveResolver(conn, { connections });
-          if (live?.models?.length) {
-            rawModelIds = live.models.map((m) => m.id);
+          const live = await liveResolver(conn, { connections, kindFilter });
+          if (live?.resolved === true || live?.models?.length) {
+            rawModelIds = (live.models || []).map((m) => m.id);
             liveModelKindById = new Map(
               live.models
                 .filter((m) => m?.id)
@@ -502,6 +537,11 @@ export async function buildModelsList(kindFilter, options = {}) {
               live.models
                 .filter((m) => m?.id && m.capabilities)
                 .map((m) => [m.id, m.capabilities])
+            );
+            liveModelMetadataById = new Map(
+              live.models
+                .filter((m) => m?.id)
+                .map((m) => [m.id, m])
             );
           }
         } catch (err) {
@@ -585,6 +625,12 @@ export async function buildModelsList(kindFilter, options = {}) {
           object: "model",
           owned_by: outputAlias,
         };
+        const liveMetadata = liveModelMetadataById.get(modelId);
+        if (liveMetadata?.name) model.name = liveMetadata.name;
+        if (liveMetadata?.description) model.description = liveMetadata.description;
+        if (Array.isArray(liveMetadata?.supportedReasoningLevels)) {
+          model.supported_reasoning_levels = liveMetadata.supportedReasoningLevels;
+        }
         // Live-catalog resolvers (kiro/qoder/github/clinepass) mostly only return
         // { id, name } — no per-model capability data. Fall back to the same
         // pattern-matched capabilities the dashboard uses (useModelCaps.js) so
@@ -620,7 +666,7 @@ export async function buildModelsList(kindFilter, options = {}) {
         if (activeProviderInfo?.exposeThinkingVariants && !modelId.includes("(")) {
           // Canonical advertised levels only — wire aliases stay accepted at
           // request time but never become virtual models.
-          const levels = getAdvertisedThinkingLevels(providerId, modelId);
+          const levels = getAdvertisedThinkingLevels(providerId, modelId, liveMetadata);
           for (const level of levels ?? []) {
             const variant = {
               id: `${outputAlias}/${modelId}(${level})`,
