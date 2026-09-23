@@ -7,7 +7,7 @@ import {
 } from "../services/oauthCredentialManager.js";
 import { normalizeResponsesInput } from "../translator/formats/responsesApi.js";
 import { fetchImageAsBase64 } from "../translator/concerns/image.js";
-import { getModelUpstreamId } from "../config/providerModels.js";
+import { getModelUpstreamId, PROVIDER_MODELS } from "../config/providerModels.js";
 import { getThinkingLevels } from "../providers/thinkingLevels.js";
 import { DEFAULT_RETRY_CONFIG, HTTP_STATUS, resolveRetryEntry } from "../config/runtimeConfig.js";
 import { dbg } from "../utils/debugLog.js";
@@ -161,6 +161,10 @@ function normalizeReasoningEffort(model, value, metadata = null) {
   if (supportedLevels?.includes(value)) return value;
   if (value === "ultra" && supportedLevels?.includes("max")) return "max";
   if (value === "max" || value === "ultra") return "xhigh";
+  if (supportedLevels?.length && !supportedLevels.includes(value)) {
+    const fallback = metadata?.defaultReasoningLevel || metadata?.default_reasoning_level || "low";
+    return supportedLevels.includes(fallback) ? fallback : supportedLevels[0];
+  }
   return value;
 }
 
@@ -463,26 +467,41 @@ export class CodexExecutor extends BaseExecutor {
     body.model = getModelUpstreamId("cx", body.model || model);
 
     // Extract thinking level from model name suffix
-    // e.g., gpt-5.3-codex-high → high, gpt-5.3-codex → medium (default)
-    const effortLevels = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+    // e.g., gpt-6-sol(ultra) → ultra, gpt-5.3-codex-high → high
     let modelEffort = null;
-    for (const level of effortLevels) {
-      if (body.model.endsWith(`-${level}`)) {
-        modelEffort = level;
-        // Strip suffix from model name for actual API call
-        body.model = body.model.replace(`-${level}`, '');
-        break;
+    const parenMatch = body.model.match(/^(.*)\(([^()]+)\)\s*$/);
+    if (parenMatch) {
+      modelEffort = parenMatch[2].trim().toLowerCase();
+      body.model = parenMatch[1].trim();
+    } else {
+      const effortLevels = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+      for (const level of effortLevels) {
+        if (body.model.endsWith(`-${level}`)) {
+          modelEffort = level;
+          body.model = body.model.replace(`-${level}`, '');
+          break;
+        }
       }
     }
 
-    // Priority: explicit reasoning.effort > reasoning_effort param > model suffix > default (medium)
-    if (!body.reasoning) {
-      const effort = normalizeReasoningEffort(body.model, body.reasoning_effort || modelEffort || 'low', credentials?.codexModelMetadata);
-      body.reasoning = { effort, summary: "auto" };
-    } else {
-      body.reasoning.effort = normalizeReasoningEffort(body.model, body.reasoning.effort, credentials?.codexModelMetadata);
-      if (!body.reasoning.summary) body.reasoning.summary = "auto";
-    }
+    const staticModel = PROVIDER_MODELS["cx"]?.find((m) => m.id === body.model);
+    const defaultEffort = credentials?.codexModelMetadata?.defaultReasoningLevel
+      || credentials?.codexModelMetadata?.default_reasoning_level
+      || staticModel?.defaultReasoningLevel
+      || 'low';
+
+    // Priority: model suffix variant > client request (reasoning.effort / reasoning_effort) > catalog/registry default
+    const requestedEffort = modelEffort
+      || body.reasoning?.effort
+      || body.reasoning_effort
+      || defaultEffort;
+
+    const effort = normalizeReasoningEffort(body.model, requestedEffort, credentials?.codexModelMetadata);
+    body.reasoning = {
+      ...(body.reasoning && typeof body.reasoning === "object" ? body.reasoning : {}),
+      effort,
+      summary: body.reasoning?.summary || "auto",
+    };
     delete body.reasoning_effort;
 
     // Include reasoning encrypted content without dropping client-requested includes.

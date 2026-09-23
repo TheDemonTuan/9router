@@ -120,9 +120,13 @@ export async function GET() {
         }
         const catalog = mergeCodexModelLists(usable.map((result) => result.models || []));
         for (const model of catalog) {
-          const caps = model.capabilities && typeof model.capabilities === "object" && !Array.isArray(model.capabilities)
+          const fallbackCaps = getCapabilitiesForModel("codex", model.id);
+          const liveCaps = model.capabilities && typeof model.capabilities === "object" && !Array.isArray(model.capabilities)
             ? model.capabilities
-            : getCapabilitiesForModel("codex", model.id);
+            : {};
+          const caps = { ...(fallbackCaps || {}), ...liveCaps };
+          const contextWindow = model.contextLength || caps.contextWindow || fallbackCaps?.contextWindow || null;
+          const maxOutput = model.maxOutputTokens || caps.maxOutput || fallbackCaps?.maxOutput || null;
           models.push({
             provider: "cx",
             model: model.id,
@@ -132,11 +136,12 @@ export async function GET() {
             routedModel: `cx/${model.id}`,
             alias: modelAliases[`cx/${model.id}`] || modelAliases[`codex/${model.id}`] || model.id,
             caps: {
-              vision: caps.vision,
-              search: caps.search,
-              reasoning: caps.reasoning,
-              contextWindow: model.contextLength || caps.contextWindow || null,
-              maxOutput: model.maxOutputTokens || caps.maxOutput || null,
+              vision: caps.vision ?? false,
+              search: caps.search ?? false,
+              reasoning: caps.reasoning ?? false,
+              contextWindow,
+              maxOutput,
+              ...(model.defaultReasoningLevel ? { defaultReasoningLevel: model.defaultReasoningLevel } : {}),
               ...(Array.isArray(model.supportedReasoningLevels)
                 ? { supportedReasoningLevels: model.supportedReasoningLevels }
                 : {}),

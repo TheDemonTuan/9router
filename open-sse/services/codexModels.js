@@ -99,13 +99,20 @@ function buildCapabilities({ kind, inputModalities, reasoningLevels, contextLeng
     || Object.prototype.hasOwnProperty.call(record || {}, "webSearchToolType");
   const searchType = record?.web_search_tool_type ?? record?.webSearchToolType;
   const supportsTools = record?.supports_tools ?? record?.supportsTools;
+  const thinkingCanDisable = Array.isArray(reasoningLevels)
+    ? reasoningLevels.includes("none")
+    : undefined;
   return {
     ...(supportsTools !== undefined
       ? { tools: Boolean(supportsTools) }
       : kind === "llm" || kind === "imageToText" ? { tools: true } : {}),
     ...(hasInputModalities ? { vision: input.includes("image") } : {}),
     ...(hasSearchType ? { search: Boolean(searchType) } : {}),
-    ...(hasReasoning ? { reasoning: true, thinkingFormat: "openai" } : Array.isArray(reasoningLevels) ? { reasoning: false } : {}),
+    ...(hasReasoning ? {
+      reasoning: true,
+      thinkingFormat: "openai",
+      ...(thinkingCanDisable !== undefined ? { thinkingCanDisable } : {}),
+    } : Array.isArray(reasoningLevels) ? { reasoning: false } : {}),
     ...(contextLength ? { contextWindow: contextLength } : {}),
     ...(maxOutputTokens ? { maxOutput: maxOutputTokens } : {}),
   };
@@ -234,10 +241,64 @@ function mergeModelMetadata(...models) {
   return result;
 }
 
+function mergeLiveEnrichment(staticModel, officialModel, liveModel) {
+  if (!liveModel) return null;
+  const result = {
+    ...(staticModel || {}),
+    ...(officialModel || {}),
+    ...liveModel,
+  };
+
+  // Live limits take priority over static; fall back to official, then static
+  result.contextLength = finitePositive(liveModel.contextLength)
+    || finitePositive(officialModel?.contextLength)
+    || finitePositive(staticModel?.contextLength);
+  result.maxContextLength = finitePositive(liveModel.maxContextLength)
+    || finitePositive(officialModel?.maxContextLength)
+    || finitePositive(staticModel?.maxContextLength);
+  if (result.contextLength && result.maxContextLength) {
+    result.contextLength = Math.min(result.contextLength, result.maxContextLength);
+  }
+  result.maxOutputTokens = finitePositive(liveModel.maxOutputTokens)
+    || finitePositive(officialModel?.maxOutputTokens)
+    || finitePositive(staticModel?.maxOutputTokens);
+
+  // Supported levels: live > official > static
+  const reasoningLevels = Array.isArray(liveModel.supportedReasoningLevels)
+    ? liveModel.supportedReasoningLevels
+    : Array.isArray(officialModel?.supportedReasoningLevels)
+      ? officialModel.supportedReasoningLevels
+      : staticModel?.supportedReasoningLevels;
+  if (Array.isArray(reasoningLevels)) {
+    result.supportedReasoningLevels = reasoningLevels;
+  }
+
+  // Default effort: live > official > static
+  const defaultEffort = liveModel.defaultReasoningLevel
+    || officialModel?.defaultReasoningLevel
+    || staticModel?.defaultReasoningLevel;
+  if (defaultEffort) {
+    result.defaultReasoningLevel = defaultEffort;
+  }
+
+  result.capabilities = {
+    ...(staticModel?.capabilities || {}),
+    ...(officialModel?.capabilities || {}),
+    ...(liveModel.capabilities || {}),
+  };
+  if (result.contextLength) result.capabilities.contextWindow = result.contextLength;
+  if (result.maxOutputTokens) result.capabilities.maxOutput = result.maxOutputTokens;
+  if (Array.isArray(result.supportedReasoningLevels)) {
+    result.capabilities.reasoning = result.supportedReasoningLevels.length > 0;
+    result.capabilities.thinkingCanDisable = result.supportedReasoningLevels.includes("none");
+  }
+  return result;
+}
+
 function enrichModels(models, officialModels) {
   const staticCatalog = staticById();
   const officialById = new Map((officialModels || []).map((model) => [model.id, model]));
-  return models.map((model) => mergeModelMetadata(staticCatalog.get(model.id), officialById.get(model.id), model));
+  return models.map((model) => mergeLiveEnrichment(staticCatalog.get(model.id), officialById.get(model.id), model));
 }
 
 function appendStaticMedia(models) {
@@ -513,11 +574,59 @@ export function mergeCodexModelLists(modelLists) {
         byId.set(model.id, { ...model });
         continue;
       }
-      const merged = mergeModelMetadata(current, model);
+      const merged = { ...current, ...model };
+
+      // Union of accounts: take min positive for limits
+      const contextValues = [current.contextLength, model.contextLength].map(finitePositive).filter(Boolean);
+      const maxContextValues = [current.maxContextLength, model.maxContextLength].map(finitePositive).filter(Boolean);
+      const maxOutputValues = [current.maxOutputTokens, model.maxOutputTokens].map(finitePositive).filter(Boolean);
+      if (contextValues.length) merged.contextLength = Math.min(...contextValues);
+      if (maxContextValues.length) merged.maxContextLength = Math.min(...maxContextValues);
+      if (merged.contextLength && merged.maxContextLength) {
+        merged.contextLength = Math.min(merged.contextLength, merged.maxContextLength);
+      }
+      if (maxOutputValues.length) merged.maxOutputTokens = Math.min(...maxOutputValues);
+
+      // Reasoning levels: intersection
       const leftLevels = Array.isArray(current.supportedReasoningLevels) ? current.supportedReasoningLevels : null;
       const rightLevels = Array.isArray(model.supportedReasoningLevels) ? model.supportedReasoningLevels : null;
       if (leftLevels && rightLevels) {
-        merged.supportedReasoningLevels = leftLevels.filter((level) => rightLevels.includes(level));
+        const intersection = leftLevels.filter((level) => rightLevels.includes(level));
+        merged.supportedReasoningLevels = intersection;
+      } else if (leftLevels || rightLevels) {
+        merged.supportedReasoningLevels = leftLevels || rightLevels;
+      }
+
+      // Revalidate defaultReasoningLevel deterministically after intersection
+      if (Array.isArray(merged.supportedReasoningLevels)) {
+        const levels = merged.supportedReasoningLevels;
+        const currentDefault = current.defaultReasoningLevel;
+        const modelDefault = model.defaultReasoningLevel;
+        const candidateDefault = (currentDefault && levels.includes(currentDefault))
+          ? currentDefault
+          : (modelDefault && levels.includes(modelDefault))
+            ? modelDefault
+            : levels.includes("medium")
+              ? "medium"
+              : levels.includes("low")
+                ? "low"
+                : levels[0];
+        if (candidateDefault) {
+          merged.defaultReasoningLevel = candidateDefault;
+        } else {
+          delete merged.defaultReasoningLevel;
+        }
+      }
+
+      merged.capabilities = {
+        ...(current.capabilities || {}),
+        ...(model.capabilities || {}),
+      };
+      if (merged.contextLength) merged.capabilities.contextWindow = merged.contextLength;
+      if (merged.maxOutputTokens) merged.capabilities.maxOutput = merged.maxOutputTokens;
+      if (Array.isArray(merged.supportedReasoningLevels)) {
+        merged.capabilities.reasoning = merged.supportedReasoningLevels.length > 0;
+        merged.capabilities.thinkingCanDisable = merged.supportedReasoningLevels.includes("none");
       }
       byId.set(model.id, merged);
     }

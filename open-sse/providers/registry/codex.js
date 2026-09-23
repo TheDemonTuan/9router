@@ -10,6 +10,7 @@ export default {
   priority: 30,
   alias: "cx",
   uiAlias: "cx",
+  exposeThinkingVariants: true,
   display: {
     name: "OpenAI Codex",
     icon: "code",
@@ -58,6 +59,8 @@ export default {
       minimalClientVersion: "0.153.0",
       contextLength: 272000,
       maxContextLength: 872000,
+      maxOutputTokens: 128000,
+      defaultReasoningLevel: "low",
       supportedReasoningLevels: ["low", "medium", "high", "xhigh", "max", "ultra"],
     },
     {
@@ -66,6 +69,8 @@ export default {
       minimalClientVersion: "0.155.0",
       contextLength: 272000,
       maxContextLength: 872000,
+      maxOutputTokens: 128000,
+      defaultReasoningLevel: "medium",
       supportedReasoningLevels: ["low", "medium", "high", "xhigh", "max", "ultra"],
     },
     {
@@ -74,6 +79,8 @@ export default {
       minimalClientVersion: "0.155.0",
       contextLength: 272000,
       maxContextLength: 872000,
+      maxOutputTokens: 128000,
+      defaultReasoningLevel: "medium",
       supportedReasoningLevels: ["low", "medium", "high", "xhigh", "max"],
     },
     { id: "gpt-5.6-sol", name: "GPT 5.6 Sol" },

@@ -437,25 +437,56 @@ export async function buildModelsList(kindFilter, options = {}) {
         if (providerId === "alitp-intl" && !isAlitpModelAvailableForEdition(model.id, "personal")) continue;
         // Deprecated compat aliases stay routable but are not discoverable.
         if (model.deprecated && providerId === "alitp-intl") continue;
-        models.push({
+        const staticCaps = getCapabilitiesForModel(alias, model.id);
+        const entry = {
           id: `${alias}/${model.id}`,
           object: "model",
           owned_by: alias,
-          capabilities: getCapabilitiesForModel(alias, model.id),
-        });
+        };
+        if (model.name) entry.name = model.name;
+        if (model.description) entry.description = model.description;
+        if (Array.isArray(model.supportedReasoningLevels)) {
+          entry.supported_reasoning_levels = model.supportedReasoningLevels;
+        }
+        if (model.defaultReasoningLevel && (!model.supportedReasoningLevels || model.supportedReasoningLevels.includes(model.defaultReasoningLevel))) {
+          entry.default_reasoning_level = model.defaultReasoningLevel;
+        }
+        const caps = { ...(staticCaps || {}) };
+        const contextWindow = model.contextLength || caps.contextWindow;
+        const maxOutput = model.maxOutputTokens || caps.maxOutput;
+        if (Number.isFinite(contextWindow)) {
+          entry.context_length = contextWindow;
+          caps.contextWindow = contextWindow;
+        }
+        if (Number.isFinite(maxOutput)) {
+          entry.max_completion_tokens = maxOutput;
+          caps.maxOutput = maxOutput;
+        }
+        if (entry.default_reasoning_level) caps.defaultReasoningLevel = entry.default_reasoning_level;
+        if (model.supportedReasoningLevels) caps.thinkingCanDisable = model.supportedReasoningLevels.includes("none");
+        if (Object.keys(caps).length > 0) entry.capabilities = caps;
+        models.push(entry);
+
         if (providerInfo?.exposeThinkingVariants && !model.id.includes("(")) {
           // Canonical advertised levels only — wire aliases (high/max→xhigh)
           // stay accepted at request time but never become virtual models.
           const levels = getAdvertisedThinkingLevels(providerId, model.id);
           for (const level of levels ?? []) {
-            models.push({
+            const variant = {
               id: `${alias}/${model.id}(${level})`,
               object: "model",
               owned_by: alias,
               base_model: `${alias}/${model.id}`,
               reasoning_effort: level,
               virtual: true,
-            });
+            };
+            if (entry.name) variant.name = `${entry.name} (${level})`;
+            if (entry.default_reasoning_level) variant.default_reasoning_level = entry.default_reasoning_level;
+            if (entry.supported_reasoning_levels) variant.supported_reasoning_levels = entry.supported_reasoning_levels;
+            if (entry.capabilities) variant.capabilities = { ...entry.capabilities };
+            if (entry.context_length) variant.context_length = entry.context_length;
+            if (entry.max_completion_tokens) variant.max_completion_tokens = entry.max_completion_tokens;
+            models.push(variant);
           }
         }
       }
@@ -502,28 +533,19 @@ export async function buildModelsList(kindFilter, options = {}) {
       let liveCapabilitiesById = new Map();
       let liveModelMetadataById = new Map();
 
-      let rawModelIds = hasExplicitEnabledModels
-        ? Array.from(
-            new Set(
-              enabledModels.filter(
-                (modelId) => typeof modelId === "string" && modelId.trim() !== "",
-              ),
-            ),
-          )
-        // Deprecated compat aliases (alitp preview) stay routable, not discoverable.
-        : providerModels
-            .filter((model) => !(model.deprecated && providerId === "alitp-intl"))
-            .map((model) => model.id);
+      let rawModelIds = providerModels
+        .filter((model) => !(model.deprecated && providerId === "alitp-intl"))
+        .map((model) => model.id);
 
       if (isCompatibleProvider && rawModelIds.length === 0 && !skipDynamicFetch) {
         rawModelIds = await fetchCompatibleModelIds(conn);
       }
 
-      // Config-driven live catalog override (e.g. Kiro returns dynamic
-      // -thinking/-agentic variants per account). On failure, fall back to
+      // Config-driven live catalog override (e.g. Codex, Kiro return dynamic
+      // models / thinking metadata per account). On failure, fall back to
       // whatever rawModelIds already holds.
       const liveResolver = LIVE_MODEL_RESOLVERS[providerId];
-      if (liveResolver && !hasExplicitEnabledModels) {
+      if (liveResolver) {
         try {
           const live = await liveResolver(conn, { connections, kindFilter });
           if (live?.resolved === true || live?.models?.length) {
@@ -547,6 +569,15 @@ export async function buildModelsList(kindFilter, options = {}) {
         } catch (err) {
           console.log(`Live model fetch failed for ${providerId}: ${err?.message || err}`);
         }
+      }
+
+      if (hasExplicitEnabledModels) {
+        const enabledSet = new Set(
+          enabledModels.filter(
+            (modelId) => typeof modelId === "string" && modelId.trim() !== "",
+          ),
+        );
+        rawModelIds = rawModelIds.filter((id) => enabledSet.has(id));
       }
 
       const modelIds = rawModelIds
@@ -625,40 +656,66 @@ export async function buildModelsList(kindFilter, options = {}) {
           object: "model",
           owned_by: outputAlias,
         };
+        const staticModel = providerModels.find((m) => m.id === modelId);
         const liveMetadata = liveModelMetadataById.get(modelId);
-        if (liveMetadata?.name) model.name = liveMetadata.name;
-        if (liveMetadata?.description) model.description = liveMetadata.description;
-        if (Array.isArray(liveMetadata?.supportedReasoningLevels)) {
-          model.supported_reasoning_levels = liveMetadata.supportedReasoningLevels;
+        if (liveMetadata?.name || staticModel?.name) model.name = liveMetadata?.name || staticModel?.name;
+        if (liveMetadata?.description || staticModel?.description) model.description = liveMetadata?.description || staticModel?.description;
+        const supportedLevels = Array.isArray(liveMetadata?.supportedReasoningLevels)
+          ? liveMetadata.supportedReasoningLevels
+          : Array.isArray(staticModel?.supportedReasoningLevels)
+            ? staticModel.supportedReasoningLevels
+            : null;
+        if (supportedLevels) {
+          model.supported_reasoning_levels = supportedLevels;
         }
-        // Live-catalog resolvers (kiro/qoder/github/clinepass) mostly only return
-        // { id, name } — no per-model capability data. Fall back to the same
-        // pattern-matched capabilities the dashboard uses (useModelCaps.js) so
-        // dynamically-discovered LLM models still surface vision/reasoning/search/tools.
+        const rawDefaultEffort = liveMetadata?.defaultReasoningLevel
+          || liveMetadata?.default_reasoning_level
+          || staticModel?.defaultReasoningLevel;
+        if (rawDefaultEffort && (!supportedLevels || supportedLevels.includes(rawDefaultEffort))) {
+          model.default_reasoning_level = rawDefaultEffort;
+        }
+
+        // Live-catalog resolvers mostly only return partial capability data.
+        // Deep merge fallbackCaps + serviceCaps + liveCaps so properties like
+        // maxOutput, vision, reasoning are not dropped.
+        const fallbackCaps = (kind === LLM_KIND || allowAsLlm)
+          ? getCapabilitiesForModel(providerId, modelId)
+          : null;
         const liveCaps = liveCapabilitiesById.get(modelId);
         const serviceCaps = capabilitiesFromServiceKind(customKind || liveKind);
-        const caps = liveCaps || serviceCaps || (kind === LLM_KIND ? getCapabilitiesForModel(providerId, modelId) : null);
-        if (caps) model.capabilities = caps;
-        // Token limits under the snake_case names the OpenAI/OpenRouter
-        // convention uses. `capabilities.contextWindow` is camelCase and nested,
-        // so clients matching context_length find nothing, fall back to guessing
-        // the window from the model name, and guess high — a 372k model read as
-        // 1.05M never reaches its compaction threshold and hard-fails upstream.
-        // Emitted at top level because not every client recurses into nested
-        // objects; the camelCase `capabilities` block stays for compatibility.
+        const caps = {
+          ...(fallbackCaps || {}),
+          ...(serviceCaps || {}),
+          ...(liveCaps || {}),
+        };
+
         if (kind === LLM_KIND || allowAsLlm) {
-          let contextWindow = caps?.contextWindow;
-          let maxOutput = caps?.maxOutput;
-          // Live-catalog and service-kind capabilities are usually partial
-          // (often just { tools: true }), so fill the gaps from the static
-          // table rather than emitting null and leaving clients to guess.
-          if (!Number.isFinite(contextWindow) || !Number.isFinite(maxOutput)) {
-            const fallback = getCapabilitiesForModel(providerId, modelId);
-            if (!Number.isFinite(contextWindow)) contextWindow = fallback.contextWindow;
-            if (!Number.isFinite(maxOutput)) maxOutput = fallback.maxOutput;
+          let contextWindow = caps.contextWindow;
+          let maxOutput = caps.maxOutput;
+          if (!Number.isFinite(contextWindow) && Number.isFinite(fallbackCaps?.contextWindow)) {
+            contextWindow = fallbackCaps.contextWindow;
           }
-          if (Number.isFinite(contextWindow)) model.context_length = contextWindow;
-          if (Number.isFinite(maxOutput)) model.max_completion_tokens = maxOutput;
+          if (!Number.isFinite(maxOutput) && Number.isFinite(fallbackCaps?.maxOutput)) {
+            maxOutput = fallbackCaps.maxOutput;
+          }
+          if (Number.isFinite(contextWindow)) {
+            model.context_length = contextWindow;
+            caps.contextWindow = contextWindow;
+          }
+          if (Number.isFinite(maxOutput)) {
+            model.max_completion_tokens = maxOutput;
+            caps.maxOutput = maxOutput;
+          }
+        }
+        if (model.default_reasoning_level) {
+          caps.defaultReasoningLevel = model.default_reasoning_level;
+        }
+        if (supportedLevels) {
+          caps.thinkingCanDisable = supportedLevels.includes("none");
+          caps.reasoning = supportedLevels.length > 0;
+        }
+        if (Object.keys(caps).length > 0) {
+          model.capabilities = caps;
         }
         models.push(model);
 
@@ -676,7 +733,10 @@ export async function buildModelsList(kindFilter, options = {}) {
               reasoning_effort: level,
               virtual: true,
             };
-            if (model.capabilities) variant.capabilities = model.capabilities;
+            if (model.name) variant.name = `${model.name} (${level})`;
+            if (model.default_reasoning_level) variant.default_reasoning_level = model.default_reasoning_level;
+            if (model.supported_reasoning_levels) variant.supported_reasoning_levels = model.supported_reasoning_levels;
+            if (model.capabilities) variant.capabilities = { ...model.capabilities };
             if (model.context_length) variant.context_length = model.context_length;
             if (model.max_completion_tokens) variant.max_completion_tokens = model.max_completion_tokens;
             models.push(variant);

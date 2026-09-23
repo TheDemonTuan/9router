@@ -60,6 +60,7 @@ jobs:
             unit/alibaba-token-plan-capabilities.test.js \
             unit/alibaba-token-plan-models-route.test.js \
             unit/alibaba-token-plan-provider.test.js \
+            unit/codex-v1-models.test.js \
             translator/alibaba-token-plan-pipeline.test.js
       - name: Run h2c and Bun disconnect regressions
         run: |

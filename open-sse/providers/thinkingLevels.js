@@ -35,8 +35,8 @@ const FORMAT_LEVELS = {
 };
 
 const CODEX_GPT_5_6_LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
-const CODEX_GPT_6_LEVELS = [...CODEX_GPT_5_6_LEVELS, "ultra"];
-const CODEX_GPT_6_LUNA_LEVELS = CODEX_GPT_5_6_LEVELS;
+const CODEX_GPT_6_LEVELS = ["low", "medium", "high", "xhigh", "max", "ultra"];
+const CODEX_GPT_6_LUNA_LEVELS = ["low", "medium", "high", "xhigh", "max"];
 
 function getCatalogThinkingLevels(metadata) {
   const raw = metadata?.supportedReasoningLevels ?? metadata?.supported_reasoning_levels;
@@ -45,7 +45,7 @@ function getCatalogThinkingLevels(metadata) {
     .map((item) => typeof item === "string" ? item.trim() : item?.effort?.trim?.())
     .filter(Boolean);
   if (levels.length === 0) return [];
-  return ["none", ...new Set(levels.filter((level) => level !== "none"))];
+  return [...new Set(levels)];
 }
 
 // Model-name pattern overrides (glob, first match wins) — more precise than format default.

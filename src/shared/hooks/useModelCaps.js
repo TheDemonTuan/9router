@@ -7,7 +7,7 @@ import { getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
 let cache = null; // { byFull, byId } | null
 let cacheAt = 0;
 let inflight = null;
-const MODEL_CAPS_TTL_MS = 5 * 60 * 1000;
+export const MODEL_CAPS_TTL_MS = 5 * 60 * 1000;
 
 function buildMaps(models) {
   const byFull = {};
@@ -68,6 +68,9 @@ export function useModelCaps() {
     };
     if (cache) {
       sync(cache);
+      if (Date.now() - cacheAt >= MODEL_CAPS_TTL_MS) {
+        loadModelCaps().then(sync);
+      }
     } else {
       loadModelCaps().then(sync);
     }
