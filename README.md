@@ -1495,7 +1495,7 @@ Content-Type: application/json
 GET http://localhost:20128/v1/models
 Authorization: Bearer your-api-key
 
-→ Returns all models + combos in OpenAI format
+→ Returns a compact model catalog for discovery; use `/v1/models/info?id={alias}/{modelId}` for extended metadata
 ```
 
 ## 📧 Support

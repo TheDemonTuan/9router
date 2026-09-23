@@ -19,6 +19,7 @@ import { updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { capabilitiesFromServiceKind, getCapabilitiesForModel, aggregateComboCapabilities } from "open-sse/providers/capabilities.js";
 import { getAdvertisedThinkingLevels } from "open-sse/providers/thinkingLevels.js";
+import { projectPublicModel } from "open-sse/providers/publicModel.js";
 import { resolveEffectiveProviderModels } from "open-sse/services/alibabaTokenPlanModels.js";
 import {
   resolveEffectiveCodexCatalog,
@@ -394,7 +395,9 @@ export async function buildModelsList(kindFilter, options = {}) {
       id: combo.name,
       object: "model",
       owned_by: "combo",
+      ...(combo.kind && combo.kind !== "llm" ? { kind: combo.kind } : {}),
     };
+
     if (combo.kind === "webSearch" || combo.kind === "webFetch") {
       entry.kind = combo.kind;
     } else {
@@ -446,6 +449,7 @@ export async function buildModelsList(kindFilter, options = {}) {
           id: `${alias}/${model.id}`,
           object: "model",
           owned_by: alias,
+          ...(modelKind(model) !== LLM_KIND ? { kind: modelKind(model) } : {}),
         };
         if (model.name) entry.name = model.name;
         if (model.description) entry.description = model.description;
@@ -476,21 +480,14 @@ export async function buildModelsList(kindFilter, options = {}) {
           // stay accepted at request time but never become virtual models.
           const levels = getAdvertisedThinkingLevels(providerId, model.id);
           for (const level of levels ?? []) {
-            const variant = {
+            models.push(projectPublicModel({
               id: `${alias}/${model.id}(${level})`,
               object: "model",
               owned_by: alias,
               base_model: `${alias}/${model.id}`,
               reasoning_effort: level,
               virtual: true,
-            };
-            if (entry.name) variant.name = `${entry.name} (${level})`;
-            if (entry.default_reasoning_level) variant.default_reasoning_level = entry.default_reasoning_level;
-            if (entry.supported_reasoning_levels) variant.supported_reasoning_levels = entry.supported_reasoning_levels;
-            if (entry.capabilities) variant.capabilities = { ...entry.capabilities };
-            if (entry.context_length) variant.context_length = entry.context_length;
-            if (entry.max_completion_tokens) variant.max_completion_tokens = entry.max_completion_tokens;
-            models.push(variant);
+            }));
           }
         }
       }
@@ -659,6 +656,7 @@ export async function buildModelsList(kindFilter, options = {}) {
           id: `${outputAlias}/${modelId}`,
           object: "model",
           owned_by: outputAlias,
+          ...(kind !== LLM_KIND ? { kind } : {}),
         };
         const staticModel = providerModels.find((m) => m.id === modelId);
         const liveMetadata = liveModelMetadataById.get(modelId);
@@ -749,21 +747,14 @@ export async function buildModelsList(kindFilter, options = {}) {
           // request time but never become virtual models.
           const levels = getAdvertisedThinkingLevels(providerId, modelId, liveMetadata);
           for (const level of levels ?? []) {
-            const variant = {
+            models.push(projectPublicModel({
               id: `${outputAlias}/${modelId}(${level})`,
               object: "model",
               owned_by: outputAlias,
               base_model: `${outputAlias}/${modelId}`,
               reasoning_effort: level,
               virtual: true,
-            };
-            if (model.name) variant.name = `${model.name} (${level})`;
-            if (model.default_reasoning_level) variant.default_reasoning_level = model.default_reasoning_level;
-            if (model.supported_reasoning_levels) variant.supported_reasoning_levels = model.supported_reasoning_levels;
-            if (model.capabilities) variant.capabilities = { ...model.capabilities };
-            if (model.context_length) variant.context_length = model.context_length;
-            if (model.max_completion_tokens) variant.max_completion_tokens = model.max_completion_tokens;
-            models.push(variant);
+            }));
           }
         }
       }
@@ -797,7 +788,11 @@ export async function buildModelsList(kindFilter, options = {}) {
     dedupedModels.push(model);
   }
 
-  return dedupedModels;
+  const projectedModels = dedupedModels
+    .map((model) => projectPublicModel(model))
+    .filter(Boolean);
+  const modelIds = new Set(projectedModels.map((model) => model.id));
+  return projectedModels.filter((model) => !model.virtual || modelIds.has(model.base_model));
 }
 
 /**
