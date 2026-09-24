@@ -188,16 +188,12 @@ if (!process.argv.includes("--child")) {
         } catch {}
         await Bun.sleep(1000);
       }
-      throw new Error("Headroom v0.38.0 /readyz did not become ready within 120s (offline tokenizer assets may be missing)");
-    }
-    try {
-      await ready();
-    } catch (error) {
       const state = docker("inspect", "--format", "{{.State.Status}} oom={{.State.OOMKilled}} exit={{.State.ExitCode}}", name);
       const logs = Bun.spawnSync(["docker", "logs", "--tail", "30", name], { stdout: "pipe", stderr: "pipe" });
       const recent = new TextDecoder().decode(logs.stderr).replaceAll(token, "[redacted]");
-      throw new Error(`${error.message}; container state: ${state}; recent stderr: ${recent}`);
+      throw new Error(`Headroom v0.38.0 /readyz did not become ready within 120s; container state: ${state}; recent stderr: ${recent}`);
     }
+    await ready();
     const version = docker("exec", name, "python", "-c", "import headroom; from headroom._version import __version__; print(__version__)");
     assert.equal(version, "0.38.0");
     const report = { image, version, hardware: { cpus: cpus().length, totalMemoryBytes: totalmem() }, cases: [], prefix: null };
