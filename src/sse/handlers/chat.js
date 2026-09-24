@@ -222,7 +222,7 @@ export async function handleChat(request, clientRawRequest = null, options = {})
             const { tools, tool_choice, ...cleanBody } = clientRawRequest.body || {};
             cleanRawReq = { ...clientRawRequest, body: cleanBody };
           }
-          return handleSingleModelChat(b, m, cleanRawReq, request, apiKey);
+          return handleSingleModelChat(b, m, cleanRawReq, request, apiKey, { preResponse });
         },
         log,
         comboName: modelStr,
@@ -246,6 +246,7 @@ export async function handleChat(request, clientRawRequest = null, options = {})
       comboStrategy,
       comboStickyLimit,
       liveCapabilities,
+      preResponse,
     });
   }
 
@@ -264,7 +265,8 @@ export async function handleChat(request, clientRawRequest = null, options = {})
       ),
       log,
       comboName: modelStr,
-      comboStrategy: getActiveAdapterStrategy(requiredCapabilities, settings)
+      comboStrategy: getActiveAdapterStrategy(requiredCapabilities, settings),
+      preResponse,
     });
   }
 
@@ -327,6 +329,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         comboStrategy,
         comboStickyLimit,
         liveCapabilities,
+        preResponse,
       });
     }
     log.warn("CHAT", "Invalid model format", { model: modelStr });

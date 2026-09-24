@@ -24,7 +24,7 @@ jobs:
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.2
@@ -58,6 +58,7 @@ jobs:
             unit/chat-pre-response-budget.test.js \
             unit/fetch-timeout-body-signal.test.js \
             unit/route-adapter-lifecycle.test.js \
+            unit/workflow-integrity.test.js \
             unit/codex-fast-capacity.test.js \
             unit/antigravity-weekly-quota.test.js \
             unit/gemini-native-endpoint.test.js \
@@ -112,7 +113,7 @@ jobs:
     outputs:
       image_ref: ${{ steps.meta.outputs.image_ref }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -137,7 +138,7 @@ jobs:
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: true
@@ -319,7 +320,7 @@ jobs:
     if: github.event_name == 'push' || !inputs.skip_deploy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
       - name: Configure SSH
         env:

@@ -66,8 +66,12 @@ export function normalizeCloudCodeProjectId(project) {
 }
 
 export async function fetchWithTimeout(url, opts = {}, ms = 10000, proxyOptions = null) {
-  const controller = new AbortController();
   const externalSignal = opts?.signal;
+  if (externalSignal?.aborted) {
+    throw (externalSignal.reason || new Error("Operation aborted"));
+  }
+
+  const controller = new AbortController();
   let finalized = false;
   let abortFetch;
   const abortPromise = new Promise((_, reject) => {
@@ -84,10 +88,8 @@ export async function fetchWithTimeout(url, opts = {}, ms = 10000, proxyOptions 
   const onExternalAbort = () => controller.abort(externalSignal.reason);
   const timeoutId = setTimeout(() => controller.abort(new Error(`Timeout after ${ms}ms`)), ms);
   if (externalSignal) {
-    if (externalSignal.aborted) onExternalAbort();
-    else externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+    externalSignal.addEventListener("abort", onExternalAbort, { once: true });
   }
-
 
   let fetchPromise;
   controller.signal.addEventListener("abort", abortFetch, { once: true });

@@ -31,6 +31,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref_name }}
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.2
@@ -46,7 +48,7 @@ jobs:
           bun --version
           node --test --test-concurrency=1 tests/unit/custom-server-h2c.test.cjs tests/unit/custom-server-h2c-concurrent.test.cjs
           bun test tests/unit/custom-server-h2c.test.cjs tests/unit/custom-server-h2c-concurrent.test.cjs tests/unit/bun-client-disconnect.test.cjs tests/unit/bun-next-request-disconnect.test.cjs
-      - name: Run Responses and ChatGPT Web verification
+      - name: Run offline translator verification
         working-directory: tests
         run: |
           set -euo pipefail
@@ -57,11 +59,35 @@ jobs:
           bun x vitest run --config vitest.config.js \
             $response_tests \
             $chatgpt_web_tests \
+            unit/codex-tool-normalization.test.js \
+            unit/codex-native-passthrough-thinking.test.js \
+            unit/base-executor-timeout-classification.test.js \
+            integration/zcode-concurrent-responses.test.js \
+            unit/grok-build-config.test.js \
+            unit/quota-classification.test.js \
+            unit/quota-response-contract.test.js \
+            unit/chat-quota-handler.test.js \
+            unit/antigravity-quota-routing.test.js \
+            unit/antigravity-retry-hook.test.js \
+            unit/base-executor-retry.test.js \
+            unit/chat-pre-response-budget.test.js \
+            unit/fetch-timeout-body-signal.test.js \
+            unit/route-adapter-lifecycle.test.js \
+            unit/workflow-integrity.test.js \
+            unit/codex-fast-capacity.test.js \
+            unit/antigravity-weekly-quota.test.js \
+            unit/gemini-native-endpoint.test.js \
+            unit/ollama-stream-tail.test.js \
+            unit/google-usage-abort.test.js \
+            unit/claude-usage-cache.test.js \
+            unit/usage-cache-contract.test.js \
+            unit/health-route.test.js \
             unit/alibaba-token-plan-thinking.test.js \
             unit/alibaba-token-plan-catalog.test.js \
             unit/alibaba-token-plan-capabilities.test.js \
             unit/alibaba-token-plan-models-route.test.js \
             unit/alibaba-token-plan-provider.test.js \
+            unit/codex-v1-models.test.js \
             translator/alibaba-token-plan-pipeline.test.js
           set +e
           bun x vitest run --config vitest.config.js translator/alibaba-token-plan-pipeline.test.js --reporter=json --outputFile=translator-results.json
@@ -74,6 +100,12 @@ jobs:
           node __baseline__/verify-providers.mjs
           node __baseline__/verify-alias.mjs
           node __baseline__/verify-oauth-urls.mjs
+      - name: Run quota persistence smoke test
+        run: bun tests/integration/quota-persistence-smoke.mjs
+      - name: Run pre-response lifecycle smoke test
+        run: bun tests/integration/pre-response-lifecycle-smoke.mjs
+      - name: Verify blue-green reconcile and drain safety
+        run: bash tests/unit/blue-green-reconcile.test.sh
 
   prepare:
     name: Validate release
@@ -193,7 +225,21 @@ jobs:
       packages: write
 
     steps:
-      - uses: actions/checkout@v7
+      - name: Check out release source at validated commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.commit }}
+          path: source
+          fetch-depth: 1
+
+      - name: Check out publishing Dockerfile
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: workflow
+          sparse-checkout: |
+            Dockerfile
+          fetch-depth: 1
 
       - uses: docker/setup-buildx-action@v4
 
@@ -392,7 +438,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: true

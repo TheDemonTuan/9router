@@ -179,20 +179,105 @@ describe("pre-response budget end-to-end boundaries", () => {
     budget.dispose();
   });
 
+  it("stops combo fallback when preResponse deadline expires during retry cooldown", async () => {
+    const { handleComboChat } = await import("../../open-sse/services/combo.js");
+    const budget = createPreResponseBudget({ budgetMs: 30 });
+    const calls = [];
+    const log = { info: vi.fn(), warn: vi.fn() };
+    const handleSingleModel = vi.fn(async (_body, model) => {
+      calls.push(model);
+      return new Response(JSON.stringify({ error: { message: "Server overloaded" } }), {
+        status: 503,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    await expect(handleComboChat({
+      body: { model: "combo-test", messages: [{ role: "user", content: "hi" }] },
+      models: ["model-a", "model-b"],
+      handleSingleModel,
+      log,
+      comboName: "combo-test",
+      comboStrategy: "fallback",
+      preResponse: budget,
+    })).rejects.toMatchObject({ code: "PRE_RESPONSE_DEADLINE_EXCEEDED" });
+
+    expect(calls).toEqual(["model-a"]);
+    budget.dispose();
+  });
+
+  it("passes preResponse to nested combo and halts child combo when budget expires", async () => {
+    const { handleComboChat } = await import("../../open-sse/services/combo.js");
+    const budget = createPreResponseBudget({ budgetMs: 30 });
+    const log = { info: vi.fn(), warn: vi.fn() };
+    const childCalls = [];
+
+    const childHandleSingleModel = vi.fn(async (_body, model) => {
+      childCalls.push(model);
+      return new Response(JSON.stringify({ error: { message: "Server overloaded" } }), {
+        status: 503,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    const parentHandleSingleModel = vi.fn(async (body, model) => {
+      if (model === "nested-child-combo") {
+        return handleComboChat({
+          body,
+          models: ["child-model-1", "child-model-2"],
+          handleSingleModel: childHandleSingleModel,
+          log,
+          comboName: "nested-child-combo",
+          comboStrategy: "fallback",
+          preResponse: budget,
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+
+    await expect(handleComboChat({
+      body: { model: "parent-combo", messages: [{ role: "user", content: "hi" }] },
+      models: ["nested-child-combo", "parent-backup"],
+      handleSingleModel: parentHandleSingleModel,
+      log,
+      comboName: "parent-combo",
+      comboStrategy: "fallback",
+      preResponse: budget,
+    })).rejects.toMatchObject({ code: "PRE_RESPONSE_DEADLINE_EXCEEDED" });
+
+    expect(childCalls).toEqual(["child-model-1"]);
+    budget.dispose();
+  });
+
   it("returns controlled 504 before route initialization finishes", async () => {
     vi.useFakeTimers();
     vi.doMock("../../src/sse/handlers/chat.js", () => ({ handleChat: vi.fn() }));
     vi.doMock("../../open-sse/translator/index.js", () => ({ initTranslators: () => new Promise(() => {}) }));
-    const { POST } = await import("../../src/app/api/v1/chat/completions/route.js");
-    const pending = POST(new Request("http://localhost/v1/chat/completions", {
-      method: "POST", body: JSON.stringify({ model: "m", messages: [] }),
-      headers: { "content-type": "application/json" },
-    }));
-    await vi.advanceTimersByTimeAsync(100_001);
-    const result = await pending;
-    expect(result.status).toBe(504);
-    expect(result.headers.get("x-9router-no-fallback")).toBe("true");
-    vi.useRealTimers();
+    try {
+      const { POST } = await import("../../src/app/api/v1/chat/completions/route.js");
+      const pending = POST(new Request("http://localhost/v1/chat/completions", {
+        method: "POST", body: JSON.stringify({ model: "m", messages: [] }),
+        headers: { "content-type": "application/json" },
+      }));
+      await vi.advanceTimersByTimeAsync(100_001);
+      const result = await pending;
+      expect(result.status).toBe(504);
+      expect(result.headers.get("x-9router-no-fallback")).toBe("true");
+    } finally {
+      vi.useRealTimers();
+      vi.doUnmock("../../src/sse/handlers/chat.js");
+      vi.doUnmock("../../open-sse/translator/index.js");
+      vi.resetModules();
+    }
+  });
+
+  it("restores unmocked modules cleanly after route initialization test", async () => {
+    const chat = await import("../../src/sse/handlers/chat.js");
+    const translator = await import("../../open-sse/translator/index.js");
+    expect(typeof chat.handleChat).toBe("function");
+    expect(vi.isMockFunction(chat.handleChat)).toBe(false);
+    expect(typeof translator.initTranslators).toBe("function");
+    expect(vi.isMockFunction(translator.initTranslators)).toBe(false);
   });
 });
 

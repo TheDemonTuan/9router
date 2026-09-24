@@ -229,4 +229,29 @@ describe("CommandCode in Combo Fallback", () => {
     expect(handleSingleModel).toHaveBeenNthCalledWith(1, expect.anything(), "commandcode/poolside/laguna-s-2.1-free");
     expect(handleSingleModel).toHaveBeenNthCalledWith(2, expect.anything(), "openai/gpt-4o-mini");
   });
+
+  it("aborts retry loop and does not open subsequent attempts when preResponse expires", async () => {
+    const { createPreResponseBudget } = await import("../../open-sse/utils/preResponseBudget.js");
+    const budget = createPreResponseBudget({ budgetMs: 15 });
+    const executor = new CommandCodeExecutor();
+    const superExecute = vi.spyOn(Object.getPrototypeOf(CommandCodeExecutor.prototype), "execute");
+    superExecute.mockResolvedValue({
+      response: new Response('data: {"type":"error","error":{"message":"overloaded","statusCode":503}}\n\n', {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      }),
+    });
+
+    await expect(executor.execute({
+      model: "commandcode/test",
+      body: {},
+      stream: true,
+      credentials: { apiKey: "k" },
+      preResponse: budget,
+    })).rejects.toMatchObject({ code: "PRE_RESPONSE_DEADLINE_EXCEEDED" });
+
+    expect(superExecute).toHaveBeenCalledTimes(1);
+    superExecute.mockRestore();
+    budget.dispose();
+  });
 });

@@ -304,7 +304,7 @@ export function getComboModelsFromData(modelStr, combosData) {
  * @param {number|string} [options.comboStickyLimit=1] - Requests per combo model before switching
  * @returns {Promise<Response>}
  */
-export async function handleComboChat({ body, models, handleSingleModel, log, comboName, comboStrategy, comboStickyLimit = 1, autoSwitch = true }) {
+export async function handleComboChat({ body, models, handleSingleModel, log, comboName, comboStrategy, comboStickyLimit = 1, autoSwitch = true, preResponse = null }) {
   // Apply rotation strategy if enabled
   let rotatedModels = getRotatedModels(models, comboName, comboStrategy, comboStickyLimit);
 
@@ -326,6 +326,9 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
   const quotaResponses = [];
 
   for (let i = 0; i < rotatedModels.length; i++) {
+    if (preResponse && (preResponse.remainingMs() <= 0 || preResponse.signal?.aborted)) {
+      throw (preResponse.signal?.reason || createDeadlineError());
+    }
     const modelStr = rotatedModels[i];
     log.info("COMBO", `Trying model ${i + 1}/${rotatedModels.length}: ${modelStr}`);
 
@@ -353,7 +356,9 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
         const errorBody = await result.clone().json();
         errorText = errorBody?.error?.message || errorBody?.error || errorBody?.message || errorText;
         retryAfter = errorBody?.retryAfter || null;
-      } catch {
+      } catch (error) {
+        if (preResponse?.signal?.aborted) throw preResponse.signal.reason;
+        if (error?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" || error?.code === "CLIENT_ABORT") throw error;
         // Ignore JSON parse errors
       }
 
@@ -381,7 +386,8 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
       if (cooldownMs && cooldownMs > 0 && cooldownMs <= 5000 &&
           (result.status === 503 || result.status === 502 || result.status === 504)) {
         log.info("COMBO", `Model ${modelStr} transient ${result.status}, waiting ${cooldownMs}ms before next`);
-        await new Promise(r => setTimeout(r, cooldownMs));
+        if (preResponse) await preResponse.sleep(cooldownMs);
+        else await new Promise(r => setTimeout(r, cooldownMs));
       }
 
       // Fallback to next model
@@ -389,6 +395,8 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
       if (!lastStatus) lastStatus = result.status;
       log.warn("COMBO", `Model ${modelStr} failed, trying next`, { status: result.status });
     } catch (error) {
+      if (preResponse?.signal?.aborted) throw preResponse.signal.reason;
+      if (error?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" || error?.code === "CLIENT_ABORT") throw error;
       // Catch unexpected exceptions to ensure fallback continues
       lastError = error.message || String(error);
       if (!lastStatus) lastStatus = 500;
