@@ -147,23 +147,24 @@ export async function callHeadroomGateway({
     return null;
   }
 
-  // 3. Assemble Gateway v2 request payload (stateless, marker-free)
+  // 3. Assemble Gateway v2 request payload (stateless, marker-free, client controls locked)
+  // Strip any client-supplied headroom control fields from upstream envelope
+  const {
+    config: _clientConfig,
+    gateway: _clientGateway,
+    session_id: _clientSessionId,
+    token_budget: _clientTokenBudget,
+    ...cleanBody
+  } = (body && typeof body === "object") ? body : {};
+
   const payload = {
-    ...body,
+    ...cleanBody,
     model,
-    ...(compressUserMessages
-      ? {
-          config: {
-            ...(body?.config || {}),
-            compress_user_messages: true,
-          },
-        }
-      : (body?.config ? { config: body.config } : {})),
+    ...(compressUserMessages ? { config: { compress_user_messages: true } } : {}),
     gateway: {
       can_redrive: false,
       can_relay_response: true,
       session_affinity: false,
-      ...(body?.gateway || {}),
     },
   };
 
@@ -256,7 +257,20 @@ export async function callHeadroomGateway({
     return null;
   }
 
-  // 7. Validate body invariants (IDs, reasoning summaries/encrypted, tool pairing, JSON arguments)
+  // 7. Obligations safety check: 9Router only implements relay_usage.
+  // Reject unsupported obligations such as redrive or session persistence to prevent protocol deviation.
+  const rawObligations = data.obligations || gatewayData.obligations || [];
+  const obligationsList = Array.isArray(rawObligations)
+    ? rawObligations
+    : (rawObligations && typeof rawObligations === "object" ? Object.keys(rawObligations).filter(k => rawObligations[k]) : []);
+
+  const unsupportedObligation = obligationsList.find(ob => ob !== "relay_usage");
+  if (unsupportedObligation) {
+    diagnostics.reason = `unsupported_obligation: ${unsupportedObligation}`;
+    return null;
+  }
+
+  // 8. Validate body invariants (IDs, reasoning summaries/encrypted, tool pairing, JSON arguments)
   const invariantCheck = validateBodyInvariants(body, returnedBody, format);
   if (!invariantCheck.valid) {
     diagnostics.reason = `invariant_violation: ${invariantCheck.reason}`;

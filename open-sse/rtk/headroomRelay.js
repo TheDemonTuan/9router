@@ -33,25 +33,37 @@ export function hasRelayUsage(obligations) {
 
 /**
  * Normalize provider-specific usage counters into a standard format without double-counting.
+ * Preserves both cache read and cache creation tokens for accurate upstream accounting.
  */
 export function normalizeRelayUsage(usage) {
   if (!usage || typeof usage !== "object") return null;
 
-  // OpenAI format
   const promptTokens = usage.prompt_tokens ?? usage.input_tokens ?? usage.promptTokenCount ?? 0;
   const completionTokens = usage.completion_tokens ?? usage.output_tokens ?? usage.candidatesTokenCount ?? 0;
   const cachedTokens = usage.prompt_tokens_details?.cached_tokens
     ?? usage.cache_read_input_tokens
     ?? usage.cachedContentTokenCount
     ?? 0;
+  const cacheCreationTokens = usage.prompt_tokens_details?.cache_creation_tokens
+    ?? usage.cache_creation_input_tokens
+    ?? 0;
   const totalTokens = usage.total_tokens ?? (promptTokens + completionTokens);
 
-  return {
+  const res = {
     input_tokens: promptTokens,
     output_tokens: completionTokens,
     cached_tokens: cachedTokens,
     total_tokens: totalTokens,
   };
+
+  if (cacheCreationTokens > 0) {
+    res.cache_creation_input_tokens = cacheCreationTokens;
+  }
+  if (usage.cache_read_input_tokens !== undefined) {
+    res.cache_read_input_tokens = cachedTokens;
+  }
+
+  return res;
 }
 
 /**

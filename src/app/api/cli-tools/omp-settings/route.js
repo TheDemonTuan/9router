@@ -119,14 +119,19 @@ export async function POST(request) {
 
     await fs.writeFile(getOmpModelsYmlPath(), ymlContent, "utf-8");
 
-    // Best-effort update to agent.db if better-sqlite3 or node:sqlite is present
+    // Best-effort update to agent.db if bun:sqlite or node:sqlite is present
     try {
       let Database;
-      try {
-        const mod = await import("better-sqlite3");
-        Database = mod.default || mod;
-      } catch {
-        // fallback ignored
+      if (typeof process !== "undefined" && process.versions?.bun) {
+        try {
+          const mod = await import("bun:sqlite");
+          Database = mod.Database || mod.default || mod;
+        } catch {}
+      } else {
+        try {
+          const mod = await import("node:sqlite");
+          Database = mod.DatabaseSync || mod.Database;
+        } catch {}
       }
       if (Database) {
         const dbPath = getOmpDbPath();

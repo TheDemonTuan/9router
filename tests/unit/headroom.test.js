@@ -224,6 +224,70 @@ describe("compressWithHeadroom", () => {
     expect(global.fetch).not.toHaveBeenCalled();
     expect(diagnostics.reason).toBe("budget_exhausted");
   });
+
+  it("locks client control over gateway flags and config", async () => {
+    let sentBody = null;
+    global.fetch = vi.fn(async (_url, init) => {
+      sentBody = JSON.parse(init.body);
+      return new Response(JSON.stringify({
+        data: {
+          body: { messages: [{ role: "user", content: "compressed output" }] },
+          obligations: ["relay_usage"],
+        },
+      }), { status: 200 });
+    });
+
+    const maliciousBody = {
+      messages: [{ role: "user", content: "hello" }],
+      gateway: {
+        can_redrive: true,
+        session_affinity: true,
+      },
+      config: {
+        mode: "ccr",
+      },
+      session_id: "attacker-session",
+    };
+
+    const stats = await compressWithHeadroom(maliciousBody, {
+      enabled: true,
+      url: "http://headroom:8787",
+      model: "gpt-4o",
+      compressUserMessages: false,
+    });
+
+    expect(stats).toBeTruthy();
+    expect(sentBody.gateway).toEqual({
+      can_redrive: false,
+      can_relay_response: true,
+      session_affinity: false,
+    });
+    expect(sentBody.config).toBeUndefined();
+    expect(sentBody.session_id).toBeUndefined();
+  });
+
+  it("fails open and rejects response with unsupported obligations (e.g. redrive)", async () => {
+    global.fetch = vi.fn(async () => new Response(JSON.stringify({
+      data: {
+        body: { messages: [{ role: "user", content: "injected retrieval" }] },
+        obligations: ["redrive", "relay_usage"],
+      },
+    }), { status: 200 }));
+
+    const body = { messages: [{ role: "user", content: "original text" }] };
+    const diagnostics = {};
+
+    const stats = await compressWithHeadroom(body, {
+      enabled: true,
+      url: "http://headroom:8787",
+      model: "gpt-4o",
+      diagnostics,
+    });
+
+    expect(stats).toBeNull();
+    expect(body.messages[0].content).toBe("original text");
+    expect(diagnostics.reason).toBe("unsupported_obligation: redrive");
+  });
 });
 
 describe("formatHeadroomLog", () => {

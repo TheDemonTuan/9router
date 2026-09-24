@@ -106,6 +106,8 @@ jobs:
         run: bun tests/integration/pre-response-lifecycle-smoke.mjs
       - name: Verify blue-green reconcile and drain safety
         run: bash tests/unit/blue-green-reconcile.test.sh
+      - name: Run Headroom gateway acceptance
+        run: bash tests/headroom-acceptance.sh --fast
 
   prepare:
     name: Validate release

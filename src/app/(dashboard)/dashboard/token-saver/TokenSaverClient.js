@@ -58,12 +58,11 @@ export default function TokenSaverClient() {
   const [showPxpipeModal, setShowPxpipeModal] = useState(false);
   const [pxpipeActionLoading, setPxpipeActionLoading] = useState(false);
   const [pxpipeActionError, setPxpipeActionError] = useState("");
-  const [locale, setLocale] = useState("en");
+  const [locale, setLocale] = useState(() => getCurrentLocale());
 
   const { copied, copy } = useCopyToClipboard();
 
   useEffect(() => {
-    setLocale(getCurrentLocale());
     return onLocaleChange(() => setLocale(getCurrentLocale()));
   }, []);
 
@@ -71,14 +70,6 @@ export default function TokenSaverClient() {
   const visibleCavemanLevels = isWenyanLocale
     ? CAVEMAN_LEVELS
     : CAVEMAN_LEVELS.filter((lvl) => !lvl.wenyan);
-
-  useEffect(() => {
-    const current = CAVEMAN_LEVELS.find((lvl) => lvl.id === cavemanLevel);
-    if (current?.wenyan && !isWenyanLocale) {
-      setCavemanLevel("ultra");
-      patchSetting({ cavemanLevel: "ultra" });
-    }
-  }, [isWenyanLocale, cavemanLevel]);
 
   const patchSetting = async (patch) => {
     try {
@@ -91,6 +82,15 @@ export default function TokenSaverClient() {
       console.log("Error updating setting:", error);
     }
   };
+
+  useEffect(() => {
+    const current = CAVEMAN_LEVELS.find((lvl) => lvl.id === cavemanLevel);
+    if (current?.wenyan && !isWenyanLocale) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setCavemanLevel("ultra");
+      patchSetting({ cavemanLevel: "ultra" });
+    }
+  }, [isWenyanLocale, cavemanLevel]);
 
   const handleRtkEnabled = async (value) => {
     try {
@@ -442,16 +442,21 @@ export default function TokenSaverClient() {
   }, [refreshHeadroomStatus, refreshPxpipeStatus, runPxpipeHealth]);
 
   const headroomRunning = !!headroomStatus.running;
+  const headroomReady = !!headroomStatus.ready;
+  const headroomLocalUrl = headroomStatus.localUrl !== false;
   const headroomStatusLabel = headroomStatus.loading
     ? "Checking…"
-    : headroomRunning
-      ? "Running"
-      : headroomStatus.localUrl !== false && !headroomStatus.installed
-        ? "Not installed"
-        : headroomStatus.localUrl !== false
-          ? "Stopped"
-          : "External";
-  const headroomLocalUrl = headroomStatus.localUrl !== false;
+    : headroomReady
+      ? "Ready"
+      : headroomRunning
+        ? "Starting…"
+        : !headroomLocalUrl && headroomStatus.reachable === false
+          ? "Unreachable"
+          : headroomLocalUrl && !headroomStatus.installed
+            ? "Not installed"
+            : headroomLocalUrl
+              ? "Stopped"
+              : "External";
   const headroomCanStart = !!headroomStatus.canStart;
   const headroomManaged =
     headroomLocalUrl && !!headroomStatus.managedPid;
@@ -798,20 +803,40 @@ export default function TokenSaverClient() {
           <div className="flex items-center justify-between text-sm">
             <span>Status</span>
             <span
-              className={headroomRunning ? "text-success" : "text-warning"}
+              className={headroomReady ? "text-success" : headroomRunning ? "text-warning" : "text-text-muted"}
             >
               {headroomStatusLabel}
             </span>
           </div>
           {headroomRunning && (
-            <a
-              href="/api/headroom/proxy/dashboard"
-              target="_blank"
-              rel="noreferrer"
-              className="w-full rounded border border-border px-4 py-2 text-center text-sm hover:bg-surface-2"
-            >
-              Open Headroom Dashboard
-            </a>
+            <div className="flex flex-col gap-2 rounded border border-border bg-surface-1 p-3 text-xs" role="status" aria-live="polite">
+              <div className="flex items-center justify-between">
+                <span className="font-medium text-text-muted">Gateway Engine</span>
+                <span className="font-mono text-text">
+                  {headroomStatus.sidecarVersion ? `v${headroomStatus.sidecarVersion}` : "v0.38.0"}
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-text-muted">Readiness</span>
+                <span className={headroomReady ? "font-medium text-success" : "font-medium text-warning"}>
+                  {headroomReady ? "● Ready" : "○ Initializing"}
+                </span>
+              </div>
+              {headroomLocalUrl ? (
+                <a
+                  href="/api/headroom/proxy/dashboard"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-1 w-full rounded border border-border px-3 py-1.5 text-center text-xs hover:bg-surface-2"
+                >
+                  Open Local Dashboard
+                </a>
+              ) : (
+                <p className="mt-1 text-center text-xs text-text-muted">
+                  Remote diagnostics active. Raw dashboard restricted to localhost.
+                </p>
+              )}
+            </div>
           )}
           <div className="flex flex-col gap-1">
             <p className="text-sm font-medium">Proxy URL</p>
