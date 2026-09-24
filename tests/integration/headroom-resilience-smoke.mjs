@@ -203,11 +203,14 @@ if (!process.argv.includes("--child")) {
       for (const format of ["openai", "claude", "openai-responses", "kiro"]) {
         const body = fixture(format, 262144);
         const projected = format === "kiro" ? { messages: collectKiroHeadroomMessages(body).messages } : body;
+        const before = bytes(projected);
         const diagnostics = {};
         const result = await compressWithHeadroom(body, { url, proxyToken: token, model: body.model, format, timeoutMs: 10000, diagnostics });
         const output = format === "kiro" ? { messages: collectKiroHeadroomMessages(body).messages } : body;
-        console.log(JSON.stringify({ format, before: bytes(projected), after: bytes(output),
-          tokensBefore: result?.tokens_before, tokensAfter: result?.tokens_after, transforms: result?.transforms_applied,
+        const after = bytes(output);
+        assert.ok(result && after < before, `${format} did not compress a synthetic tool result`);
+        console.log(JSON.stringify({ format, before, after,
+          tokensBefore: result.tokens_before, tokensAfter: result.tokens_after, transforms: result.transforms_applied,
           reason: diagnostics.reason || null }));
       }
     } else {
@@ -217,14 +220,15 @@ if (!process.argv.includes("--child")) {
       const projected = format === "kiro" ? { messages: collectKiroHeadroomMessages(input).messages } : input;
       const inputBytes = bytes(projected);
       assert.ok(inputBytes >= size && inputBytes <= 20 * 1024 * 1024, "Synthetic payload size out of bounds");
+      const original = mode === "facade" && format !== "kiro" ? structuredClone(projected) : projected;
       const diag = {};
       const started = performance.now();
       const result = mode === "raw"
         ? await callHeadroomGateway({ url, proxyToken: token, body: projected, model: input.model, format: format === "kiro" ? "openai" : format, timeoutMs: 30000, diagnostics: diag })
         : await compressWithHeadroom(input, { url, proxyToken: token, model: input.model, format, timeoutMs: 10000, diagnostics: diag });
       const accepted = !!result;
-      const outputBody = mode === "raw" ? result?.compressedBody : input;
-      if (accepted && format !== "kiro") assert.equal(validateBodyInvariants(projected, outputBody, format).valid, true);
+      const outputBody = mode === "raw" ? result?.compressedBody : format === "kiro" ? { messages: collectKiroHeadroomMessages(input).messages } : input;
+      if (accepted) assert.equal(validateBodyInvariants(original, outputBody, format === "kiro" ? "openai" : format).valid, true);
       return { accepted, reason: diag.reason || null, latencyMs: diag.latencyMs ?? null,
         elapsedMs: performance.now() - started, inputBytes, outputBytes: accepted ? bytes(outputBody) : null,
         tokensBefore: result?.tokens_before ?? null, tokensAfter: result?.tokens_after ?? null };
