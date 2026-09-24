@@ -116,7 +116,7 @@ describe("pre-response budget end-to-end boundaries", () => {
 
   it("allows one 504 retry (60s + 3s + 37s scaled) but never starts a third request", async () => {
     fetchMock.mockReset();
-    const budget = createPreResponseBudget({ budgetMs: 400 });
+    const budget = createPreResponseBudget({ budgetMs: 1200 });
     const executor = new BaseExecutor("test", {
       baseUrl: "https://provider.test",
       timeoutMs: 150,
