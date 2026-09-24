@@ -12,6 +12,7 @@ import { getSettings, getProviderConnections } from "@/lib/localDb";
 import { getModelInfo, getComboModels } from "../services/model.js";
 import { handleChatCore } from "open-sse/handlers/chatCore.js";
 import { createDeadlineError } from "open-sse/utils/preResponseBudget.js";
+import { createRouteContext } from "open-sse/utils/modelRoute.js";
 import { DEFAULT_HEADROOM_URL } from "@/lib/headroom/detect";
 import { getTransform as getPxpipeTransform } from "@/lib/pxpipe/loader.js";
 import { appendPxpipeEvent } from "@/lib/pxpipe/events.js";
@@ -216,13 +217,19 @@ export async function handleChat(request, clientRawRequest = null, options = {})
       return handleFusionChat({
         body,
         models: comboModels,
-        handleSingleModel: (b, m, isPanel) => {
+        handleSingleModel: (b, m, isPanel, meta = {}) => {
           let cleanRawReq = clientRawRequest;
           if (isPanel && clientRawRequest) {
             const { tools, tool_choice, ...cleanBody } = clientRawRequest.body || {};
             cleanRawReq = { ...clientRawRequest, body: cleanBody };
           }
-          return handleSingleModelChat(b, m, cleanRawReq, request, apiKey, { preResponse });
+          return handleSingleModelChat(b, m, cleanRawReq, request, apiKey, {
+            preResponse,
+            clientModel: modelStr,
+            effectiveModel: m,
+            routeReason: "combo",
+            ...meta
+          });
         },
         log,
         comboName: modelStr,
@@ -238,7 +245,13 @@ export async function handleChat(request, clientRawRequest = null, options = {})
       body,
       models: augmentedModels,
       handleSingleModel: withCapacityAdapterStripping(
-        (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, { preResponse }),
+        (b, m, meta = {}) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, {
+          preResponse,
+          clientModel: modelStr,
+          effectiveModel: m,
+          routeReason: "combo",
+          ...meta
+        }),
         adapterAdded
       ),
       log,
@@ -260,7 +273,13 @@ export async function handleChat(request, clientRawRequest = null, options = {})
       body,
       models: soloAugmented,
       handleSingleModel: withCapacityAdapterStripping(
-        (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, { preResponse }),
+        (b, m, meta = {}) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, {
+          preResponse,
+          clientModel: modelStr,
+          effectiveModel: m,
+          routeReason: m !== modelStr ? "capacity-adapter" : "direct",
+          ...meta
+        }),
         adapterAdded
       ),
       log,
@@ -270,13 +289,18 @@ export async function handleChat(request, clientRawRequest = null, options = {})
     });
   }
 
-  return handleSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, { preResponse });
+  return handleSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, {
+    preResponse,
+    clientModel: modelStr,
+    effectiveModel: modelStr,
+    routeReason: "direct",
+  });
 }
 
 /**
  * Handle single model chat request
  */
-async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, { preResponse = null } = {}) {
+async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, { preResponse = null, clientModel = null, effectiveModel = null, routeReason = "direct", routeContext = null } = {}) {
   const modelInfo = await getModelInfo(modelStr);
 
   // If provider is null, this might be a combo name - check and handle
@@ -299,13 +323,19 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         return handleFusionChat({
           body,
           models: comboModels,
-          handleSingleModel: (b, m, isPanel) => {
+          handleSingleModel: (b, m, isPanel, meta = {}) => {
             let cleanRawReq = clientRawRequest;
             if (isPanel && clientRawRequest) {
               const { tools, tool_choice, ...cleanBody } = clientRawRequest.body || {};
               cleanRawReq = { ...clientRawRequest, body: cleanBody };
             }
-            return handleSingleModelChat(b, m, cleanRawReq, request, apiKey, { preResponse });
+            return handleSingleModelChat(b, m, cleanRawReq, request, apiKey, {
+              preResponse,
+              clientModel: modelStr,
+              effectiveModel: m,
+              routeReason: "combo",
+              ...meta
+            });
           },
           log,
           comboName: modelStr,
@@ -321,7 +351,13 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         body,
         models: augmentedModels,
         handleSingleModel: withCapacityAdapterStripping(
-          (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, { preResponse }),
+          (b, m, meta = {}) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, {
+            preResponse,
+            clientModel: modelStr,
+            effectiveModel: m,
+            routeReason: "combo",
+            ...meta
+          }),
           adapterAdded
         ),
         log,
@@ -466,9 +502,15 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     // Use shared chatCore
     const chatSettings = await getSettings();
     const providerThinking = (chatSettings.providerThinking || {})[provider] || null;
+    const resolvedEffectiveModel = effectiveModel || (modelInfo.providerAlias ? `${modelInfo.providerAlias}/${model}` : `${provider}/${model}`);
+    const resolvedClientModel = clientModel || clientRawRequest?.body?.model || modelStr;
+    const effectiveRouteReason = clientModel && clientModel !== modelStr && clientModel !== resolvedEffectiveModel
+      ? routeReason
+      : (modelStr.includes("/") ? "direct" : "model-alias");
+
     const result = await handleChatCore({
       body: { ...body, model: `${provider}/${model}` },
-      modelInfo: { provider, model },
+      modelInfo: { provider, providerAlias: modelInfo.providerAlias, model },
       credentials: refreshedCredentials,
       preResponse,
       log,
@@ -476,6 +518,16 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       connectionId: credentials.connectionId,
       userAgent,
       apiKey,
+      routeReason: effectiveRouteReason,
+      effectiveModel: resolvedEffectiveModel,
+      routeContext: routeContext || createRouteContext({
+        clientModel: resolvedClientModel,
+        requestedProviderAlias: modelInfo.providerAlias,
+        provider,
+        requestedModel: model,
+        effectiveModel: resolvedEffectiveModel,
+        reason: effectiveRouteReason,
+      }),
       ccFilterNaming: !!chatSettings.ccFilterNaming,
       rtkEnabled: !!chatSettings.rtkEnabled,
       headroomEnabled: !!chatSettings.headroomEnabled,

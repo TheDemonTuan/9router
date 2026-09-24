@@ -71,6 +71,7 @@ export function resolveModelAliasFromMap(alias, aliases) {
     const providerOrAlias = resolved.slice(0, firstSlash);
     return {
       provider: resolveProviderAlias(providerOrAlias),
+      providerAlias: providerOrAlias,
       model: resolved.slice(firstSlash + 1),
     };
   }
@@ -79,6 +80,7 @@ export function resolveModelAliasFromMap(alias, aliases) {
   if (typeof resolved === "object" && resolved.provider && resolved.model) {
     return {
       provider: resolveProviderAlias(resolved.provider),
+      providerAlias: resolved.providerAlias || resolved.provider,
       model: resolved.model,
     };
   }
@@ -97,6 +99,7 @@ export async function getModelInfoCore(modelStr, aliasesOrGetter) {
   if (!parsed.isAlias) {
     return {
       provider: parsed.provider,
+      providerAlias: parsed.providerAlias,
       model: parsed.model,
     };
   }
@@ -118,6 +121,7 @@ export async function getModelInfoCore(modelStr, aliasesOrGetter) {
   // Fallback: infer provider from model name prefix
   return {
     provider: inferProviderFromModelName(parsed.model),
+    providerAlias: null,
     model: parsed.model,
   };
 }

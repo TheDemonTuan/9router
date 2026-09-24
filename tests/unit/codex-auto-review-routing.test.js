@@ -15,6 +15,7 @@ describe("codex auto-review routing (#1398)", () => {
   it("routes the bare Codex auto-review model to the OAuth Codex provider", async () => {
     await expect(getModelInfoCore("codex-auto-review", {})).resolves.toEqual({
       provider: "codex",
+      providerAlias: null,
       model: "codex-auto-review",
     });
   });
