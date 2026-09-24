@@ -236,12 +236,15 @@ try:
         print("none")
     elif status == "200" and valid:
         gen_headers = headers.get("x-9router-route-generation", [])
-        if len(gen_headers) != 1:
+        if len(gen_headers) == 1:
+            gen = gen_headers[0]
+            if not re.fullmatch(r"[0-9a-fA-F]{32}", gen):
+                fail("invalid route generation header")
+            print(f"{payload['deployment_slot']} {gen.lower()}")
+        elif not gen_headers and mode == "legacy":
+            print(f"{payload['deployment_slot']} legacy")
+        else:
             fail("missing or duplicate route generation header")
-        gen = gen_headers[0]
-        if not re.fullmatch(r"[0-9a-fA-F]{32}", gen):
-            fail("invalid route generation header")
-        print(f"{payload['deployment_slot']} {gen.lower()}")
     else:
         fail("unexpected HTTP status or health identity")
 except (OSError, UnicodeError, ValueError) as error:
@@ -257,20 +260,25 @@ PY
 }
 
 wait_route_slot() {
-  local expected_slot="$1" expected_gen="${2:-}" timeout="${ROUTE_TIMEOUT:-30}" deadline attempt=0 streak=0 observed remaining expected
+  local expected_slot="$1" expected_gen="${2:-}" timeout="${ROUTE_TIMEOUT:-30}" deadline attempt=0 streak=0 observed remaining expected mode
   [[ "$timeout" =~ ^[0-9]+$ ]] && (( 10#$timeout >= 2 )) || die "ROUTE_TIMEOUT must be an integer >= 2"
   if [[ "$expected_slot" == none ]]; then
     expected="none"
+    mode="bootstrap"
+  elif [[ "$expected_gen" == legacy ]]; then
+    expected="$expected_slot legacy"
+    mode="legacy"
   else
     [[ -n "$expected_gen" ]] || die "wait_route_slot requires generation for slot $expected_slot"
     expected="$expected_slot ${expected_gen,,}"
+    mode="route"
   fi
   deadline=$((SECONDS + 10#$timeout))
   while (( SECONDS < deadline )); do
     attempt=$((attempt + 1))
     remaining=$((deadline - SECONDS))
     if (( remaining > 5 )); then remaining=5; fi
-    if observed="$(probe_observed_slot "$attempt" "$remaining" "${expected_slot/none/bootstrap}" 2>/dev/null)" && [[ "$observed" == "$expected" ]]; then
+    if observed="$(probe_observed_slot "$attempt" "$remaining" "$mode" 2>/dev/null)" && [[ "$observed" == "$expected" ]]; then
       streak=$((streak + 1))
       if (( streak == 2 )); then return 0; fi
     else
@@ -345,7 +353,7 @@ else:
         nodes.append((indent, stripped, parent))
         stack.append(len(nodes) - 1)
 
-    for key in ("http", "services", "9router-service", "loadBalancer", "servers", "9router-route-generation", "headers", "customResponseHeaders"):
+    for key in ("http", "services", "9router-service", "loadBalancer", "servers"):
         if sum(bool(re.fullmatch(re.escape(key) + r"\s*:", text)) for _, text, _ in nodes) != 1:
             fail(route, f"expected exactly one {key} key")
 
@@ -378,21 +386,28 @@ else:
             fail(route, "extra backend in generated service")
     return_slot = match.group(1)
 
-    middlewares = one(http, 2, r"middlewares:")
-    gen_mw = one(middlewares, 4, r"9router-route-generation:")
-    headers = one(gen_mw, 6, r"headers:")
-    custom_headers = one(headers, 8, r"customResponseHeaders:")
-    gen_nodes = [index for index, (depth, value, owner) in enumerate(nodes)
-                 if owner == custom_headers and depth == 10 and re.match(r"^X-9Router-Route-Generation:\s*", value)]
-    if len(gen_nodes) != 1:
-        fail(route, "expected exactly one X-9Router-Route-Generation header")
-    gen_match = re.fullmatch(r'X-9Router-Route-Generation:\s*"?([0-9a-fA-F]{32})"?', nodes[gen_nodes[0]][1])
-    if not gen_match:
-        fail(route, "invalid generation token in generated route")
-    return_gen = gen_match.group(1).lower()
+    mw_nodes = children(http, 2, r"middlewares:")
+    if mw_nodes:
+        middlewares = mw_nodes[0]
+        gen_mws = children(middlewares, 4, r"9router-route-generation:")
+        if gen_mws:
+            gen_mw = gen_mws[0]
+            headers = one(gen_mw, 6, r"headers:")
+            custom_headers = one(headers, 8, r"customResponseHeaders:")
+            gen_nodes = [index for index, (depth, value, owner) in enumerate(nodes)
+                         if owner == custom_headers and depth == 10 and re.match(r"^X-9Router-Route-Generation:\s*", value)]
+            if len(gen_nodes) != 1:
+                fail(route, "expected exactly one X-9Router-Route-Generation header")
+            gen_match = re.fullmatch(r'X-9Router-Route-Generation:\s*"?([0-9a-fA-F]{32})"?', nodes[gen_nodes[0]][1])
+            if not gen_match:
+                fail(route, "invalid generation token in generated route")
+            return_gen = gen_match.group(1).lower()
 
-if return_slot is not None and return_gen is not None:
-    print(f"{return_slot} {return_gen}")
+if return_slot is not None:
+    if return_gen is not None:
+        print(f"{return_slot} {return_gen}")
+    else:
+        print(f"{return_slot} legacy")
 PY
 }
 

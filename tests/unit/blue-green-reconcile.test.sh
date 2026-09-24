@@ -220,6 +220,26 @@ new_case() {
   printf none > "$FAKE_LOADED_SLOT"
   printf none > "$FAKE_LOADED_GENERATION"
 }
+route_legacy() {
+  local slot="$1"
+  cat > "$case_dir/dynamic/9router.yml" <<YAML
+http:
+  services:
+    9router-service:
+      loadBalancer:
+        servers:
+          - url: "http://9router-$slot:20128"
+YAML
+}
+seed_legacy() {
+  local slot="$1"
+  route_legacy "$slot"
+  printf '%s' "$slot" > "$FAKE_LOADED_SLOT"
+  printf none > "$FAKE_LOADED_GENERATION"
+  printf 'running|sha256:%s-old|fake-%s\n' "$slot" "$slot" > "$FAKE_STATE/9router-$slot"
+  printf '%s' "$slot" > "$case_dir/.active-slot"
+  printf 'sha256:%s-old' "$slot" > "$case_dir/.deployed-image"
+}
 route() {
   local slot="$1" gen="${2:-00000000000000000000000000000001}"
   cat > "$case_dir/dynamic/9router.yml" <<YAML
@@ -560,5 +580,14 @@ FAKE_WRONG_SLOT=blue fail --status --strict
 API_HOST='https://invalid.example.test/path' fail --preflight
 DASHBOARD_ALIAS_HOST='bad/alias' fail --preflight
 assert_route blue blue
+
+# Legacy YAML route without generation is supported in preflight and migrated by reconcile/release.
+new_case; seed_legacy blue
+run --preflight
+fail --status --strict
+run --reconcile
+assert_route blue blue
+[[ -n "$(generation_on_disk)" ]]
+[[ "$(cat "$case_dir/.deployed-image")" == sha256:blue-old ]]
 
 printf 'CLI preflight, ACK, rollback, reconcile, bootstrap and drain scenarios passed\n'
