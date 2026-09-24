@@ -33,6 +33,10 @@ export function bindResponseBody(response, { signal = null, onFinalize = null } 
     },
     async pull(streamController) {
       if (terminal) return;
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
       reading = true;
       try {
         const { value, done } = await reader.read();

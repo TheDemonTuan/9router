@@ -358,13 +358,20 @@ async function forwardGeminiNativeRequest(request, body, model, action, preRespo
     const guarded = bindResponseBody(upstreamResponse, { signal: attemptController.signal, onFinalize: cleanup });
 
     if (upstreamResponse.ok) {
+      const payload = action === ":generateContent"
+        ? await preResponse.run(() => guarded.arrayBuffer())
+        : guarded.body;
+      if (preResponse.signal.aborted) throw preResponse.signal.reason;
       await clearAccountError(credentials.connectionId, credentials, modelId);
       if (preResponse.signal.aborted) throw preResponse.signal.reason;
-      return new Response(guarded.body, {
+      const response = new Response(payload, {
         status: upstreamResponse.status,
         statusText: upstreamResponse.statusText,
         headers: corsHeadersFrom(upstreamResponse),
       });
+      return action === ":streamGenerateContent"
+        ? withWireHeartbeat(response, { clientSignal: request.signal })
+        : response;
     }
 
     const errorText = await preResponse.run(() => guarded.text());

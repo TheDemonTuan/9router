@@ -42,6 +42,9 @@ export class CommandCodeExecutor extends BaseExecutor {
   async execute(opts) {
     const maxRetries = 2;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      if (opts?.preResponse && (opts.preResponse.remainingMs() <= 0 || opts.preResponse.signal?.aborted)) {
+        throw (opts.preResponse.signal?.reason || new Error("Pre-response deadline exceeded"));
+      }
       const result = await super.execute(opts);
       if (!result?.response?.ok || !result.response.body) return result;
 
@@ -49,8 +52,14 @@ export class CommandCodeExecutor extends BaseExecutor {
       if (!wrappedResponse.ok && attempt < maxRetries) {
         const isRetryableStatus = wrappedResponse.status === 502 || wrappedResponse.status === 503 || wrappedResponse.status === 504;
         if (isRetryableStatus) {
+          if (opts?.preResponse?.signal?.aborted) throw opts.preResponse.signal.reason;
           opts.log?.debug?.("RETRY", `CommandCode upstream returned status ${wrappedResponse.status}, retrying ${attempt + 1}/${maxRetries}...`);
-          await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+          const delay = 1000 * (attempt + 1);
+          if (opts?.preResponse) {
+            await opts.preResponse.sleep(delay);
+          } else {
+            await new Promise(r => setTimeout(r, delay));
+          }
           continue;
         }
       }

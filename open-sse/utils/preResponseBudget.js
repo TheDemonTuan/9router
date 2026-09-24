@@ -74,7 +74,7 @@ export function createPreResponseBudget({ clientSignal = null, budgetMs = ROUTER
   }
 
   const reason = () => controller.signal.reason || createDeadlineError();
-  const remainingMs = () => Math.max(0, deadlineAt - now());
+  const remainingMs = () => (controller.signal.aborted ? 0 : Math.max(0, deadlineAt - now()));
   const expireIfNeeded = () => {
     if (!controller.signal.aborted && remainingMs() <= 0) abortDeadline();
     return controller.signal.aborted;

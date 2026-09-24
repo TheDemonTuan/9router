@@ -286,13 +286,30 @@ describe("Gemini native v1beta endpoint", () => {
     global.fetch.mockResolvedValueOnce(new Response(new ReadableStream({
       pull() { return new Promise(() => {}); }, cancel,
     }), { headers: { "content-type": "application/json" } }));
-    const response = await POST(makeGeminiRequest("gemini-3.1-flash-tts-preview:generateContent", audioBody(), {}, client.signal), {
-      params: { path: ["gemini-3.1-flash-tts-preview:generateContent"] },
+    const response = await POST(makeGeminiRequest("gemini-3.1-flash-tts-preview:streamGenerateContent", audioBody(), {}, client.signal), {
+      params: { path: ["gemini-3.1-flash-tts-preview:streamGenerateContent"] },
     });
     const pending = response.text();
     client.abort(new Error("closed"));
     await expect(pending).rejects.toThrow("closed");
     expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels upstream body and does not record success when client aborts during nonstream body read", async () => {
+    const client = new AbortController();
+    const cancel = vi.fn();
+    global.fetch.mockResolvedValueOnce(new Response(new ReadableStream({
+      pull() { return new Promise(() => {}); }, cancel,
+    }), { headers: { "content-type": "application/json" } }));
+    const pending = POST(makeGeminiRequest("gemini-3.1-flash-tts-preview:generateContent", audioBody(), {}, client.signal), {
+      params: { path: ["gemini-3.1-flash-tts-preview:generateContent"] },
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    client.abort(new Error("closed"));
+    const response = await pending;
+    expect(response.status).toBe(499);
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(mocks.clearAccountError).not.toHaveBeenCalled();
   });
 
   it("keeps non-audio Gemini requests on the existing chat conversion path", async () => {

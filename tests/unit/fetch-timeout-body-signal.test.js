@@ -59,4 +59,15 @@ describe("fetchWithTimeout response body signal", () => {
     await expect(response.json()).resolves.toEqual({});
     await vi.advanceTimersByTimeAsync(1_000);
   });
+
+  it("rejects immediately without calling fetch when external signal is already aborted", async () => {
+    const upstream = new AbortController();
+    const reason = new Error("already aborted");
+    upstream.abort(reason);
+
+    mocks.proxyAwareFetch.mockClear();
+    await expect(fetchWithTimeout("https://smoke.invalid", { signal: upstream.signal }, 1_000))
+      .rejects.toBe(reason);
+    expect(mocks.proxyAwareFetch).not.toHaveBeenCalled();
+  });
 });
