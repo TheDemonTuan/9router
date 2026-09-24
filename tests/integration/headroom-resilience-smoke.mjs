@@ -187,7 +187,7 @@ if (!process.argv.includes("--child")) {
           const response = await fetch(`${url}/readyz`, { signal: AbortSignal.timeout(2000) });
           if (response.ok) return;
           lastProbe = `HTTP ${response.status}`;
-        } catch (error) { lastProbe = error?.cause?.code || error?.name || "fetch_failed"; }
+        } catch (error) { lastProbe = `${error?.cause?.code || error?.name || "fetch_failed"}${error?.cause?.message ? `: ${error.cause.message}` : ""}`; }
         await Bun.sleep(1000);
       }
       const state = docker("inspect", "--format", "{{.State.Status}} oom={{.State.OOMKilled}} exit={{.State.ExitCode}}", name);
