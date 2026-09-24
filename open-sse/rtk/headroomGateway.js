@@ -54,14 +54,17 @@ function maskEndpoint(endpoint) {
 
 export function isInternalHost(hostname) {
   const h = String(hostname || "").replace(/^\[/, "").replace(/\]$/, "").toLowerCase();
-  if (h === "localhost" || h === "127.0.0.1" || h === "::1" || h.startsWith("127.")) return true;
+  if (h === "localhost" || h === "127.0.0.1" || h === "::1") return true;
   if (h === "headroom" || h === "9router-headroom" || h === "host.docker.internal") return true;
-  if (h.endsWith(".local") || h.endsWith(".internal") || h.endsWith(".lan") || h.endsWith(".test") || h.endsWith(".example") || h === "example.com") return true;
 
   const ipMatch = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
   if (ipMatch) {
     const octet1 = parseInt(ipMatch[1], 10);
     const octet2 = parseInt(ipMatch[2], 10);
+    const octet3 = parseInt(ipMatch[3], 10);
+    const octet4 = parseInt(ipMatch[4], 10);
+    if (octet1 > 255 || octet2 > 255 || octet3 > 255 || octet4 > 255) return false;
+    if (octet1 === 127) return true;
     if (octet1 === 10) return true;
     if (octet1 === 172 && octet2 >= 16 && octet2 <= 31) return true;
     if (octet1 === 192 && octet2 === 168) return true;
@@ -70,7 +73,7 @@ export function isInternalHost(hostname) {
   return false;
 }
 
-function isSafeOrigin(endpointUrl) {
+export function isSafeOrigin(endpointUrl) {
   try {
     const parsed = new URL(endpointUrl);
     if (!["http:", "https:"].includes(parsed.protocol)) return false;
@@ -148,11 +151,19 @@ export async function callHeadroomGateway({
   const payload = {
     ...body,
     model,
-    config: {
+    ...(compressUserMessages
+      ? {
+          config: {
+            ...(body?.config || {}),
+            compress_user_messages: true,
+          },
+        }
+      : (body?.config ? { config: body.config } : {})),
+    gateway: {
       can_redrive: false,
-      can_relay_response: false,
+      can_relay_response: true,
       session_affinity: false,
-      ...(compressUserMessages ? { compress_user_messages: true } : {}),
+      ...(body?.gateway || {}),
     },
   };
 
@@ -225,10 +236,13 @@ export async function callHeadroomGateway({
   diagnostics.latencyMs = Date.now() - startTime;
 
   // 5. Unpack Gateway v2 response
-  // v0.38.0 native gateway returns { data: { body, turn_id, route, obligations, headers }, ... }
-  // or legacy top-level { messages, ... }
+  // v0.38.0 native gateway returns top-level { body, turn_id, route, obligations, headers, ... }
+  // with fallback to { data: { body, turn_id, ... } } or raw { messages, ... }
   const gatewayData = data?.data || {};
-  const returnedBody = gatewayData.body || data.body || (Array.isArray(data.messages) ? { messages: data.messages } : (Array.isArray(data.input) ? { input: data.input } : null));
+  const returnedBody = data.body
+    || gatewayData.body
+    || (Array.isArray(data.messages) ? { messages: data.messages } : (Array.isArray(data.input) ? { input: data.input } : null))
+    || (Array.isArray(gatewayData.messages) ? { messages: gatewayData.messages } : (Array.isArray(gatewayData.input) ? { input: gatewayData.input } : null));
 
   if (!returnedBody) {
     diagnostics.reason = "gateway_missing_compressed_body";
@@ -236,7 +250,7 @@ export async function callHeadroomGateway({
   }
 
   // 6. Sovereignty check: model must not be changed by Headroom
-  const returnedModel = returnedBody.model || data.model || model;
+  const returnedModel = returnedBody.model || data.model || gatewayData.model || model;
   if (returnedModel !== model && returnedModel !== body.model) {
     diagnostics.reason = `model_sovereignty_violation: returned ${returnedModel} expected ${model}`;
     return null;
@@ -251,15 +265,15 @@ export async function callHeadroomGateway({
 
   return {
     compressedBody: returnedBody,
-    turnId: gatewayData.turn_id || data.turn_id || null,
-    route: gatewayData.route || data.route || null,
-    obligations: gatewayData.obligations || data.obligations || {},
-    providerHeaders: gatewayData.headers || data.headers || null,
-    tokens_before: data.tokens_before ?? null,
-    tokens_after: data.tokens_after ?? null,
-    tokens_saved: data.tokens_saved ?? null,
-    compression_ratio: data.compression_ratio ?? null,
-    transforms_applied: data.transforms_applied || [],
+    turnId: data.turn_id || gatewayData.turn_id || null,
+    route: data.route || gatewayData.route || null,
+    obligations: data.obligations || gatewayData.obligations || [],
+    providerHeaders: data.headers || gatewayData.headers || null,
+    tokens_before: data.tokens_before ?? gatewayData.tokens_before ?? null,
+    tokens_after: data.tokens_after ?? gatewayData.tokens_after ?? null,
+    tokens_saved: data.tokens_saved ?? gatewayData.tokens_saved ?? null,
+    compression_ratio: data.compression_ratio ?? gatewayData.compression_ratio ?? null,
+    transforms_applied: data.transforms_applied || gatewayData.transforms_applied || [],
     latencyMs: diagnostics.latencyMs,
   };
 }

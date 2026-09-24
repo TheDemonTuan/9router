@@ -223,7 +223,8 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
 
       try {
         headroomTurnContext?.complete?.({
-          status: "completed",
+          statusCode: 200,
+          status: 200,
           usage: { prompt_tokens: inTokens, completion_tokens: outTokens, total_tokens: inTokens + outTokens, ...cacheDetails },
           latencyMs: Date.now() - requestStartTime,
         });
@@ -232,6 +233,14 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
       trackDone();
       return { success: true, response: new Response(JSON.stringify(restoreToolNames(finalResp, toolNameMap)), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
     } catch (err) {
+      try {
+        headroomTurnContext?.complete?.({
+          statusCode: 502,
+          status: 502,
+          error: err,
+          latencyMs: Date.now() - requestStartTime,
+        });
+      } catch { /* best-effort */ }
       if (preResponse?.signal.aborted) throw preResponse.signal.reason;
       if (err?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" || err?.code === "CLIENT_ABORT") throw err;
       trackDone();
@@ -245,11 +254,18 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
     const sseText = await providerResponse.text();
     const parsed = parseSSEToOpenAIResponse(sseText, model);
     if (!parsed) {
+      try {
+        headroomTurnContext?.complete?.({
+          statusCode: 502,
+          status: 502,
+          error: new Error("Invalid SSE response for non-streaming request"),
+          latencyMs: Date.now() - requestStartTime,
+        });
+      } catch { /* best-effort */ }
       trackDone();
       return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Invalid SSE response for non-streaming request");
     }
     if (parsed.error) {
-      trackDone();
       // Structured error chunks may carry the real upstream status (e.g. the
       // Qoder executor emits status 403 for billing envelopes). Preserve it so
       // the account loop locks/falls back on the right status instead of a
@@ -258,6 +274,15 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
       const status = Number.isInteger(upstreamStatus) && upstreamStatus >= 400 && upstreamStatus <= 599
         ? upstreamStatus
         : HTTP_STATUS.BAD_GATEWAY;
+      try {
+        headroomTurnContext?.complete?.({
+          statusCode: status,
+          status,
+          error: new Error(parsed.error.message || "Upstream SSE stream failed"),
+          latencyMs: Date.now() - requestStartTime,
+        });
+      } catch { /* best-effort */ }
+      trackDone();
       return createErrorResult(
         status,
         parsed.error.message || "Upstream SSE stream failed"
@@ -276,7 +301,8 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
     const usage = parsed.usage || {};
     try {
       headroomTurnContext?.complete?.({
-        status: "completed",
+        statusCode: 200,
+        status: 200,
         usage,
         latencyMs: Date.now() - requestStartTime,
       });

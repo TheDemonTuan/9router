@@ -10,9 +10,15 @@ describe("compressWithHeadroom openai-responses format (#1998, #2132)", () => {
   });
 
   it("keeps body.input in Responses format after compressing an openai-responses request", async () => {
-    // Gateway v2 contract returns { data: { body: { input: [...] }, turn_id, obligations, headers } }
-    global.fetch = vi.fn(async () => new Response(JSON.stringify({
-      data: {
+    // Gateway v2 contract returns top-level { body: { input: [...] }, turn_id, obligations, headers }
+    global.fetch = vi.fn(async (_url, init) => {
+      const payload = JSON.parse(init.body);
+      expect(payload.gateway).toEqual({
+        can_redrive: false,
+        can_relay_response: true,
+        session_affinity: false,
+      });
+      return new Response(JSON.stringify({
         body: {
           input: [
             {
@@ -23,13 +29,13 @@ describe("compressWithHeadroom openai-responses format (#1998, #2132)", () => {
           ],
         },
         turn_id: "turn_123",
-        obligations: { relay_usage: true },
+        obligations: ["relay_usage"],
         headers: { "openai-beta": "responses-2025" },
-      },
-      tokens_before: 100,
-      tokens_after: 90,
-      tokens_saved: 10,
-    }), { status: 200 }));
+        tokens_before: 100,
+        tokens_after: 90,
+        tokens_saved: 10,
+      }), { status: 200 });
+    });
 
     const body = {
       input: [
@@ -43,7 +49,7 @@ describe("compressWithHeadroom openai-responses format (#1998, #2132)", () => {
 
     const data = await compressWithHeadroom(body, {
       enabled: true,
-      url: "http://headroom.test",
+      url: "http://headroom:8787",
       model: "gpt-5",
       format: "openai-responses",
     });
@@ -83,37 +89,40 @@ describe("compressWithHeadroom openai-responses format (#1998, #2132)", () => {
     global.fetch = vi.fn(async (_url, init) => {
       const payload = JSON.parse(init.body);
       expect(payload.input).toBeDefined();
+      expect(payload.gateway).toEqual({
+        can_redrive: false,
+        can_relay_response: true,
+        session_affinity: false,
+      });
       return new Response(JSON.stringify({
-        data: {
-          body: {
-            input: [
-              {
-                type: "message",
-                role: "user",
-                content: [{ type: "input_text", text: "investigate" }],
-              },
-              {
-                type: "function_call",
-                call_id: "call_apply_patch_123",
-                name: "apply_patch",
-                arguments: "{\"patch\":\"diff\"}",
-              },
-              {
-                type: "function_call_output",
-                call_id: "call_apply_patch_123",
-                output: "ok",
-              },
-              {
-                type: "reasoning",
-                summary: [{ type: "summary_text", text: "Plan" }],
-                encrypted_content: "opaque_ciphertext",
-              },
-            ],
-          },
-          turn_id: "turn_abc",
-          obligations: { relay_usage: true },
-          headers: { "x-custom-provider": "true" },
+        body: {
+          input: [
+            {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: "investigate" }],
+            },
+            {
+              type: "function_call",
+              call_id: "call_apply_patch_123",
+              name: "apply_patch",
+              arguments: "{\"patch\":\"diff\"}",
+            },
+            {
+              type: "function_call_output",
+              call_id: "call_apply_patch_123",
+              output: "ok",
+            },
+            {
+              type: "reasoning",
+              summary: [{ type: "summary_text", text: "Plan" }],
+              encrypted_content: "opaque_ciphertext",
+            },
+          ],
         },
+        turn_id: "turn_abc",
+        obligations: ["relay_usage"],
+        headers: { "x-custom-provider": "true" },
         tokens_before: 200,
         tokens_after: 120,
         tokens_saved: 80,
@@ -134,7 +143,7 @@ describe("compressWithHeadroom openai-responses format (#1998, #2132)", () => {
 
     const data = await compressWithHeadroom(body, {
       enabled: true,
-      url: "http://headroom.test",
+      url: "http://headroom:8787",
       model: "gpt-5",
       format: "openai-responses",
       diagnostics,

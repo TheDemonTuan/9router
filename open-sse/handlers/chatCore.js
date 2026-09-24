@@ -592,9 +592,14 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     }
     reqLogger.logTargetRequest(providerUrl, providerHeaders, finalBody);
   } catch (error) {
+    const isClientAbort = error.code === "CLIENT_ABORT" || (error.name === "AbortError" && (clientSignal?.aborted || error.message?.includes?.("Client closed")));
+    const isConnectTimeout = error.code === "UPSTREAM_CONNECT_TIMEOUT" || error.status === HTTP_STATUS.GATEWAY_TIMEOUT;
+    const failureStatus = isClientAbort ? 499 : (isConnectTimeout ? HTTP_STATUS.GATEWAY_TIMEOUT : HTTP_STATUS.BAD_GATEWAY);
+
     try {
       headroomTurnContext?.complete?.({
-        status: "error",
+        statusCode: failureStatus,
+        status: failureStatus,
         error,
         latencyMs: Date.now() - requestStartTime,
       });
@@ -605,9 +610,6 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       streamController.handleError(error);
       throw preResponse?.signal.aborted ? preResponse.signal.reason : error;
     }
-    const isClientAbort = error.code === "CLIENT_ABORT" || (error.name === "AbortError" && (clientSignal?.aborted || error.message?.includes?.("Client closed")));
-    const isConnectTimeout = error.code === "UPSTREAM_CONNECT_TIMEOUT" || error.status === HTTP_STATUS.GATEWAY_TIMEOUT;
-    const failureStatus = isClientAbort ? 499 : (isConnectTimeout ? HTTP_STATUS.GATEWAY_TIMEOUT : HTTP_STATUS.BAD_GATEWAY);
 
     releasePending(true);
     appendRequestLog({ model, provider, connectionId, status: `FAILED ${failureStatus}` }).catch(() => { });
@@ -706,7 +708,8 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     releasePending(true);
     try {
       headroomTurnContext?.complete?.({
-        status: "error",
+        statusCode: providerResponse.status,
+        status: providerResponse.status,
         error: new Error(`Provider returned HTTP ${providerResponse.status}`),
         latencyMs: Date.now() - requestStartTime,
       });

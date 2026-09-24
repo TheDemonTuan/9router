@@ -153,6 +153,7 @@ describe("chat credential exhaustion", () => {
   });
 
   it("falls back to the next account after normalized hard quota", async () => {
+    const resetAtMs = Date.now() + 60 * 60 * 1000;
     const first = { connectionId: "ag-a", connectionName: "a", accessToken: "a", providerSpecificData: {} };
     const second = { connectionId: "ag-b", connectionName: "b", accessToken: "b", providerSpecificData: {} };
     mocks.getProviderCredentials.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
@@ -163,7 +164,7 @@ describe("chat credential exhaustion", () => {
         error: "Request cannot be served",
         errorClass: "quota_exhausted",
         retryable: false,
-        resetsAtMs: Date.parse(RESET_AT),
+        resetsAtMs: resetAtMs,
         response: new Response("quota", { status: 429 }),
       })
       .mockResolvedValueOnce({ success: true, response: new Response("ok", { status: 200 }) });
@@ -172,7 +173,7 @@ describe("chat credential exhaustion", () => {
     expect(response.status).toBe(200);
     expect(mocks.handleChatCore).toHaveBeenCalledTimes(2);
     expect(mocks.markAccountUnavailable).toHaveBeenCalledWith(
-      "ag-a", 429, "Request cannot be served", "antigravity", "gemini-3.8-flash-high", Date.parse(RESET_AT), "quota_exhausted",
+      "ag-a", 429, "Request cannot be served", "antigravity", "gemini-3.8-flash-high", resetAtMs, "quota_exhausted",
     );
     expect(mocks.handleAntigravityQuotaError).not.toHaveBeenCalled();
   });

@@ -284,8 +284,11 @@ export function buildOnStreamComplete({ provider, model, connectionId, apiKey, r
 
   const onStreamComplete = (contentObj, usage, ttftAt, outcome = { status: "completed", successful: true }, metrics = {}) => {
     try {
+      const isSuccessful = outcome?.successful !== false;
+      const statusCode = isSuccessful ? 200 : 502;
       headroomTurnContext?.complete?.({
-        status: outcome?.successful === false ? "error" : "completed",
+        statusCode,
+        status: statusCode,
         usage,
         latencyMs: Date.now() - requestStartTime,
       });
