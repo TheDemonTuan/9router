@@ -288,6 +288,11 @@ if (!process.argv.includes("--child")) {
     if (output) await writeFile(output, JSON.stringify(report, null, 2));
     console.log(JSON.stringify(report));
     assert.ok(Object.values(counts).every((count) => count > 0), "At least one format had zero accepted compression results");
+    for (const format of Object.keys(counts)) {
+      const cases = report.cases.filter((item) => item.transport === "facade" && item.format === format);
+      assert.ok(cases.some((item) => item.warm.inputBytes > item.warm.outputBytes && item.warm.accepted > 0), `${format} did not reduce provider bytes`);
+      assert.ok(cases.every((item) => item.warm.invariantRejects === 0 && item.cold.invariantRejects === 0), `${format} produced an invariant rejection`);
+    }
     }
   } finally {
     if (owned) { docker("stop", name); docker("rm", name); }
