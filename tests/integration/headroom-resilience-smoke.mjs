@@ -181,17 +181,19 @@ if (!process.argv.includes("--child")) {
     assert.ok(port > 0, "Docker localhost port was not allocated");
     const url = `http://127.0.0.1:${port}`;
     async function ready() {
+      let lastProbe = "none";
       for (let n = 0; n < 120; n++) {
         try {
           const response = await fetch(`${url}/readyz`, { signal: AbortSignal.timeout(2000) });
           if (response.ok) return;
-        } catch {}
+          lastProbe = `HTTP ${response.status}`;
+        } catch (error) { lastProbe = error?.cause?.code || error?.name || "fetch_failed"; }
         await Bun.sleep(1000);
       }
       const state = docker("inspect", "--format", "{{.State.Status}} oom={{.State.OOMKilled}} exit={{.State.ExitCode}}", name);
       const logs = Bun.spawnSync(["docker", "logs", "--tail", "30", name], { stdout: "pipe", stderr: "pipe" });
-      const recent = new TextDecoder().decode(logs.stderr).replaceAll(token, "[redacted]");
-      throw new Error(`Headroom v0.38.0 /readyz did not become ready within 120s; container state: ${state}; recent stderr: ${recent}`);
+      const recent = `${new TextDecoder().decode(logs.stdout)}\n${new TextDecoder().decode(logs.stderr)}`.replaceAll(token, "[redacted]");
+      throw new Error(`Headroom v0.38.0 /readyz did not become ready within 120s; last probe: ${lastProbe}; container state: ${state}; recent logs: ${recent}`);
     }
     await ready();
     const version = docker("exec", name, "python", "-c", "import headroom; from headroom._version import __version__; print(__version__)");
