@@ -34,7 +34,9 @@ stop_pull_heartbeat() {
   if [[ -n "${PULL_HEARTBEAT_PID:-}" ]]; then
     local pid="$PULL_HEARTBEAT_PID"
     PULL_HEARTBEAT_PID=""
-    { kill -TERM "$pid" 2>/dev/null && pkill -P "$pid" 2>/dev/null && wait "$pid" 2>/dev/null; } || true
+    kill -TERM "$pid" 2>/dev/null || true
+    pkill -TERM -P "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
   fi
 }
 die() { stop_pull_heartbeat 2>/dev/null || true; log "ERROR: $*" >&2; exit 1; }
@@ -907,9 +909,14 @@ print(json.dumps(data, indent=2))
 
   if [[ -n "$new_cfg" ]]; then
     $sudo_cmd mkdir -p "$(dirname "$daemon_json")" 2>/dev/null || true
-    printf '%s\n' "$new_cfg" | $sudo_cmd tee "$daemon_json" >/dev/null 2>&1 || true
+    printf '%s\n' "$new_cfg" | $sudo_cmd tee "$daemon_json" >/dev/null || die "Failed to write $daemon_json"
     log "Reloading Docker daemon..."
-    $sudo_cmd systemctl reload docker >/dev/null 2>&1 || $sudo_cmd kill -SIGHUP "$(pidof dockerd 2>/dev/null || true)" >/dev/null 2>&1 || true
+    if ! $sudo_cmd systemctl reload docker 2>/dev/null; then
+      local pid
+      pid="$(pidof dockerd 2>/dev/null || true)"
+      [[ -n "$pid" ]] || die "Cannot find dockerd for reload"
+      $sudo_cmd kill -SIGHUP "$pid" 2>/dev/null || die "Failed to reload Docker daemon"
+    fi
     log "Docker max-concurrent-downloads configured to $concurrency"
   else
     die "Failed to generate Docker daemon configuration"
@@ -918,7 +925,7 @@ print(json.dumps(data, indent=2))
 
 PULL_TIMEOUT="${PULL_TIMEOUT:-300}"
 PULL_ATTEMPTS="${PULL_ATTEMPTS:-2}"
-COMPOSE_PROGRESS="${COMPOSE_PROGRESS:-tty}"
+COMPOSE_PROGRESS="${COMPOSE_PROGRESS:-plain}"
 PULL_HEARTBEAT_INTERVAL="${PULL_HEARTBEAT_INTERVAL:-15}"
 DRAIN_TIMEOUT="${DRAIN_TIMEOUT:-120}"
 DRAIN_POLL_SECONDS="${DRAIN_POLL_SECONDS:-2}"
@@ -945,7 +952,7 @@ start_pull_heartbeat() {
 inspect_manifest_summary() {
   local image="$1" out
   if command -v docker >/dev/null 2>&1; then
-    out="$(timeout 5 docker manifest inspect "$image" 2>/dev/null || timeout 5 docker buildx imagetools inspect --raw "$image" 2>/dev/null || true)"
+    out="$(timeout 2 docker manifest inspect "$image" 2>/dev/null || true)"
     if [[ -n "$out" ]]; then
       python3 - "$out" <<'PY' 2>/dev/null || true
 import json, sys
@@ -1002,7 +1009,7 @@ pull_image() {
     start_ts="$(date +%s)"
     start_pull_heartbeat "$service" "$start_ts"
 
-    if timeout "$PULL_TIMEOUT" docker compose "${COMPOSE_ARGS[@]}" --progress="${COMPOSE_PROGRESS:-tty}" pull "$service"; then
+    if timeout "$PULL_TIMEOUT" docker compose "${COMPOSE_ARGS[@]}" --ansi=never --progress="$COMPOSE_PROGRESS" pull "$service"; then
       stop_pull_heartbeat
       duration=$(( $(date +%s) - start_ts ))
       log "Pull completed in ${duration}s"

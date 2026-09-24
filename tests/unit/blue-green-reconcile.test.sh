@@ -71,6 +71,20 @@ case "${1:-}" in
       IFS='|' read -r state image hostname < "$FAKE_STATE/$name"
       printf 'exited|%s|%s\n' "$image" "$hostname" > "$FAKE_STATE/$name"
     elif [[ "$*" == *' pull '* ]]; then
+      if [[ "${FAKE_PULL_TIMEOUT:-}" == 1 ]]; then
+        sleep 5
+        exit 0
+      fi
+      if [[ -n "${FAKE_PULL_FAIL_COUNT:-}" ]]; then
+        fails_left="$FAKE_PULL_FAIL_COUNT"
+        if [[ -f "$FAKE_STATE/pull_fails_left" ]]; then
+          fails_left="$(cat "$FAKE_STATE/pull_fails_left")"
+        fi
+        if (( fails_left > 0 )); then
+          printf '%s' "$((fails_left - 1))" > "$FAKE_STATE/pull_fails_left"
+          exit 1
+        fi
+      fi
       exit 0
     fi
     ;;
@@ -210,7 +224,23 @@ if [[ "${FAKE_SIGNAL_AFTER_WRITE:-}" == 1 && "$dest" == "$FAKE_ROUTE_FILE" && "$
   kill -TERM "$PPID"
 fi
 MV
-chmod +x "$tmp/bin/docker" "$tmp/bin/curl" "$tmp/bin/mv"
+cat > "$tmp/bin/systemctl" <<'SYSTEMCTL'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${FAKE_SYSTEMCTL_FAIL:-}" == 1 ]]; then
+  exit 1
+fi
+printf '%s\n' "$*" >> "${FAKE_SYSTEMCTL_LOG:-/dev/null}"
+SYSTEMCTL
+cat > "$tmp/bin/pidof" <<'PIDOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${FAKE_PIDOF_FAIL:-}" == 1 ]]; then
+  exit 1
+fi
+printf '99999\n'
+PIDOF
+chmod +x "$tmp/bin/docker" "$tmp/bin/curl" "$tmp/bin/mv" "$tmp/bin/systemctl" "$tmp/bin/pidof"
 
 new_case() {
   case_dir="$(mktemp -d "$tmp/case.XXXXXXXX")"
@@ -222,8 +252,9 @@ new_case() {
   export FAKE_STATE="$case_dir/state" FAKE_DOCKER_LOG="$case_dir/docker.log" FAKE_CASE_DIR="$case_dir"
   export FAKE_CURL_COUNTER="$case_dir/curl.count" FAKE_ROUTE_FILE="$case_dir/dynamic/9router.yml"
   export FAKE_LOADED_SLOT="$case_dir/loaded.slot" FAKE_LOADED_GENERATION="$case_dir/loaded.gen"
+  export FAKE_SYSTEMCTL_LOG="$case_dir/systemctl.log"
   export READY_TIMEOUT=2 DRAIN_TIMEOUT=1 DRAIN_POLL_SECONDS=1 ROUTE_TIMEOUT=8
-  unset FAKE_CURL_MODE FAKE_CURL_SEQUENCE FAKE_RELOAD_AFTER FAKE_RELOAD_GEN_AFTER FAKE_BAD_HEALTH_SLOT FAKE_WRONG_SLOT FAKE_UNKNOWN_DRAIN_SLOT FAKE_BUSY_SLOT FAKE_MOUNT_TYPE FAKE_NETWORK FAKE_DETACH_SLOT FAKE_NESTED FAKE_TRAEFIK_RUNNING FAKE_FAIL_METADATA FAKE_SIGNAL_AFTER_WRITE FAKE_HOLD_MARKER FAKE_HOLD_RELEASE FAKE_INVENTORY_ERROR FAKE_INSPECT_ERROR FAKE_UNCACHED_IMAGE ROUTE_GENERATION
+  unset FAKE_CURL_MODE FAKE_CURL_SEQUENCE FAKE_RELOAD_AFTER FAKE_RELOAD_GEN_AFTER FAKE_BAD_HEALTH_SLOT FAKE_WRONG_SLOT FAKE_UNKNOWN_DRAIN_SLOT FAKE_BUSY_SLOT FAKE_MOUNT_TYPE FAKE_NETWORK FAKE_DETACH_SLOT FAKE_NESTED FAKE_TRAEFIK_RUNNING FAKE_FAIL_METADATA FAKE_SIGNAL_AFTER_WRITE FAKE_HOLD_MARKER FAKE_HOLD_RELEASE FAKE_INVENTORY_ERROR FAKE_INSPECT_ERROR FAKE_UNCACHED_IMAGE ROUTE_GENERATION FAKE_PULL_FAIL_COUNT FAKE_PULL_TIMEOUT FAKE_SYSTEMCTL_FAIL FAKE_PIDOF_FAIL PULL_TIMEOUT PULL_ATTEMPTS PULL_HEARTBEAT_INTERVAL
   printf none > "$FAKE_LOADED_SLOT"
   printf none > "$FAKE_LOADED_GENERATION"
 }
@@ -597,21 +628,86 @@ assert_route blue blue
 [[ -n "$(generation_on_disk)" ]]
 [[ "$(cat "$case_dir/.deployed-image")" == sha256:blue-old ]]
 
-# Deploy uses docker compose pull with target service and tty progress when image is uncached
+# Deploy uses docker compose pull with target service and plain progress without ANSI when image is uncached
 new_case; seed blue
 export FAKE_UNCACHED_IMAGE="image-new"
 run image-new
 assert_route green green
-[[ "$(cat "$case_dir/docker.log")" == *'compose -f docker-compose.prod.yml --progress=tty pull 9router-green'* ]]
+[[ "$(cat "$case_dir/docker.log")" == *'compose -f docker-compose.prod.yml --ansi=never --progress=plain pull 9router-green'* ]]
 unset FAKE_UNCACHED_IMAGE
+
+# Pull fails on attempt 1, retries and succeeds on attempt 2; target slot green is correct
+new_case; seed blue
+export FAKE_UNCACHED_IMAGE="image-new"
+export FAKE_PULL_FAIL_COUNT=1
+run image-new
+assert_route green green
+pull_attempts="$(grep -c 'compose.*pull 9router-green' "$case_dir/docker.log" || true)"
+[[ "$pull_attempts" -eq 2 ]]
+unset FAKE_UNCACHED_IMAGE FAKE_PULL_FAIL_COUNT
+
+# Pull fails on attempt 1, retries and succeeds on attempt 2; target slot blue is correct
+new_case; seed green
+export FAKE_UNCACHED_IMAGE="image-new"
+export FAKE_PULL_FAIL_COUNT=1
+run image-new
+assert_route blue blue
+pull_attempts="$(grep -c 'compose.*pull 9router-blue' "$case_dir/docker.log" || true)"
+[[ "$pull_attempts" -eq 2 ]]
+unset FAKE_UNCACHED_IMAGE FAKE_PULL_FAIL_COUNT
+
+# Pull timeout aborts deployment cleanly without leaving orphan heartbeat processes
+new_case; seed blue
+export FAKE_UNCACHED_IMAGE="image-new"
+export FAKE_PULL_TIMEOUT=1
+export PULL_TIMEOUT=1
+export PULL_ATTEMPTS=1
+export PULL_HEARTBEAT_INTERVAL=1
+timeout_out="$(run image-new 2>&1 || true)"
+[[ "$timeout_out" == *"Pull attempt 1 timed out after 1s"* ]]
+[[ "$timeout_out" == *"Unable to pull image: image-new"* ]]
+unset FAKE_UNCACHED_IMAGE FAKE_PULL_TIMEOUT PULL_TIMEOUT PULL_ATTEMPTS PULL_HEARTBEAT_INTERVAL
+
+# Heartbeat process is terminated cleanly by stop_pull_heartbeat
+(
+  # shellcheck disable=SC1090
+  source <(sed '/^cmd=/,$d' "$repo_root/deploy.sh")
+  PULL_HEARTBEAT_INTERVAL=1
+  start_pull_heartbeat "9router-blue" "$(date +%s)"
+  hb_pid="$PULL_HEARTBEAT_PID"
+  [[ -n "$hb_pid" ]]
+  kill -0 "$hb_pid" 2>/dev/null
+  stop_pull_heartbeat
+  [[ -z "$PULL_HEARTBEAT_PID" ]]
+  sleep 0.2
+  ! kill -0 "$hb_pid" 2>/dev/null
+)
 
 # Host concurrency setup defaults to 3 and accepts custom concurrency
 new_case; seed blue
 export DOCKER_DAEMON_JSON="$case_dir/daemon.json"
 run --setup-host
 [[ "$(cat "$case_dir/daemon.json")" == *'"max-concurrent-downloads": 3'* ]]
+[[ "$(cat "$case_dir/systemctl.log")" == *'reload docker'* ]]
 run --setup-host 2
 [[ "$(cat "$case_dir/daemon.json")" == *'"max-concurrent-downloads": 2'* ]]
 unset DOCKER_DAEMON_JSON
+
+# Host concurrency setup fails when daemon.json cannot be written
+new_case; seed blue
+mkdir -p "$case_dir/readonly_dir"
+chmod 555 "$case_dir/readonly_dir"
+export DOCKER_DAEMON_JSON="$case_dir/readonly_dir/daemon.json"
+fail --setup-host
+chmod 755 "$case_dir/readonly_dir"
+unset DOCKER_DAEMON_JSON
+
+# Host concurrency setup fails when docker daemon reload fails and dockerd is missing
+new_case; seed blue
+export DOCKER_DAEMON_JSON="$case_dir/daemon.json"
+export FAKE_SYSTEMCTL_FAIL=1
+export FAKE_PIDOF_FAIL=1
+fail --setup-host 4
+unset DOCKER_DAEMON_JSON FAKE_SYSTEMCTL_FAIL FAKE_PIDOF_FAIL
 
 printf 'CLI preflight, ACK, rollback, reconcile, bootstrap and drain scenarios passed\n'
