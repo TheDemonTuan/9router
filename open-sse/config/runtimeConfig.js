@@ -70,6 +70,13 @@ export const DEFAULT_MAX_TOKENS = 64000;
 export const DEFAULT_MIN_TOKENS = 32000;
 
 export const TOKEN_SAVER_HEADER = "x-9router-token-saver";
+export const TOKEN_SAVER_HEADERS = ["x-9router-token-saver", "x-9r-token-saver"];
+
+// Headroom gateway runtime limits and timeouts
+export const HEADROOM_DEFAULT_TIMEOUT_MS = envMs("HEADROOM_DEFAULT_TIMEOUT_MS", 1000);
+export const HEADROOM_RESERVE_TIMEOUT_MS = envMs("HEADROOM_RESERVE_TIMEOUT_MS", 1500);
+export const HEADROOM_MAX_PAYLOAD_BYTES = 20 * 1024 * 1024; // 20MB
+export const HEADROOM_GATEWAY_TURN_TTL_SECONDS = parseInt(process.env.HEADROOM_GATEWAY_TURN_TTL_SECONDS || "120", 10) || 120;
 
 // Retry config for 429 responses (legacy - kept for backward compatibility)
 export const RETRY_CONFIG = {

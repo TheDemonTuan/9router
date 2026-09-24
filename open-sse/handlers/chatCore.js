@@ -10,6 +10,7 @@ import { getModelTargetFormat, getModelSupportedFormats, getModelStrip, getModel
 import { PROVIDERS } from "../config/providers.js";
 import { createErrorResult, parseUpstreamError, formatProviderError } from "../utils/error.js";
 import { HTTP_STATUS, TOKEN_SAVER_HEADER } from "../config/runtimeConfig.js";
+import { createDeadlineError, createClientAbortError } from "../utils/preResponseBudget.js";
 import { handleBypassRequest } from "../utils/bypassHandler.js";
 import { trackPendingRequest, appendRequestLog, saveRequestDetail } from "@/lib/usageDb.js";
 import { getExecutor } from "../executors/index.js";
@@ -25,7 +26,9 @@ import { takeRenamedToolNames } from "../utils/opencodeFingerprint.js";
 import { injectCaveman } from "../rtk/caveman.js";
 import { injectPonytail } from "../rtk/ponytail.js";
 import { compressMessages, formatRtkLog } from "../rtk/index.js";
-import { compressWithHeadroom, formatHeadroomLog, formatHeadroomSizeLog, isHeadroomPhantomSavings } from "../rtk/headroom.js";
+import { compressWithHeadroom, formatHeadroomLog, formatHeadroomSizeLog } from "../rtk/headroom.js";
+import { selectHeadroomStage, HEADROOM_STAGES } from "../rtk/headroomStage.js";
+import { createHeadroomTurnContext } from "../rtk/headroomRelay.js";
 import { compressWithPxpipe } from "../rtk/pxpipe.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { sanitizeAlitpBaseOrigin, applyAlitpBaseOrigin } from "../providers/alibabaTokenPlanCatalog.js";
@@ -63,7 +66,7 @@ export function stripContinuityFields(body) {
   return body;
 }
 
-export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, headroomTimeoutMs, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, clientSignal, preResponse = null, routeContext: inputRouteContext = null, routeReason = "direct", effectiveModel = null }) {
+export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomProxyToken, headroomCompressUserMessages, headroomTimeoutMs, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, clientSignal, preResponse = null, routeContext: inputRouteContext = null, routeReason = "direct", effectiveModel = null }) {
   const { provider, model } = modelInfo;
   const requestStartTime = Date.now();
   // Stable per-session color so all lines of one CLI conversation share a tag
@@ -163,20 +166,96 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   }
 
   // Per-request opt-out: client can bypass all token savers via header.
+  const clientTokenSaverOptOut =
+    clientRawRequest?.headers?.["x-9router-token-saver"]?.toLowerCase() === "off"
+    || clientRawRequest?.headers?.["x-9r-token-saver"]?.toLowerCase() === "off"
+    || clientRawRequest?.headers?.[TOKEN_SAVER_HEADER]?.toLowerCase() === "off";
+
   // Structured output is a protocol contract; prompt/content mutations are unsafe.
-  const strictStructuredOutput = nativePassthrough
-    || body.text?.format?.type === "json_schema"
+  const strictStructuredOutput =
+    body.text?.format?.type === "json_schema"
     || body.response_format?.type === "json_schema"
     || body.response_format?.type === "json_object";
-  const tokenSaverEnabled = !strictStructuredOutput
-    && clientRawRequest?.headers?.[TOKEN_SAVER_HEADER]?.toLowerCase() !== "off";
+
+  // Deep clone body for source transformations to prevent mutating caller's original object
+  let sourceBody;
+  try {
+    sourceBody = structuredClone(body);
+  } catch {
+    sourceBody = JSON.parse(JSON.stringify(body));
+  }
+
+  const tokenSaverEnabled = !clientTokenSaverOptOut && !strictStructuredOutput && !nativePassthrough;
+  // Headroom 0.38 natively handles structured Responses/messages, decoupled from nativePassthrough and strictStructuredOutput
+  const headroomEligible = !clientTokenSaverOptOut;
+
+  // Headroom pure stage planning
+  const headroomStagePlan = selectHeadroomStage({
+    sourceFormat,
+    targetFormat,
+    provider,
+    isCompact: isChatGptWebCompact,
+  });
+
+  const headroomDiagnostics = {};
+  let headroomStats = null;
+  let forwardedProviderHeaders = null;
+
+  const handleHeadroomAbort = (error) => {
+    if (preResponse?.signal?.aborted || error?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED") {
+      const deadlineError = preResponse?.signal?.reason || error || createDeadlineError();
+      if (!deadlineError.code) deadlineError.code = "PRE_RESPONSE_DEADLINE_EXCEEDED";
+      if (!deadlineError.status) deadlineError.status = 504;
+      if (preResponse) throw deadlineError;
+      return createErrorResult(HTTP_STATUS.GATEWAY_TIMEOUT, deadlineError.message || "Gateway timeout: pre-response budget exceeded", null, {
+        errorClass: "transient_provider_failure",
+        retryable: true,
+      });
+    }
+    if (clientSignal?.aborted || error?.code === "CLIENT_ABORT" || error?.name === "AbortError") {
+      const abortError = error?.code === "CLIENT_ABORT" ? error : createClientAbortError();
+      if (!abortError.code) abortError.code = "CLIENT_ABORT";
+      if (!abortError.status) abortError.status = 499;
+      if (preResponse) throw abortError;
+      return createErrorResult(499, "Client closed request", null, {
+        errorClass: "client_abort",
+        retryable: false,
+      });
+    }
+    return null;
+  };
+
+  // SOURCE_NATIVE stage: runs on the clean source body before translation
+  if (headroomEligible && headroomEnabled && headroomStagePlan.stage === HEADROOM_STAGES.SOURCE_NATIVE) {
+    try {
+      headroomStats = await compressWithHeadroom(sourceBody, {
+        enabled: true,
+        url: headroomUrl,
+        proxyToken: headroomProxyToken,
+        model: upstreamModel,
+        format: headroomStagePlan.format,
+        compressUserMessages: headroomCompressUserMessages,
+        timeoutMs: headroomTimeoutMs,
+        preResponse,
+        clientSignal: clientSignal || null,
+        diagnostics: headroomDiagnostics,
+      });
+      if (headroomStats?.providerHeaders) {
+        forwardedProviderHeaders = headroomStats.providerHeaders;
+      }
+    } catch (error) {
+      const abortResult = handleHeadroomAbort(error);
+      if (abortResult) return abortResult;
+      headroomStats = null;
+    }
+  }
 
   // Cursor's translator rewrites tool_result into user text, so RTK must run on
   // the source body before translation. Every other pair translates the tool
   // shapes 1:1 — keep the post-translate pass there so those providers are
   // untouched (and a retry never re-compresses an already-compressed body).
   const preTranslateRtk = provider === "cursor"
-    ? compressMessages(body, tokenSaverEnabled && rtkEnabled)
+    ? compressMessages(sourceBody, tokenSaverEnabled && rtkEnabled)
     : null;
   const preTranslateRtkLine = formatRtkLog(preTranslateRtk);
   if (preTranslateRtkLine) console.log(preTranslateRtkLine);
@@ -230,12 +309,12 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     const caps = provider === "codex" && credentials?.codexModelMetadata?.capabilities
       ? { ...baseCaps, ...credentials.codexModelMetadata.capabilities }
       : baseCaps;
-    if (stripUnsupportedModalities(body, sourceFormat, caps)) {
+    if (stripUnsupportedModalities(sourceBody, sourceFormat, caps)) {
       log?.debug?.("MODALITY", `stripped unsupported media for ${provider}/${model}`);
     }
     // Convert remote image URLs to base64 for targets that can't fetch URLs.
     try {
-      const n = await prefetchRemoteImages(body, sourceFormat, targetFormat, { signal: undefined });
+      const n = await prefetchRemoteImages(sourceBody, sourceFormat, targetFormat, { signal: undefined });
       if (n > 0) log?.debug?.("MODALITY", `prefetched ${n} remote image(s) for ${targetFormat}`);
     } catch (e) { log?.warn?.("MODALITY", `image prefetch failed: ${e.message}`); }
   }
@@ -246,7 +325,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   let customToolNames;
   if (passthrough) {
     log?.debug?.("PASSTHROUGH", `${clientTool} → ${provider} | native lossless`);
-    translatedBody = { ...body, model: wireModel };
+    translatedBody = { ...sourceBody, model: wireModel };
     if (provider === "codex") {
       const suffixThinking = {};
       applyThinking(sourceFormat, upstreamModel, suffixThinking, provider, undefined, credentials?.codexModelMetadata);
@@ -263,10 +342,12 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     if (clientTool === "claude") normalizeClaudePassthrough(translatedBody, translatedBody.model);
   } else {
     try {
-      translatedBody = translateRequest(sourceFormat, targetFormat, upstreamModel, body, stream, credentials, provider, reqLogger, stripList, connectionId, clientTool);
+      translatedBody = translateRequest(sourceFormat, targetFormat, upstreamModel, sourceBody, stream, credentials, provider, reqLogger, stripList, connectionId, clientTool);
     } catch (error) {
-      const message = (error?.code === "unsupported_feature" || error?.code === "invalid_thinking_level")
-        ? error.message
+      const message = error?.message
+        ? (error.code === "unsupported_feature" || error.code === "invalid_thinking_level"
+            ? error.message
+            : `Failed to translate request for ${sourceFormat} → ${targetFormat}: ${error.message}`)
         : `Failed to translate request for ${sourceFormat} → ${targetFormat}`;
       return createErrorResult(HTTP_STATUS.BAD_REQUEST, message);
     }
@@ -348,22 +429,54 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const rtkLine = formatRtkLog(rtkStats);
   if (rtkLine) console.log(rtkLine);
 
-  // Headroom: optional external proxy compression; fail open if proxy is absent.
-  const headroomDiagnostics = {};
-  const headroomStats = await compressWithHeadroom(translatedBody, { enabled: tokenSaverEnabled && headroomEnabled, url: headroomUrl, model: upstreamModel, format: finalFormat, compressUserMessages: headroomCompressUserMessages, timeoutMs: headroomTimeoutMs, diagnostics: headroomDiagnostics });
+  // Headroom: optional external gateway compression; fail open if proxy is absent.
+  // Runs TARGET_NATIVE (after translate) or PROJECTED (Kiro), only if not already run in SOURCE_NATIVE.
+  if (!headroomStats && headroomEligible && headroomEnabled && (headroomStagePlan.stage === HEADROOM_STAGES.TARGET_NATIVE || headroomStagePlan.stage === HEADROOM_STAGES.PROJECTED)) {
+    try {
+      headroomStats = await compressWithHeadroom(translatedBody, {
+        enabled: true,
+        url: headroomUrl,
+        proxyToken: headroomProxyToken,
+        model: upstreamModel,
+        format: headroomStagePlan.format,
+        compressUserMessages: headroomCompressUserMessages,
+        timeoutMs: headroomTimeoutMs,
+        preResponse,
+        clientSignal: clientSignal || null,
+        diagnostics: headroomDiagnostics,
+      });
+      if (headroomStats?.providerHeaders) {
+        forwardedProviderHeaders = headroomStats.providerHeaders;
+      }
+    } catch (error) {
+      const abortResult = handleHeadroomAbort(error);
+      if (abortResult) return abortResult;
+      headroomStats = null;
+    }
+  }
   const headroomLine = formatHeadroomLog(headroomStats);
   const headroomSizeLine = formatHeadroomSizeLog(headroomDiagnostics);
   if (headroomLine) {
-    log?.info?.("HEADROOM", `${headroomLine}${headroomSizeLine ? ` | ${headroomSizeLine}` : ""}`);
-    if (isHeadroomPhantomSavings(headroomStats, headroomDiagnostics)) {
-      log?.warn?.("HEADROOM", `reported token delta, but outbound JSON shrank <5%; provider may bill near-original payload | ${formatHeadroomSizeLog(headroomDiagnostics)}`);
-    }
-  } else if (tokenSaverEnabled && headroomEnabled) log?.warn?.("HEADROOM", `skipped: ${headroomDiagnostics.reason || "compression unavailable"}${headroomDiagnostics.endpoint ? ` (${headroomDiagnostics.endpoint})` : ""}`);
+    log?.info?.("HEADROOM", `stage=${headroomStagePlan.stage} fmt=${headroomStagePlan.format || "-"} | ${headroomLine}${headroomSizeLine ? ` | ${headroomSizeLine}` : ""}`);
+  } else if (headroomEnabled && !clientTokenSaverOptOut) {
+    log?.warn?.("HEADROOM", `skipped: ${headroomDiagnostics.reason || headroomStagePlan.reason || "compression unavailable"}${headroomDiagnostics.endpoint ? ` (${headroomDiagnostics.endpoint})` : ""}`);
+  }
+
+  // Response usage relay context (Phase 3): active only when obligations.relay_usage === true
+  const headroomTurnContext = createHeadroomTurnContext({
+    url: headroomUrl,
+    proxyToken: headroomProxyToken,
+    turnId: headroomStats?.turnId,
+    obligations: headroomStats?.obligations,
+    startTime: requestStartTime,
+    log,
+  });
 
   // Token-saver flags accumulator for the single "⚙" log line below.
   const xf = [];
 
   if (rtkStats?.hits?.length) xf.push(`RTK:${rtkStats.hits.length}`);
+  if (headroomStats?.tokens_saved) xf.push(`HEADROOM:${headroomStats.tokens_saved}`);
 
   // Caveman: inject terse-style system prompt
   if (tokenSaverEnabled && cavemanEnabled && cavemanLevel) {
@@ -379,7 +492,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   // PXPIPE: image bulky context (Claude-format bodies only), last saver before dispatch
   let pxpipeSummary = null;
-  if (pxpipeEnabled && !strictStructuredOutput) {
+  if (pxpipeEnabled && tokenSaverEnabled && !strictStructuredOutput) {
     const pxpipeResult = await compressWithPxpipe(translatedBody, {
       enabled: true, format: finalFormat, model: upstreamModel,
       minChars: pxpipeMinChars, timeoutMs: pxpipeTimeoutMs, transform: pxpipeTransform,
@@ -461,9 +574,11 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     const result = await (preResponse ? preResponse.run(() => executor.execute({
       model, body: translatedBody, stream, credentials, providerSessionId: sessionSeed,
       clientTool, signal: streamController.signal, log, proxyOptions, preResponse,
+      customHeaders: forwardedProviderHeaders,
     })) : executor.execute({
       model, body: translatedBody, stream, credentials, providerSessionId: sessionSeed,
       clientTool, signal: streamController.signal, log, proxyOptions, preResponse,
+      customHeaders: forwardedProviderHeaders,
     }));
     providerResponse = bindResponseBody(result.response, { signal: preResponse ? AbortSignal.any([streamController.signal, preResponse.signal]) : streamController.signal });
     providerUrl = result.url;
@@ -477,6 +592,14 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     }
     reqLogger.logTargetRequest(providerUrl, providerHeaders, finalBody);
   } catch (error) {
+    try {
+      headroomTurnContext?.complete?.({
+        status: "error",
+        error,
+        latencyMs: Date.now() - requestStartTime,
+      });
+    } catch { /* best effort */ }
+
     if (preResponse?.signal.aborted || error?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" || error?.code === "CLIENT_ABORT") {
       streamController.abort(error);
       streamController.handleError(error);
@@ -549,9 +672,11 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
           const retryResult = await (preResponse ? preResponse.run(() => executor.execute({
             model, body: translatedBody, stream, credentials, providerSessionId: sessionSeed,
             clientTool, signal: streamController.signal, log, proxyOptions, preResponse,
+            customHeaders: forwardedProviderHeaders,
           })) : executor.execute({
             model, body: translatedBody, stream, credentials, providerSessionId: sessionSeed,
             clientTool, signal: streamController.signal, log, proxyOptions, preResponse,
+            customHeaders: forwardedProviderHeaders,
           }));
           retryResult.response = bindResponseBody(retryResult.response, { signal: preResponse ? AbortSignal.any([streamController.signal, preResponse.signal]) : streamController.signal });
           if (retryResult.response.ok) {
@@ -579,6 +704,13 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // Provider returned error
   if (!providerResponse.ok) {
     releasePending(true);
+    try {
+      headroomTurnContext?.complete?.({
+        status: "error",
+        error: new Error(`Provider returned HTTP ${providerResponse.status}`),
+        latencyMs: Date.now() - requestStartTime,
+      });
+    } catch { /* best-effort */ }
     const terminalNoFallback = providerResponse.headers.get("x-9router-no-fallback") === "true";
     const originalProviderError = terminalNoFallback ? providerResponse.clone() : null;
     const { statusCode, message, resetsAtMs, resolvedModel, errorClass, retryable } = await parseUpstreamError(providerResponse, executor);
@@ -612,7 +744,14 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     return errorResult;
   }
 
-  const sharedCtx = { provider, model, body, stream, translatedBody, finalBody, responseSchemaValidation, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag, log, responsesClientDialect, responsesProviderDialect, releasePending, preResponse, upstreamHeadersAt, routeContext };
+  const sharedCtx = {
+    provider, model, body, stream, translatedBody, finalBody,
+    responseSchemaValidation, requestStartTime, connectionId, apiKey,
+    clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag,
+    log, responsesClientDialect, responsesProviderDialect, releasePending,
+    preResponse, upstreamHeadersAt, routeContext,
+    headroomTurnContext,
+  };
   const appendLog = (extra) => appendRequestLog({ model, provider, connectionId, ...extra }).catch(() => { });
   const trackDone = () => releasePending();
 

@@ -120,6 +120,8 @@ export function findPython310() {
   return fallback;
 }
 
+let probeCache = { url: null, timestamp: 0, data: null };
+
 // Probe whether a Headroom proxy is reachable at the given URL by hitting /health.
 export async function probeProxyRunning(url) {
   if (!url) return false;
@@ -130,6 +132,64 @@ export async function probeProxyRunning(url) {
   } catch {
     return false;
   }
+}
+
+// Detailed synthetic cached probe: reachable, ready, version, gateway_supported
+export async function probeProxyDetails(url) {
+  if (!url) return { reachable: false, ready: false, sidecarVersion: null, gatewaySupported: false };
+  const base = String(url).replace(/\/$/, "");
+  const now = Date.now();
+  if (probeCache.url === base && (now - probeCache.timestamp) < 2000 && probeCache.data) {
+    return probeCache.data;
+  }
+
+  let reachable = false;
+  let ready = false;
+  let sidecarVersion = null;
+  let gatewaySupported = false;
+
+  try {
+    const res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(HEADROOM_HEALTH_TIMEOUT_MS) });
+    reachable = res.ok;
+    if (reachable) {
+      try {
+        const body = await res.json();
+        if (body?.version) sidecarVersion = body.version;
+      } catch { /* ignore non-json */ }
+    }
+  } catch {
+    reachable = false;
+  }
+
+  if (reachable) {
+    try {
+      const readyRes = await fetch(`${base}/readyz`, { signal: AbortSignal.timeout(HEADROOM_HEALTH_TIMEOUT_MS) });
+      ready = readyRes.ok;
+      if (ready && !sidecarVersion) {
+        try {
+          const body = await readyRes.json();
+          if (body?.version) sidecarVersion = body.version;
+        } catch { /* ignore non-json */ }
+      }
+    } catch {
+      ready = false;
+    }
+  }
+
+  if (sidecarVersion) {
+    const match = String(sidecarVersion).match(/^(\d+)\.(\d+)/);
+    if (match) {
+      const maj = parseInt(match[1], 10);
+      const min = parseInt(match[2], 10);
+      gatewaySupported = maj > 0 || min >= 38;
+    }
+  } else if (reachable) {
+    gatewaySupported = true;
+  }
+
+  const result = { reachable, ready, sidecarVersion, gatewaySupported };
+  probeCache = { url: base, timestamp: now, data: result };
+  return result;
 }
 
 export function isLoopbackHeadroomUrl(url) {
@@ -146,17 +206,25 @@ export async function getHeadroomStatus(url) {
   const path = findHeadroomBinary();
   const python = findPython310();
   const installed = Boolean(path);
-  const running = await probeProxyRunning(url);
+  const probe = await probeProxyDetails(url);
+  const running = probe.reachable;
   const localUrl = isLoopbackHeadroomUrl(url);
   const extrasStatus = installed ? getInstalledHeadroomExtras(python) : { installed: false, version: null, extras: { code: false, ml: false } };
+  const effectiveVersion = probe.sidecarVersion || extrasStatus.version || null;
+
   return {
     installed,
     path,
     running,
+    reachable: probe.reachable,
+    ready: probe.ready,
     python,
     localUrl,
     canStart: installed && localUrl,
-    version: extrasStatus.version,
+    version: effectiveVersion,
+    sidecarVersion: probe.sidecarVersion,
+    localPipVersion: extrasStatus.version,
+    gatewaySupported: probe.gatewaySupported,
     extras: extrasStatus.extras,
   };
 }

@@ -1,22 +1,31 @@
 import { NextResponse } from "next/server";
 import { getSettings } from "@/lib/localDb";
 import { DEFAULT_HEADROOM_URL } from "@/lib/headroom/detect";
+import { isLocalRequest } from "@/dashboardGuard";
 
 export const dynamic = "force-dynamic";
 
-const HOP_BY_HOP_HEADERS = new Set([
-  "connection",
-  "keep-alive",
-  "proxy-authenticate",
-  "proxy-authorization",
-  "te",
-  "trailer",
-  "transfer-encoding",
-  "upgrade",
+const REMOTE_ALLOWED_PATHS = new Set([
+  "health",
+  "readyz",
+  "stats",
+  "stats-history",
 ]);
 
-const DASHBOARD_PREFIX = "/api/headroom/proxy";
-const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+const LOCAL_EXTENDED_PATHS = new Set([
+  "dashboard",
+  "transformations/feed",
+]);
+
+const SAFE_QUERY_PARAMS = new Set([
+  "limit",
+  "offset",
+  "hours",
+  "format",
+]);
+
+const PROXY_TIMEOUT_MS = 5000;
+const MAX_RESPONSE_BYTES = 5 * 1024 * 1024; // 5MB limit
 
 async function getTargetBase() {
   const settings = await getSettings();
@@ -25,80 +34,109 @@ async function getTargetBase() {
   if (!["http:", "https:"].includes(target.protocol)) {
     throw new Error("Headroom URL must use http or https");
   }
+  if (target.username || target.password) {
+    throw new Error("Headroom URL must not contain user credentials");
+  }
   return target;
 }
 
-function buildTargetUrl(base, path, search) {
+function buildCleanTargetUrl(base, pathSegments, searchParams) {
   const target = new URL(base);
-  target.pathname = `/${path.join("/")}`;
-  target.search = search;
+  const cleanPath = pathSegments.map((s) => encodeURIComponent(s)).join("/");
+  target.pathname = `/${cleanPath}`;
+
+  // Filter query parameters against safe allowlist
+  const cleanSearch = new URLSearchParams();
+  for (const [key, val] of searchParams.entries()) {
+    if (SAFE_QUERY_PARAMS.has(key.toLowerCase())) {
+      cleanSearch.set(key, val);
+    }
+  }
+  target.search = cleanSearch.toString();
   return target;
-}
-
-function forwardedHeaders(request, target) {
-  const headers = new Headers(request.headers);
-  for (const header of headers.keys()) {
-    if (HOP_BY_HOP_HEADERS.has(header.toLowerCase())) headers.delete(header);
-  }
-  headers.delete("host");
-  // Never leak viewer credentials to a non-loopback Headroom host
-  if (!LOOPBACK_HOSTS.has(target.hostname.replace(/^\[|\]$/g, "").toLowerCase())) {
-    headers.delete("cookie");
-    headers.delete("authorization");
-  }
-  return headers;
-}
-
-function rewriteDashboardHtml(html) {
-  return html.replace(
-    /fetch\('(?=\/(?:stats|health|stats-history|transformations\/feed))/g,
-    `fetch('${DASHBOARD_PREFIX}`,
-  );
 }
 
 async function proxy(request, { params }) {
+  const method = request.method.toUpperCase();
+  if (method !== "GET" && method !== "HEAD") {
+    return NextResponse.json({ error: "Method not allowed" }, { status: 405 });
+  }
+
   try {
+    const rawSegments = (await params).path || [];
+    const normalizedPath = rawSegments.join("/");
+
+    const isLocal = isLocalRequest(request);
+    const isRemoteAllowed = REMOTE_ALLOWED_PATHS.has(normalizedPath);
+    const isLocalAllowed = isLocal && LOCAL_EXTENDED_PATHS.has(normalizedPath);
+
+    if (!isRemoteAllowed && !isLocalAllowed) {
+      return NextResponse.json(
+        { error: "Endpoint not permitted through diagnostic proxy" },
+        { status: 403 }
+      );
+    }
+
     const base = await getTargetBase();
-    const { search } = new URL(request.url);
-    const path = (await params).path || [];
-    const target = buildTargetUrl(base, path, search);
-    const method = request.method;
-    const hasBody = !["GET", "HEAD"].includes(method);
+    const reqUrl = new URL(request.url);
+    const target = buildCleanTargetUrl(base, rawSegments, reqUrl.searchParams);
+
+    // Fresh allowlisted request headers: do not forward client auth/cookies
+    const upstreamHeaders = {
+      "Accept": "application/json, text/plain",
+      "User-Agent": "9Router-Headroom-Proxy/1.0",
+    };
+
+    const proxyToken = process.env.HEADROOM_PROXY_TOKEN;
+    if (proxyToken) {
+      upstreamHeaders["X-Headroom-Proxy-Token"] = proxyToken;
+    }
 
     const response = await fetch(target, {
       method,
-      headers: forwardedHeaders(request, target),
-      body: hasBody ? request.body : undefined,
-      duplex: hasBody ? "half" : undefined,
+      headers: upstreamHeaders,
+      signal: AbortSignal.timeout(PROXY_TIMEOUT_MS),
       redirect: "manual",
     });
 
-    const headers = new Headers(response.headers);
-    for (const header of headers.keys()) {
-      if (HOP_BY_HOP_HEADERS.has(header.toLowerCase())) headers.delete(header);
+    if (response.status >= 300 && response.status < 400) {
+      return NextResponse.json({ error: "Upstream redirect rejected" }, { status: 502 });
     }
 
-    if (path.join("/") === "dashboard") {
-      const contentType = response.headers.get("content-type") || "";
-      if (contentType.includes("text/html")) {
-        headers.delete("content-length");
-        return new NextResponse(rewriteDashboardHtml(await response.text()), {
-          status: response.status,
-          headers,
-        });
-      }
+    // Clean response headers: strip Set-Cookie, CORS headers, add no-store
+    const outHeaders = new Headers();
+    outHeaders.set("Cache-Control", "no-store, no-cache, must-revalidate");
+    outHeaders.set("Pragma", "no-cache");
+
+    const contentType = response.headers.get("content-type");
+    if (contentType) {
+      outHeaders.set("Content-Type", contentType);
     }
 
-    return new NextResponse(response.body, { status: response.status, headers });
+    // For local-only raw dashboard html rewrite
+    if (normalizedPath === "dashboard" && contentType?.includes("text/html")) {
+      const html = await response.text();
+      const rewritten = html.replace(
+        /fetch\('(?=\/(?:stats|health|stats-history|transformations\/feed))/g,
+        "fetch('/api/headroom/proxy/"
+      );
+      outHeaders.set("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self' /api/headroom/proxy/; img-src 'self' data:; frame-ancestors 'none';");
+      outHeaders.set("X-Frame-Options", "DENY");
+      outHeaders.set("X-Content-Type-Options", "nosniff");
+      return new NextResponse(rewritten, { status: response.status, headers: outHeaders });
+    }
+
+    // Stream or buffer response with byte limit
+    const bodyBuf = await response.arrayBuffer();
+    if (bodyBuf.byteLength > MAX_RESPONSE_BYTES) {
+      return NextResponse.json({ error: "Upstream payload exceeded resource limit" }, { status: 502 });
+    }
+
+    return new NextResponse(bodyBuf, { status: response.status, headers: outHeaders });
   } catch (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
+    return NextResponse.json({ error: error.message || String(error) }, { status: 500 });
   }
 }
 
 export const GET = proxy;
-export const POST = proxy;
-export const PUT = proxy;
-export const PATCH = proxy;
-export const DELETE = proxy;
 export const HEAD = proxy;
-export const OPTIONS = proxy;

@@ -80,7 +80,7 @@ describe("handleChatCore Headroom diagnostics", () => {
 
     expect(log.warn).toHaveBeenCalledWith(
       "HEADROOM",
-      expect.stringContaining("skipped: request failed")
+      expect.stringContaining("skipped: gateway_fetch_error")
     );
     expect(log.warn).toHaveBeenCalledWith(
       "HEADROOM",
@@ -166,7 +166,10 @@ describe("handleChatCore Headroom diagnostics", () => {
     global.fetch = vi.fn(async (url) => {
       if (String(url).includes("/v1/compress")) {
         return new Response(JSON.stringify({
-          messages: [{ role: "user", content: compressed }],
+          data: {
+            body: { messages: [{ role: "user", content: compressed }] },
+            turn_id: "turn_123",
+          },
           tokens_before: 100,
           tokens_after: 10,
           tokens_saved: 90,
@@ -205,11 +208,10 @@ describe("handleChatCore Headroom diagnostics", () => {
     expect(log.info).toHaveBeenCalledWith("HEADROOM", expect.stringContaining("messages="));
 
     const logs = JSON.stringify([...log.info.mock.calls, ...log.warn.mock.calls]);
-    expect(logs).not.toContain("saved");
     expect(logs).not.toContain(original);
   });
 
-  it("warns when Headroom reports savings but outbound body barely shrinks", async () => {
+  it("reports byte delta without phantom billing heuristic warnings", async () => {
     const log = { debug: vi.fn(), info: vi.fn(), warn: vi.fn() };
     const original = "x".repeat(1000);
     const nearlySame = "x".repeat(990);
@@ -217,7 +219,9 @@ describe("handleChatCore Headroom diagnostics", () => {
     global.fetch = vi.fn(async (url) => {
       if (String(url).includes("/v1/compress")) {
         return new Response(JSON.stringify({
-          messages: [{ role: "user", content: nearlySame }],
+          data: {
+            body: { messages: [{ role: "user", content: nearlySame }] },
+          },
           tokens_before: 1000,
           tokens_after: 100,
           tokens_saved: 900,
@@ -245,10 +249,9 @@ describe("handleChatCore Headroom diagnostics", () => {
       },
     });
 
-    expect(log.warn).toHaveBeenCalledWith(
-      "HEADROOM",
-      expect.stringContaining("reported token delta, but outbound JSON shrank <5%; provider may bill near-original payload")
-    );
+    const warns = JSON.stringify(log.warn.mock.calls);
+    expect(warns).not.toContain("outbound JSON shrank <5%");
+    expect(log.info).toHaveBeenCalledWith("HEADROOM", expect.stringContaining("body="));
   });
 
   it("bypasses token savers when requested by the client", async () => {
@@ -293,5 +296,182 @@ describe("handleChatCore Headroom diagnostics", () => {
         messages: [{ role: "user", content: "Write polished prose." }],
       }),
     }));
+  });
+
+  it("forwards provider request headers from Headroom Gateway into executor.execute({ customHeaders })", async () => {
+    const log = { debug: vi.fn(), info: vi.fn(), warn: vi.fn() };
+    global.fetch = vi.fn(async (url) => {
+      if (String(url).includes("/v1/compress")) {
+        return new Response(JSON.stringify({
+          data: {
+            body: { messages: [{ role: "user", content: "compressed" }] },
+            turn_id: "turn_hdr_1",
+            headers: {
+              "anthropic-version": "2023-06-01",
+              "x-anthropic-beta": "prompt-caching-2024-07-31",
+            },
+          },
+          tokens_before: 50,
+          tokens_after: 20,
+          tokens_saved: 30,
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    await handleChatCore({
+      body: { model: "gpt-4o", stream: false, messages: [{ role: "user", content: "original" }] },
+      modelInfo: { provider: "openai", model: "gpt-4o" },
+      credentials: { apiKey: "test-key", providerSpecificData: {} },
+      log,
+      connectionId: "test-conn",
+      headroomEnabled: true,
+      headroomUrl: "http://localhost:8787",
+      clientRawRequest: {
+        endpoint: "/v1/chat/completions",
+        body: {},
+        headers: { accept: "application/json" },
+      },
+    });
+
+    expect(executeMock).toHaveBeenCalledWith(expect.objectContaining({
+      customHeaders: {
+        "anthropic-version": "2023-06-01",
+        "x-anthropic-beta": "prompt-caching-2024-07-31",
+      },
+    }));
+  });
+
+  it("executes SOURCE_NATIVE pipeline compressing source format and translating to Google contents[] for Antigravity", async () => {
+    const log = { debug: vi.fn(), info: vi.fn(), warn: vi.fn() };
+    const originalBody = {
+      model: "claude-3-5-sonnet-20241022",
+      messages: [{ role: "user", content: "original text to be compressed" }],
+    };
+
+    global.fetch = vi.fn(async (url) => {
+      if (String(url).includes("/v1/compress")) {
+        return new Response(JSON.stringify({
+          data: {
+            body: { messages: [{ role: "user", content: "compressed_claude_text" }] },
+            turn_id: "turn_sn_1",
+          },
+          tokens_before: 100,
+          tokens_after: 20,
+          tokens_saved: 80,
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    await handleChatCore({
+      body: originalBody,
+      modelInfo: { provider: "antigravity", model: "claude-3-5-sonnet" },
+      credentials: { apiKey: "test-key", providerSpecificData: {} },
+      log,
+      connectionId: "test-conn",
+      headroomEnabled: true,
+      headroomUrl: "http://localhost:8787",
+      sourceFormatOverride: "claude",
+      clientRawRequest: {
+        endpoint: "/v1/messages",
+        body: originalBody,
+        headers: { accept: "application/json" },
+      },
+    });
+
+    // Caller body was NOT mutated in-place
+    expect(originalBody.messages[0].content).toBe("original text to be compressed");
+
+    // Executor received translated Google contents[] containing the compressed text
+    expect(executeMock).toHaveBeenCalledWith(expect.objectContaining({
+      body: expect.objectContaining({
+        request: expect.objectContaining({
+          contents: expect.arrayContaining([
+            expect.objectContaining({
+              parts: expect.arrayContaining([
+                expect.objectContaining({ text: "compressed_claude_text" }),
+              ]),
+            }),
+          ]),
+        }),
+      }),
+    }));
+  });
+
+  it("handles client cancellation during Headroom compression with HTTP 499", async () => {
+    const log = { debug: vi.fn(), info: vi.fn(), warn: vi.fn() };
+    const clientController = new AbortController();
+
+    global.fetch = vi.fn(async (url) => {
+      if (String(url).includes("/v1/compress")) {
+        clientController.abort();
+        const err = new Error("This operation was aborted");
+        err.name = "AbortError";
+        throw err;
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    const result = await handleChatCore({
+      body: { model: "gpt-4o", stream: false, messages: [{ role: "user", content: "test" }] },
+      modelInfo: { provider: "openai", model: "gpt-4o" },
+      credentials: { apiKey: "test-key", providerSpecificData: {} },
+      log,
+      connectionId: "test-conn",
+      headroomEnabled: true,
+      headroomUrl: "http://localhost:8787",
+      clientSignal: clientController.signal,
+      clientRawRequest: {
+        endpoint: "/v1/chat/completions",
+        body: {},
+        headers: { accept: "application/json" },
+      },
+    });
+
+    expect(result.status).toBe(499);
+    expect(executeMock).not.toHaveBeenCalled();
+  });
+
+  it("handles preResponse deadline expiration during Headroom compression with HTTP 504", async () => {
+    const log = { debug: vi.fn(), info: vi.fn(), warn: vi.fn() };
+    const deadlineController = new AbortController();
+    const deadlineError = new Error("Pre-response deadline exceeded");
+    deadlineError.code = "PRE_RESPONSE_DEADLINE_EXCEEDED";
+    deadlineError.status = 504;
+
+    const mockPreResponse = {
+      remainingMs: () => 5000,
+      signal: deadlineController.signal,
+      run: (fn) => fn(),
+    };
+
+    global.fetch = vi.fn(async (url) => {
+      if (String(url).includes("/v1/compress")) {
+        deadlineController.abort(deadlineError);
+        const err = new Error("This operation was aborted");
+        err.name = "AbortError";
+        throw err;
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    await expect(handleChatCore({
+      body: { model: "gpt-4o", stream: false, messages: [{ role: "user", content: "test" }] },
+      modelInfo: { provider: "openai", model: "gpt-4o" },
+      credentials: { apiKey: "test-key", providerSpecificData: {} },
+      log,
+      connectionId: "test-conn",
+      headroomEnabled: true,
+      headroomUrl: "http://localhost:8787",
+      preResponse: mockPreResponse,
+      clientRawRequest: {
+        endpoint: "/v1/chat/completions",
+        body: {},
+        headers: { accept: "application/json" },
+      },
+    })).rejects.toMatchObject({ code: "PRE_RESPONSE_DEADLINE_EXCEEDED", status: 504 });
+
+    expect(executeMock).not.toHaveBeenCalled();
   });
 });

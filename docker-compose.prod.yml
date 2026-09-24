@@ -1,17 +1,32 @@
 services:
   headroom:
-    image: ghcr.io/chopratejas/headroom:latest
+    image: ghcr.io/headroomlabs-ai/headroom:0.38.0@sha256:14e3dda1f041eef509af850ac7a32647d1c3e5d9bd66e3e8655dfd3a398273af
     container_name: 9router-headroom
     restart: unless-stopped
     expose:
       - "8787"
     networks:
       - internal
+    environment:
+      HEADROOM_COMPRESS_ALLOW_REMOTE: "1"
+      HEADROOM_SKIP_UPSTREAM_CHECK: "1"
+      HEADROOM_DISABLE_KOMPRESS: "1"
+      HEADROOM_DISABLE_KOMPRESS_FALLBACK: "1"
+      HEADROOM_TOOL_SEARCH: "0"
+      HEADROOM_OUTPUT_SHAPER: "0"
+      HEADROOM_MODEL_ROUTER_ENABLED: "0"
+      HEADROOM_PROXY_TOKEN: ${HEADROOM_PROXY_TOKEN:-}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8787/readyz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
     deploy:
       resources:
         limits:
           cpus: "1.0"
-          memory: 512M
+          memory: 1024M
     logging:
       driver: json-file
       options:
@@ -32,6 +47,7 @@ services:
       NODE_ENV: production
       INITIAL_PASSWORD: ${INITIAL_PASSWORD:?INITIAL_PASSWORD must be set for production}
       HEADROOM_URL: http://9router-headroom:8787
+      HEADROOM_PROXY_TOKEN: ${HEADROOM_PROXY_TOKEN:-}
       PUBLIC_URL: ${PUBLIC_URL:-https://${DASHBOARD_HOST:-9router-admin.tuannguyenviet.site}}
       NEXT_PUBLIC_BASE_URL: ${PUBLIC_URL:-https://${DASHBOARD_HOST:-9router-admin.tuannguyenviet.site}}
       DASHBOARD_HOST: ${DASHBOARD_HOST:-9router-admin.tuannguyenviet.site}
@@ -74,6 +90,7 @@ services:
       NODE_ENV: production
       INITIAL_PASSWORD: ${INITIAL_PASSWORD:?INITIAL_PASSWORD must be set for production}
       HEADROOM_URL: http://9router-headroom:8787
+      HEADROOM_PROXY_TOKEN: ${HEADROOM_PROXY_TOKEN:-}
       PUBLIC_URL: ${PUBLIC_URL:-https://${DASHBOARD_HOST:-9router-admin.tuannguyenviet.site}}
       NEXT_PUBLIC_BASE_URL: ${PUBLIC_URL:-https://${DASHBOARD_HOST:-9router-admin.tuannguyenviet.site}}
       DASHBOARD_HOST: ${DASHBOARD_HOST:-9router-admin.tuannguyenviet.site}

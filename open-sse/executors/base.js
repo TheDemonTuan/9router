@@ -99,7 +99,7 @@ export class BaseExecutor {
     return { status: response.status, message: bodyText || `HTTP ${response.status}` };
   }
 
-  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null, preResponse = null }) {
+  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null, preResponse = null, customHeaders = null }) {
     const fallbackCount = this.getFallbackCount();
     let lastError = null;
     let lastStatus = 0;
@@ -142,6 +142,25 @@ export class BaseExecutor {
       const url = this.buildUrl(model, stream, urlIndex, credentials, requestContext);
       const transformedBody = this.transformRequest(model, body, stream, credentials);
       const headers = this.buildHeaders(credentials, stream, url, model, transformedBody, body);
+      if (customHeaders && typeof customHeaders === "object") {
+        const BLOCKED_HEADERS = new Set([
+          "authorization",
+          "x-api-key",
+          "api-key",
+          "cookie",
+          "host",
+          "connection",
+          "content-length",
+          "proxy-authorization",
+          "x-forwarded-for",
+          "x-real-ip",
+        ]);
+        for (const [key, value] of Object.entries(customHeaders)) {
+          if (!BLOCKED_HEADERS.has(key.toLowerCase()) && typeof value === "string") {
+            headers[key] = value;
+          }
+        }
+      }
 
       if (!retryAttemptsByUrl[urlIndex]) retryAttemptsByUrl[urlIndex] = 0;
 

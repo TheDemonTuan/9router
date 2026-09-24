@@ -1,26 +1,35 @@
-// #1998 — Headroom compression treated a Codex (openai-responses) body.input
-// array as OpenAI messages: it sent Responses items to /v1/compress and then
-// assigned the returned OpenAI messages back to body.input, violating the
-// Responses format contract. body.input must stay Responses-shaped.
+// tests/unit/headroom-responses-format.test.js
+// Modernized for Headroom 0.38.0 Native Gateway v2 contract.
+// Preserves Responses input structure, reasoning, tools, and call_ids safely.
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { compressWithHeadroom } from "../../open-sse/rtk/headroom.js";
 
-describe("compressWithHeadroom openai-responses format (#1998)", () => {
+describe("compressWithHeadroom openai-responses format (#1998, #2132)", () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
   it("keeps body.input in Responses format after compressing an openai-responses request", async () => {
-    // Headroom always returns compressed OpenAI-style messages.
-    global.fetch = vi.fn(async () => ({
-      ok: true,
-      json: async () => ({
-        messages: [{ role: "user", content: "compressed text" }],
-        tokens_before: 100,
-        tokens_after: 90,
-        tokens_saved: 10,
-      }),
-    }));
+    // Gateway v2 contract returns { data: { body: { input: [...] }, turn_id, obligations, headers } }
+    global.fetch = vi.fn(async () => new Response(JSON.stringify({
+      data: {
+        body: {
+          input: [
+            {
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: "compressed text" }],
+            },
+          ],
+        },
+        turn_id: "turn_123",
+        obligations: { relay_usage: true },
+        headers: { "openai-beta": "responses-2025" },
+      },
+      tokens_before: 100,
+      tokens_after: 90,
+      tokens_saved: 10,
+    }), { status: 200 }));
 
     const body = {
       input: [
@@ -40,23 +49,13 @@ describe("compressWithHeadroom openai-responses format (#1998)", () => {
     });
 
     expect(data).not.toBeNull();
-    // body.input must remain Responses items (type:"message" + content array),
-    // NOT the raw OpenAI messages ({ role, content: "<string>" }) the bug produced.
     expect(Array.isArray(body.input)).toBe(true);
     expect(body.input[0]).toMatchObject({ type: "message", role: "user" });
     expect(Array.isArray(body.input[0].content)).toBe(true);
-    expect(typeof body.input[0].content).not.toBe("string");
+    expect(body.input[0].content[0].text).toBe("compressed text");
   });
 
-  it("skips Responses tool/reasoning history instead of collapsing it into a message (#2132)", async () => {
-    global.fetch = vi.fn(async () => ({
-      ok: true,
-      json: async () => ({
-        messages: [{ role: "user", content: "compressed tool history" }],
-        tokens_saved: 10,
-      }),
-    }));
-
+  it("natively compresses Responses tool/reasoning history preserving invariants (0.38 Gateway v2)", async () => {
     const input = [
       {
         type: "message",
@@ -67,7 +66,7 @@ describe("compressWithHeadroom openai-responses format (#1998)", () => {
         type: "function_call",
         call_id: "call_apply_patch_123",
         name: "apply_patch",
-        arguments: "*** Begin Patch\n*** End Patch",
+        arguments: "{\"patch\":\"unified diff\"}",
       },
       {
         type: "function_call_output",
@@ -77,8 +76,50 @@ describe("compressWithHeadroom openai-responses format (#1998)", () => {
       {
         type: "reasoning",
         summary: [{ type: "summary_text", text: "Need a plan" }],
+        encrypted_content: "opaque_ciphertext",
       },
     ];
+
+    global.fetch = vi.fn(async (_url, init) => {
+      const payload = JSON.parse(init.body);
+      expect(payload.input).toBeDefined();
+      return new Response(JSON.stringify({
+        data: {
+          body: {
+            input: [
+              {
+                type: "message",
+                role: "user",
+                content: [{ type: "input_text", text: "investigate" }],
+              },
+              {
+                type: "function_call",
+                call_id: "call_apply_patch_123",
+                name: "apply_patch",
+                arguments: "{\"patch\":\"diff\"}",
+              },
+              {
+                type: "function_call_output",
+                call_id: "call_apply_patch_123",
+                output: "ok",
+              },
+              {
+                type: "reasoning",
+                summary: [{ type: "summary_text", text: "Plan" }],
+                encrypted_content: "opaque_ciphertext",
+              },
+            ],
+          },
+          turn_id: "turn_abc",
+          obligations: { relay_usage: true },
+          headers: { "x-custom-provider": "true" },
+        },
+        tokens_before: 200,
+        tokens_after: 120,
+        tokens_saved: 80,
+      }), { status: 200 });
+    });
+
     const body = {
       input: structuredClone(input),
       tools: [
@@ -99,9 +140,10 @@ describe("compressWithHeadroom openai-responses format (#1998)", () => {
       diagnostics,
     });
 
-    expect(data).toBeNull();
-    expect(global.fetch).not.toHaveBeenCalled();
-    expect(body.input).toEqual(input);
-    expect(diagnostics.reason).toBe("skipped: openai-responses tool/reasoning input is not safe to compress");
+    expect(data).not.toBeNull();
+    expect(data.tokens_saved).toBe(80);
+    expect(body.input[0].content[0].text).toBe("investigate");
+    expect(body.input[1].call_id).toBe("call_apply_patch_123");
+    expect(body.input[3].encrypted_content).toBe("opaque_ciphertext");
   });
 });

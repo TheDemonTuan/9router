@@ -37,9 +37,27 @@ export function isPidAlive(pid) {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
+// Verify that the PID actually belongs to a headroom process before interacting with it (guards against PID recycling)
+export function isHeadroomProcess(pid) {
+  if (!isPidAlive(pid)) return false;
+  try {
+    const procCmdline = `/proc/${pid}/cmdline`;
+    if (fs.existsSync(procCmdline)) {
+      const cmdline = fs.readFileSync(procCmdline, "utf8");
+      return cmdline.includes("headroom");
+    }
+  } catch { /* ignore */ }
+  return true;
+}
+
 export function getManagedPid() {
   const pid = readPid();
-  return pid && isPidAlive(pid) ? pid : null;
+  if (!pid) return null;
+  if (!isHeadroomProcess(pid)) {
+    clearPid();
+    return null;
+  }
+  return pid;
 }
 
 // Build proxy CLI flags for the active compression extras. `[code]` (AST
@@ -116,7 +134,7 @@ export function stopHeadroomProxy() {
     process.kill(pid, "SIGTERM");
     // Give it a moment, then force if still alive.
     setTimeout(() => {
-      if (isPidAlive(pid)) {
+      if (isPidAlive(pid) && isHeadroomProcess(pid)) {
         try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
       }
     }, 2000);
@@ -140,7 +158,7 @@ export async function restartHeadroomProxy(opts = {}) {
     for (let i = 0; i < 30 && isPidAlive(pid); i++) {
       await new Promise((r) => setTimeout(r, 100));
     }
-    if (isPidAlive(pid)) {
+    if (isPidAlive(pid) && isHeadroomProcess(pid)) {
       try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
       await new Promise((r) => setTimeout(r, 300));
     }
@@ -179,9 +197,10 @@ export async function installHeadroomExtras(extras = []) {
   // pip install string is built from a closed set (HEADROOM_COMPRESSION_EXTRAS),
   // so it cannot be poisoned by caller input — the comma-list is a fixed
   // ['proxy', ...requested]. No shell interpolation.
+  // Pinned strictly to 0.38.0 without floating --upgrade for production stability.
   const extrasList = ["proxy", ...requested].join(",");
-  const spec = `headroom-ai[${extrasList}]`;
-  const args = ["-m", "pip", "install", "--upgrade", spec];
+  const spec = `headroom-ai[${extrasList}]==0.38.0`;
+  const args = ["-m", "pip", "install", spec];
 
   ensureDir();
   // Truncate ("w") so the log reflects only the current install for live progress.

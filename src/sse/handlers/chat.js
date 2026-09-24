@@ -508,8 +508,16 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       ? routeReason
       : (modelStr.includes("/") ? "direct" : "model-alias");
 
+    let attemptBody;
+    try {
+      attemptBody = structuredClone(body);
+    } catch {
+      attemptBody = JSON.parse(JSON.stringify(body));
+    }
+    attemptBody.model = `${provider}/${model}`;
+
     const result = await handleChatCore({
-      body: { ...body, model: `${provider}/${model}` },
+      body: attemptBody,
       modelInfo: { provider, providerAlias: modelInfo.providerAlias, model },
       credentials: refreshedCredentials,
       preResponse,
@@ -532,6 +540,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       rtkEnabled: !!chatSettings.rtkEnabled,
       headroomEnabled: !!chatSettings.headroomEnabled,
       headroomUrl: chatSettings.headroomUrl || DEFAULT_HEADROOM_URL,
+      headroomProxyToken: process.env.HEADROOM_PROXY_TOKEN || chatSettings.headroomProxyToken || "",
       headroomCompressUserMessages: !!chatSettings.headroomCompressUserMessages,
       headroomTimeoutMs: chatSettings.headroomTimeoutMs,
       cavemanEnabled: !!chatSettings.cavemanEnabled,
