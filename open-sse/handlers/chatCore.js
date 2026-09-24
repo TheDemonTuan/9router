@@ -33,6 +33,7 @@ import { stripUnsupportedModalities } from "../translator/concerns/modality.js";
 import { prefetchRemoteImages } from "../translator/concerns/prefetch.js";
 import { defaultClaudeToolType, shouldDefaultClaudeToolType } from "../translator/concerns/toolCall.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
+import { createRouteContext, formatRoute } from "../utils/modelRoute.js";
 import { bindResponseBody } from "../utils/responseLifecycle.js";
 
 /**
@@ -62,7 +63,7 @@ export function stripContinuityFields(body) {
   return body;
 }
 
-export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, headroomTimeoutMs, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, clientSignal, preResponse = null }) {
+export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, headroomTimeoutMs, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, clientSignal, preResponse = null, routeContext: inputRouteContext = null, routeReason = "direct", effectiveModel = null }) {
   const { provider, model } = modelInfo;
   const requestStartTime = Date.now();
   // Stable per-session color so all lines of one CLI conversation share a tag
@@ -114,7 +115,32 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     }
   }
   const stripList = getModelStrip(alias, model);
-  const upstreamModel = getModelUpstreamId(alias, model);
+  const registryModel = model;
+  const configuredUpstreamModel = getModelUpstreamId(alias, model);
+  const wireModel = stripThinkingSuffix(configuredUpstreamModel);
+  const upstreamModel = configuredUpstreamModel;
+
+  const requestedProviderAlias = modelInfo?.providerAlias
+    || (clientRawRequest?.body?.model?.includes("/") ? clientRawRequest.body.model.slice(0, clientRawRequest.body.model.indexOf("/")) : null)
+    || alias;
+  const clientModel = clientRawRequest?.body?.model
+    || (requestedProviderAlias ? `${requestedProviderAlias}/${model}` : `${alias}/${model}`);
+
+  const routeContext = inputRouteContext || createRouteContext({
+    clientModel,
+    requestedProviderAlias,
+    provider,
+    requestedModel: registryModel,
+    effectiveModel: effectiveModel || (requestedProviderAlias ? `${requestedProviderAlias}/${model}` : `${alias}/${model}`),
+    wireModel,
+    reason: routeReason,
+  });
+  if (!routeContext.wireModel) routeContext.wireModel = wireModel;
+
+  if (requestedProviderAlias && requestedProviderAlias !== provider) {
+    log?.debug?.("ROUTE", `alias ${requestedProviderAlias} → provider ${provider}`);
+  }
+  log?.debug?.("MODEL", `${model} · wire=${wireModel}`);
   const detectedClientTool = detectClientTool(clientRawRequest?.headers || {}, body);
   const isChatGptWebCompact = provider === "chatgpt-web" && body?._compact === true;
   const nativePassthrough = isNativePassthrough(detectedClientTool, provider) || isChatGptWebCompact;
@@ -220,7 +246,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   let customToolNames;
   if (passthrough) {
     log?.debug?.("PASSTHROUGH", `${clientTool} → ${provider} | native lossless`);
-    translatedBody = { ...body, model: stripThinkingSuffix(upstreamModel) };
+    translatedBody = { ...body, model: wireModel };
     if (provider === "codex") {
       const suffixThinking = {};
       applyThinking(sourceFormat, upstreamModel, suffixThinking, provider, undefined, credentials?.codexModelMetadata);
@@ -254,7 +280,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     delete translatedBody._toolNameMap;
     customToolNames = translatedBody._customToolNames;
     delete translatedBody._customToolNames;
-    translatedBody.model = stripThinkingSuffix(upstreamModel);
+    translatedBody.model = wireModel;
     stripContinuityFields(translatedBody);
   }
 
@@ -281,7 +307,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   // Request line: one correlated summary (fmt + thinking + counts + account)
   if (log?.line) {
-    const clientModel = clientRawRequest?.body?.model || `${provider}/${model}`;
+    const displayModel = formatRoute(routeContext);
     const msgN = translatedBody.messages?.length || translatedBody.input?.length || translatedBody.contents?.length || body.messages?.length || body.input?.length || 0;
     const toolN = translatedBody.tools?.length || body.tools?.length || 0;
     const fmtStr = passthrough ? `FMT: ${sourceFormat} (passthrough)` : `FMT: ${sourceFormat}→${targetFormat}`;
@@ -289,7 +315,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     const think = showThinking ? log.fmtThink?.(extractThinking(translatedBody)) : null;
     const acc = credentials?.connectionName || credentials?.connectionId?.slice(0, 8) || "-";
     const parts = [
-      `POST ${clientModel} → ${provider}/${model}`,
+      `POST ${displayModel}`,
       fmtStr,
       stream ? "STREAM" : "JSON",
       `${msgN} MSG`,
@@ -463,7 +489,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     releasePending(true);
     appendRequestLog({ model, provider, connectionId, status: `FAILED ${failureStatus}` }).catch(() => { });
     saveRequestDetail(buildRequestDetail({
-      provider, model, connectionId,
+      provider, model, connectionId, routeContext,
       latency: { ttft: 0, total: Date.now() - requestStartTime },
       tokens: { prompt_tokens: 0, completion_tokens: 0 },
       request: extractRequestConfig(body, stream),
@@ -558,7 +584,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     const { statusCode, message, resetsAtMs, resolvedModel, errorClass, retryable } = await parseUpstreamError(providerResponse, executor);
     appendRequestLog({ model, provider, connectionId, status: `FAILED ${statusCode}` }).catch(() => { });
     saveRequestDetail(buildRequestDetail({
-      provider, model, connectionId,
+      provider, model, connectionId, routeContext,
       latency: { ttft: 0, total: Date.now() - requestStartTime },
       tokens: { prompt_tokens: 0, completion_tokens: 0 },
       request: extractRequestConfig(body, stream),
@@ -586,7 +612,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     return errorResult;
   }
 
-  const sharedCtx = { provider, model, body, stream, translatedBody, finalBody, responseSchemaValidation, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag, log, responsesClientDialect, responsesProviderDialect, releasePending, preResponse, upstreamHeadersAt };
+  const sharedCtx = { provider, model, body, stream, translatedBody, finalBody, responseSchemaValidation, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag, log, responsesClientDialect, responsesProviderDialect, releasePending, preResponse, upstreamHeadersAt, routeContext };
   const appendLog = (extra) => appendRequestLog({ model, provider, connectionId, ...extra }).catch(() => { });
   const trackDone = () => releasePending();
 

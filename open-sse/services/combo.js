@@ -7,6 +7,7 @@ import { unavailableResponse } from "../utils/error.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { extractTextContent } from "../translator/formats/gemini.js";
 import { createDeadlineError } from "../utils/preResponseBudget.js";
+import { formatFallback } from "../utils/modelRoute.js";
 // Hard capabilities = input modalities; missing one drops request data (e.g. image
 // stripped). Must be prioritized. Soft (e.g. search) only degrades a feature.
 const HARD_CAPS = new Set(["vision", "pdf", "audioInput", "videoInput"]);
@@ -304,7 +305,7 @@ export function getComboModelsFromData(modelStr, combosData) {
  * @param {number|string} [options.comboStickyLimit=1] - Requests per combo model before switching
  * @returns {Promise<Response>}
  */
-export async function handleComboChat({ body, models, handleSingleModel, log, comboName, comboStrategy, comboStickyLimit = 1, autoSwitch = true, preResponse = null }) {
+export async function handleComboChat({ body, models, handleSingleModel, log, comboName, comboStrategy, comboStickyLimit = 1, autoSwitch = true, preResponse = null, reqTag = "" }) {
   // Apply rotation strategy if enabled
   let rotatedModels = getRotatedModels(models, comboName, comboStrategy, comboStickyLimit);
 
@@ -393,6 +394,19 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
       // Fallback to next model
       lastError = errorText || String(result.status);
       if (!lastStatus) lastStatus = result.status;
+      const nextModelStr = rotatedModels[i + 1];
+      if (nextModelStr) {
+        const isQuota = result.headers.get("x-9router-error-code") === "provider_quota_exhausted"
+          || result.status === 429
+          || /quota/i.test(errorText);
+        const reason = isQuota ? "quota exhausted" : (errorText || String(result.status));
+        const fallbackText = formatFallback(modelStr, nextModelStr, reason);
+        if (log?.line) {
+          log.line(reqTag || "", "↪", fallbackText);
+        } else {
+          log.warn("FALLBACK", `↪ ${fallbackText}`);
+        }
+      }
       log.warn("COMBO", `Model ${modelStr} failed, trying next`, { status: result.status });
     } catch (error) {
       if (preResponse?.signal?.aborted) throw preResponse.signal.reason;
@@ -400,6 +414,15 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
       // Catch unexpected exceptions to ensure fallback continues
       lastError = error.message || String(error);
       if (!lastStatus) lastStatus = 500;
+      const nextModelStr = rotatedModels[i + 1];
+      if (nextModelStr) {
+        const fallbackText = formatFallback(modelStr, nextModelStr, lastError);
+        if (log?.line) {
+          log.line(reqTag || "", "↪", fallbackText);
+        } else {
+          log.warn("FALLBACK", `↪ ${fallbackText}`);
+        }
+      }
       log.warn("COMBO", `Model ${modelStr} threw error, trying next`, { error: lastError });
     }
   }

@@ -45,23 +45,24 @@ export async function getModelInfo(modelStr) {
       const openaiNodes = await getProviderNodes({ type: "openai-compatible" });
       const matchedOpenAI = openaiNodes.find((node) => node.prefix === parsed.providerAlias);
       if (matchedOpenAI) {
-        return { provider: matchedOpenAI.id, model: parsed.model };
+        return { provider: matchedOpenAI.id, providerAlias: parsed.providerAlias, model: parsed.model };
       }
 
       const anthropicNodes = await getProviderNodes({ type: "anthropic-compatible" });
       const matchedAnthropic = anthropicNodes.find((node) => node.prefix === parsed.providerAlias);
       if (matchedAnthropic) {
-        return { provider: matchedAnthropic.id, model: parsed.model };
+        return { provider: matchedAnthropic.id, providerAlias: parsed.providerAlias, model: parsed.model };
       }
 
       const embeddingNodes = await getProviderNodes({ type: "custom-embedding" });
       const matchedEmbedding = embeddingNodes.find((node) => node.prefix === parsed.providerAlias);
       if (matchedEmbedding) {
-        return { provider: matchedEmbedding.id, model: parsed.model };
+        return { provider: matchedEmbedding.id, providerAlias: parsed.providerAlias, model: parsed.model };
       }
     }
     return {
       provider: parsed.provider,
+      providerAlias: parsed.providerAlias,
       model: parsed.model
     };
   }
@@ -72,7 +73,7 @@ export async function getModelInfo(modelStr) {
   if (combo) {
     // Return null provider to signal this should be handled as combo
     // The caller (handleChat) will detect this and handle it as combo
-    return { provider: null, model: parsed.model };
+    return { provider: null, providerAlias: null, model: parsed.model };
   }
 
   return getModelInfoCore(modelStr, getModelAliases);

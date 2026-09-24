@@ -48,6 +48,7 @@ describe("grok-cli registry", () => {
   it("routes bare grok-build to the subscription provider", async () => {
     await expect(getModelInfoCore("grok-build", {})).resolves.toEqual({
       provider: "grok-cli",
+      providerAlias: "gcli",
       model: "grok-build",
     });
   });

@@ -54,6 +54,7 @@ describe("model routing", () => {
     await expect(ctx.getModelInfo("cf/@cf/black-forest-labs/flux-2-klein-9b"))
       .resolves.toEqual({
         provider: "cloudflare-ai",
+        providerAlias: "cf",
         model: "@cf/black-forest-labs/flux-2-klein-9b",
       });
   });
@@ -74,6 +75,7 @@ describe("model routing", () => {
     await expect(ctx.getModelInfo("oct/gpt-image-1"))
       .resolves.toEqual({
         provider: "openai-compatible-chat-test",
+        providerAlias: "oct",
         model: "gpt-image-1",
       });
   });

@@ -34,8 +34,8 @@ describe("Codex GPT-5.6 image models", () => {
     vi.stubGlobal("fetch", fetchMock);
     const onRequestSuccess = vi.fn();
     const modelInfo = await getModelInfoCore(`cx/${model}-image`);
-    expect(modelInfo).toEqual({ provider: "codex", model: `${model}-image` });
-    expect(await getModelInfoCore(`codex/${model}-image`)).toEqual(modelInfo);
+    expect(modelInfo).toEqual({ provider: "codex", providerAlias: "cx", model: `${model}-image` });
+    expect(await getModelInfoCore(`codex/${model}-image`)).toEqual({ provider: "codex", providerAlias: "codex", model: `${model}-image` });
 
     const result = await handleImageGenerationCore({
       modelInfo,

@@ -88,9 +88,14 @@ function redactChatGptWebDetail(base) {
 
 export function buildRequestDetail(base, overrides = {}) {
   base = redactChatGptWebDetail(base);
+  const routeCtx = base.routeContext || overrides.routeContext || null;
   return {
     provider: base.provider || "unknown",
     model: base.model || "unknown",
+    client_model: base.client_model || base.clientModel || routeCtx?.clientModel || undefined,
+    provider_alias: base.provider_alias || base.providerAlias || routeCtx?.requestedProviderAlias || undefined,
+    wire_model: base.wire_model || base.wireModel || routeCtx?.wireModel || undefined,
+    route_reason: base.route_reason || base.routeReason || routeCtx?.reason || undefined,
     connectionId: base.connectionId || undefined,
     timestamp: new Date().toISOString(),
     latency: base.latency || { ttft: 0, total: 0 },

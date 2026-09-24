@@ -116,6 +116,10 @@ async function flushToDatabase() {
             providerResponse: truncateField(item.providerResponse, config.maxJsonSize),
             response: truncateField(item.response, config.maxJsonSize),
             pxpipe: item.pxpipe || undefined,
+            client_model: item.client_model || item.clientModel || undefined,
+            provider_alias: item.provider_alias || item.providerAlias || undefined,
+            wire_model: item.wire_model || item.wireModel || undefined,
+            route_reason: item.route_reason || item.routeReason || undefined,
           };
 
           db.run(
