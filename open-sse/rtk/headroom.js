@@ -113,21 +113,6 @@ export function collectKiroHeadroomMessages(body) {
   return messages.length > 0 ? { messages, targets } : null;
 }
 
-function textFromHeadroomMessage(message) {
-  const content = message?.content;
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return null;
-
-  const parts = [];
-  for (const part of content) {
-    if (typeof part === "string") {
-      parts.push(part);
-    } else if (typeof part?.text === "string") {
-      parts.push(part.text);
-    }
-  }
-  return parts.length > 0 ? parts.join("\n") : null;
-}
 
 export function applyKiroHeadroomMessages(projection, compressedMessages, diagnostics) {
   if (!Array.isArray(compressedMessages) || compressedMessages.length !== projection.messages.length) {
@@ -144,7 +129,7 @@ export function applyKiroHeadroomMessages(projection, compressedMessages, diagno
       return false;
     }
 
-    const text = textFromHeadroomMessage(actual);
+    const text = typeof actual.content === "string" ? actual.content : null;
     if (text === null) {
       setDiagnostic(diagnostics, "proxy response missing Kiro text content");
       return false;
@@ -175,6 +160,7 @@ export async function compressWithHeadroom(
     preResponse = null,
     clientSignal = null,
     diagnostics = null,
+    requestHeaders = null,
   } = {}
 ) {
   if (!enabled) {
@@ -191,7 +177,6 @@ export async function compressWithHeadroom(
   }
 
   const diag = diagnostics || {};
-  diag.before = captureSizeSnapshot(body);
 
   try {
     // 1. Kiro special format: projection mapping
@@ -212,8 +197,10 @@ export async function compressWithHeadroom(
         preResponse,
         clientSignal,
         diagnostics: diag,
+        requestHeaders,
       });
       if (!data) return null;
+      diag.before = captureSizeSnapshot(body);
       const compressedMsgs = data.compressedBody?.messages || data.compressedBody;
       if (!applyKiroHeadroomMessages(projection, compressedMsgs, diag)) return null;
       diag.after = captureSizeSnapshot(body);
@@ -233,30 +220,29 @@ export async function compressWithHeadroom(
       preResponse,
       clientSignal,
       diagnostics: diag,
+      requestHeaders,
     });
 
     if (!data) return null;
-
+    diag.before = captureSizeSnapshot(body);
     const compressed = data.compressedBody;
     if (format === "claude") {
-      if (Array.isArray(compressed?.messages)) body.messages = compressed.messages;
-      if (compressed?.system !== undefined) body.system = compressed.system;
-    } else if (format === "openai-responses") {
-      if (Array.isArray(compressed?.input)) body.input = compressed.input;
+      body.messages = compressed.messages;
+      if (Object.hasOwn(compressed, "system")) body.system = compressed.system;
+    } else if (format === "openai-responses" || (!format && Object.hasOwn(body, "input"))) {
+      body.input = compressed.input;
     } else {
-      // Default OpenAI format
-      if (Array.isArray(compressed?.messages)) body.messages = compressed.messages;
-      else if (Array.isArray(compressed?.input)) body.input = compressed.input;
+      body.messages = compressed.messages;
     }
 
     diag.after = captureSizeSnapshot(body);
     return data;
   } catch (error) {
     // Propagate client abort / preResponse deadline errors
-    if (clientSignal?.aborted || preResponse?.signal?.aborted || error?.code === "CLIENT_ABORT" || error?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED") {
+    if (error?.code === "CLIENT_ABORT" || error?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED") {
       throw error;
     }
-    setDiagnostic(diag, `unexpected error: ${error?.message || String(error)}`);
+    setDiagnostic(diag, "gateway_unexpected_error");
     return null;
   }
 }

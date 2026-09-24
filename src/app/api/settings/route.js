@@ -4,6 +4,7 @@ import { applyOutboundProxyEnv } from "@/lib/network/outboundProxy";
 import { resetComboRotation } from "open-sse/services/combo.js";
 import bcrypt from "bcryptjs";
 import { getInitialPassword, isUnsafeProductionInitialPassword } from "@/lib/auth/passwordPolicy.js";
+import { isValidHeadroomTimeout, HEADROOM_MAX_TIMEOUT_MS } from "open-sse/config/runtimeConfig.js";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -39,6 +40,12 @@ export async function GET() {
 export async function PATCH(request) {
   try {
     const body = await request.json();
+    if (Object.prototype.hasOwnProperty.call(body, "headroomTimeoutMs") && !isValidHeadroomTimeout(body.headroomTimeoutMs)) {
+      return NextResponse.json({ error: `headroomTimeoutMs must be an integer between 1 and ${HEADROOM_MAX_TIMEOUT_MS}` }, { status: 400 });
+    }
+    delete body.headroomEffectiveTimeoutMs;
+    delete body.headroomTimeoutSource;
+
 
     // Strip protected secrets before any internal handling sets them
     for (const key of PROTECTED_SETTING_KEYS) delete body[key];

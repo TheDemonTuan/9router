@@ -1,5 +1,6 @@
 import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
+import { HEADROOM_DEFAULT_TIMEOUT_MS, resolveHeadroomTimeout } from "../../../../open-sse/config/runtimeConfig.js";
 
 const DEFAULT_MITM_ROUTER_BASE = "http://localhost:20128";
 const DEFAULT_HEADROOM_URL = process.env.HEADROOM_URL || "http://localhost:8787";
@@ -53,7 +54,7 @@ const DEFAULT_SETTINGS = {
   headroomEnabled: false,
   headroomUrl: DEFAULT_HEADROOM_URL,
   headroomCompressUserMessages: false,
-  headroomTimeoutMs: 3000,
+  headroomTimeoutMs: HEADROOM_DEFAULT_TIMEOUT_MS,
   cavemanEnabled: false,
   cavemanLevel: "full",
   ponytailEnabled: false,
@@ -96,6 +97,9 @@ export function mergeWithDefaults(raw) {
       }
     }
   }
+  const { timeoutMs, source } = resolveHeadroomTimeout(raw?.headroomTimeoutMs);
+  merged.headroomEffectiveTimeoutMs = timeoutMs;
+  merged.headroomTimeoutSource = source;
   return merged;
 }
 
@@ -107,11 +111,12 @@ export async function getSettings() {
 // Atomic read-merge-write inside transaction (prevents losing concurrent updates)
 export async function updateSettings(updates) {
   const db = await getAdapter();
+  const { headroomEffectiveTimeoutMs, headroomTimeoutSource, ...persistedUpdates } = updates;
   let next;
   db.transaction(function () {
     const row = db.get(`SELECT data FROM settings WHERE id = 1`);
     const current = row ? parseJson(row.data, {}) : {};
-    next = { ...current, ...updates };
+    next = { ...current, ...persistedUpdates };
     db.run(
       `INSERT INTO settings(id, data) VALUES(1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data`,
       [stringifyJson(next)],

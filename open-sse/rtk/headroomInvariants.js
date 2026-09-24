@@ -24,185 +24,82 @@ export function deepEqual(a, b) {
   return true;
 }
 
-function isValidJson(str) {
-  if (typeof str !== "string") return false;
-  try {
-    JSON.parse(str);
-    return true;
-  } catch {
-    return false;
-  }
-}
+const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value) && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
+const isJsonValue = (value) => {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  return isObject(value) && Object.values(value).every(isJsonValue);
+};
 
 export function validateBodyInvariants(original, compressed, format) {
-  if (!original || !compressed || typeof compressed !== "object") {
-    return { valid: false, reason: "missing_compressed_body" };
+  if (!isObject(original) || !isObject(compressed)) return { valid: false, reason: "invalid_body_root" };
+  if (!isJsonValue(original) || !isJsonValue(compressed)) return { valid: false, reason: "invalid_json_tree" };
+  const wireFormat = format || (Object.hasOwn(original, "input") ? "openai-responses" : "openai");
+  if (!["openai", "claude", "openai-responses"].includes(wireFormat)) return { valid: false, reason: "unknown_format" };
+  const failed = (path) => ({ valid: false, reason: "immutable_field_changed", detail: path.join(".") || "root" });
+
+  function textPath(path) {
+    const [root, index, field, part, leaf, nested, sub] = path;
+    if (wireFormat === "openai") {
+      return root === "messages" && typeof index === "number" && (
+        (field === "content" && path.length === 3)
+        || (field === "content" && typeof part === "number" && leaf === "text" && path.length === 5 && original.messages[index]?.content?.[part]?.type === "text")
+      );
+    }
+    if (wireFormat === "claude") {
+      if (root === "system") return path.length === 1 || (typeof index === "number" && field === "text" && path.length === 3 && original.system?.[index]?.type === "text");
+      if (root !== "messages" || typeof index !== "number" || field !== "content") return false;
+      if (path.length === 3) return true;
+      const block = original.messages[index]?.content?.[part];
+      if (typeof part !== "number" || !block) return false;
+      if (block.type === "text") return path.length === 5 && leaf === "text";
+      if (block.type !== "tool_result" || block.is_error === true || leaf !== "content") return false;
+      return path.length === 5 || (path.length === 7 && typeof nested === "number" && sub === "text" && block.content?.[nested]?.type === "text");
+    }
+    if (root !== "input") return false;
+    if (path.length === 1) return true;
+    if (typeof index !== "number") return false;
+    const item = original.input?.[index];
+    if (!item || typeof item !== "object") return false;
+    const message = item.type === "message" || (!item.type && item.role);
+    const result = item.type === "function_call_output" || item.type === "custom_tool_call_output";
+    if (message && field === "content" || result && field === "output") {
+      if (path.length === 3) return true;
+      if (typeof part === "number" && path.length === 5) {
+        const block = item[field]?.[part];
+        return ["input_text", "output_text", "text"].includes(block?.type) && leaf === "text";
+      }
+    }
+    return false;
   }
 
-  // 1. OpenAI Chat completions format
-  if (Array.isArray(original.messages)) {
-    if (!Array.isArray(compressed.messages)) {
-      return { valid: false, reason: "missing_messages_array" };
+  function compare(a, b, path = []) {
+    if (textPath(path) && typeof a === "string" && typeof b === "string") return null;
+    if (a === b) return null;
+    if (Array.isArray(a)) {
+      if (!Array.isArray(b) || a.length !== b.length) return failed(path);
+      for (let i = 0; i < a.length; i++) {
+        const error = compare(a[i], b[i], [...path, i]);
+        if (error) return error;
+      }
+      return null;
     }
-    if (compressed.messages.length !== original.messages.length) {
-      return { valid: false, reason: "messages_count_mismatch" };
+    if (!isObject(a)) return failed(path);
+    if (!isObject(b)) return failed(path);
+    const keys = Object.keys(a);
+    if (keys.length !== Object.keys(b).length) return failed(path);
+    for (const key of keys) {
+      if (!Object.hasOwn(b, key)) return failed([...path, key]);
+      const next = [...path, key];
+      if (!["messages", "system", "input"].includes(path[0] ?? key)) {
+        if (!deepEqual(a[key], b[key])) return failed(next);
+        continue;
+      }
+      const error = compare(a[key], b[key], next);
+      if (error) return error;
     }
-
-    for (let i = 0; i < original.messages.length; i++) {
-      const origMsg = original.messages[i];
-      const compMsg = compressed.messages[i];
-      if (!compMsg || compMsg.role !== origMsg.role) {
-        return { valid: false, reason: `message_role_or_order_mismatch_at_${i}` };
-      }
-
-      if (origMsg.name && compMsg.name !== origMsg.name) {
-        return { valid: false, reason: `message_name_mismatch_at_${i}` };
-      }
-
-      // Preserve tool_call_id
-      if (origMsg.tool_call_id && compMsg.tool_call_id !== origMsg.tool_call_id) {
-        return { valid: false, reason: `tool_call_id_mismatch_at_${i}` };
-      }
-
-      // Preserve tool_calls structure
-      if (Array.isArray(origMsg.tool_calls)) {
-        if (!Array.isArray(compMsg.tool_calls) || compMsg.tool_calls.length !== origMsg.tool_calls.length) {
-          return { valid: false, reason: `tool_calls_count_mismatch_at_${i}` };
-        }
-        for (let t = 0; t < origMsg.tool_calls.length; t++) {
-          const origCall = origMsg.tool_calls[t];
-          const compCall = compMsg.tool_calls[t];
-          if (compCall.id !== origCall.id) {
-            return { valid: false, reason: `tool_call_id_mismatch_at_${i}_${t}` };
-          }
-          if (compCall.function?.name !== origCall.function?.name) {
-            return { valid: false, reason: `tool_call_name_mismatch_at_${i}_${t}` };
-          }
-          // Arguments must remain valid JSON if original was valid JSON
-          if (origCall.function?.arguments && isValidJson(origCall.function.arguments)) {
-            if (!isValidJson(compCall.function?.arguments)) {
-              return { valid: false, reason: `tool_call_arguments_invalid_json_at_${i}_${t}` };
-            }
-          }
-        }
-      }
-
-      // Preserve reasoning/thinking if present
-      if (origMsg.reasoning_content && !compMsg.reasoning_content) {
-        return { valid: false, reason: `reasoning_content_dropped_at_${i}` };
-      }
-    }
+    return null;
   }
-
-  // 2. OpenAI Responses format (Codex input[])
-  if (Array.isArray(original.input)) {
-    if (!Array.isArray(compressed.input)) {
-      return { valid: false, reason: "missing_responses_input_array" };
-    }
-    if (compressed.input.length !== original.input.length) {
-      return { valid: false, reason: "responses_input_count_mismatch" };
-    }
-
-    for (let i = 0; i < original.input.length; i++) {
-      const origItem = original.input[i];
-      const compItem = compressed.input[i];
-      if (!compItem || compItem.type !== origItem.type) {
-        return { valid: false, reason: `responses_item_type_mismatch_at_${i}` };
-      }
-
-      // Preserve item.id and item.status if present
-      if (origItem.id !== undefined && compItem.id !== origItem.id) {
-        return { valid: false, reason: `responses_item_id_mismatch_at_${i}` };
-      }
-      if (origItem.status !== undefined && compItem.status !== origItem.status) {
-        return { valid: false, reason: `responses_item_status_mismatch_at_${i}` };
-      }
-
-      if (origItem.type === "reasoning") {
-        if (origItem.encrypted_content && compItem.encrypted_content !== origItem.encrypted_content) {
-          return { valid: false, reason: `reasoning_encrypted_content_altered_at_${i}` };
-        }
-        if (origItem.summary && !compItem.summary) {
-          return { valid: false, reason: `reasoning_summary_dropped_at_${i}` };
-        }
-      } else if (origItem.type === "function_call" || origItem.type === "custom_tool_call") {
-        if (compItem.call_id !== origItem.call_id) {
-          return { valid: false, reason: `responses_tool_call_id_mismatch_at_${i}` };
-        }
-        if (compItem.name !== origItem.name) {
-          return { valid: false, reason: `responses_tool_call_name_mismatch_at_${i}` };
-        }
-        if (origItem.arguments && isValidJson(origItem.arguments)) {
-          if (!isValidJson(compItem.arguments)) {
-            return { valid: false, reason: `responses_tool_call_arguments_invalid_json_at_${i}` };
-          }
-        }
-      } else if (origItem.type === "function_call_output" || origItem.type === "custom_tool_call_output") {
-        if (compItem.call_id !== origItem.call_id) {
-          return { valid: false, reason: `responses_tool_output_call_id_mismatch_at_${i}` };
-        }
-      } else if (origItem.type === "message" || (!origItem.type && origItem.role)) {
-        if (origItem.role && compItem.role !== origItem.role) {
-          return { valid: false, reason: `responses_message_role_mismatch_at_${i}` };
-        }
-      } else {
-        // Unknown Responses item type (e.g. local_shell_call, apply_patch_call, opaque metadata)
-        // Non-compressible items must be deep equal
-        if (!deepEqual(origItem, compItem)) {
-          return { valid: false, reason: `unknown_responses_item_altered_at_${i}` };
-        }
-      }
-    }
-  }
-
-  // 3. Claude format
-  if (format === "claude" && Array.isArray(original.messages)) {
-    for (let i = 0; i < original.messages.length; i++) {
-      const origMsg = original.messages[i];
-      const compMsg = compressed.messages?.[i];
-      if (Array.isArray(origMsg.content) && Array.isArray(compMsg?.content)) {
-        if (compMsg.content.length !== origMsg.content.length) {
-          return { valid: false, reason: `claude_content_count_mismatch_at_${i}` };
-        }
-        for (let c = 0; c < origMsg.content.length; c++) {
-          const origPart = origMsg.content[c];
-          const compPart = compMsg.content[c];
-          if (origPart?.type === "tool_result") {
-            if (compPart?.type !== "tool_result") {
-              return { valid: false, reason: `claude_tool_result_dropped_at_${i}_${c}` };
-            }
-            if (compPart.tool_use_id !== origPart.tool_use_id) {
-              return { valid: false, reason: `claude_tool_use_id_mismatch_at_${i}_${c}` };
-            }
-            if (Boolean(origPart.is_error) !== Boolean(compPart.is_error)) {
-              return { valid: false, reason: `claude_tool_is_error_altered_at_${i}_${c}` };
-            }
-          }
-          if (origPart?.type === "tool_use") {
-            if (compPart?.type !== "tool_use" || compPart.id !== origPart.id || compPart.name !== origPart.name) {
-              return { valid: false, reason: `claude_tool_use_altered_at_${i}_${c}` };
-            }
-          }
-          if (origPart?.type === "thinking") {
-            if (compPart?.type !== "thinking") {
-              return { valid: false, reason: `claude_thinking_dropped_at_${i}_${c}` };
-            }
-            if (origPart.signature && compPart.signature !== origPart.signature) {
-              return { valid: false, reason: `claude_thinking_signature_altered_at_${i}_${c}` };
-            }
-            if (origPart.thinking && compPart.thinking !== origPart.thinking) {
-              return { valid: false, reason: `claude_thinking_content_altered_at_${i}_${c}` };
-            }
-          }
-          if (origPart?.type === "redacted_thinking") {
-            if (compPart?.type !== "redacted_thinking" || compPart.data !== origPart.data) {
-              return { valid: false, reason: `claude_redacted_thinking_altered_at_${i}_${c}` };
-            }
-          }
-        }
-      }
-    }
-  }
-
-  return { valid: true };
+  return compare(original, compressed) || { valid: true };
 }
