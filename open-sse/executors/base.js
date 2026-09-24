@@ -6,6 +6,7 @@ import { bindResponseBody } from "../utils/responseLifecycle.js";
 import { dbg } from "../utils/debugLog.js";
 import { ANTHROPIC_API_VERSION, OPENAI_COMPAT_BASE, ANTHROPIC_COMPAT_BASE } from "../providers/shared.js";
 import { resolveOpenAICompatibleApiType } from "../services/provider.js";
+import { mergeAnthropicBetaHeaders } from "../utils/anthropicBeta.js";
 
 /**
  * BaseExecutor - Base class for provider executors
@@ -142,26 +143,16 @@ export class BaseExecutor {
       const url = this.buildUrl(model, stream, urlIndex, credentials, requestContext);
       const transformedBody = this.transformRequest(model, body, stream, credentials);
       const headers = this.buildHeaders(credentials, stream, url, model, transformedBody, body);
-      if (customHeaders && typeof customHeaders === "object") {
-        const BLOCKED_HEADERS = new Set([
-          "authorization",
-          "x-api-key",
-          "api-key",
-          "cookie",
-          "host",
-          "connection",
-          "content-length",
-          "proxy-authorization",
-          "x-forwarded-for",
-          "x-real-ip",
-        ]);
-        for (const [key, value] of Object.entries(customHeaders)) {
-          if (!BLOCKED_HEADERS.has(key.toLowerCase()) && typeof value === "string") {
-            headers[key] = value;
-          }
-        }
+      const claudeTransport = (credentials?.runtimeTransport?.format || this.config.format) === "claude"
+        || this.provider === "claude" || this.provider?.startsWith?.("anthropic-compatible-");
+      if (customHeaders && claudeTransport) {
+        let official = false;
+        try { official = new URL(url).hostname === "api.anthropic.com"; } catch {}
+        mergeAnthropicBetaHeaders(headers, customHeaders["anthropic-beta"], {
+          model, body: transformedBody,
+          stripClaudeCode: this.provider?.startsWith?.("anthropic-compatible-") && !official,
+        });
       }
-
       if (!retryAttemptsByUrl[urlIndex]) retryAttemptsByUrl[urlIndex] = 0;
 
       // Keep the first abort origin in the merged signal reason.

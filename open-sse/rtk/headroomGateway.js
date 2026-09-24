@@ -4,12 +4,15 @@
 // Provider request headers extracted from gateway response and forwarded to upstream executor.
 
 import {
+  resolveHeadroomTimeout,
   HEADROOM_DEFAULT_TIMEOUT_MS,
   HEADROOM_RESERVE_TIMEOUT_MS,
   HEADROOM_MAX_PAYLOAD_BYTES,
 } from "../config/runtimeConfig.js";
 import { validateBodyInvariants } from "./headroomInvariants.js";
 import { createDeadlineError, createClientAbortError } from "../utils/preResponseBudget.js";
+import { beginHeadroomAttempt, markHeadroomAttemptStarted, finishHeadroomAttempt, recordHeadroomBypass } from "./headroomRuntime.js";
+import { normalizeAnthropicBeta } from "../utils/anthropicBeta.js";
 
 function jsonByteSize(value) {
   try {
@@ -18,39 +21,17 @@ function jsonByteSize(value) {
     return 0;
   }
 }
-
-function buildCompressEndpoint(rawUrl) {
+export function buildCompressEndpoint(rawUrl) {
   try {
     const parsed = new URL(rawUrl);
     parsed.pathname = `${parsed.pathname.replace(/\/$/, "")}/v1/compress`;
     parsed.hash = "";
     return parsed.toString();
   } catch {
-    const clean = String(rawUrl).replace(/#.*$/, "");
-    const [base, query = ""] = clean.split("?", 2);
-    const endpoint = `${base.replace(/\/$/, "")}/v1/compress`;
-    return query ? `${endpoint}?${query}` : endpoint;
+    return null;
   }
 }
 
-function scrubSensitiveUrlText(text) {
-  return String(text)
-    .replace(/\/\/[^/@\s]+@/g, "//")
-    .replace(/(https?:\/\/[^\s?#]+)[?#][^\s)]*/g, "$1");
-}
-
-function maskEndpoint(endpoint) {
-  try {
-    const parsed = new URL(endpoint);
-    parsed.username = "";
-    parsed.password = "";
-    parsed.search = "";
-    parsed.hash = "";
-    return parsed.toString();
-  } catch {
-    return String(endpoint).replace(/\/\/[^/@\s]+@/, "//").replace(/[?#].*$/, "");
-  }
-}
 
 export function isInternalHost(hostname) {
   const h = String(hostname || "").replace(/^\[/, "").replace(/\]$/, "").toLowerCase();
@@ -85,9 +66,7 @@ export function isSafeOrigin(endpointUrl) {
 }
 
 export function computeHeadroomBudget(configuredTimeoutMs, preResponse) {
-  const configured = typeof configuredTimeoutMs === "number" && Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0
-    ? configuredTimeoutMs
-    : HEADROOM_DEFAULT_TIMEOUT_MS;
+  const { timeoutMs: configured } = resolveHeadroomTimeout(configuredTimeoutMs);
 
   if (!preResponse || typeof preResponse.remainingMs !== "function") {
     return configured;
@@ -98,6 +77,12 @@ export function computeHeadroomBudget(configuredTimeoutMs, preResponse) {
   return Math.min(configured, available);
 }
 
+function betaFromHeaders(headers) {
+  if (headers instanceof Headers) return headers.get("anthropic-beta");
+  if (!headers || typeof headers !== "object" || Array.isArray(headers)) return null;
+  const values = Object.entries(headers).filter(([key]) => key.toLowerCase() === "anthropic-beta").map(([, value]) => value);
+  return values.length && values.every((value) => typeof value === "string") ? values.join(",") : null;
+}
 /**
  * Call Headroom Gateway v2 POST /v1/compress.
  * Fail-open on Headroom service faults.
@@ -114,8 +99,9 @@ export async function callHeadroomGateway({
   preResponse = null,
   clientSignal = null,
   diagnostics = {},
+  requestHeaders = null,
 } = {}) {
-  const startTime = Date.now();
+  const startTime = performance.now();
   if (!url) {
     diagnostics.reason = "missing_proxy_url";
     return null;
@@ -126,7 +112,6 @@ export async function callHeadroomGateway({
   }
 
   const endpoint = buildCompressEndpoint(url);
-  diagnostics.endpoint = maskEndpoint(endpoint);
 
   if (!isSafeOrigin(endpoint)) {
     diagnostics.reason = "unsafe_proxy_origin";
@@ -134,14 +119,32 @@ export async function callHeadroomGateway({
   }
 
   // 1. Calculate budget: min(configured, max(0, remaining - reserve))
+  if (typeof body !== "object" || Array.isArray(body)) {
+    diagnostics.reason = "invalid_body_root";
+    return null;
+  }
   const budgetMs = computeHeadroomBudget(timeoutMs, preResponse);
   if (budgetMs <= 0) {
     diagnostics.reason = "budget_exhausted";
     return null;
   }
 
+  if (preResponse?.signal?.aborted) throw preResponse.signal.reason?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" ? preResponse.signal.reason : createDeadlineError();
+  if (clientSignal?.aborted) throw clientSignal.reason?.code === "CLIENT_ABORT" ? clientSignal.reason : createClientAbortError();
+  const admission = beginHeadroomAttempt(endpoint);
+  if (!admission.ticket) {
+    diagnostics.reason = admission.reason;
+    recordHeadroomBypass(endpoint, admission.reason);
+    return null;
+  }
+  const ticket = admission.ticket;
+  try {
   // 2. Resource bounds: check payload size limit (max 20MB)
   const estimatedSize = jsonByteSize(body);
+  if (estimatedSize === 0) {
+    diagnostics.reason = "invalid_body_root";
+    return null;
+  }
   if (estimatedSize > HEADROOM_MAX_PAYLOAD_BYTES) {
     diagnostics.reason = "payload_too_large";
     return null;
@@ -157,9 +160,10 @@ export async function callHeadroomGateway({
     ...cleanBody
   } = (body && typeof body === "object") ? body : {};
 
+  const expectedBody = Object.fromEntries(Object.entries(cleanBody).filter(([, value]) => value !== undefined));
+  if (model !== undefined) expectedBody.model = model;
   const payload = {
-    ...cleanBody,
-    model,
+    ...expectedBody,
     ...(compressUserMessages ? { config: { compress_user_messages: true } } : {}),
     gateway: {
       can_redrive: false,
@@ -167,6 +171,8 @@ export async function callHeadroomGateway({
       session_affinity: false,
     },
   };
+  const requestBeta = normalizeAnthropicBeta(betaFromHeaders(requestHeaders));
+  if (requestBeta) payload.gateway.request_headers = { "anthropic-beta": requestBeta };
 
   const headers = {
     "Content-Type": "application/json",
@@ -176,113 +182,139 @@ export async function callHeadroomGateway({
     headers["X-Headroom-Proxy-Token"] = proxyToken;
   }
 
-  // 4. Linked timeouts: client abort + preResponse deadline + local budget
+  // A single deadline covers serialization, response headers and body parsing.
+  const timeoutError = new Error("Headroom gateway timeout");
+  timeoutError.code = "HEADROOM_GATEWAY_TIMEOUT";
   const localCtrl = new AbortController();
-  const timer = setTimeout(() => {
-    localCtrl.abort(new Error(`Headroom gateway timeout after ${budgetMs}ms`));
-  }, budgetMs);
-
   const signals = [localCtrl.signal];
   if (clientSignal) signals.push(clientSignal);
   if (preResponse?.signal) signals.push(preResponse.signal);
   const combinedSignal = AbortSignal.any(signals);
-
-  let res;
+  const remaining = budgetMs - (performance.now() - startTime);
+  if (remaining <= 0) {
+    diagnostics.reason = "gateway_timeout";
+    diagnostics.budgetMs = budgetMs;
+    diagnostics.latencyMs = performance.now() - startTime;
+    return null;
+  }
+  const timer = setTimeout(() => localCtrl.abort(timeoutError), remaining);
+  diagnostics.budgetMs = budgetMs;
+  let data;
   try {
-    res = await fetch(endpoint, {
+    if (combinedSignal.aborted) throw combinedSignal.reason;
+    markHeadroomAttemptStarted(ticket);
+    const res = await fetch(endpoint, {
       method: "POST",
       headers,
       body: JSON.stringify(payload),
       signal: combinedSignal,
       redirect: "manual",
     });
+    if (combinedSignal.aborted) throw combinedSignal.reason;
+    if (!res.ok) {
+      diagnostics.httpStatus = res.status;
+      diagnostics.reason = res.status >= 500 && res.status <= 599 ? "gateway_http_5xx" : `gateway_http_${res.status}`;
+      res.body?.cancel().catch(() => {});
+      return null;
+    }
+    try {
+      data = await res.json();
+    } catch (error) {
+      if (combinedSignal.aborted) throw error;
+      if (error instanceof SyntaxError) {
+        diagnostics.reason = "gateway_invalid_json_response";
+        return null;
+      }
+      throw error;
+    }
+    if (combinedSignal.aborted || performance.now() - startTime >= budgetMs) {
+      if (!combinedSignal.aborted) localCtrl.abort(timeoutError);
+      throw combinedSignal.reason;
+    }
   } catch (error) {
+    if (combinedSignal.aborted && combinedSignal.reason !== timeoutError) {
+      if (preResponse?.signal?.reason === combinedSignal.reason) {
+        diagnostics.cancelled = true;
+        throw combinedSignal.reason?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" ? combinedSignal.reason : createDeadlineError();
+      }
+      if (clientSignal?.reason === combinedSignal.reason) {
+        diagnostics.cancelled = true;
+        throw combinedSignal.reason?.code === "CLIENT_ABORT" ? combinedSignal.reason : createClientAbortError();
+      }
+    }
+    if (combinedSignal.reason === timeoutError || error === timeoutError) {
+      diagnostics.reason = "gateway_timeout";
+    } else {
+      const code = error?.code || error?.cause?.code;
+      diagnostics.reason = code === "ENOTFOUND" || code === "EAI_AGAIN" ? "gateway_dns_error"
+        : code === "ECONNREFUSED" ? "gateway_connection_refused"
+          : ["ECONNRESET", "EPIPE", "UND_ERR_SOCKET"].includes(code) ? "gateway_connection_reset" : "gateway_fetch_error";
+    }
+    return null;
+  } finally {
     clearTimeout(timer);
-    // If client aborted or preResponse deadline passed, propagate typed error with code & status
-    if (preResponse?.signal?.aborted) {
-      const deadlineError = preResponse.signal.reason && typeof preResponse.signal.reason === "object" && preResponse.signal.reason.code
-        ? preResponse.signal.reason
-        : createDeadlineError();
-      throw deadlineError;
-    }
-    if (clientSignal?.aborted) {
-      const abortError = clientSignal.reason && typeof clientSignal.reason === "object" && clientSignal.reason.code
-        ? clientSignal.reason
-        : createClientAbortError();
-      throw abortError;
-    }
-    const cleanMsg = scrubSensitiveUrlText(error.message || String(error));
-    diagnostics.reason = `gateway_fetch_error: ${cleanMsg}`;
-    diagnostics.latencyMs = Date.now() - startTime;
-    return null;
+    diagnostics.latencyMs = performance.now() - startTime;
   }
-
-  clearTimeout(timer);
-
-  if (!res.ok) {
-    diagnostics.reason = `gateway_http_${res.status}`;
-    diagnostics.latencyMs = Date.now() - startTime;
-    return null;
-  }
-
-  let data;
-  try {
-    data = await res.json();
-  } catch (parseError) {
-    diagnostics.reason = "gateway_invalid_json_response";
-    diagnostics.latencyMs = Date.now() - startTime;
-    return null;
-  }
-
-  diagnostics.latencyMs = Date.now() - startTime;
-
-  // 5. Unpack Gateway v2 response
-  // v0.38.0 native gateway returns top-level { body, turn_id, route, obligations, headers, ... }
-  // with fallback to { data: { body, turn_id, ... } } or raw { messages, ... }
+  // Gateway v2 must return the complete provider envelope.
   const gatewayData = data?.data || {};
-  const returnedBody = data.body
-    || gatewayData.body
-    || (Array.isArray(data.messages) ? { messages: data.messages } : (Array.isArray(data.input) ? { input: data.input } : null))
-    || (Array.isArray(gatewayData.messages) ? { messages: gatewayData.messages } : (Array.isArray(gatewayData.input) ? { input: gatewayData.input } : null));
-
+  const returnedBody = data?.body ?? gatewayData.body ?? null;
+  if (data?.compression_skipped === true || gatewayData.compression_skipped === true) {
+    const check = validateBodyInvariants(expectedBody, returnedBody, format);
+    diagnostics.reason = check.valid ? "gateway_compression_skipped" : "invariant_violation";
+    if (!check.valid) diagnostics.detail = check.detail || check.reason;
+    return null;
+  }
   if (!returnedBody) {
     diagnostics.reason = "gateway_missing_compressed_body";
     return null;
   }
-
-  // 6. Sovereignty check: model must not be changed by Headroom
-  const returnedModel = returnedBody.model || data.model || gatewayData.model || model;
-  if (returnedModel !== model && returnedModel !== body.model) {
-    diagnostics.reason = `model_sovereignty_violation: returned ${returnedModel} expected ${model}`;
+  if ((data.route?.model !== undefined && data.route.model !== expectedBody.model)
+    || (gatewayData.route?.model !== undefined && gatewayData.route.model !== expectedBody.model)) {
+    diagnostics.reason = "model_sovereignty_violation";
     return null;
   }
-
-  // 7. Obligations safety check: 9Router only implements relay_usage.
-  // Reject unsupported obligations such as redrive or session persistence to prevent protocol deviation.
+  // Only relay_usage is implemented; redrive or session state must never be requested.
   const rawObligations = data.obligations || gatewayData.obligations || [];
   const obligationsList = Array.isArray(rawObligations)
     ? rawObligations
-    : (rawObligations && typeof rawObligations === "object" ? Object.keys(rawObligations).filter(k => rawObligations[k]) : []);
-
-  const unsupportedObligation = obligationsList.find(ob => ob !== "relay_usage");
+    : (rawObligations && typeof rawObligations === "object" ? Object.keys(rawObligations).filter((key) => rawObligations[key]) : []);
+  const unsupportedObligation = obligationsList.find((obligation) => obligation !== "relay_usage");
   if (unsupportedObligation) {
-    diagnostics.reason = `unsupported_obligation: ${unsupportedObligation}`;
+    diagnostics.reason = "unsupported_obligation";
     return null;
   }
 
   // 8. Validate body invariants (IDs, reasoning summaries/encrypted, tool pairing, JSON arguments)
-  const invariantCheck = validateBodyInvariants(body, returnedBody, format);
+  const invariantCheck = validateBodyInvariants(expectedBody, returnedBody, format);
   if (!invariantCheck.valid) {
-    diagnostics.reason = `invariant_violation: ${invariantCheck.reason}`;
+    diagnostics.reason = "invariant_violation";
+    diagnostics.detail = invariantCheck.detail || invariantCheck.reason;
     return null;
   }
+  const responseHeaders = data.headers ?? gatewayData.headers ?? null;
+  if (responseHeaders !== null && (typeof responseHeaders !== "object" || Array.isArray(responseHeaders))) {
+    diagnostics.reason = "gateway_invalid_provider_headers";
+    return null;
+  }
+  const rawBeta = betaFromHeaders(responseHeaders);
+  if (responseHeaders && Object.keys(responseHeaders).some((key) => key.toLowerCase() === "anthropic-beta") && !normalizeAnthropicBeta(rawBeta)) {
+    diagnostics.reason = "gateway_invalid_provider_headers";
+    return null;
+  }
+  const providerHeaders = rawBeta ? { "anthropic-beta": normalizeAnthropicBeta(rawBeta) } : null;
+  diagnostics.latencyMs = performance.now() - startTime;
+  if (diagnostics.latencyMs >= budgetMs) {
+    diagnostics.reason = "gateway_timeout";
+    return null;
+  }
+  diagnostics.accepted = true;
 
   return {
     compressedBody: returnedBody,
     turnId: data.turn_id || gatewayData.turn_id || null,
     route: data.route || gatewayData.route || null,
     obligations: data.obligations || gatewayData.obligations || [],
-    providerHeaders: data.headers || gatewayData.headers || null,
+    providerHeaders,
     tokens_before: data.tokens_before ?? gatewayData.tokens_before ?? null,
     tokens_after: data.tokens_after ?? gatewayData.tokens_after ?? null,
     tokens_saved: data.tokens_saved ?? gatewayData.tokens_saved ?? null,
@@ -290,4 +322,11 @@ export async function callHeadroomGateway({
     transforms_applied: data.transforms_applied || gatewayData.transforms_applied || [],
     latencyMs: diagnostics.latencyMs,
   };
+  } finally {
+    const reason = diagnostics.reason;
+    const kind = diagnostics.accepted ? "success" : diagnostics.cancelled ? "cancelled"
+      : !ticket.attempted ? "local_bypass"
+        : ["gateway_timeout", "gateway_dns_error", "gateway_connection_refused", "gateway_connection_reset", "gateway_fetch_error", "gateway_http_5xx", "gateway_http_429", "gateway_invalid_json_response", "gateway_missing_compressed_body", "gateway_compression_skipped"].includes(reason) ? "service_failure" : "neutral";
+    diagnostics.transition = finishHeadroomAttempt(ticket, { kind, reason, latencyMs: ticket.attempted ? diagnostics.latencyMs : undefined });
+  }
 }

@@ -59,13 +59,13 @@ const ANTHROPIC_BETA_BASE = [
   "redact-thinking-2026-02-12",
   "token-efficient-tools-2026-03-28",
 ];
-const ANTHROPIC_BETA_HEAVY_AGENT = ["advanced-tool-use-2025-11-20", "effort-2025-11-24"];
+export const ANTHROPIC_BETA_HEAVY_AGENT = ["advanced-tool-use-2025-11-20", "effort-2025-11-24"];
 
 // Heavy-agent beta flags are gated to opus/sonnet — cheaper models don't need them.
 // `redact-thinking` asks Anthropic to return signature-only thinking blocks, which
 // is right for clients that never render thinking but blanks the summaries a
 // client explicitly requested with `thinking.display: "summarized"`.
-const ANTHROPIC_BETA_REDACT_THINKING = "redact-thinking-2026-02-12";
+export const ANTHROPIC_BETA_REDACT_THINKING = "redact-thinking-2026-02-12";
 
 export function wantsThinkingSummaries(body) {
   return body?.thinking?.display === "summarized";

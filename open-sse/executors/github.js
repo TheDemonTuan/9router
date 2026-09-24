@@ -11,6 +11,7 @@ import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { stripUnsupportedParams } from "../translator/concerns/paramSupport.js";
 import { SSE_DONE } from "../utils/sseConstants.js";
 import { ANTHROPIC_API_VERSION } from "../providers/shared.js";
+import { mergeAnthropicBetaHeaders } from "../utils/anthropicBeta.js";
 import crypto from "crypto";
 
 export class GithubExecutor extends BaseExecutor {
@@ -249,7 +250,7 @@ export class GithubExecutor extends BaseExecutor {
   // see the note in execute() above), so we translate to Anthropic-native ourselves.
   // This is what makes prepareClaudeRequest() (translator/formats/claude.js) inject
   // cache_control — /chat/completions never gets there, so it never sees cache tokens.
-  async executeWithMessagesEndpoint({ model, body, stream, credentials, signal, log, proxyOptions = null }) {
+  async executeWithMessagesEndpoint({ model, body, stream, credentials, signal, log, proxyOptions = null, customHeaders = null }) {
     const url = this.config.messagesUrl;
     const headers = this.buildHeaders(credentials, stream);
 
@@ -264,6 +265,7 @@ export class GithubExecutor extends BaseExecutor {
     // schema rejects the extra field with a 400.
     const toolNameMap = transformedBody._toolNameMap;
     delete transformedBody._toolNameMap;
+    if (customHeaders) mergeAnthropicBetaHeaders(headers, customHeaders["anthropic-beta"], { model, body: transformedBody, stripClaudeCode: true });
 
     log?.debug("GITHUB", "Sending translated request to /v1/messages");
 
