@@ -193,7 +193,9 @@ if (!process.argv.includes("--child")) {
       const state = docker("inspect", "--format", "{{.State.Status}} oom={{.State.OOMKilled}} exit={{.State.ExitCode}}", name);
       const logs = Bun.spawnSync(["docker", "logs", "--tail", "30", name], { stdout: "pipe", stderr: "pipe" });
       const recent = `${new TextDecoder().decode(logs.stdout)}\n${new TextDecoder().decode(logs.stderr)}`.replaceAll(token, "[redacted]");
-      throw new Error(`Headroom v0.38.0 /readyz did not become ready within 120s; mapping: ${mapping}; last probe: ${lastProbe}; container state: ${state}; recent logs: ${recent}`);
+      const internal = Bun.spawnSync(["docker", "exec", name, "python", "-c", "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8787/readyz', timeout=2).status)"], { stdout: "pipe", stderr: "pipe" });
+      const inside = `${internal.exitCode}: ${new TextDecoder().decode(internal.stdout)} ${new TextDecoder().decode(internal.stderr)}`;
+      throw new Error(`Headroom v0.38.0 /readyz did not become ready within 120s; mapping: ${mapping}; last probe: ${lastProbe}; inside: ${inside}; container state: ${state}; recent logs: ${recent}`);
     }
     await ready();
     const version = docker("exec", name, "python", "-c", "import headroom; from headroom._version import __version__; print(__version__)");
