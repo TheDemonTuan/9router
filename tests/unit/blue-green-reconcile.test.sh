@@ -368,6 +368,7 @@ new_case; seed blue
 export FAKE_RELOAD_AFTER=7
 run --release image-new
 assert_route green green
+[[ "$(stat -c '%a' "$FAKE_ROUTE_FILE")" == 644 ]] # Traefik has no DAC_OVERRIDE and must read the generated route.
 [[ "$(cat "$case_dir/.deployed-image")" == sha256:green-new ]]
 [[ "$(cat "$FAKE_STATE/9router-blue")" == exited* ]]
 [[ "$(cat "$FAKE_CURL_COUNTER")" -ge 8 ]]

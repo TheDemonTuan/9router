@@ -520,6 +520,7 @@ http:
           interval: "5s"
           timeout: "2s"
 EOF
+  chmod 644 "$tmp" || return 1
   NEW_ROUTE_INODE="$(stat -c '%d:%i' "$tmp")" || return 1
   NEW_ROUTE_GENERATION="$gen"
   mv -f "$tmp" "$dest"
@@ -616,7 +617,7 @@ recover_pending_route() {
   if [[ "${PENDING_ROUTE:-false}" == true ]]; then
     if [[ -n "$SNAPSHOT_PATH" ]]; then
       if restore_tmp="$(mktemp "$TRAEFIK_DYNAMIC_DIR/.9router-restore.XXXXXXXX")" &&
-         cp -- "$SNAPSHOT_PATH" "$restore_tmp" && mv -f -- "$restore_tmp" "$ROUTE_PATH"; then
+         cp -- "$SNAPSHOT_PATH" "$restore_tmp" && chmod 644 "$restore_tmp" && mv -f -- "$restore_tmp" "$ROUTE_PATH"; then
         restored=true
       else
         [[ -z "$restore_tmp" ]] || rm -f -- "$restore_tmp" || true
