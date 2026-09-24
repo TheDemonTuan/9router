@@ -130,27 +130,62 @@ if [[ -n "${FAKE_HOLD_MARKER:-}" && ! -e "$FAKE_HOLD_MARKER" ]]; then
 fi
 mode="${FAKE_CURL_MODE:-}"
 if [[ -n "${FAKE_CURL_SEQUENCE:-}" ]]; then mode="$(sed -n "${counter}p" "$FAKE_CURL_SEQUENCE")"; fi
+
+disk_slot=none
+disk_gen=""
+if [[ -f "$FAKE_ROUTE_FILE" ]]; then
+  disk_slot="$(sed -n 's/^[[:space:]]*- url: "http:\/\/9router-\(blue\|green\):20128".*/\1/p' "$FAKE_ROUTE_FILE")"
+  disk_slot="${disk_slot:-none}"
+  disk_gen="$(sed -n 's/^[[:space:]]*X-9Router-Route-Generation:[[:space:]]*"\?\([0-9a-fA-F]\{32\}\)"\?.*/\1/p' "$FAKE_ROUTE_FILE")"
+fi
+
+if [[ ! -f "$FAKE_LOADED_SLOT" || ! -f "$FAKE_LOADED_GENERATION" ]]; then
+  loaded_slot="$disk_slot"
+  loaded_gen="$disk_gen"
+  printf '%s' "$loaded_slot" > "$FAKE_LOADED_SLOT"
+  printf '%s' "$loaded_gen" > "$FAKE_LOADED_GENERATION"
+else
+  loaded_slot="$(cat "$FAKE_LOADED_SLOT")"
+  loaded_gen="$(cat "$FAKE_LOADED_GENERATION")"
+fi
+
 if [[ -z "$mode" ]]; then
-  mode="$(cat "$FAKE_LOADED_SLOT")"
-  disk=none
-  if [[ -f "$FAKE_ROUTE_FILE" ]]; then
-    disk="$(sed -n 's/^[[:space:]]*- url: "http:\/\/9router-\(blue\|green\):20128".*/\1/p' "$FAKE_ROUTE_FILE")"
+  if [[ "$loaded_slot" != "$disk_slot" && "$counter" -ge "${FAKE_RELOAD_AFTER:-0}" ]]; then
+    loaded_slot="$disk_slot"
+    loaded_gen="$disk_gen"
+    printf '%s' "$loaded_slot" > "$FAKE_LOADED_SLOT"
+    printf '%s' "$loaded_gen" > "$FAKE_LOADED_GENERATION"
+  elif [[ "$loaded_slot" == "$disk_slot" && "$loaded_gen" != "$disk_gen" ]]; then
+    reload_gen_target="${FAKE_RELOAD_GEN_AFTER:-0}"
+    if [[ "$counter" -ge "$reload_gen_target" ]]; then
+      loaded_gen="$disk_gen"
+      printf '%s' "$loaded_gen" > "$FAKE_LOADED_GENERATION"
+    fi
   fi
-  if [[ "$mode" != "$disk" && "$counter" -ge "${FAKE_RELOAD_AFTER:-0}" ]]; then
-    mode="$disk"
-    printf '%s' "$mode" > "$FAKE_LOADED_SLOT"
+  mode="$loaded_slot"
+  gen="$loaded_gen"
+else
+  if [[ "$mode" == *" "* ]]; then
+    gen="${mode#* }"
+    mode="${mode%% *}"
+  else
+    gen="${disk_gen:-$loaded_gen}"
   fi
 fi
+
 case "$mode" in
   blue|green) status=200; payload="{\"ok\":true,\"deployment_slot\":\"$mode\"}" ;;
-  none) status=404; payload='not found' ;;
+  none) status=404; payload='not found'; gen="" ;;
   duplicate) status=200; payload='{"ok":true,"deployment_slot":"green","deployment_slot":"blue"}' ;;
   cached|cf-hit) status=200; payload='{"ok":true,"deployment_slot":"green"}' ;;
-  *) status=403; payload='denied' ;;
+  *) status=403; payload='denied'; gen="" ;;
 esac
 printf 'HTTP/2 %s\r\n' "$status" > "$header"
 [[ "$mode" != cached ]] || printf 'Age: 2\r\n' >> "$header"
 [[ "$mode" != cf-hit ]] || printf 'CF-Cache-Status: HIT\r\n' >> "$header"
+if [[ -n "$gen" ]]; then
+  printf 'X-9Router-Route-Generation: %s\r\n' "$gen" >> "$header"
+fi
 printf '\r\n' >> "$header"
 printf '%s' "$payload" > "$body"
 printf '%s' "$status"
@@ -178,27 +213,37 @@ new_case() {
   export PATH="$tmp/bin:$PATH" API_HOST=9router-api.example.test
   export TRAEFIK_DYNAMIC_DIR="$case_dir/dynamic" FAKE_MOUNT_SOURCE="$case_dir/dynamic"
   export FAKE_STATE="$case_dir/state" FAKE_DOCKER_LOG="$case_dir/docker.log" FAKE_CASE_DIR="$case_dir"
-  export FAKE_CURL_COUNTER="$case_dir/curl.count" FAKE_ROUTE_FILE="$case_dir/dynamic/9router.yml" FAKE_LOADED_SLOT="$case_dir/loaded.slot"
+  export FAKE_CURL_COUNTER="$case_dir/curl.count" FAKE_ROUTE_FILE="$case_dir/dynamic/9router.yml"
+  export FAKE_LOADED_SLOT="$case_dir/loaded.slot" FAKE_LOADED_GENERATION="$case_dir/loaded.gen"
   export READY_TIMEOUT=2 DRAIN_TIMEOUT=1 DRAIN_POLL_SECONDS=1 ROUTE_TIMEOUT=8
-  unset FAKE_CURL_MODE FAKE_CURL_SEQUENCE FAKE_RELOAD_AFTER FAKE_BAD_HEALTH_SLOT FAKE_WRONG_SLOT FAKE_UNKNOWN_DRAIN_SLOT FAKE_BUSY_SLOT FAKE_MOUNT_TYPE FAKE_NETWORK FAKE_DETACH_SLOT FAKE_NESTED FAKE_TRAEFIK_RUNNING FAKE_FAIL_METADATA FAKE_SIGNAL_AFTER_WRITE FAKE_HOLD_MARKER FAKE_HOLD_RELEASE FAKE_INVENTORY_ERROR FAKE_INSPECT_ERROR
+  unset FAKE_CURL_MODE FAKE_CURL_SEQUENCE FAKE_RELOAD_AFTER FAKE_RELOAD_GEN_AFTER FAKE_BAD_HEALTH_SLOT FAKE_WRONG_SLOT FAKE_UNKNOWN_DRAIN_SLOT FAKE_BUSY_SLOT FAKE_MOUNT_TYPE FAKE_NETWORK FAKE_DETACH_SLOT FAKE_NESTED FAKE_TRAEFIK_RUNNING FAKE_FAIL_METADATA FAKE_SIGNAL_AFTER_WRITE FAKE_HOLD_MARKER FAKE_HOLD_RELEASE FAKE_INVENTORY_ERROR FAKE_INSPECT_ERROR ROUTE_GENERATION
   printf none > "$FAKE_LOADED_SLOT"
+  printf none > "$FAKE_LOADED_GENERATION"
 }
 route() {
+  local slot="$1" gen="${2:-00000000000000000000000000000001}"
   cat > "$case_dir/dynamic/9router.yml" <<YAML
 http:
+  middlewares:
+    9router-route-generation:
+      headers:
+        customResponseHeaders:
+          X-9Router-Route-Generation: "$gen"
   services:
     9router-service:
       loadBalancer:
         servers:
-          - url: "http://9router-$1:20128"
+          - url: "http://9router-$slot:20128"
 YAML
 }
 seed() {
-  route "$1"
-  printf '%s' "$1" > "$FAKE_LOADED_SLOT"
-  printf 'running|sha256:%s-old|fake-%s\n' "$1" "$1" > "$FAKE_STATE/9router-$1"
-  printf '%s' "$1" > "$case_dir/.active-slot"
-  printf 'sha256:%s-old' "$1" > "$case_dir/.deployed-image"
+  local slot="$1" gen="${2:-00000000000000000000000000000001}"
+  route "$slot" "$gen"
+  printf '%s' "$slot" > "$FAKE_LOADED_SLOT"
+  printf '%s' "$gen" > "$FAKE_LOADED_GENERATION"
+  printf 'running|sha256:%s-old|fake-%s\n' "$slot" "$slot" > "$FAKE_STATE/9router-$slot"
+  printf '%s' "$slot" > "$case_dir/.active-slot"
+  printf 'sha256:%s-old' "$slot" > "$case_dir/.deployed-image"
 }
 run() { (cd "$case_dir" && ./deploy.sh "$@"); }
 fail() {
@@ -209,6 +254,9 @@ fail() {
 }
 slot_on_disk() {
   sed -n 's/^[[:space:]]*- url: "http:\/\/9router-\(blue\|green\):20128".*/\1/p' "$FAKE_ROUTE_FILE"
+}
+generation_on_disk() {
+  sed -n 's/^[[:space:]]*X-9Router-Route-Generation:[[:space:]]*"\?\([0-9a-fA-F]\{32\}\)"\?.*/\1/p' "$FAKE_ROUTE_FILE"
 }
 assert_route() {
   [[ "$(slot_on_disk)" == "$1" ]]
@@ -222,6 +270,9 @@ printf '          - url: "http://9router-blue:20128"\n' >> "$case_dir/dynamic/9r
 fail --preflight
 route blue
 printf '# 9router-service\n' > "$case_dir/dynamic/other.yml"
+fail --preflight
+rm "$case_dir/dynamic/other.yml"
+printf '# 9router-route-generation\n' > "$case_dir/dynamic/other.yml"
 fail --preflight
 rm "$case_dir/dynamic/other.yml"
 mkfifo "$case_dir/dynamic/other.yml"
@@ -273,6 +324,44 @@ export FAKE_CURL_SEQUENCE="$case_dir/probe-sequence"
 run --reconcile
 assert_route blue blue
 [[ "$(cat "$FAKE_CURL_COUNTER")" == 4 ]]
+
+# Reconcile same slot with delayed reload: must accept G2 and reject G1.
+new_case; seed blue 11111111111111111111111111111111
+export FAKE_RELOAD_GEN_AFTER=6
+run --reconcile
+assert_route blue blue
+g2="$(generation_on_disk)"
+[[ "$g2" != 11111111111111111111111111111111 ]]
+[[ "$(cat "$FAKE_LOADED_GENERATION")" == "$g2" ]]
+[[ "$(cat "$FAKE_CURL_COUNTER")" -ge 7 ]]
+
+# Streak reset when generation mismatches during wait_route_slot.
+new_case; seed blue 11111111111111111111111111111111
+export ROUTE_GENERATION="22222222222222222222222222222222"
+printf '%s\n' \
+  "blue 22222222222222222222222222222222" \
+  "blue 11111111111111111111111111111111" \
+  "blue 22222222222222222222222222222222" \
+  "blue 22222222222222222222222222222222" > "$case_dir/probe-sequence"
+export FAKE_CURL_SEQUENCE="$case_dir/probe-sequence"
+run --reconcile
+assert_route blue blue
+[[ "$(cat "$FAKE_CURL_COUNTER")" == 4 ]]
+
+# Traefik restart re-reads route from disk
+new_case; seed blue 11111111111111111111111111111111
+rm -f "$FAKE_LOADED_SLOT" "$FAKE_LOADED_GENERATION"
+[[ "$(run --status --strict)" == *'Route state: HEALTHY'* ]]
+[[ "$(cat "$FAKE_LOADED_SLOT")" == blue ]]
+[[ "$(cat "$FAKE_LOADED_GENERATION")" == 11111111111111111111111111111111 ]]
+
+# Snapshot restore preserves exact original generation after failed cutover.
+new_case; seed blue 11111111111111111111111111111111
+export FAKE_RELOAD_AFTER=999
+fail image-new
+assert_route blue blue
+[[ "$(generation_on_disk)" == 11111111111111111111111111111111 ]]
+[[ "$(cat "$FAKE_LOADED_GENERATION")" == 11111111111111111111111111111111 ]]
 
 # Reconcile after crash between YAML write and metadata: never restores stale mirror.
 new_case; seed blue
