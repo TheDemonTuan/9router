@@ -8,6 +8,10 @@ on:
         description: "Benchmark the pinned Headroom 0.38.0 image on this disposable runner"
         type: boolean
         default: false
+      headroom_probe:
+        description: "Run two short compression probes instead of the full matrix"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -62,7 +66,7 @@ jobs:
       - name: Pull pinned sidecar
         run: docker pull ghcr.io/headroomlabs-ai/headroom:0.38.0@sha256:14e3dda1f041eef509af850ac7a32647d1c3e5d9bd66e3e8655dfd3a398273af
       - name: Benchmark local-only synthetic traffic
-        run: bun tests/integration/headroom-resilience-smoke.mjs --sidecar --output "$RUNNER_TEMP/headroom-benchmark.json"
+        run: bun tests/integration/headroom-resilience-smoke.mjs --sidecar ${{ inputs.headroom_probe && '--probe' || '' }} --output "$RUNNER_TEMP/headroom-benchmark.json"
       - name: Upload synthetic measurements
         if: always()
         uses: actions/upload-artifact@v4

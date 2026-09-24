@@ -199,6 +199,24 @@ if (!process.argv.includes("--child")) {
     await ready();
     const version = docker("exec", name, "python", "-c", "import headroom; from headroom._version import __version__; print(__version__)");
     assert.equal(version, "0.38.0");
+    if (process.argv.includes("--probe")) {
+      const structured = JSON.stringify(Array.from({ length: 3000 }, (_, i) => ({ file: `src/file-${i % 120}.js`, line: i, text: "synthetic repeated search result alpha beta gamma delta epsilon" })));
+      const samples = [
+        ["prose", fixture("openai", 262144)],
+        ["structured", { model: "gpt-4o", messages: [
+          { role: "assistant", tool_calls: [{ id: "call_1", type: "function", function: { name: "search", arguments: "{}" } }] },
+          { role: "tool", tool_call_id: "call_1", content: structured },
+          { role: "user", content: "Summarize results" },
+        ] }],
+      ];
+      for (const [shape, body] of samples) {
+        const diagnostics = {};
+        const result = await callHeadroomGateway({ url, proxyToken: token, model: body.model, body, format: "openai", timeoutMs: 30000, diagnostics });
+        console.log(JSON.stringify({ shape, before: bytes(body), after: result ? bytes(result.compressedBody) : null,
+          tokensBefore: result?.tokens_before, tokensAfter: result?.tokens_after, transforms: result?.transforms_applied,
+          reason: diagnostics.reason || null }));
+      }
+    } else {
     const report = { image, version, hardware: { cpus: cpus().length, totalMemoryBytes: totalmem() }, cases: [], prefix: null };
     async function sample(format, size, mode) {
       const input = fixture(format, size);
@@ -272,6 +290,7 @@ if (!process.argv.includes("--child")) {
     if (output) await writeFile(output, JSON.stringify(report, null, 2));
     console.log(JSON.stringify(report));
     assert.ok(Object.values(counts).every((count) => count > 0), "At least one format had zero accepted compression results");
+    }
   } finally {
     if (owned) { docker("stop", name); docker("rm", name); }
   }
