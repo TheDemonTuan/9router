@@ -12,7 +12,7 @@ if (!process.argv.includes("--child")) {
   const env = { ...process.env, HOME: sandbox, USERPROFILE: sandbox, APPDATA: sandbox,
     DATA_DIR: join(sandbox, "data"), HEADROOM_DEFAULT_TIMEOUT_MS: "" };
   for (const key of Object.keys(env)) if (/^(https?_proxy|all_proxy)$/i.test(key) || /^(OPENAI|ANTHROPIC|GEMINI|GOOGLE|GITHUB).*?(KEY|TOKEN)$/i.test(key)) delete env[key];
-  const args = [process.execPath, import.meta.path, "--child", `--${mode}`, ...(output ? ["--output", output] : [])];
+  const args = [process.execPath, import.meta.path, "--child", `--${mode}`, ...(process.argv.includes("--probe") ? ["--probe"] : []), ...(output ? ["--output", output] : [])];
   try {
     const child = Bun.spawn(args, { env, stdout: "inherit", stderr: "inherit" });
     const code = await child.exited;
