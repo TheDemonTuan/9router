@@ -154,20 +154,20 @@ if (!process.argv.includes("--child")) {
   const filler = (size) => JSON.stringify(Array.from({ length: Math.ceil(size / 88) }, (_, i) => ({ file: `src/file-${i % 120}.js`, line: i, text: "synthetic repeated search result alpha beta gamma delta epsilon" })));
   function fixture(format, size) {
     const text = filler(size);
-    const tool = { type: "function", function: { name: "read", parameters: { type: "object", properties: { path: { type: "string" } } } } };
-    if (format === "claude") return { model: "claude-sonnet-4-5", max_tokens: 256, tools: [{ name: "read", input_schema: tool.function.parameters }], system: [{ type: "text", text: "Synthetic instructions" }], messages: [
-      { role: "assistant", content: [{ type: "tool_use", id: "tool_1", name: "read", input: { path: "config.json" } }, { type: "thinking", thinking: "opaque", signature: "sig" }] },
+    const tool = { type: "function", function: { name: "search", parameters: { type: "object", properties: { path: { type: "string" } } } } };
+    if (format === "claude") return { model: "claude-sonnet-4-5", max_tokens: 256, tools: [{ name: "search", input_schema: tool.function.parameters }], system: [{ type: "text", text: "Synthetic instructions" }], messages: [
+      { role: "assistant", content: [{ type: "tool_use", id: "tool_1", name: "search", input: { path: "config.json" } }, { type: "thinking", thinking: "opaque", signature: "sig" }] },
       { role: "user", content: [{ type: "tool_result", tool_use_id: "tool_1", content: text }, { type: "text", text: "continue" }] },
     ] };
     if (format === "openai-responses") return { model: "gpt-5", tools: [tool], input: [
-      { type: "function_call", call_id: "call_1", name: "read", arguments: "{\"path\":\"config.json\"}" },
+      { type: "function_call", call_id: "call_1", name: "search", arguments: "{\"path\":\"config.json\"}" },
       { type: "function_call_output", call_id: "call_1", output: text },
       { type: "reasoning", encrypted_content: "opaque", summary: [{ type: "summary_text", text: "opaque" }] },
     ] };
-    if (format === "kiro") return { model: "claude-sonnet-4-5", conversationState: { history: [{ assistantResponseMessage: { content: "reading", toolUses: [{ toolUseId: "tool_1", name: "read", input: { path: "config.json" } }] } }],
+    if (format === "kiro") return { model: "claude-sonnet-4-5", conversationState: { history: [{ assistantResponseMessage: { content: "searching", toolUses: [{ toolUseId: "tool_1", name: "search", input: { path: "config.json" } }] } }],
       currentMessage: { userInputMessage: { content: "continue", userInputMessageContext: { toolResults: [{ toolUseId: "tool_1", status: "success", content: [{ text }] }] } } } } };
     return { model: "gpt-4o", tools: [tool], messages: [
-      { role: "assistant", tool_calls: [{ id: "call_1", type: "function", function: { name: "read", arguments: "{\"path\":\"config.json\"}" } }] },
+      { role: "assistant", tool_calls: [{ id: "call_1", type: "function", function: { name: "search", arguments: "{\"path\":\"config.json\"}" } }] },
       { role: "tool", tool_call_id: "call_1", content: text }, { role: "user", content: "continue" },
     ] };
   }
