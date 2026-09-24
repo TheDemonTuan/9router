@@ -174,12 +174,9 @@ if (!process.argv.includes("--child")) {
   let owned = false;
   try {
     docker("run", "--pull=never", "--detach", "--name", name, "--cpus", "1", "--memory", "1024m",
-      "--publish", "127.0.0.1::8787", ...env.flatMap((value) => ["--env", value]), image);
+      "--network", "host", ...env.flatMap((value) => ["--env", value]), image);
     owned = true;
-    const mapping = docker("port", name, "8787/tcp");
-    const port = Number(mapping.match(/:(\d+)\s*$/)?.[1]);
-    assert.ok(port > 0, "Docker localhost port was not allocated");
-    const url = `http://127.0.0.1:${port}`;
+    const url = "http://127.0.0.1:8787";
     async function ready() {
       let lastProbe = "none";
       for (let n = 0; n < 120; n++) {
@@ -197,7 +194,7 @@ if (!process.argv.includes("--child")) {
       const inside = `${internal.exitCode}: ${new TextDecoder().decode(internal.stdout)} ${new TextDecoder().decode(internal.stderr)}`;
       const hostCurl = Bun.spawnSync(["curl", "--max-time", "3", "--silent", "--show-error", "--output", "/dev/null", "--write-out", "%{http_code}", `${url}/readyz`], { stdout: "pipe", stderr: "pipe" });
       const curlStatus = `${hostCurl.exitCode}: ${new TextDecoder().decode(hostCurl.stdout)} ${new TextDecoder().decode(hostCurl.stderr)}`;
-      throw new Error(`Headroom v0.38.0 /readyz did not become ready within 120s; mapping: ${mapping}; last probe: ${lastProbe}; curl: ${curlStatus}; inside: ${inside}; container state: ${state}; recent logs: ${recent}`);
+      throw new Error(`Headroom v0.38.0 /readyz did not become ready within 120s; last probe: ${lastProbe}; curl: ${curlStatus}; inside: ${inside}; container state: ${state}; recent logs: ${recent}`);
     }
     await ready();
     const version = docker("exec", name, "python", "-c", "import headroom; from headroom._version import __version__; print(__version__)");
