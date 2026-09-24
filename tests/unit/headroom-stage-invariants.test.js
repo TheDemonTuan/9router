@@ -264,9 +264,20 @@ describe("Headroom response relay", () => {
     expect(normalizeRelayUsage({ prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }))
       .toEqual({ input_tokens: 10, output_tokens: 5, cached_tokens: 0, total_tokens: 15 });
 
-    // Anthropic cache counters
-    expect(normalizeRelayUsage({ input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 30 }))
-      .toEqual({ input_tokens: 10, output_tokens: 5, cached_tokens: 30, total_tokens: 15 });
+    // Anthropic cache counters with creation and read
+    expect(normalizeRelayUsage({
+      input_tokens: 100,
+      output_tokens: 20,
+      cache_read_input_tokens: 5000,
+      cache_creation_input_tokens: 1000,
+    })).toEqual({
+      input_tokens: 100,
+      output_tokens: 20,
+      cached_tokens: 5000,
+      cache_read_input_tokens: 5000,
+      cache_creation_input_tokens: 1000,
+      total_tokens: 120,
+    });
   });
 
   it("completes once and fires async relay request with Headroom 0.38 integer status and no ttl_seconds", async () => {

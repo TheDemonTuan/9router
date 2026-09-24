@@ -39,6 +39,10 @@ case "${1:-}" in
       esac
       exit 0
     fi
+    if [[ "${2:-}" == 9router-headroom ]]; then
+      printf '%s\n' "${FAKE_HEADROOM_STATUS:-healthy}"
+      exit 0
+    fi
     [[ -f "$slot_file" ]] || exit 1
     IFS='|' read -r state image hostname < "$slot_file"
     case "${4:-}" in
@@ -613,6 +617,21 @@ for mode in cached duplicate; do
   assert_route blue blue
 done
 FAKE_NETWORK=detached fail --status --strict
+
+# Headroom readiness gates deployment cutover
+new_case; seed blue
+FAKE_HEADROOM_STATUS=unhealthy fail image-new
+assert_route blue blue
+[[ "$(cat "$FAKE_STATE/9router-blue")" == running* ]]
+[[ ! -e "$FAKE_STATE/9router-green" ]]
+
+new_case; seed blue
+FAKE_HEADROOM_STATUS=exited fail image-new
+assert_route blue blue
+
+new_case; seed blue
+HEADROOM_READY_TIMEOUT=invalid fail image-new
+assert_route blue blue
 assert_route blue blue
 FAKE_WRONG_SLOT=blue fail --status --strict
 API_HOST='https://invalid.example.test/path' fail --preflight

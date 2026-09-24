@@ -26,6 +26,7 @@ DASHBOARD_ALIAS_HOST="${DASHBOARD_ALIAS_HOST:-}"
 API_HOST="${API_HOST:-9router-api.tuannguyenviet.site}"
 EDGE_NETWORK="${EDGE_NETWORK:-edge-9router}"
 READY_TIMEOUT="${READY_TIMEOUT:-60}"
+HEADROOM_READY_TIMEOUT="${HEADROOM_READY_TIMEOUT:-60}"
 TRAEFIK_CONFIG_NAME="${TRAEFIK_CONFIG_NAME-9router.yml}"
 
 
@@ -535,6 +536,31 @@ wait_healthy() {
   done
   log "Slot $slot failed direct health identity within ${READY_TIMEOUT}s"
   return 1
+}
+
+wait_headroom_ready() {
+  local timeout="${HEADROOM_READY_TIMEOUT}" deadline status
+  if [[ ! "$timeout" =~ ^[0-9]+$ || "$timeout" -le 0 ]]; then
+    die "HEADROOM_READY_TIMEOUT must be a positive integer: $timeout"
+  fi
+  deadline=$((SECONDS + timeout))
+  log "Waiting for 9router-headroom readiness (timeout ${timeout}s)..."
+
+  while (( SECONDS < deadline )); do
+    status="$(docker inspect 9router-headroom --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' 2>/dev/null || true)"
+    if [[ "$status" == "healthy" ]]; then
+      log "9router-headroom is healthy."
+      return 0
+    fi
+    if [[ "$status" == "unhealthy" || "$status" == "exited" || "$status" == "dead" ]]; then
+      docker logs --tail 50 9router-headroom >&2 2>/dev/null || true
+      die "9router-headroom entered failed state: $status"
+    fi
+    sleep 1
+  done
+
+  docker logs --tail 50 9router-headroom >&2 2>/dev/null || true
+  die "9router-headroom failed readiness within ${timeout}s (last status: ${status:-unknown})"
 }
 
 container_image() {
@@ -1053,12 +1079,14 @@ do_deploy() {
   fi
   log "Deploying $IMAGE_REF from ${current:-bootstrap} to $target"
   compose up -d headroom
+  wait_headroom_ready
   pull_image "9router-$target"
   compose up -d --no-deps --pull never "9router-$target"
   if ! wait_healthy "$target"; then
     compose stop "9router-$target" || true
     die "Candidate $target failed direct health identity; configured route unchanged"
   fi
+  wait_headroom_ready
   image="$(container_image "$target")" || die "Cannot inspect target immutable image"
   route_cutover "$target" "$current"
   sync_metadata "$target" "$current" "$image"

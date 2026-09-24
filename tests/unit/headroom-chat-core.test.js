@@ -404,6 +404,137 @@ describe("handleChatCore Headroom diagnostics", () => {
     }));
   });
 
+  it("executes full Claude Code request with thinking and parallel tool_use through Headroom into Antigravity Google contents[]", async () => {
+    const log = { debug: vi.fn(), info: vi.fn(), warn: vi.fn() };
+
+    const claudeCodeBody = {
+      model: "claude-3-7-sonnet-20250219",
+      system: [
+        { type: "text", text: "You are a coding assistant." },
+      ],
+      messages: [
+        {
+          role: "user",
+          content: "Find and read the config file.",
+        },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "thinking",
+              thinking: "Need to locate the config file first.",
+              signature: "sig_abc_123",
+            },
+            {
+              type: "tool_use",
+              id: "toolu_find_1",
+              name: "find_file",
+              input: { pattern: "*.json" },
+            },
+            {
+              type: "tool_use",
+              id: "toolu_read_2",
+              name: "read_file",
+              input: { path: "config.json" },
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_find_1",
+              content: "config.json found",
+            },
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_read_2",
+              content: "{\"port\": 8080}",
+            },
+          ],
+        },
+      ],
+      tools: [
+        {
+          name: "find_file",
+          description: "Find files",
+          input_schema: { type: "object", properties: { pattern: { type: "string" } } },
+        },
+        {
+          name: "read_file",
+          description: "Read file contents",
+          input_schema: { type: "object", properties: { path: { type: "string" } } },
+        },
+      ],
+    };
+
+    let receivedHeadroomPayload = null;
+    let receivedRelayPayload = null;
+    global.fetch = vi.fn(async (url, init) => {
+      const urlStr = String(url);
+      if (urlStr.endsWith("/v1/compress/response")) {
+        receivedRelayPayload = JSON.parse(init.body);
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (urlStr.endsWith("/v1/compress")) {
+        receivedHeadroomPayload = JSON.parse(init.body);
+        return new Response(JSON.stringify({
+          data: {
+            body: {
+              messages: receivedHeadroomPayload.messages,
+              system: receivedHeadroomPayload.system,
+            },
+            turn_id: "turn_claude_ag_1",
+            obligations: ["relay_usage"],
+          },
+          tokens_before: 200,
+          tokens_after: 50,
+          tokens_saved: 150,
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    await handleChatCore({
+      body: claudeCodeBody,
+      modelInfo: { provider: "antigravity", model: "claude-3-5-sonnet" },
+      credentials: { apiKey: "test-key", providerSpecificData: {} },
+      log,
+      connectionId: "test-conn",
+      headroomEnabled: true,
+      headroomUrl: "http://localhost:8787",
+      sourceFormatOverride: "claude",
+      clientRawRequest: {
+        endpoint: "/v1/messages",
+        body: claudeCodeBody,
+        headers: { accept: "application/json" },
+      },
+    });
+
+    // 1. Headroom received valid Claude wire format
+    expect(receivedHeadroomPayload).toBeTruthy();
+    expect(receivedHeadroomPayload.messages[1].content[0].type).toBe("thinking");
+    expect(receivedHeadroomPayload.messages[1].content[1].type).toBe("tool_use");
+    expect(receivedHeadroomPayload.gateway).toEqual({
+      can_redrive: false,
+      can_relay_response: true,
+      session_affinity: false,
+    });
+
+    // 2. Antigravity executor received translated request structure with contents
+    expect(executeMock).toHaveBeenCalledTimes(1);
+    const executedRequest = executeMock.mock.calls[0][0].body.request;
+    expect(executedRequest).toBeTruthy();
+    expect(executedRequest.contents).toBeInstanceOf(Array);
+
+    // Verify functionCall and functionResponse were produced in Antigravity format
+    const contentsJson = JSON.stringify(executedRequest.contents);
+    expect(contentsJson).toContain("find_file");
+    expect(contentsJson).toContain("read_file");
+    expect(contentsJson).toContain("config.json found");
+  });
+
   it("handles client cancellation during Headroom compression with HTTP 499", async () => {
     const log = { debug: vi.fn(), info: vi.fn(), warn: vi.fn() };
     const clientController = new AbortController();
