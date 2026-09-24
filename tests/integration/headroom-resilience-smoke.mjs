@@ -195,7 +195,9 @@ if (!process.argv.includes("--child")) {
       const recent = `${new TextDecoder().decode(logs.stdout)}\n${new TextDecoder().decode(logs.stderr)}`.replaceAll(token, "[redacted]");
       const internal = Bun.spawnSync(["docker", "exec", name, "python", "-c", "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8787/readyz', timeout=2).status)"], { stdout: "pipe", stderr: "pipe" });
       const inside = `${internal.exitCode}: ${new TextDecoder().decode(internal.stdout)} ${new TextDecoder().decode(internal.stderr)}`;
-      throw new Error(`Headroom v0.38.0 /readyz did not become ready within 120s; mapping: ${mapping}; last probe: ${lastProbe}; inside: ${inside}; container state: ${state}; recent logs: ${recent}`);
+      const hostCurl = Bun.spawnSync(["curl", "--max-time", "3", "--silent", "--show-error", "--output", "/dev/null", "--write-out", "%{http_code}", `${url}/readyz`], { stdout: "pipe", stderr: "pipe" });
+      const curlStatus = `${hostCurl.exitCode}: ${new TextDecoder().decode(hostCurl.stdout)} ${new TextDecoder().decode(hostCurl.stderr)}`;
+      throw new Error(`Headroom v0.38.0 /readyz did not become ready within 120s; mapping: ${mapping}; last probe: ${lastProbe}; curl: ${curlStatus}; inside: ${inside}; container state: ${state}; recent logs: ${recent}`);
     }
     await ready();
     const version = docker("exec", name, "python", "-c", "import headroom; from headroom._version import __version__; print(__version__)");
