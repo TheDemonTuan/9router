@@ -160,8 +160,12 @@ preflight() {
   if [[ "$BLUE_PRESENT" == present ]]; then verify_container_network 9router-blue "$attached"; fi
   if [[ "$GREEN_PRESENT" == present ]]; then verify_container_network 9router-green "$attached"; fi
   local route="$TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME"
-  local slot
-  slot="$(read_active_route_slot "$route")" || die "Unsupported generated route: $route"
+  local slot="" gen="" route_info
+  if route_info="$(read_active_route_slot "$route")"; then
+    read -r slot gen <<< "$route_info"
+  else
+    die "Unsupported generated route: $route"
+  fi
   if [[ -z "$slot" ]] && { [[ -e "$ACTIVE_SLOT_FILE" || -L "$ACTIVE_SLOT_FILE" || -e "$DEPLOYED_IMAGE_FILE" || -L "$DEPLOYED_IMAGE_FILE" ]] ||
        [[ "$BLUE_PRESENT" == present || "$GREEN_PRESENT" == present ]]; }; then
     die "Missing generated route $route; restore a verified backup before deployment"
@@ -188,6 +192,7 @@ probe_observed_slot() {
   fi
   if observed="$(python3 - "$status" "$tmp/headers" "$tmp/body" "$mode" <<'PY'
 import json
+import re
 import sys
 
 status, header_path, body_path, mode = sys.argv[1:]
@@ -230,7 +235,13 @@ try:
     if status == "404" and mode == "bootstrap" and not valid:
         print("none")
     elif status == "200" and valid:
-        print(payload["deployment_slot"])
+        gen_headers = headers.get("x-9router-route-generation", [])
+        if len(gen_headers) != 1:
+            fail("missing or duplicate route generation header")
+        gen = gen_headers[0]
+        if not re.fullmatch(r"[0-9a-fA-F]{32}", gen):
+            fail("invalid route generation header")
+        print(f"{payload['deployment_slot']} {gen.lower()}")
     else:
         fail("unexpected HTTP status or health identity")
 except (OSError, UnicodeError, ValueError) as error:
@@ -246,14 +257,20 @@ PY
 }
 
 wait_route_slot() {
-  local expected="$1" timeout="${ROUTE_TIMEOUT:-30}" deadline attempt=0 streak=0 observed remaining
+  local expected_slot="$1" expected_gen="${2:-}" timeout="${ROUTE_TIMEOUT:-30}" deadline attempt=0 streak=0 observed remaining expected
   [[ "$timeout" =~ ^[0-9]+$ ]] && (( 10#$timeout >= 2 )) || die "ROUTE_TIMEOUT must be an integer >= 2"
+  if [[ "$expected_slot" == none ]]; then
+    expected="none"
+  else
+    [[ -n "$expected_gen" ]] || die "wait_route_slot requires generation for slot $expected_slot"
+    expected="$expected_slot ${expected_gen,,}"
+  fi
   deadline=$((SECONDS + 10#$timeout))
   while (( SECONDS < deadline )); do
     attempt=$((attempt + 1))
     remaining=$((deadline - SECONDS))
     if (( remaining > 5 )); then remaining=5; fi
-    if observed="$(probe_observed_slot "$attempt" "$remaining" "${expected/none/bootstrap}" 2>/dev/null)" && [[ "$observed" == "$expected" ]]; then
+    if observed="$(probe_observed_slot "$attempt" "$remaining" "${expected_slot/none/bootstrap}" 2>/dev/null)" && [[ "$observed" == "$expected" ]]; then
       streak=$((streak + 1))
       if (( streak == 2 )); then return 0; fi
     else
@@ -294,12 +311,15 @@ for directory, dirs, files in os.walk(dynamic_dir, onerror=lambda error: fail(er
                 content = other.read()
         except (OSError, UnicodeError) as error:
             fail(path, f"unreadable Traefik configuration: {error}")
-        for token in ("9router-service", "9router-api-router", "9router-dashboard-router"):
+        for token in ("9router-service", "9router-api-router", "9router-dashboard-router", "9router-route-generation"):
             if token in content:
                 fail(path, f"duplicate route token {token}")
 
+return_slot = None
+return_gen = None
+
 if not os.path.exists(route):
-    return_slot = None
+    pass
 else:
     if os.path.islink(route) or not os.path.isfile(route):
         fail(route, "generated route must be a regular file")
@@ -325,7 +345,7 @@ else:
         nodes.append((indent, stripped, parent))
         stack.append(len(nodes) - 1)
 
-    for key in ("http", "services", "9router-service", "loadBalancer", "servers"):
+    for key in ("http", "services", "9router-service", "loadBalancer", "servers", "9router-route-generation", "headers", "customResponseHeaders"):
         if sum(bool(re.fullmatch(re.escape(key) + r"\s*:", text)) for _, text, _ in nodes) != 1:
             fail(route, f"expected exactly one {key} key")
 
@@ -358,14 +378,33 @@ else:
             fail(route, "extra backend in generated service")
     return_slot = match.group(1)
 
-if return_slot is not None:
-    print(return_slot)
+    middlewares = one(http, 2, r"middlewares:")
+    gen_mw = one(middlewares, 4, r"9router-route-generation:")
+    headers = one(gen_mw, 6, r"headers:")
+    custom_headers = one(headers, 8, r"customResponseHeaders:")
+    gen_nodes = [index for index, (depth, value, owner) in enumerate(nodes)
+                 if owner == custom_headers and depth == 10 and re.match(r"^X-9Router-Route-Generation:\s*", value)]
+    if len(gen_nodes) != 1:
+        fail(route, "expected exactly one X-9Router-Route-Generation header")
+    gen_match = re.fullmatch(r'X-9Router-Route-Generation:\s*"?([0-9a-fA-F]{32})"?', nodes[gen_nodes[0]][1])
+    if not gen_match:
+        fail(route, "invalid generation token in generated route")
+    return_gen = gen_match.group(1).lower()
+
+if return_slot is not None and return_gen is not None:
+    print(f"{return_slot} {return_gen}")
 PY
 }
 
 render_traefik_config() {
   local slot="$1"
   local dest="$2"
+  local gen="${3:-${ROUTE_GENERATION:-}}"
+  if [[ -z "$gen" ]]; then
+    gen="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')" || return 1
+  fi
+  [[ "$gen" =~ ^[0-9a-fA-F]{32}$ ]] || die "Invalid route generation token: $gen"
+  gen="${gen,,}"
   local tmp="${dest}.tmp.$$"
   [[ -d "$(dirname "$dest")" ]] || die "Traefik dynamic directory is missing: $(dirname "$dest")"
 
@@ -379,6 +418,12 @@ render_traefik_config() {
   cat <<EOF > "$tmp"
 # Managed dynamically by 9router deploy.sh - DO NOT EDIT MANUALLY
 http:
+  middlewares:
+    9router-route-generation:
+      headers:
+        customResponseHeaders:
+          X-9Router-Route-Generation: "${gen}"
+
   routers:
     # 1. Deny internal endpoints across all domains
     9router-deny-internal:
@@ -408,6 +453,7 @@ http:
         - web
       priority: 500
       middlewares:
+        - 9router-route-generation
         - tunnel-only
         - public-api-rate-limit
         - security-headers
@@ -431,6 +477,7 @@ http:
         - web
       priority: 100
       middlewares:
+        - 9router-route-generation
         - tunnel-only
         - security-headers
       service: 9router-service
@@ -449,6 +496,7 @@ http:
           timeout: "2s"
 EOF
   NEW_ROUTE_INODE="$(stat -c '%d:%i' "$tmp")" || return 1
+  NEW_ROUTE_GENERATION="$gen"
   mv -f "$tmp" "$dest"
 }
 
@@ -493,11 +541,23 @@ sync_metadata() {
 }
 
 report_route_state() {
-  local configured observed
-  configured="$(read_active_route_slot "$ROUTE_PATH" 2>/dev/null)" || configured=unknown
-  configured="${configured:-none}"
-  observed="$(probe_observed_slot recovery 5 bootstrap 2>/dev/null)" || observed=unknown
-  log "Configured route slot: $configured; observed Traefik slot: $observed"
+  local configured_slot=unknown configured_gen=unknown observed_slot=unknown observed_gen=unknown route_info probe_info
+  if route_info="$(read_active_route_slot "$ROUTE_PATH" 2>/dev/null)"; then
+    read -r configured_slot configured_gen <<< "$route_info"
+    configured_slot="${configured_slot:-none}"
+    configured_gen="${configured_gen:-none}"
+  fi
+  if probe_info="$(probe_observed_slot recovery 5 bootstrap 2>/dev/null)"; then
+    if [[ "$probe_info" == none ]]; then
+      observed_slot=none
+      observed_gen=none
+    else
+      read -r observed_slot observed_gen <<< "$probe_info"
+      observed_slot="${observed_slot:-unknown}"
+      observed_gen="${observed_gen:-unknown}"
+    fi
+  fi
+  log "Configured route slot: $configured_slot gen: $configured_gen; observed Traefik slot: $observed_slot gen: $observed_gen"
 }
 
 recover_pending_route() {
@@ -517,7 +577,7 @@ recover_pending_route() {
          rm -f -- "$ROUTE_PATH"; then
       restored=true
     fi
-    if [[ "$restored" == true ]] && wait_route_slot "${ORIGINAL_ROUTE_SLOT:-none}"; then
+    if [[ "$restored" == true ]] && wait_route_slot "${ORIGINAL_ROUTE_SLOT:-none}" "${ORIGINAL_ROUTE_GEN:-}"; then
       log "Original route acknowledged after failure."
       [[ -z "$SNAPSHOT_PATH" ]] || rm -f -- "$SNAPSHOT_PATH" || true
     else
@@ -533,8 +593,16 @@ route_cutover() {
   local new_slot="$1" old_slot="$2"
   ROUTE_PATH="$TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME"
   ORIGINAL_ROUTE_SLOT="$old_slot"
+  ORIGINAL_ROUTE_GEN=""
   SNAPSHOT_PATH=""
   NEW_ROUTE_INODE=""
+  NEW_ROUTE_GENERATION=""
+  if [[ -f "$ROUTE_PATH" ]]; then
+    local orig_info
+    if orig_info="$(read_active_route_slot "$ROUTE_PATH" 2>/dev/null)"; then
+      read -r _ ORIGINAL_ROUTE_GEN <<< "$orig_info"
+    fi
+  fi
   if [[ -n "$old_slot" ]]; then
     SNAPSHOT_PATH="$(mktemp "$TRAEFIK_DYNAMIC_DIR/.9router-snapshot.XXXXXXXX")" || return 1
     cp -- "$ROUTE_PATH" "$SNAPSHOT_PATH" || { rm -f -- "$SNAPSHOT_PATH"; return 1; }
@@ -544,7 +612,7 @@ route_cutover() {
   trap 'exit 130' INT
   trap 'exit 143' TERM
   render_traefik_config "$new_slot" "$ROUTE_PATH" || return 1
-  wait_route_slot "$new_slot" || return 1
+  wait_route_slot "$new_slot" "$NEW_ROUTE_GENERATION" || return 1
   PENDING_ROUTE=false
   trap - EXIT INT TERM
   [[ -z "$SNAPSHOT_PATH" ]] || rm -f -- "$SNAPSHOT_PATH" || log "Snapshot cleanup deferred: $SNAPSHOT_PATH"
@@ -552,8 +620,12 @@ route_cutover() {
 
 reconcile_active_slot() {
   preflight mutation
-  local configured previous="" image
-  configured="$(read_active_route_slot "$TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME")" || die "Cannot read configured route"
+  local route_info configured="" configured_gen="" previous="" image
+  if route_info="$(read_active_route_slot "$TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME")"; then
+    read -r configured configured_gen <<< "$route_info"
+  else
+    die "Cannot read configured route"
+  fi
   if [[ -z "$configured" ]]; then
     log "Verified bootstrap; no route to reconcile."
     return 0
@@ -606,36 +678,58 @@ PY
 }
 
 show_status() {
-  local strict="${1:-false}" configured=unknown observed=unknown mirror=none
-  local blue green directory=unknown reason="" prepared health_ok=false
+  local strict="${1:-false}" configured_slot=unknown configured_gen=unknown observed_slot=unknown observed_gen=unknown mirror=none
+  local blue green directory=unknown reason="" prepared health_ok=false route_info probe_info
   if prepared="$(preflight status 2>&1)"; then
     directory="$prepared"
     TRAEFIK_DYNAMIC_DIR="$directory"
-    configured="$(read_active_route_slot "$directory/$TRAEFIK_CONFIG_NAME" 2>/dev/null)" || configured=unknown
-    configured="${configured:-none}"
+    if route_info="$(read_active_route_slot "$directory/$TRAEFIK_CONFIG_NAME" 2>/dev/null)"; then
+      read -r configured_slot configured_gen <<< "$route_info"
+      configured_slot="${configured_slot:-none}"
+      configured_gen="${configured_gen:-none}"
+    else
+      configured_slot=unknown
+      configured_gen=unknown
+    fi
   else
     reason="preflight failed: ${prepared##*$'\n'}"
     directory="${TRAEFIK_DYNAMIC_DIR:-unknown}"
   fi
   if validate_hosts 2>/dev/null; then
-    observed="$(probe_observed_slot status 5 bootstrap 2>/dev/null)" || observed=unknown
+    if probe_info="$(probe_observed_slot status 5 bootstrap 2>/dev/null)"; then
+      if [[ "$probe_info" == none ]]; then
+        observed_slot=none
+        observed_gen=none
+      else
+        read -r observed_slot observed_gen <<< "$probe_info"
+        observed_slot="${observed_slot:-unknown}"
+        observed_gen="${observed_gen:-unknown}"
+      fi
+    else
+      observed_slot=unknown
+      observed_gen=unknown
+    fi
   else
     reason="${reason:-invalid deployment hostname}"
   fi
   if [[ -f "$ACTIVE_SLOT_FILE" ]]; then mirror="$(cat "$ACTIVE_SLOT_FILE")"; fi
   blue="$(docker inspect 9router-blue --format '{{.State.Status}}' 2>/dev/null)" || blue=missing
   green="$(docker inspect 9router-green --format '{{.State.Status}}' 2>/dev/null)" || green=missing
-  if [[ "$configured" == blue && "$blue" == running ]] || [[ "$configured" == green && "$green" == running ]]; then
-    if direct_slot_healthy "$configured"; then health_ok=true; fi
+  if [[ "$configured_slot" == blue && "$blue" == running ]] || [[ "$configured_slot" == green && "$green" == running ]]; then
+    if direct_slot_healthy "$configured_slot"; then health_ok=true; fi
   fi
-  printf 'Configured route slot: %s\n' "$configured"
-  printf 'Observed Traefik slot: %s\n' "$observed"
+  printf 'Configured route slot: %s\n' "$configured_slot"
+  printf 'Configured route generation: %s\n' "$configured_gen"
+  printf 'Observed Traefik slot: %s\n' "$observed_slot"
+  printf 'Observed Traefik generation: %s\n' "$observed_gen"
   printf 'Mirror .active-slot: %s\n' "$mirror"
   printf 'Blue container: %s\n' "$blue"
   printf 'Green container: %s\n' "$green"
   printf 'Traefik dynamic dir: %s\n' "$directory"
-  if [[ -z "$reason" && ( "$configured" == blue || "$configured" == green ) &&
-        "$configured" == "$observed" && "$configured" == "$mirror" && "$health_ok" == true ]]; then
+  if [[ -z "$reason" && ( "$configured_slot" == blue || "$configured_slot" == green ) &&
+        "$configured_slot" == "$observed_slot" && "$configured_gen" == "$observed_gen" &&
+        "$configured_gen" != none && "$configured_gen" != unknown &&
+        "$configured_slot" == "$mirror" && "$health_ok" == true ]]; then
     printf 'Route state: HEALTHY\n'
   else
     printf 'Route state: MISMATCH\n'
@@ -646,8 +740,12 @@ show_status() {
 
 do_rollback() {
   preflight mutation
-  local current target state old_state image observed
-  current="$(read_active_route_slot "$TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME")"
+  local route_info current="" current_gen="" target state old_state image observed
+  if route_info="$(read_active_route_slot "$TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME")"; then
+    read -r current current_gen <<< "$route_info"
+  else
+    die "Cannot read configured route"
+  fi
   [[ "$current" == blue || "$current" == green ]] || die "Cannot rollback without a configured route"
   [[ -f "$PREVIOUS_SLOT_FILE" ]] || die "No previous slot recorded for rollback"
   target="$(cat "$PREVIOUS_SLOT_FILE")"
@@ -807,12 +905,16 @@ pull_image() {
 
 do_deploy() {
   preflight mutation
-  local current target target_state image
-  current="$(read_active_route_slot "$TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME")" || die "Cannot read configured route"
+  local route_info current="" current_gen="" target target_state image
+  if route_info="$(read_active_route_slot "$TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME")"; then
+    read -r current current_gen <<< "$route_info"
+  else
+    die "Cannot read configured route"
+  fi
   if [[ "$current" == blue ]]; then target=green; else target=blue; fi
   if [[ -n "$current" ]]; then
     wait_healthy "$current" || die "Configured slot $current is unhealthy; deployment aborted"
-    wait_route_slot "$current" || die "Public route does not acknowledge configured slot $current"
+    wait_route_slot "$current" "$current_gen" || die "Public route does not acknowledge configured slot $current"
   fi
   if [[ "$target" == blue && "$BLUE_PRESENT" == present || "$target" == green && "$GREEN_PRESENT" == present ]]; then
     target_state="$(docker inspect "9router-$target" --format '{{.State.Status}}')" || die "Cannot inspect existing target $target"
