@@ -129,7 +129,8 @@ describe("compressWithHeadroom", () => {
     expect(stats.tokens_saved).toBe(60);
     expect(requestPayload).toMatchObject({
       model: "claude-sonnet-4.5",
-      config: { compress_user_messages: true, can_redrive: false },
+      config: { compress_user_messages: true },
+      gateway: { can_redrive: false, can_relay_response: true, session_affinity: false },
       messages: [
         { role: "user", content: "earlier user" },
         {

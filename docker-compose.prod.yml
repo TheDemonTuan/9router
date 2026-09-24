@@ -17,7 +17,7 @@ services:
       HEADROOM_MODEL_ROUTER_ENABLED: "0"
       HEADROOM_PROXY_TOKEN: ${HEADROOM_PROXY_TOKEN:-}
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8787/readyz || exit 1"]
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8787/readyz"]
       interval: 5s
       timeout: 3s
       retries: 6

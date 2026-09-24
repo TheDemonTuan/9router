@@ -1,9 +1,9 @@
 // open-sse/rtk/headroomRelay.js
 // Usage-only response relay for Headroom 0.38.0 Gateway (POST /v1/compress/response).
-// Gated strictly on obligations.relay_usage === true.
+// Gated strictly on obligations containing "relay_usage".
 // Bounded async, non-blocking, fail-open, no client latency, no raw response.
 
-import { HEADROOM_GATEWAY_TURN_TTL_SECONDS } from "../config/runtimeConfig.js";
+import { isSafeOrigin } from "./headroomGateway.js";
 
 const RELAY_TIMEOUT_MS = 1500;
 
@@ -19,6 +19,16 @@ function buildResponseEndpoint(rawUrl) {
     const endpoint = `${base.replace(/\/$/, "")}/v1/compress/response`;
     return query ? `${endpoint}?${query}` : endpoint;
   }
+}
+
+/**
+ * Check if obligations include relay_usage (Headroom 0.38 array format or legacy object).
+ */
+export function hasRelayUsage(obligations) {
+  if (Array.isArray(obligations)) {
+    return obligations.includes("relay_usage");
+  }
+  return obligations?.relay_usage === true;
 }
 
 /**
@@ -51,12 +61,12 @@ export function createHeadroomTurnContext({
   url,
   proxyToken = "",
   turnId = null,
-  obligations = {},
+  obligations = [],
   startTime = Date.now(),
   log = null,
 } = {}) {
-  // If relay_usage obligation is not explicitly true, return a no-op context
-  if (!url || !turnId || obligations?.relay_usage !== true) {
+  // If relay_usage obligation is not explicitly present, return a no-op context
+  if (!url || !turnId || !hasRelayUsage(obligations)) {
     return {
       complete: () => {},
       isEligible: false,
@@ -65,24 +75,41 @@ export function createHeadroomTurnContext({
 
   let completed = false;
 
-  const complete = ({ status = "completed", usage = null, error = null, latencyMs = null } = {}) => {
+  const complete = ({ statusCode = 200, status = null, usage = null, error = null, latencyMs = null } = {}) => {
     if (completed) return;
     completed = true;
 
-    const effectiveLatency = typeof latencyMs === "number" ? latencyMs : (Date.now() - startTime);
+    const effectiveLatency = typeof latencyMs === "number" ? Math.max(0, latencyMs) : Math.max(0, Date.now() - startTime);
     const normalizedUsage = normalizeRelayUsage(usage);
+
+    let finalStatus = 200;
+    if (Number.isInteger(statusCode) && statusCode >= 100 && statusCode <= 599) {
+      finalStatus = statusCode;
+    } else if (Number.isInteger(status) && status >= 100 && status <= 599) {
+      finalStatus = status;
+    } else if (error) {
+      const errCode = Number(error?.status || error?.statusCode);
+      finalStatus = Number.isInteger(errCode) && errCode >= 100 && errCode <= 599 ? errCode : 502;
+    } else if (status === "error" || status === "failed") {
+      finalStatus = 502;
+    }
 
     const payload = {
       turn_id: turnId,
-      status: error ? "error" : status,
+      status: finalStatus,
       latency_ms: effectiveLatency,
       ...(normalizedUsage ? { usage: normalizedUsage } : {}),
-      ttl_seconds: HEADROOM_GATEWAY_TURN_TTL_SECONDS,
     };
 
     const endpoint = buildResponseEndpoint(url);
+    if (!isSafeOrigin(endpoint)) {
+      log?.debug?.("HEADROOM_RELAY", `relay skipped: unsafe origin ${endpoint}`);
+      return;
+    }
+
     const headers = { "Content-Type": "application/json" };
-    if (proxyToken) {
+    const parsedEndpoint = (() => { try { return new URL(endpoint); } catch { return null; } })();
+    if (proxyToken && !parsedEndpoint?.username && !parsedEndpoint?.password) {
       headers["X-Headroom-Proxy-Token"] = proxyToken;
     }
 
@@ -93,6 +120,10 @@ export function createHeadroomTurnContext({
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(RELAY_TIMEOUT_MS),
       redirect: "manual",
+    }).then((res) => {
+      if (!res.ok) {
+        log?.debug?.("HEADROOM_RELAY", `relay HTTP error: ${res.status}`);
+      }
     }).catch((err) => {
       log?.debug?.("HEADROOM_RELAY", `relay failed: ${err.message || String(err)}`);
     });

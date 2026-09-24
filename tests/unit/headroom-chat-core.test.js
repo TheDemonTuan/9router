@@ -126,36 +126,41 @@ describe("handleChatCore Headroom diagnostics", () => {
   });
 
   it("masks credentials and query strings in Headroom endpoint diagnostics", async () => {
-    const log = { debug: vi.fn(), info: vi.fn(), warn: vi.fn() };
+    process.env.HEADROOM_ALLOW_EXTERNAL_ORIGIN = "1";
+    try {
+      const log = { debug: vi.fn(), info: vi.fn(), warn: vi.fn() };
 
-    await handleChatCore({
-      body: { model: "gpt-4o", stream: false, messages: [{ role: "user", content: "hello" }] },
-      modelInfo: { provider: "openai", model: "gpt-4o" },
-      credentials: { apiKey: "test-key", providerSpecificData: {} },
-      log,
-      connectionId: "test-conn",
-      headroomEnabled: true,
-      headroomUrl: "https://user:secret@example.com:8787/proxy?token=abc123",
-      headroomCompressUserMessages: false,
-      rtkEnabled: false,
-      cavemanEnabled: false,
-      ponytailEnabled: false,
-      clientRawRequest: {
-        endpoint: "/v1/chat/completions",
-        body: {},
-        headers: { accept: "application/json" },
-      },
-    });
+      await handleChatCore({
+        body: { model: "gpt-4o", stream: false, messages: [{ role: "user", content: "hello" }] },
+        modelInfo: { provider: "openai", model: "gpt-4o" },
+        credentials: { apiKey: "test-key", providerSpecificData: {} },
+        log,
+        connectionId: "test-conn",
+        headroomEnabled: true,
+        headroomUrl: "https://user:secret@example.com:8787/proxy?token=abc123",
+        headroomCompressUserMessages: false,
+        rtkEnabled: false,
+        cavemanEnabled: false,
+        ponytailEnabled: false,
+        clientRawRequest: {
+          endpoint: "/v1/chat/completions",
+          body: {},
+          headers: { accept: "application/json" },
+        },
+      });
 
-    const logs = JSON.stringify(log.warn.mock.calls);
-    expect(global.fetch).toHaveBeenCalledWith(
-      "https://user:secret@example.com:8787/proxy/v1/compress?token=abc123",
-      expect.any(Object)
-    );
-    expect(logs).toContain("https://example.com:8787/proxy/v1/compress");
-    expect(logs).not.toContain("user");
-    expect(logs).not.toContain("secret");
-    expect(logs).not.toContain("abc123");
+      const logs = JSON.stringify(log.warn.mock.calls);
+      expect(global.fetch).toHaveBeenCalledWith(
+        "https://user:secret@example.com:8787/proxy/v1/compress?token=abc123",
+        expect.any(Object)
+      );
+      expect(logs).toContain("https://example.com:8787/proxy/v1/compress");
+      expect(logs).not.toContain("user");
+      expect(logs).not.toContain("secret");
+      expect(logs).not.toContain("abc123");
+    } finally {
+      delete process.env.HEADROOM_ALLOW_EXTERNAL_ORIGIN;
+    }
   });
 
   it("sends Headroom-compressed messages to the provider executor", async () => {

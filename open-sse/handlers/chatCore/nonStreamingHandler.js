@@ -288,7 +288,8 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
   const usage = extractUsageFromResponse(responseBody);
   try {
     headroomTurnContext?.complete?.({
-      status: "completed",
+      statusCode: 200,
+      status: 200,
       usage,
       latencyMs: Date.now() - requestStartTime,
     });

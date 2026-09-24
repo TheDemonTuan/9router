@@ -4,6 +4,26 @@
 // Any breach in structure, IDs, order, tool pairing, reasoning or arguments syntax
 // invalidates the compression result and triggers an immediate fail-open bypass.
 
+export function deepEqual(a, b) {
+  if (a === b) return true;
+  if (!a || !b || typeof a !== "object" || typeof b !== "object") return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  if (Array.isArray(a)) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (!deepEqual(a[i], b[i])) return false;
+    }
+    return true;
+  }
+  const ka = Object.keys(a);
+  const kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  for (const k of ka) {
+    if (!Object.prototype.hasOwnProperty.call(b, k) || !deepEqual(a[k], b[k])) return false;
+  }
+  return true;
+}
+
 function isValidJson(str) {
   if (typeof str !== "string") return false;
   try {
@@ -33,6 +53,10 @@ export function validateBodyInvariants(original, compressed, format) {
       const compMsg = compressed.messages[i];
       if (!compMsg || compMsg.role !== origMsg.role) {
         return { valid: false, reason: `message_role_or_order_mismatch_at_${i}` };
+      }
+
+      if (origMsg.name && compMsg.name !== origMsg.name) {
+        return { valid: false, reason: `message_name_mismatch_at_${i}` };
       }
 
       // Preserve tool_call_id
@@ -86,13 +110,22 @@ export function validateBodyInvariants(original, compressed, format) {
         return { valid: false, reason: `responses_item_type_mismatch_at_${i}` };
       }
 
+      // Preserve item.id and item.status if present
+      if (origItem.id !== undefined && compItem.id !== origItem.id) {
+        return { valid: false, reason: `responses_item_id_mismatch_at_${i}` };
+      }
+      if (origItem.status !== undefined && compItem.status !== origItem.status) {
+        return { valid: false, reason: `responses_item_status_mismatch_at_${i}` };
+      }
+
       if (origItem.type === "reasoning") {
         if (origItem.encrypted_content && compItem.encrypted_content !== origItem.encrypted_content) {
           return { valid: false, reason: `reasoning_encrypted_content_altered_at_${i}` };
         }
-      }
-
-      if (origItem.type === "function_call" || origItem.type === "custom_tool_call") {
+        if (origItem.summary && !compItem.summary) {
+          return { valid: false, reason: `reasoning_summary_dropped_at_${i}` };
+        }
+      } else if (origItem.type === "function_call" || origItem.type === "custom_tool_call") {
         if (compItem.call_id !== origItem.call_id) {
           return { valid: false, reason: `responses_tool_call_id_mismatch_at_${i}` };
         }
@@ -104,11 +137,19 @@ export function validateBodyInvariants(original, compressed, format) {
             return { valid: false, reason: `responses_tool_call_arguments_invalid_json_at_${i}` };
           }
         }
-      }
-
-      if (origItem.type === "function_call_output" || origItem.type === "custom_tool_call_output") {
+      } else if (origItem.type === "function_call_output" || origItem.type === "custom_tool_call_output") {
         if (compItem.call_id !== origItem.call_id) {
           return { valid: false, reason: `responses_tool_output_call_id_mismatch_at_${i}` };
+        }
+      } else if (origItem.type === "message" || (!origItem.type && origItem.role)) {
+        if (origItem.role && compItem.role !== origItem.role) {
+          return { valid: false, reason: `responses_message_role_mismatch_at_${i}` };
+        }
+      } else {
+        // Unknown Responses item type (e.g. local_shell_call, apply_patch_call, opaque metadata)
+        // Non-compressible items must be deep equal
+        if (!deepEqual(origItem, compItem)) {
+          return { valid: false, reason: `unknown_responses_item_altered_at_${i}` };
         }
       }
     }
@@ -120,6 +161,9 @@ export function validateBodyInvariants(original, compressed, format) {
       const origMsg = original.messages[i];
       const compMsg = compressed.messages?.[i];
       if (Array.isArray(origMsg.content) && Array.isArray(compMsg?.content)) {
+        if (compMsg.content.length !== origMsg.content.length) {
+          return { valid: false, reason: `claude_content_count_mismatch_at_${i}` };
+        }
         for (let c = 0; c < origMsg.content.length; c++) {
           const origPart = origMsg.content[c];
           const compPart = compMsg.content[c];
@@ -135,7 +179,7 @@ export function validateBodyInvariants(original, compressed, format) {
             }
           }
           if (origPart?.type === "tool_use") {
-            if (compPart?.type !== "tool_use" || compPart.id !== origPart.id) {
+            if (compPart?.type !== "tool_use" || compPart.id !== origPart.id || compPart.name !== origPart.name) {
               return { valid: false, reason: `claude_tool_use_altered_at_${i}_${c}` };
             }
           }

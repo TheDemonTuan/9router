@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { selectHeadroomStage, HEADROOM_STAGES } from "../../open-sse/rtk/headroomStage.js";
-import { validateBodyInvariants } from "../../open-sse/rtk/headroomInvariants.js";
-import { normalizeRelayUsage, createHeadroomTurnContext } from "../../open-sse/rtk/headroomRelay.js";
+import { validateBodyInvariants, deepEqual } from "../../open-sse/rtk/headroomInvariants.js";
+import { normalizeRelayUsage, createHeadroomTurnContext, hasRelayUsage } from "../../open-sse/rtk/headroomRelay.js";
+import { isInternalHost, isSafeOrigin } from "../../open-sse/rtk/headroomGateway.js";
 
 describe("Headroom pure stage selector", () => {
   it("selects TARGET_NATIVE for native target formats", () => {
@@ -96,6 +97,69 @@ describe("Headroom invariants guard", () => {
     expect(validateBodyInvariants(orig, compTampered, "openai-responses").valid).toBe(false);
   });
 
+  it("rejects Responses item id and status mismatches", () => {
+    const orig = {
+      input: [{
+        type: "message",
+        id: "msg_orig_123",
+        status: "in_progress",
+        role: "user",
+        content: [{ type: "input_text", text: "hello" }],
+      }],
+    };
+    const compAlteredId = {
+      input: [{
+        type: "message",
+        id: "msg_tampered_456",
+        status: "in_progress",
+        role: "user",
+        content: [{ type: "input_text", text: "hello" }],
+      }],
+    };
+    expect(validateBodyInvariants(orig, compAlteredId, "openai-responses").valid).toBe(false);
+
+    const compAlteredStatus = {
+      input: [{
+        type: "message",
+        id: "msg_orig_123",
+        status: "completed",
+        role: "user",
+        content: [{ type: "input_text", text: "hello" }],
+      }],
+    };
+    expect(validateBodyInvariants(orig, compAlteredStatus, "openai-responses").valid).toBe(false);
+  });
+
+  it("guards unknown Responses items with deep equality", () => {
+    const orig = {
+      input: [{
+        type: "local_shell_call",
+        id: "shell_1",
+        command: "ls -la",
+        env: { FOO: "bar" },
+      }],
+    };
+    const compSame = {
+      input: [{
+        type: "local_shell_call",
+        id: "shell_1",
+        command: "ls -la",
+        env: { FOO: "bar" },
+      }],
+    };
+    expect(validateBodyInvariants(orig, compSame, "openai-responses")).toEqual({ valid: true });
+
+    const compAltered = {
+      input: [{
+        type: "local_shell_call",
+        id: "shell_1",
+        command: "rm -rf /",
+        env: { FOO: "bar" },
+      }],
+    };
+    expect(validateBodyInvariants(orig, compAltered, "openai-responses").valid).toBe(false);
+  });
+
   it("preserves Claude thinking blocks and signatures", () => {
     const orig = {
       messages: [{
@@ -138,9 +202,61 @@ describe("Headroom invariants guard", () => {
   });
 });
 
+describe("Headroom security origin validation", () => {
+  it("strictly whitelists internal and private hosts", () => {
+    expect(isInternalHost("localhost")).toBe(true);
+    expect(isInternalHost("127.0.0.1")).toBe(true);
+    expect(isInternalHost("::1")).toBe(true);
+    expect(isInternalHost("headroom")).toBe(true);
+    expect(isInternalHost("9router-headroom")).toBe(true);
+    expect(isInternalHost("host.docker.internal")).toBe(true);
+    expect(isInternalHost("10.0.1.5")).toBe(true);
+    expect(isInternalHost("172.16.0.1")).toBe(true);
+    expect(isInternalHost("172.31.255.255")).toBe(true);
+    expect(isInternalHost("192.168.1.1")).toBe(true);
+  });
+
+  it("rejects public domains, fake suffixes and invalid IPs", () => {
+    expect(isInternalHost("example.com")).toBe(false);
+    expect(isInternalHost("test.example")).toBe(false);
+    expect(isInternalHost("local.lan")).toBe(false);
+    expect(isInternalHost("attacker.internal")).toBe(false);
+    expect(isInternalHost("172.32.0.1")).toBe(false);
+    expect(isInternalHost("256.0.0.1")).toBe(false);
+  });
+
+  it("checks origin URLs safely and respects HEADROOM_ALLOW_EXTERNAL_ORIGIN override", () => {
+    const originalEnv = process.env.HEADROOM_ALLOW_EXTERNAL_ORIGIN;
+    try {
+      delete process.env.HEADROOM_ALLOW_EXTERNAL_ORIGIN;
+      expect(isSafeOrigin("http://127.0.0.1:8787")).toBe(true);
+      expect(isSafeOrigin("http://headroom:8787/v1/compress")).toBe(true);
+      expect(isSafeOrigin("https://example.com/v1/compress")).toBe(false);
+
+      process.env.HEADROOM_ALLOW_EXTERNAL_ORIGIN = "1";
+      expect(isSafeOrigin("https://example.com/v1/compress")).toBe(true);
+    } finally {
+      if (originalEnv !== undefined) {
+        process.env.HEADROOM_ALLOW_EXTERNAL_ORIGIN = originalEnv;
+      } else {
+        delete process.env.HEADROOM_ALLOW_EXTERNAL_ORIGIN;
+      }
+    }
+  });
+});
+
 describe("Headroom response relay", () => {
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it("handles Headroom 0.38 array obligations and legacy objects", () => {
+    expect(hasRelayUsage(["relay_usage"])).toBe(true);
+    expect(hasRelayUsage(["redrive", "relay_usage"])).toBe(true);
+    expect(hasRelayUsage(["redrive"])).toBe(false);
+    expect(hasRelayUsage({ relay_usage: true })).toBe(true);
+    expect(hasRelayUsage({ relay_usage: false })).toBe(false);
+    expect(hasRelayUsage(null)).toBe(false);
   });
 
   it("normalizes diverse provider usage without double-counting", () => {
@@ -153,43 +269,69 @@ describe("Headroom response relay", () => {
       .toEqual({ input_tokens: 10, output_tokens: 5, cached_tokens: 30, total_tokens: 15 });
   });
 
-  it("completes once and fires async relay request", async () => {
+  it("completes once and fires async relay request with Headroom 0.38 integer status and no ttl_seconds", async () => {
     global.fetch = vi.fn(async () => new Response("ok", { status: 200 }));
     const ctx = createHeadroomTurnContext({
       url: "http://headroom:8787",
       proxyToken: "secret-token",
       turnId: "turn_999",
-      obligations: { relay_usage: true },
+      obligations: ["relay_usage"],
       startTime: Date.now() - 100,
     });
 
     expect(ctx.isEligible).toBe(true);
-    ctx.complete({ usage: { prompt_tokens: 50, completion_tokens: 25 }, status: "completed" });
+    ctx.complete({ statusCode: 200, usage: { prompt_tokens: 50, completion_tokens: 25 } });
     // Second complete is ignored (complete-once)
-    ctx.complete({ usage: { prompt_tokens: 50, completion_tokens: 25 }, status: "completed" });
+    ctx.complete({ statusCode: 500 });
 
     expect(global.fetch).toHaveBeenCalledTimes(1);
-    expect(global.fetch).toHaveBeenCalledWith(
-      "http://headroom:8787/v1/compress/response",
-      expect.objectContaining({
-        method: "POST",
-        headers: expect.objectContaining({ "X-Headroom-Proxy-Token": "secret-token" }),
-      })
-    );
+    const [fetchUrl, fetchOptions] = global.fetch.mock.calls[0];
+    expect(fetchUrl).toBe("http://headroom:8787/v1/compress/response");
+    expect(fetchOptions.headers).toMatchObject({ "X-Headroom-Proxy-Token": "secret-token" });
+
+    const sentPayload = JSON.parse(fetchOptions.body);
+    expect(sentPayload).toEqual({
+      turn_id: "turn_999",
+      status: 200,
+      latency_ms: expect.any(Number),
+      usage: {
+        input_tokens: 50,
+        output_tokens: 25,
+        cached_tokens: 0,
+        total_tokens: 75,
+      },
+    });
+    expect(sentPayload.ttl_seconds).toBeUndefined();
   });
 
-  it("suppresses response relay when obligations.relay_usage is not true", () => {
+  it("relays error status as integer HTTP status code", async () => {
+    global.fetch = vi.fn(async () => new Response("ok", { status: 200 }));
+    const ctx = createHeadroomTurnContext({
+      url: "http://headroom:8787",
+      proxyToken: "secret-token",
+      turnId: "turn_err_1",
+      obligations: ["relay_usage"],
+      startTime: Date.now() - 50,
+    });
+
+    ctx.complete({ statusCode: 429, error: new Error("Rate limit exceeded") });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    const sentPayload = JSON.parse(global.fetch.mock.calls[0][1].body);
+    expect(sentPayload.status).toBe(429);
+  });
+
+  it("suppresses response relay when obligations does not include relay_usage", () => {
     global.fetch = vi.fn();
     const ctx = createHeadroomTurnContext({
       url: "http://headroom:8787",
       proxyToken: "secret-token",
       turnId: "turn_999",
-      obligations: { relay_usage: false },
+      obligations: ["redrive"],
       startTime: Date.now() - 100,
     });
 
     expect(ctx.isEligible).toBe(false);
-    ctx.complete({ usage: { prompt_tokens: 50, completion_tokens: 25 }, status: "completed" });
+    ctx.complete({ statusCode: 200 });
     expect(global.fetch).not.toHaveBeenCalled();
   });
 });
