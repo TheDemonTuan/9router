@@ -70,9 +70,16 @@ case "${1:-}" in
       name="${!#}"
       IFS='|' read -r state image hostname < "$FAKE_STATE/$name"
       printf 'exited|%s|%s\n' "$image" "$hostname" > "$FAKE_STATE/$name"
+    elif [[ "$*" == *' pull '* ]]; then
+      exit 0
     fi
     ;;
-  image) exit 0 ;;
+  image)
+    if [[ "${2:-}" == inspect && "${FAKE_UNCACHED_IMAGE:-}" == "${3:-}" ]]; then
+      exit 1
+    fi
+    exit 0
+    ;;
   start)
     name="$2"
     IFS='|' read -r state image hostname < "$FAKE_STATE/$name"
@@ -216,7 +223,7 @@ new_case() {
   export FAKE_CURL_COUNTER="$case_dir/curl.count" FAKE_ROUTE_FILE="$case_dir/dynamic/9router.yml"
   export FAKE_LOADED_SLOT="$case_dir/loaded.slot" FAKE_LOADED_GENERATION="$case_dir/loaded.gen"
   export READY_TIMEOUT=2 DRAIN_TIMEOUT=1 DRAIN_POLL_SECONDS=1 ROUTE_TIMEOUT=8
-  unset FAKE_CURL_MODE FAKE_CURL_SEQUENCE FAKE_RELOAD_AFTER FAKE_RELOAD_GEN_AFTER FAKE_BAD_HEALTH_SLOT FAKE_WRONG_SLOT FAKE_UNKNOWN_DRAIN_SLOT FAKE_BUSY_SLOT FAKE_MOUNT_TYPE FAKE_NETWORK FAKE_DETACH_SLOT FAKE_NESTED FAKE_TRAEFIK_RUNNING FAKE_FAIL_METADATA FAKE_SIGNAL_AFTER_WRITE FAKE_HOLD_MARKER FAKE_HOLD_RELEASE FAKE_INVENTORY_ERROR FAKE_INSPECT_ERROR ROUTE_GENERATION
+  unset FAKE_CURL_MODE FAKE_CURL_SEQUENCE FAKE_RELOAD_AFTER FAKE_RELOAD_GEN_AFTER FAKE_BAD_HEALTH_SLOT FAKE_WRONG_SLOT FAKE_UNKNOWN_DRAIN_SLOT FAKE_BUSY_SLOT FAKE_MOUNT_TYPE FAKE_NETWORK FAKE_DETACH_SLOT FAKE_NESTED FAKE_TRAEFIK_RUNNING FAKE_FAIL_METADATA FAKE_SIGNAL_AFTER_WRITE FAKE_HOLD_MARKER FAKE_HOLD_RELEASE FAKE_INVENTORY_ERROR FAKE_INSPECT_ERROR FAKE_UNCACHED_IMAGE ROUTE_GENERATION
   printf none > "$FAKE_LOADED_SLOT"
   printf none > "$FAKE_LOADED_GENERATION"
 }
@@ -589,5 +596,22 @@ run --reconcile
 assert_route blue blue
 [[ -n "$(generation_on_disk)" ]]
 [[ "$(cat "$case_dir/.deployed-image")" == sha256:blue-old ]]
+
+# Deploy uses docker compose pull with target service and tty progress when image is uncached
+new_case; seed blue
+export FAKE_UNCACHED_IMAGE="image-new"
+run image-new
+assert_route green green
+[[ "$(cat "$case_dir/docker.log")" == *'compose -f docker-compose.prod.yml --progress=tty pull 9router-green'* ]]
+unset FAKE_UNCACHED_IMAGE
+
+# Host concurrency setup defaults to 3 and accepts custom concurrency
+new_case; seed blue
+export DOCKER_DAEMON_JSON="$case_dir/daemon.json"
+run --setup-host
+[[ "$(cat "$case_dir/daemon.json")" == *'"max-concurrent-downloads": 3'* ]]
+run --setup-host 2
+[[ "$(cat "$case_dir/daemon.json")" == *'"max-concurrent-downloads": 2'* ]]
+unset DOCKER_DAEMON_JSON
 
 printf 'CLI preflight, ACK, rollback, reconcile, bootstrap and drain scenarios passed\n'
