@@ -30,7 +30,14 @@ TRAEFIK_CONFIG_NAME="${TRAEFIK_CONFIG_NAME-9router.yml}"
 
 
 log() { printf '[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
-die() { log "ERROR: $*" >&2; exit 1; }
+stop_pull_heartbeat() {
+  if [[ -n "${PULL_HEARTBEAT_PID:-}" ]]; then
+    local pid="$PULL_HEARTBEAT_PID"
+    PULL_HEARTBEAT_PID=""
+    { kill -TERM "$pid" 2>/dev/null && pkill -P "$pid" 2>/dev/null && wait "$pid" 2>/dev/null; } || true
+  fi
+}
+die() { stop_pull_heartbeat 2>/dev/null || true; log "ERROR: $*" >&2; exit 1; }
 
 COMPOSE_ARGS=(-f "$COMPOSE_FILE")
 if [[ -z "$CHATGPT_WEB_COMPOSE_FILE" && -n "${CHATGPT_WEB_SOCKET_GID:-}" ]]; then
@@ -791,50 +798,69 @@ run_diagnostics() {
   log "=== [DIAG] Cached images for 9router ==="
   docker image ls --digests "ghcr.io/*" 2>/dev/null || true
 
-  if docker image inspect "$IMAGE_REF" >/dev/null 2>&1; then
-    log "[DIAG] EXACT IMAGE CACHED: $IMAGE_REF"
-  else
-    log "[DIAG] EXACT IMAGE NOT CACHED: $IMAGE_REF"
+  if [[ -n "${IMAGE_REF:-}" ]]; then
+    if docker image inspect "$IMAGE_REF" >/dev/null 2>&1; then
+      log "[DIAG] EXACT IMAGE CACHED: $IMAGE_REF"
+      docker inspect "$IMAGE_REF" --format 'Size: {{.Size}} bytes, Created: {{.Created}}, Layers: {{len .RootFS.Layers}}' 2>/dev/null || true
+    else
+      log "[DIAG] EXACT IMAGE NOT CACHED: $IMAGE_REF"
+      local manifest_summary
+      manifest_summary="$(inspect_manifest_summary "$IMAGE_REF")"
+      if [[ -n "$manifest_summary" ]]; then
+        log "[DIAG] REMOTE MANIFEST: $manifest_summary"
+      fi
+    fi
   fi
 
   log "=== [DIAG] Docker daemon config ==="
   cat /etc/docker/daemon.json 2>/dev/null || true
+  if [[ -f /etc/docker/daemon.json ]]; then
+    local configured_dl
+    configured_dl="$(python3 -c 'import json, sys; d=json.load(open(sys.argv[1])); print(d.get("max-concurrent-downloads", "unset (Docker default: 3)"))' /etc/docker/daemon.json 2>/dev/null || echo "parse error")"
+    log "[DIAG] max-concurrent-downloads: $configured_dl"
+  else
+    log "[DIAG] /etc/docker/daemon.json absent (Docker default: 3)"
+  fi
 
-  log "=== [DIAG] Registry DNS ==="
+  log "=== [DIAG] Registry DNS & Nameservers ==="
+  cat /etc/resolv.conf 2>/dev/null | grep -E '^nameserver' || true
   getent ahosts ghcr.io 2>/dev/null || true
   getent ahosts pkg-containers.githubusercontent.com 2>/dev/null || true
 
-  log "=== [DIAG] IPv4 connectivity ==="
+  log "=== [DIAG] IPv4 connectivity & latency ==="
   curl -4 -sS \
     --connect-timeout 5 \
     -o /dev/null \
-    -w 'ghcr ipv4: connect=%{time_connect}s total=%{time_total}s code=%{http_code}\n' \
+    -w 'ghcr ipv4: namelookup=%{time_namelookup}s connect=%{time_connect}s tls=%{time_appconnect}s total=%{time_total}s code=%{http_code}\n' \
     https://ghcr.io/v2/ 2>&1 || echo "ghcr ipv4 FAILED"
 
   curl -4 -sS \
     --connect-timeout 5 \
     -o /dev/null \
-    -w 'blob ipv4: connect=%{time_connect}s total=%{time_total}s code=%{http_code}\n' \
+    -w 'blob ipv4: namelookup=%{time_namelookup}s connect=%{time_connect}s tls=%{time_appconnect}s total=%{time_total}s code=%{http_code}\n' \
     https://pkg-containers.githubusercontent.com/ 2>&1 || echo "blob ipv4 FAILED"
 
-  log "=== [DIAG] IPv6 connectivity ==="
+  log "=== [DIAG] IPv6 connectivity & latency ==="
   curl -6 -sS \
     --connect-timeout 5 \
     -o /dev/null \
-    -w 'ghcr ipv6: connect=%{time_connect}s total=%{time_total}s code=%{http_code}\n' \
-    https://ghcr.io/v2/ 2>&1 || echo "ghcr ipv6 FAILED"
+    -w 'ghcr ipv6: namelookup=%{time_namelookup}s connect=%{time_connect}s tls=%{time_appconnect}s total=%{time_total}s code=%{http_code}\n' \
+    https://ghcr.io/v2/ 2>&1 || echo "ghcr ipv6 FAILED (or unrouted)"
 
   curl -6 -sS \
     --connect-timeout 5 \
     -o /dev/null \
-    -w 'blob ipv6: connect=%{time_connect}s total=%{time_total}s code=%{http_code}\n' \
-    https://pkg-containers.githubusercontent.com/ 2>&1 || echo "blob ipv6 FAILED"
+    -w 'blob ipv6: namelookup=%{time_namelookup}s connect=%{time_connect}s tls=%{time_appconnect}s total=%{time_total}s code=%{http_code}\n' \
+    https://pkg-containers.githubusercontent.com/ 2>&1 || echo "blob ipv6 FAILED (or unrouted)"
 }
 
 configure_docker_concurrency() {
-  local daemon_json="/etc/docker/daemon.json"
+  local concurrency="${1:-${DOCKER_MAX_CONCURRENT_DOWNLOADS:-3}}"
+  [[ "$concurrency" =~ ^[1-9][0-9]*$ ]] || die "Invalid max-concurrent-downloads: $concurrency (must be a positive integer)"
+
+  local daemon_json="${DOCKER_DAEMON_JSON:-/etc/docker/daemon.json}"
   local sudo_cmd=""
-  if [[ $(id -u) -ne 0 ]]; then
+  if [[ $(id -u) -ne 0 && "$daemon_json" == /etc/* ]]; then
     if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
       sudo_cmd="sudo"
     else
@@ -843,37 +869,102 @@ configure_docker_concurrency() {
     fi
   fi
 
-  if grep -q '"max-concurrent-downloads"[[:space:]]*:[[:space:]]*1' "$daemon_json" 2>/dev/null; then
-    log "Docker max-concurrent-downloads already set to 1"
+  local current_concurrency=""
+  if [[ -f "$daemon_json" ]]; then
+    current_concurrency="$(python3 -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    if isinstance(d, dict) and "max-concurrent-downloads" in d:
+        print(d["max-concurrent-downloads"])
+except Exception:
+    pass
+' "$daemon_json" 2>/dev/null || true)"
+  fi
+
+  if [[ "$current_concurrency" == "$concurrency" ]]; then
+    log "Docker max-concurrent-downloads already set to $concurrency in $daemon_json"
     return 0
   fi
 
-  log "Testing max-concurrent-downloads=1 in $daemon_json..."
+  log "Configuring max-concurrent-downloads=$concurrency in $daemon_json..."
   local new_cfg=""
-  if [[ -f "$daemon_json" ]]; then
-    if command -v jq >/dev/null 2>&1; then
-      new_cfg="$($sudo_cmd jq '. + {"max-concurrent-downloads": 1}' "$daemon_json" 2>/dev/null || true)"
-    elif command -v python3 >/dev/null 2>&1; then
-      new_cfg="$($sudo_cmd python3 -c 'import json; d = json.load(open("'"$daemon_json"'")); d["max-concurrent-downloads"]=1; print(json.dumps(d, indent=2))' 2>/dev/null || true)"
-    fi
-  else
-    $sudo_cmd mkdir -p /etc/docker 2>/dev/null || true
-    new_cfg='{
-  "max-concurrent-downloads": 1
-}'
-  fi
+  new_cfg="$(python3 -c '
+import json, os, sys
+path, val = sys.argv[1], int(sys.argv[2])
+data = {}
+if os.path.exists(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        sys.exit(f"Failed to read JSON: {e}")
+if not isinstance(data, dict):
+    data = {}
+data["max-concurrent-downloads"] = val
+print(json.dumps(data, indent=2))
+' "$daemon_json" "$concurrency" 2>/dev/null || true)"
 
   if [[ -n "$new_cfg" ]]; then
+    $sudo_cmd mkdir -p "$(dirname "$daemon_json")" 2>/dev/null || true
     printf '%s\n' "$new_cfg" | $sudo_cmd tee "$daemon_json" >/dev/null 2>&1 || true
     log "Reloading Docker daemon..."
     $sudo_cmd systemctl reload docker >/dev/null 2>&1 || $sudo_cmd kill -SIGHUP "$(pidof dockerd 2>/dev/null || true)" >/dev/null 2>&1 || true
+    log "Docker max-concurrent-downloads configured to $concurrency"
+  else
+    die "Failed to generate Docker daemon configuration"
   fi
 }
 
 PULL_TIMEOUT="${PULL_TIMEOUT:-300}"
 PULL_ATTEMPTS="${PULL_ATTEMPTS:-2}"
+COMPOSE_PROGRESS="${COMPOSE_PROGRESS:-tty}"
+PULL_HEARTBEAT_INTERVAL="${PULL_HEARTBEAT_INTERVAL:-15}"
 DRAIN_TIMEOUT="${DRAIN_TIMEOUT:-120}"
 DRAIN_POLL_SECONDS="${DRAIN_POLL_SECONDS:-2}"
+PULL_HEARTBEAT_PID=""
+
+start_pull_heartbeat() {
+  local service="$1"
+  local start_ts="$2"
+  local interval="${PULL_HEARTBEAT_INTERVAL:-15}"
+  stop_pull_heartbeat
+  (
+    trap 'exit 0' TERM INT
+    while true; do
+      sleep "$interval" 2>/dev/null || break
+      local now elapsed
+      now="$(date +%s)"
+      elapsed=$((now - start_ts))
+      log "Pull in progress for $service (${elapsed}s elapsed)..."
+    done
+  ) 2>/dev/null &
+  PULL_HEARTBEAT_PID=$!
+}
+
+inspect_manifest_summary() {
+  local image="$1" out
+  if command -v docker >/dev/null 2>&1; then
+    out="$(timeout 5 docker manifest inspect "$image" 2>/dev/null || timeout 5 docker buildx imagetools inspect --raw "$image" 2>/dev/null || true)"
+    if [[ -n "$out" ]]; then
+      python3 - "$out" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+    if "layers" in data and isinstance(data["layers"], list):
+        layers = data["layers"]
+        count = len(layers)
+        size_mib = sum(l.get("size", 0) for l in layers) / (1024 * 1024)
+        print(f"{count} layers, {size_mib:.2f} MiB compressed")
+    elif "manifests" in data and isinstance(data["manifests"], list):
+        count = len(data["manifests"])
+        print(f"multi-platform index with {count} variants")
+except Exception:
+    pass
+PY
+    fi
+  fi
+}
 
 wait_slot_idle() {
   local slot="$1" deadline=$((SECONDS + DRAIN_TIMEOUT))
@@ -890,21 +981,35 @@ wait_slot_idle() {
 }
 
 pull_image() {
+  local service="${1:-9router-${target:-blue}}"
+
   if docker image inspect "$IMAGE_REF" >/dev/null 2>&1; then
     log "Image already cached locally: $IMAGE_REF"
     return 0
+  fi
+
+  local summary
+  summary="$(inspect_manifest_summary "$IMAGE_REF")"
+  if [[ -n "$summary" ]]; then
+    log "Target: $service | Image: $IMAGE_REF | Manifest: $summary | Cache: missing"
+  else
+    log "Target: $service | Image: $IMAGE_REF | Cache: missing"
   fi
 
   local attempt rc start_ts duration
   for ((attempt=1; attempt<=PULL_ATTEMPTS; attempt++)); do
     log "Pull attempt $attempt/$PULL_ATTEMPTS for $IMAGE_REF..."
     start_ts="$(date +%s)"
-    if timeout "$PULL_TIMEOUT" docker pull "$IMAGE_REF"; then
+    start_pull_heartbeat "$service" "$start_ts"
+
+    if timeout "$PULL_TIMEOUT" docker compose "${COMPOSE_ARGS[@]}" --progress="${COMPOSE_PROGRESS:-tty}" pull "$service"; then
+      stop_pull_heartbeat
       duration=$(( $(date +%s) - start_ts ))
       log "Pull completed in ${duration}s"
       return 0
     else
       rc=$?
+      stop_pull_heartbeat
     fi
 
     if [[ "$rc" -eq 124 ]]; then
@@ -941,7 +1046,7 @@ do_deploy() {
   fi
   log "Deploying $IMAGE_REF from ${current:-bootstrap} to $target"
   compose up -d headroom
-  pull_image
+  pull_image "9router-$target"
   compose up -d --no-deps --pull never "9router-$target"
   if ! wait_healthy "$target"; then
     compose stop "9router-$target" || true
@@ -996,8 +1101,8 @@ case "$cmd" in
     show_status true
     ;;
   --setup-host)
-    [[ $# -eq 1 ]] || die "Usage: $0 --setup-host"
-    configure_docker_concurrency
+    [[ $# -le 2 ]] || die "Usage: $0 --setup-host [concurrency]"
+    configure_docker_concurrency "${2:-}"
     ;;
   --diagnostics)
     [[ $# -le 2 ]] || die "Usage: $0 --diagnostics [IMAGE_REF]"
@@ -1006,7 +1111,7 @@ case "$cmd" in
     run_diagnostics
     ;;
   -*|"")
-    die "Usage: $0 <IMAGE_REF> | --release <IMAGE_REF> | --reconcile | --rollback | --status [--strict] | --preflight"
+    die "Usage: $0 <IMAGE_REF> | --release <IMAGE_REF> | --reconcile | --rollback | --status [--strict] | --preflight | --setup-host [concurrency] | --diagnostics [IMAGE_REF]"
     ;;
   *)
     [[ $# -eq 1 ]] || die "Usage: $0 <IMAGE_REF>"
