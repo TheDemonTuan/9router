@@ -151,7 +151,7 @@ if (!process.argv.includes("--child")) {
     const match = /([\d.]+)\s*(B|KiB|MiB|GiB)/.exec(text);
     return match ? Math.round(Number(match[1]) * 1024 ** ({ B: 0, KiB: 1, MiB: 2, GiB: 3 }[match[2]])) : null;
   };
-  const filler = (size) => Array.from({ length: Math.ceil(size / 88) }, (_, i) => `line-${i.toString().padStart(7, "0")}: synthetic output alpha beta gamma delta epsilon zeta eta theta iota kappa.`).join("\n");
+  const filler = (size) => JSON.stringify(Array.from({ length: Math.ceil(size / 88) }, (_, i) => ({ file: `src/file-${i % 120}.js`, line: i, text: "synthetic repeated search result alpha beta gamma delta epsilon" })));
   function fixture(format, size) {
     const text = filler(size);
     const tool = { type: "function", function: { name: "read", parameters: { type: "object", properties: { path: { type: "string" } } } } };
@@ -200,19 +200,13 @@ if (!process.argv.includes("--child")) {
     const version = docker("exec", name, "python", "-c", "import headroom; from headroom._version import __version__; print(__version__)");
     assert.equal(version, "0.38.0");
     if (process.argv.includes("--probe")) {
-      const structured = JSON.stringify(Array.from({ length: 3000 }, (_, i) => ({ file: `src/file-${i % 120}.js`, line: i, text: "synthetic repeated search result alpha beta gamma delta epsilon" })));
-      const samples = [
-        ["prose", fixture("openai", 262144)],
-        ["structured", { model: "gpt-4o", messages: [
-          { role: "assistant", tool_calls: [{ id: "call_1", type: "function", function: { name: "search", arguments: "{}" } }] },
-          { role: "tool", tool_call_id: "call_1", content: structured },
-          { role: "user", content: "Summarize results" },
-        ] }],
-      ];
-      for (const [shape, body] of samples) {
+      for (const format of ["openai", "claude", "openai-responses", "kiro"]) {
+        const body = fixture(format, 262144);
+        const projected = format === "kiro" ? { messages: collectKiroHeadroomMessages(body).messages } : body;
         const diagnostics = {};
-        const result = await callHeadroomGateway({ url, proxyToken: token, model: body.model, body, format: "openai", timeoutMs: 30000, diagnostics });
-        console.log(JSON.stringify({ shape, before: bytes(body), after: result ? bytes(result.compressedBody) : null,
+        const result = await compressWithHeadroom(body, { url, proxyToken: token, model: body.model, format, timeoutMs: 10000, diagnostics });
+        const output = format === "kiro" ? { messages: collectKiroHeadroomMessages(body).messages } : body;
+        console.log(JSON.stringify({ format, before: bytes(projected), after: bytes(output),
           tokensBefore: result?.tokens_before, tokensAfter: result?.tokens_after, transforms: result?.transforms_applied,
           reason: diagnostics.reason || null }));
       }
