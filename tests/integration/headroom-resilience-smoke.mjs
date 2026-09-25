@@ -395,7 +395,7 @@ if (!process.argv.includes("--child")) {
         const diagnostics = {};
         const result = await compressWithHeadroom(body, { url, proxyToken: token, model: body.model, format, diagnostics });
         const after = bytes(body);
-        assert.ok(result && after < before, `${format} did not compress a synthetic tool result`);
+        assert.ok(result && after < before, `${format} did not compress synthetic tool result: ${JSON.stringify({ accepted: Boolean(result), before, after, diagnostics, transforms: result?.transforms_applied })}`);
         const item = {
           format,
           before,
