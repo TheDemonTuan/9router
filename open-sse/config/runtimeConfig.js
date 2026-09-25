@@ -89,6 +89,8 @@ export function resolveHeadroomTimeout(configuredTimeoutMs, envValue = process.e
   return { timeoutMs: HEADROOM_DEFAULT_TIMEOUT_MS, source: "default" };
 }
 export const HEADROOM_RESERVE_TIMEOUT_MS = envMs("HEADROOM_RESERVE_TIMEOUT_MS", 1500);
+export const HEADROOM_UPSTREAM_MARGIN_MS = envMs("HEADROOM_UPSTREAM_MARGIN_MS", 2000);
+export const HEADROOM_UPSTREAM_TIMEOUT_MS = envMs("HEADROOM_UPSTREAM_TIMEOUT_MS", 0);
 export const HEADROOM_MAX_PAYLOAD_BYTES = 20 * 1024 * 1024; // 20MB
 export const HEADROOM_CIRCUIT_FAILURE_THRESHOLD = 3;
 export const HEADROOM_CIRCUIT_COOLDOWN_MS = 30000;

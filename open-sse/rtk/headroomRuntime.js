@@ -12,7 +12,7 @@ const codes = new Set([
   "gateway_fetch_error", "gateway_http_5xx", "gateway_http_429", "gateway_invalid_json_response",
   "gateway_missing_compressed_body", "gateway_compression_skipped", "gateway_invalid_provider_headers",
   "invariant_violation", "circuit_open", "circuit_probe_in_flight", "runtime_capacity",
-  "payload_too_large", "budget_exhausted", "unsafe_proxy_origin", "missing_proxy_url", "missing_body",
+  "payload_too_large", "budget_exhausted", "insufficient_upstream_budget", "unsafe_proxy_origin", "missing_proxy_url", "missing_body",
   "stage_bypass", "gateway_http_4xx", "model_sovereignty_violation", "unsupported_obligation",
 ]);
 function code(reason) {
