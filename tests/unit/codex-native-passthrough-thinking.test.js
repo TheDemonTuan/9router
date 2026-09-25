@@ -50,7 +50,6 @@ async function runNativeCodexRequest(model, reasoning) {
     log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn() },
     connectionId: "test-connection",
     rtkEnabled: false,
-    headroomEnabled: false,
     cavemanEnabled: false,
     ponytailEnabled: false,
     pxpipeEnabled: false,

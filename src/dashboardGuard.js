@@ -46,7 +46,6 @@ const ALWAYS_PROTECTED = [
   "/api/version/update",
   "/api/oauth/cursor/auto-import",
   "/api/oauth/kiro/auto-import",
-  "/api/headroom/proxy",
 ];
 
 // Require auth, but allow through if requireLogin is disabled
@@ -84,10 +83,6 @@ const LOCAL_ONLY_PATHS = [
   "/api/oauth/cursor/auto-import",
   "/api/oauth/kiro/auto-import",
   "/api/auth/reset-password",
-  "/api/headroom/start",
-  "/api/headroom/stop",
-  "/api/headroom/restart",
-  "/api/headroom/extras",
 ];
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);

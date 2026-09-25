@@ -434,7 +434,6 @@ URLs por defecto:
 | Característica                                                                           | Qué hace                                                                                       | Por qué importa                                         |
 | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
 | 🚀 **Ahorrador de tokens RTK** ([RTK](https://github.com/rtk-ai/rtk) ⭐40K)                | Comprime las salidas de las herramientas (`git diff`, `grep`, `ls`, `tree`...) antes de enviarlas al LLM | Ahorra **20-40% de tokens de entrada** por solicitud    |
-| 🧠 **Ahorrador de tokens Headroom** ([Headroom](https://github.com/chopratejas/headroom)) | Proxy externo opcional `/v1/compress` antes del enrutamiento al proveedor                      | Ahorra más tokens de contexto sin cambiar los clientes  |
 | 🪨 **Modo cavernícola** ([Caveman](https://github.com/JuliusBrussee/caveman) ⭐52K)        | Inyecta un prompt de lenguaje cavernícola → el LLM responde de forma concisa, se conserva el contenido técnico | Ahorra **hasta un 65% de tokens de salida**  |
 | 🐴 **Ponytail** ([Ponytail](https://github.com/DietrichGebert/ponytail))                  | Inyecta un prompt de "dev sénior perezoso" → el LLM escribe código mínimo, primero YAGNI (Lite/Full/Ultra) | **Menos tokens de salida, menos refactorización**        |
 | 🎯 **Reserva inteligente de 3 niveles**                                                  | Enrutado automático: Suscripción → Económico → Gratuito                                        | Nunca dejes de programar, cero tiempos de inactividad   |
@@ -465,35 +464,6 @@ Las salidas de las herramientas (`git diff`, `grep`, `find`, `ls`, `tree`, volca
 Sin RTK: se envían 47K tokens al LLM
 Con RTK:    se envían 28K tokens al LLM   (40% ahorrado · mismo contexto · misma respuesta)
 ```
-
-### 🧠 Ahorrador de tokens Headroom
-
-Headroom es opcional y se ejecuta por separado. 9Router llama al endpoint local `/v1/compress` de Headroom y luego mantiene el enrutamiento, la reserva, la autenticación y el seguimiento de uso normales:
-
-```
-Client → 9Router → Headroom /v1/compress → 9Router → provider
-```
-
-Configuración local:
-
-```bash
-pip install "headroom-ai[proxy]"
-headroom proxy --port 8787
-```
-
-Actívalo en Panel de control → Endpoint → Token Saver → Headroom. URL por defecto: `http://localhost:8787`.
-
-Ejemplos con Docker:
-
-```bash
-# Servicio de Headroom en la misma red de Docker
-http://headroom:8787
-
-# Headroom ejecutándose en la máquina host
-http://host.docker.internal:8787
-```
-
-Si Headroom está caído o devuelve un error, 9Router falla de forma segura y envía la solicitud original.
 
 ### 🐴 Ponytail (Dev sénior perezoso)
 

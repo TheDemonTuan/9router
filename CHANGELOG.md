@@ -1,3 +1,8 @@
+# Unreleased
+
+## Removed
+- **Headroom**: remove compressor, sidecar, dashboard/CLI controls, and retire persisted settings on upgrade and restore.
+
 # v0.5.86 (2026-09-23)
 
 ## Features
@@ -165,9 +170,6 @@
 - **CLI tools**: endpoint presets shared across every tool card through one
   live-resyncing store, instead of per-card localStorage copies that never
   saw each other's saved endpoints
-- **Token Saver**: configurable compression timeout (`headroomTimeoutMs`) —
-  the fixed 3000 ms made busy machines time out and send inconsistently
-  compressed bodies, hurting prompt caching
 - **i18n**: pt-BR expanded to 1132 terms
 
 ## Fixes
@@ -305,9 +307,6 @@
 - **Combos**: strip `stream_options` from the Fusion panel fan-out to avoid a
   DeepSeek 400 (#3024); raise the dashboard model-test probe budget to 1024 and
   soft-pass reasoning-only responses (#3010)
-- **Headroom**: the toggle reflects the `headroomEnabled` setting even when the
-  proxy is down — it previously showed OFF while the engine kept calling
-  `/v1/compress`; proxy status stays visible via the status chip
 - **Hermes**: add the `api_key` parameter to the model block in YAML config
 - **Providers**: add llm7 to provider test support
 
@@ -349,8 +348,6 @@
 - **Qoder**: support PAT (Personal Access Token) connections end-to-end, alongside
   OAuth device flow
 - **CLI tools**: add OpenDesign (manalkaff/opendesign) support
-- **Headroom**: report effective payload savings (tool schema/history bytes broken
-  out, byte-savings % reflects actual outbound reduction)
 - **Ollama**: Cloud quota tracker (session + weekly) + proactive background OAuth
   token refresh scheduler for all providers
 
@@ -501,8 +498,6 @@
 - **Featherless**: add OpenAI-compatible provider presets
 - **SearXNG**: configure endpoint via SEARXNG_URL env (#2499)
 - **Providers**: add max thinking level for gpt-5.6-sol (#2500)
-- **Headroom**: add extras detection and install UI (#2403)
-- **Headroom**: activate/uninstall extras + fix interpreter detection
 - **PXPipe**: PXPIPE token saver — multimodal prompt compression (#2465)
 - **Proxy-Pools**: auto-rotate strategy for no-auth providers (#2409)
 
@@ -511,7 +506,6 @@
 - **DB**: backup on schema change, MCP child cleanup, codex models, usage providers OOM
 - **Codex**: avoid bare-email OAuth dedup (#2477)
 - **CLI**: allow staged app bundle builds (#2479)
-- **Headroom**: compress Kiro conversation state (#2488)
 - **Gemini-CLI**: raise output floor for thinking and add validated toolConfig (#2486)
 - **GitHub**: label Copilot profiles by account identity (#2498)
 - **OpenAI-to-Claude**: unwrap bare {function:{…}} tools without parent type (#2473)
@@ -543,7 +537,6 @@
 - **Kimi**: normalize reasoning_effort to backend enum (#2427)
 - **Claude**: reconcile max_tokens vs thinking budget and lift per-model ceiling (#2381)
 - **Kiro**: deliver system prompt natively, add Opus 4.5/4.7/4.8, tolerate dash version ids (#2366)
-- **Headroom**: proxy dashboard through app (#2372)
 - **MITM**: recover from stale lock file on server start
 
 # v0.5.18 (2026-07-03)
@@ -577,7 +570,6 @@
 
 ## Fixes
 - **Responses**: handle response.done terminal events (#2142) — rifuki
-- **Headroom**: skip unsafe responses tool history (#2132) — Sutarto Jordan Chrisfivo
 - **Translator**: map mid-conversation system message to user (claude→openai) — decolua
 - **Gemini**: normalize contents to prevent 400 invalid_argument (#2192) — warelik
 - **Gemini**: backfill thoughtSignature + suppress stream done sentinel — WARELIK
@@ -613,9 +605,6 @@
 - CodeBuddy: only send reasoning params when client requests reasoning (#2071) — Rex
 - CodeBuddy CN: show one-shot bonus packs as expiring, not monthly-replenishing
 - Show custom provider models in combo picker — Sapto
-- Docker: add docker-compose.yml with headroom enabled by default — nitsuahlabs
-- Clarify token diagnostics vs provider billing (headroom, #1998) — Sutarto Jordan Chrisfivo
-- Translate openai-responses input through OpenAI for compression (#1998) — Ankit
 - Kiro: report 1M context window for claude-opus-4.8 — EdisonPVE
 - Avoid stale redirects after auth changes (#2100) — Emirhan
 - Mark Claude Opus 4.7 (dashed id) as 1M context — Brokenc0de
@@ -634,7 +623,6 @@
 
 ## Fixes
 - **MiniMax-M3**: enable vision capability
-- **Headroom**: support Docker sidecar proxy
 - **Antigravity**: image executor fixes
 - **mimo-free**: Chrome User-Agent rotation to bypass anti-abuse gate
 - **cloudflare-ai**: flatten content-part arrays to string to avoid oneOf 400 (#1926)
@@ -647,7 +635,6 @@
 
 ## Features
 - **Ponytail**: minimalist code generation feature
-- **Headroom**: proxy lifecycle management + dashboard UI (one-click start/stop, install detection, status probing, token saver, claude↔openai shape conversion)
 - **CodeBuddy CN**: new OAuth provider (copilot.tencent.com) — 15-model catalog, /v2 inference, forced streaming, OpenAI-style reasoning
 - **OpenCode-Go**: align models with official endpoints; route Qwen 3.7 MiniMax via /v1/messages, GLM/Kimi/DeepSeek/MiMo via /chat/completions
 

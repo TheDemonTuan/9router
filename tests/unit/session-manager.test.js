@@ -10,7 +10,6 @@ import {
   resolveContinuationId,
   resolveSessionId,
   resolveSessionIdentity,
-  resolveHeadroomSessionId,
 } from "../../open-sse/utils/sessionManager.js";
 
 // Assistant text must reach ASSISTANT_MIN_LEN (80) to use assistant anchor; else first user message.
@@ -286,47 +285,5 @@ describe("resolveContinuationId", () => {
     }
 
     expect(resolveContinuationId({ sessionId: "explicit-session", connectionId: "conn1", scope: "kiro" })).toBe(stable);
-  });
-});
-
-describe("resolveHeadroomSessionId", () => {
-  it("resolves stable opaque session ID with apiKey, provider, model and format scoping", () => {
-    const s1 = resolveHeadroomSessionId({
-      headers: { "x-session-id": "conv-123" },
-      apiKey: "secret-key-1",
-      provider: "openai",
-      model: "gpt-4o",
-      format: "openai",
-    });
-    const s2 = resolveHeadroomSessionId({
-      headers: { "x-session-id": "conv-123" },
-      apiKey: "secret-key-1",
-      provider: "openai",
-      model: "gpt-4o",
-      format: "openai",
-    });
-    expect(s1).toBe(s2);
-    expect(s1.startsWith("s_")).toBe(true);
-
-    const sDifferentKey = resolveHeadroomSessionId({
-      headers: { "x-session-id": "conv-123" },
-      apiKey: "secret-key-2",
-      provider: "openai",
-      model: "gpt-4o",
-      format: "openai",
-    });
-    expect(sDifferentKey).not.toBe(s1);
-  });
-
-  it("returns null if compressUserMessages is true or conversation identity is missing", () => {
-    expect(resolveHeadroomSessionId({
-      headers: { "x-session-id": "conv-123" },
-      compressUserMessages: true,
-    })).toBeNull();
-
-    expect(resolveHeadroomSessionId({
-      headers: {},
-      body: {},
-    })).toBeNull();
   });
 });

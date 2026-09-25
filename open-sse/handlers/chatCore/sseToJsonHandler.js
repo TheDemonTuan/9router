@@ -112,7 +112,7 @@ export function parseSSEToOpenAIResponse(rawSSE, fallbackModel) {
  * Handle case: provider forced streaming but client wants JSON.
  * Supports both Codex/Responses API SSE and standard Chat Completions SSE.
  */
-export async function handleForcedSSEToJson({ providerResponse, sourceFormat, targetFormat, provider, model, body, stream, translatedBody, finalBody, responseSchemaValidation, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, customToolNames, toolNameMap, trackDone, appendLog, reqTag, log, preResponse, routeContext = null, headroomTurnContext = null }) {
+export async function handleForcedSSEToJson({ providerResponse, sourceFormat, targetFormat, provider, model, body, stream, translatedBody, finalBody, responseSchemaValidation, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, customToolNames, toolNameMap, trackDone, appendLog, reqTag, log, preResponse, routeContext = null }) {
   const contentType = providerResponse.headers.get("content-type") || "";
   const isSSE = contentType.includes("text/event-stream") || (contentType === "" && isResponsesProvider(provider));
   if (!isSSE) return null; // not handled here
@@ -221,26 +221,9 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
         };
       }
 
-      try {
-        headroomTurnContext?.complete?.({
-          statusCode: 200,
-          status: 200,
-          usage: { prompt_tokens: inTokens, completion_tokens: outTokens, total_tokens: inTokens + outTokens, ...cacheDetails },
-          latencyMs: Date.now() - requestStartTime,
-        });
-      } catch { /* best-effort */ }
-
       trackDone();
       return { success: true, response: new Response(JSON.stringify(restoreToolNames(finalResp, toolNameMap)), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
     } catch (err) {
-      try {
-        headroomTurnContext?.complete?.({
-          statusCode: 502,
-          status: 502,
-          error: err,
-          latencyMs: Date.now() - requestStartTime,
-        });
-      } catch { /* best-effort */ }
       if (preResponse?.signal.aborted) throw preResponse.signal.reason;
       if (err?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" || err?.code === "CLIENT_ABORT") throw err;
       trackDone();
@@ -254,14 +237,6 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
     const sseText = await providerResponse.text();
     const parsed = parseSSEToOpenAIResponse(sseText, model);
     if (!parsed) {
-      try {
-        headroomTurnContext?.complete?.({
-          statusCode: 502,
-          status: 502,
-          error: new Error("Invalid SSE response for non-streaming request"),
-          latencyMs: Date.now() - requestStartTime,
-        });
-      } catch { /* best-effort */ }
       trackDone();
       return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Invalid SSE response for non-streaming request");
     }
@@ -274,14 +249,6 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
       const status = Number.isInteger(upstreamStatus) && upstreamStatus >= 400 && upstreamStatus <= 599
         ? upstreamStatus
         : HTTP_STATUS.BAD_GATEWAY;
-      try {
-        headroomTurnContext?.complete?.({
-          statusCode: status,
-          status,
-          error: new Error(parsed.error.message || "Upstream SSE stream failed"),
-          latencyMs: Date.now() - requestStartTime,
-        });
-      } catch { /* best-effort */ }
       trackDone();
       return createErrorResult(
         status,
@@ -299,14 +266,6 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
       }
     }
     const usage = parsed.usage || {};
-    try {
-      headroomTurnContext?.complete?.({
-        statusCode: 200,
-        status: 200,
-        usage,
-        latencyMs: Date.now() - requestStartTime,
-      });
-    } catch { /* best-effort */ }
     appendLog({ tokens: usage, status: "200 OK" });
     saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, silent: true });
     if (log?.line) log.line(reqTag, "📊", formatDoneLine({ usage, latency: { total: Date.now() - requestStartTime } }));

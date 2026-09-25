@@ -39,9 +39,6 @@ export async function GET() {
 export async function PATCH(request) {
   try {
     const body = await request.json();
-    delete body.headroomTimeoutMs;
-    delete body.headroomEffectiveTimeoutMs;
-    delete body.headroomTimeoutSource;
 
     // Strip protected secrets before any internal handling sets them
     for (const key of PROTECTED_SETTING_KEYS) delete body[key];

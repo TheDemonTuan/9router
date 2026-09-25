@@ -7,19 +7,19 @@ const RESET_AT = "2026-09-24T07:38:55.000Z";
 const RESET_AT_SECONDS = Math.floor(Date.parse(RESET_AT) / 1000);
 
 describe("quotaExhaustedResponse", () => {
-  it("does not advance combo models on terminal Headroom session failure", async () => {
-    const attempt = vi.fn().mockResolvedValue(new Response("session unavailable", {
-      status: 503, headers: { "x-9router-no-fallback": "true", "x-should-retry": "true" },
+  it("does not advance combo models on terminal bridge failure", async () => {
+    const attempt = vi.fn().mockResolvedValue(new Response("bridge unavailable", {
+      status: 503, headers: { "x-9router-no-fallback": "true", "x-should-retry": "false", "x-9router-error-code": "bridge_connection_unavailable" },
     }));
     const response = await handleComboChat({
       body: { messages: [{ role: "user", content: "hello" }] },
       models: ["provider/first", "provider/second"],
       handleSingleModel: attempt,
       log: { info: vi.fn(), warn: vi.fn() },
-      comboName: "headroom-combo", comboStrategy: "fallback",
+      comboName: "bridge-combo", comboStrategy: "fallback",
     });
     expect(response.status).toBe(503);
-    expect(response.headers.get("x-should-retry")).toBe("true");
+    expect(response.headers.get("x-should-retry")).toBe("false");
     expect(attempt).toHaveBeenCalledTimes(1);
   });
 

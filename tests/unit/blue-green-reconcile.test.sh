@@ -39,10 +39,6 @@ case "${1:-}" in
       esac
       exit 0
     fi
-    if [[ "${2:-}" == 9router-headroom ]]; then
-      printf '%s\n' "${FAKE_HEADROOM_STATUS:-healthy}"
-      exit 0
-    fi
     [[ -f "$slot_file" ]] || exit 1
     IFS='|' read -r state image hostname < "$slot_file"
     case "${4:-}" in
@@ -67,6 +63,7 @@ case "${1:-}" in
     [[ "${2:-}" == version ]] && exit 0
     if [[ "$*" == *' up '* ]]; then
       name="${!#}"
+      [[ "$name" == 9router-blue || "$name" == 9router-green ]] || exit 1
       if [[ "$name" == 9router-* ]]; then
         printf 'running|sha256:%s-new|fake-%s\n' "${name#9router-}" "${name#9router-}" > "$FAKE_STATE/$name"
       fi
@@ -629,25 +626,18 @@ for mode in cached duplicate; do
 done
 FAKE_NETWORK=detached fail --status --strict
 
-# Headroom readiness gates deployment cutover
 new_case; seed blue
-FAKE_HEADROOM_STATUS=unhealthy fail image-new
-assert_route blue blue
-[[ "$(cat "$FAKE_STATE/9router-blue")" == running* ]]
-[[ ! -e "$FAKE_STATE/9router-green" ]]
-
-new_case; seed blue
-FAKE_HEADROOM_STATUS=exited fail image-new
-assert_route blue blue
-
-new_case; seed blue
-HEADROOM_READY_TIMEOUT=invalid fail image-new
-assert_route blue blue
-assert_route blue blue
 FAKE_WRONG_SLOT=blue fail --status --strict
 API_HOST='https://invalid.example.test/path' fail --preflight
 DASHBOARD_ALIAS_HOST='bad/alias' fail --preflight
 assert_route blue blue
+
+# Deploy with only an app slot and Traefik; no sidecar service is available.
+new_case; seed blue
+run image-new
+assert_route green green
+[[ "$(cat "$case_dir/.deployed-image")" == sha256:green-new ]]
+[[ "$(cat "$FAKE_STATE/9router-blue")" == exited* ]]
 
 # Legacy YAML route without generation is supported in preflight and migrated by reconcile/release.
 new_case; seed_legacy blue

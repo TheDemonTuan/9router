@@ -1,6 +1,7 @@
 // Public API barrel — all DB functions
 import { getAdapter } from "./driver.js";
 import { stringifyJson, parseJson } from "./helpers/jsonCol.js";
+import { stripRetiredSettings } from "./helpers/retiredSettings.js";
 
 // Settings
 export {
@@ -114,8 +115,8 @@ export async function importDb(payload) {
     db.run(`DELETE FROM kv WHERE scope IN ('modelAliases', 'customModels', 'mitmAlias', 'pricing')`);
 
     // Settings
-    if (payload.settings) {
-      db.run(`INSERT INTO settings(id, data) VALUES(1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data`, [stringifyJson(payload.settings)]);
+    if (payload.settings !== undefined) {
+      db.run(`INSERT INTO settings(id, data) VALUES(1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data`, [stringifyJson(stripRetiredSettings(payload.settings))]);
     }
 
     for (const c of payload.providerConnections || []) {

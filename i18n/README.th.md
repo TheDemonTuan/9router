@@ -331,7 +331,6 @@ URL ค่าเริ่มต้น:
 | ฟีเจอร์ | ทำอะไร | ทำไมถึงสำคัญ |
 |---------|--------------|----------------|
 | 🚀 **RTK Token Saver** ([RTK](https://github.com/rtk-ai/rtk) ⭐40K) | บีบอัดผลลัพธ์จากเครื่องมือ (`git diff`, `grep`, `ls`, `tree`...) ก่อนส่งให้ LLM | ประหยัด **โทเค็น input 20-40%** ต่อคำขอ |
-| 🧠 **Headroom Token Saver** ([Headroom](https://github.com/chopratejas/headroom)) | พร็อกซี `/v1/compress` ภายนอกก่อนเลือกผู้ให้บริการ | ประหยัดโทเค็นบริบทมากขึ้นโดยไม่ต้องเปลี่ยน client |
 | 🪨 **Caveman Mode** ([Caveman](https://github.com/JuliusBrussee/caveman) ⭐52K) | ฉีด caveman-speak prompt → LLM ตอบสั้นกระชับ เนื้อหาทางเทคนิคยังครบถ้วน | ประหยัด **โทเค็น output สูงสุด 65%** |
 | 🐴 **Ponytail** ([Ponytail](https://github.com/DietrichGebert/ponytail)) | ฉีด prompt "lazy senior dev" → LLM เขียนโค้ดน้อยที่สุด YAGNI-first (Lite/Full/Ultra) | **โทเค็น output น้อยลง, ไม่ต้อง refactor มาก** |
 | 🎯 **Smart 3-Tier Fallback** | เลือกเส้นทางอัตโนมัติ: สมาชิก → ถูก → ฟรี | ไม่ต้องหยุดเขียนโค้ด, ไม่มีเวลาหยุดทำงาน |
@@ -362,32 +361,6 @@ URL ค่าเริ่มต้น:
 ไม่ใช้ RTK: ส่ง 47K โทเค็นให้ LLM
 ใช้ RTK:    ส่ง 28K โทเค็นให้ LLM   (ประหยัด 40% · บริบทเดียวกัน · คำตอบเดียวกัน)
 ```
-
-### 🧠 Headroom Token Saver
-
-Headroom เป็นตัวเลือกและทำงานแยกกัน 9Router เรียก endpoint `/v1/compress` ของ Headroom จากนั้นยังคงเลือกเส้นทาง, fallback, auth และติดตามการใช้งานตามปกติ:
-
-```
-Client → 9Router → Headroom /v1/compress → 9Router → provider
-```
-
-ตั้งค่าท้องถิ่น:
-
-```bash
-pip install "headroom-ai[proxy]"
-headroom proxy --port 8787
-```
-
-เปิดใช้งานใน แดชบอร์ด → Endpoint → Token Saver → Headroom URL ค่าเริ่มต้น: `http://localhost:8787`
-
-ตัวอย่าง Docker:
-
-```bash
-# Headroom service ใน Docker network เดียวกัน
-http://host.docker.internal:8787
-```
-
-ถ้า Headroom ดับหรือคืน error, 9Router จะ fail open และส่งคำขอต้นฉบับ
 
 ### 🐴 Ponytail (Lazy Senior Dev)
 

@@ -61,6 +61,9 @@ jobs:
             $chatgpt_web_tests \
             unit/codex-tool-normalization.test.js \
             unit/codex-native-passthrough-thinking.test.js \
+            unit/claude-header-forwarding.test.js \
+            unit/session-manager.test.js \
+            unit/rtk-cursor-pretranslate.test.js \
             unit/base-executor-timeout-classification.test.js \
             integration/zcode-concurrent-responses.test.js \
             unit/grok-build-config.test.js \
@@ -106,8 +109,8 @@ jobs:
         run: bun tests/integration/pre-response-lifecycle-smoke.mjs
       - name: Verify blue-green reconcile and drain safety
         run: bash tests/unit/blue-green-reconcile.test.sh
-      - name: Run Headroom gateway acceptance
-        run: bash tests/headroom-acceptance.sh --fast
+      - name: Run retired settings migration smoke
+        run: bun tests/integration/retired-settings-smoke.mjs
 
   prepare:
     name: Validate release

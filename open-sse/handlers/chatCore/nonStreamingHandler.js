@@ -234,7 +234,7 @@ export function translateNonStreamingResponse(responseBody, targetFormat, source
 /**
  * Handle non-streaming response from provider.
  */
-export async function handleNonStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, body, stream, translatedBody, finalBody, responseSchemaValidation, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, trackDone, appendLog, pxpipe, reqTag, log, routeContext, headroomTurnContext = null }) {
+export async function handleNonStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, body, stream, translatedBody, finalBody, responseSchemaValidation, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, trackDone, appendLog, pxpipe, reqTag, log, routeContext }) {
   const contentType = providerResponse.headers.get("content-type") || "";
   let responseBody;
 
@@ -248,7 +248,6 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
     }
     const parsed = parseSSEToOpenAIResponse(sseText, model);
     if (!parsed) {
-      headroomTurnContext?.complete?.({ statusCode: HTTP_STATUS.BAD_GATEWAY });
       trackDone();
       appendLog({ status: `FAILED ${HTTP_STATUS.BAD_GATEWAY}` });
       return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Invalid SSE response for non-streaming request");
@@ -259,7 +258,6 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
       responseBody = await providerResponse.json();
     } catch (err) {
       if (err?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" || err?.code === "CLIENT_ABORT") throw err;
-      headroomTurnContext?.complete?.({ statusCode: HTTP_STATUS.BAD_GATEWAY });
       trackDone();
       appendLog({ status: `FAILED ${HTTP_STATUS.BAD_GATEWAY}` });
       console.error(`[ChatCore] Failed to parse JSON from ${provider}:`, err.message);
@@ -288,14 +286,6 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
   responseBody = decloakToolNames(responseBody, toolNameMap);
 
   const usage = extractUsageFromResponse(responseBody);
-  try {
-    headroomTurnContext?.complete?.({
-      statusCode: 200,
-      status: 200,
-      usage,
-      latencyMs: Date.now() - requestStartTime,
-    });
-  } catch { /* best-effort */ }
   appendLog({ tokens: usage, status: "200 OK" });
   saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, silent: true });
   if (log?.line) log.line(reqTag, "📊", formatDoneLine({ usage, latency: { total: Date.now() - requestStartTime } }));

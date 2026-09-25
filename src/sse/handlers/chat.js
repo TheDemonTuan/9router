@@ -13,7 +13,6 @@ import { getModelInfo, getComboModels } from "../services/model.js";
 import { handleChatCore } from "open-sse/handlers/chatCore.js";
 import { createDeadlineError } from "open-sse/utils/preResponseBudget.js";
 import { createRouteContext } from "open-sse/utils/modelRoute.js";
-import { DEFAULT_HEADROOM_URL } from "@/lib/headroom/detect";
 import { getTransform as getPxpipeTransform } from "@/lib/pxpipe/loader.js";
 import { appendPxpipeEvent } from "@/lib/pxpipe/events.js";
 import { credentialUnavailableResponse, errorResponse } from "open-sse/utils/error.js";
@@ -538,10 +537,6 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       }),
       ccFilterNaming: !!chatSettings.ccFilterNaming,
       rtkEnabled: !!chatSettings.rtkEnabled,
-      headroomEnabled: !!chatSettings.headroomEnabled,
-      headroomUrl: chatSettings.headroomUrl || DEFAULT_HEADROOM_URL,
-      headroomProxyToken: process.env.HEADROOM_PROXY_TOKEN || chatSettings.headroomProxyToken || "",
-      headroomCompressUserMessages: !!chatSettings.headroomCompressUserMessages,
       cavemanEnabled: !!chatSettings.cavemanEnabled,
       cavemanLevel: chatSettings.cavemanLevel || "full",
       ponytailEnabled: !!chatSettings.ponytailEnabled,

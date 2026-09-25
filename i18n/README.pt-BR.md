@@ -513,7 +513,6 @@ terceiros por meio de um provedor chamado "Auto-hospedado".
 | Recurso | O que faz | Por que é importante |
 | --------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------- |
 | 🚀 **RTK Token Saver** ([RTK](https://github.com/rtk-ai/rtk) ⭐40K) | Compactar saídas de ferramentas (`git diff`, `grep`, `ls`, `tree`...) antes de enviar para LLM | Economize **20-40% de tokens de entrada** por solicitação |
-| 🧠 **Headroom Token Saver** ([Headroom](https://github.com/chopratejas/headroom)) | Proxy `/v1/compress` externo opcional antes do roteamento do provedor | Economize mais tokens de contexto sem alterar clientes |
 | 🪨 **Modo Caveman** ([Caveman](https://github.com/JuliusBrussee/caveman) ⭐52K) | Injetar prompt de fala do homem das cavernas → Respostas do LLM concisas, substância técnica preservada | Economize **até 65% de tokens de produção** |
 | 🐴 **Ponytail** ([Ponytail](https://github.com/DietrichGebert/ponytail)) | Injetar prompt "lazy senior dev" → LLM escreve código mínimo YAGNI primeiro (Lite/Full/Ultra) | **Menos tokens de saída, menos refatoração** |
 | 🎯 **Fallback inteligente de 3 camadas** | Rota automática: Assinatura → Barato → Grátis | Nunca pare de codificar, tempo de inatividade zero |
@@ -546,35 +545,6 @@ As saídas da ferramenta (`git diff`, `grep`, `find`, `ls`, `tree`, despejos de 
 Sem RTK: 47 mil tokens enviados ao LLM
 Com RTK: 28 mil tokens enviados ao LLM (40% de economia · mesmo contexto · mesma resposta)
 ```
-
-### 🧠 Headroom Token Saver
-
-O headroom é opcional e funciona separadamente. 9Router chama o endpoint `/v1/compress` local do Headroom e, em seguida, mantém roteamento normal, fallback, autenticação e rastreamento de uso:
-
-```
-Cliente → 9Router → Headroom /v1/compress → 9Router → provedor
-```
-
-Configuração local:
-
-```bash
-pip install "headroom-ai[proxy]"
-headroom proxy --port 8787
-```
-
-Habilite em Painel → Endpoint → Economia de tokens → Headroom. URL padrão: `http://localhost:8787`.
-
-Exemplos de Docker:
-
-```bash
-# Serviço Headroom na mesma rede Docker
-http://headroom:8787
-
-# Headroom em execução na máquina host
-http://host.docker.internal:8787
-```
-
-Se o Headroom estiver inativo ou retornar um erro, o o 9Router seguirá em modo aberto e enviará a solicitação original.
 
 ### 🐴 Ponytail (desenvolvedor sênior preguiçoso)
 

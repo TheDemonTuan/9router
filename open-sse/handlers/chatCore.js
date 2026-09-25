@@ -26,16 +26,13 @@ import { takeRenamedToolNames } from "../utils/opencodeFingerprint.js";
 import { injectCaveman } from "../rtk/caveman.js";
 import { injectPonytail } from "../rtk/ponytail.js";
 import { compressMessages, formatRtkLog } from "../rtk/index.js";
-import { compressWithHeadroom, formatHeadroomLog, formatHeadroomSummaryTag } from "../rtk/headroom.js";
-import { selectHeadroomStage, HEADROOM_STAGES } from "../rtk/headroomStage.js";
-import { createHeadroomTurnContext } from "../rtk/headroomRelay.js";
 import { compressWithPxpipe } from "../rtk/pxpipe.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { sanitizeAlitpBaseOrigin, applyAlitpBaseOrigin } from "../providers/alibabaTokenPlanCatalog.js";
 import { stripUnsupportedModalities } from "../translator/concerns/modality.js";
 import { prefetchRemoteImages } from "../translator/concerns/prefetch.js";
 import { defaultClaudeToolType, shouldDefaultClaudeToolType } from "../translator/concerns/toolCall.js";
-import { resolveSessionId, resolveHeadroomSessionId } from "../utils/sessionManager.js";
+import { resolveSessionId } from "../utils/sessionManager.js";
 import { createRouteContext, formatRoute } from "../utils/modelRoute.js";
 import { bindResponseBody } from "../utils/responseLifecycle.js";
 
@@ -66,7 +63,7 @@ export function stripContinuityFields(body) {
   return body;
 }
 
-export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomProxyToken, headroomCompressUserMessages, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, clientSignal, preResponse = null, routeContext: inputRouteContext = null, routeReason = "direct", effectiveModel = null }) {
+export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, clientSignal, preResponse = null, routeContext: inputRouteContext = null, routeReason = "direct", effectiveModel = null }) {
   const { provider, model } = modelInfo;
   const requestStartTime = Date.now();
   // Stable per-session color so all lines of one CLI conversation share a tag
@@ -211,108 +208,8 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     stream = false;
   }
 
-  // Real client-visible SSE stream (excludes forced provider streaming that converts back to JSON)
-  const isInteractiveSse = Boolean(stream && (!providerRequiresStreaming || clientRequestedStreaming));
 
   const tokenSaverEnabled = !clientTokenSaverOptOut && !strictStructuredOutput && !nativePassthrough;
-  // Headroom 0.38 natively handles structured Responses/messages, decoupled from nativePassthrough and strictStructuredOutput
-  const headroomEligible = !clientTokenSaverOptOut;
-
-  // Headroom pure stage planning
-  const headroomStagePlan = selectHeadroomStage({
-    sourceFormat,
-    targetFormat,
-    provider,
-    isCompact: isChatGptWebCompact,
-  });
-
-  // Single-point session resolution derived strictly from caller source/original payload before any mutation
-  const headroomSessionId = (headroomEligible && headroomEnabled && headroomStagePlan.stage !== HEADROOM_STAGES.BYPASS)
-    ? resolveHeadroomSessionId({
-      headers: clientRawRequest?.headers,
-      body: sourceBody,
-      apiKey,
-      provider,
-      model: upstreamModel,
-      format: headroomStagePlan.format,
-      compressUserMessages: headroomCompressUserMessages,
-    })
-    : null;
-
-  const headroomDiagnostics = {};
-  let headroomStats = null;
-  let forwardedProviderHeaders = null;
-  let headroomTurnContext = null;
-  const completeHeadroomTurn = (statusCode = 400) => headroomTurnContext?.complete?.({ statusCode });
-  const captureHeadroomTurn = () => {
-    if (!headroomStats) return;
-    headroomTurnContext = createHeadroomTurnContext({
-      url: headroomUrl, proxyToken: headroomProxyToken,
-      turnId: headroomStats.turnId, obligations: headroomStats.obligations,
-      startTime: requestStartTime, log,
-    });
-  };
-
-  const handleHeadroomAbort = (error) => {
-    if (error?.code === "HEADROOM_SESSION_FAILURE" && preResponse?.signal?.aborted) throw preResponse.signal.reason;
-    if (error?.code === "HEADROOM_SESSION_FAILURE" && clientSignal?.aborted) throw createClientAbortError();
-    if (error?.code === "HEADROOM_SESSION_FAILURE") {
-      const result = createErrorResult(error.status || 503, "Headroom session compression unavailable", null, {
-        errorClass: error.reason || "headroom_session_failure",
-        retryable: error.retryable === true,
-      });
-      result.terminalNoFallback = true;
-      result.response.headers.set("x-9router-no-fallback", "true");
-      result.response.headers.set("x-9router-error-code", error.reason || "headroom_session_failure");
-      return result;
-    }
-    if (error?.code !== "CLIENT_ABORT" && (error?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" || preResponse?.signal?.aborted)) {
-      const deadlineError = error?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" ? error : preResponse?.signal?.reason || createDeadlineError();
-      if (!deadlineError.code) deadlineError.code = "PRE_RESPONSE_DEADLINE_EXCEEDED";
-      if (!deadlineError.status) deadlineError.status = 504;
-      if (preResponse) throw deadlineError;
-      return createErrorResult(HTTP_STATUS.GATEWAY_TIMEOUT, deadlineError.message || "Gateway timeout: pre-response budget exceeded", null, {
-        errorClass: "transient_provider_failure",
-        retryable: true,
-      });
-    }
-    if (error?.code === "CLIENT_ABORT" || (error?.code !== "PRE_RESPONSE_DEADLINE_EXCEEDED" && (clientSignal?.aborted || error?.name === "AbortError"))) {
-      const abortError = error?.code === "CLIENT_ABORT" ? error : createClientAbortError();
-      if (!abortError.code) abortError.code = "CLIENT_ABORT";
-      if (!abortError.status) abortError.status = 499;
-      if (preResponse) throw abortError;
-      return createErrorResult(499, "Client closed request", null, {
-        errorClass: "client_abort",
-        retryable: false,
-      });
-    }
-    return null;
-  };
-
-  // SOURCE_NATIVE stage: runs on the clean source body before translation
-  if (headroomEligible && headroomEnabled && headroomStagePlan.stage === HEADROOM_STAGES.SOURCE_NATIVE) {
-    try {
-      headroomStats = await compressWithHeadroom(sourceBody, {
-        enabled: true,
-        url: headroomUrl,
-        proxyToken: headroomProxyToken,
-        model: sourceBody.model || upstreamModel,
-        format: headroomStagePlan.format,
-        compressUserMessages: headroomCompressUserMessages,
-        sessionId: headroomSessionId,
-        preResponse,
-        clientSignal: clientSignal || null,
-        requestHeaders: clientRawRequest?.headers,
-        diagnostics: headroomDiagnostics,
-      });
-      captureHeadroomTurn();
-      if (headroomStats?.providerHeaders) forwardedProviderHeaders = headroomStats.providerHeaders;
-    } catch (error) {
-      const abortResult = handleHeadroomAbort(error);
-      if (abortResult) return abortResult;
-      headroomStats = null;
-    }
-  }
 
   // Cursor's translator rewrites tool_result into user text, so RTK must run on
   // the source body before translation. Every other pair translates the tool
@@ -356,7 +253,6 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       if (n > 0) log?.debug?.("MODALITY", `prefetched ${n} remote image(s) for ${targetFormat}`);
     } catch (e) {
       if (preResponse?.signal?.aborted || clientSignal?.aborted) {
-        completeHeadroomTurn(preResponse?.signal?.reason?.status || clientSignal?.reason?.status || 499);
         throw preResponse?.signal?.reason || clientSignal?.reason || e;
       }
       log?.warn?.("MODALITY", `image prefetch failed: ${e.message}`);
@@ -393,11 +289,9 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
             ? error.message
             : `Failed to translate request for ${sourceFormat} → ${targetFormat}: ${error.message}`)
         : `Failed to translate request for ${sourceFormat} → ${targetFormat}`;
-      completeHeadroomTurn();
       return createErrorResult(HTTP_STATUS.BAD_REQUEST, message);
     }
     if (!translatedBody) {
-      completeHeadroomTurn();
       return createErrorResult(HTTP_STATUS.BAD_REQUEST, `Failed to translate request for ${sourceFormat} → ${targetFormat}`);
     }
     responseSchemaValidation = translatedBody._responseSchemaValidation || translatedBody.request?._responseSchemaValidation;
@@ -415,7 +309,6 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     try {
       validateCodexResponsesRequest(body);
     } catch (error) {
-      completeHeadroomTurn();
       return createErrorResult(HTTP_STATUS.BAD_REQUEST, error.message);
     }
   }
@@ -476,52 +369,10 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const rtkLine = formatRtkLog(rtkStats);
   if (rtkLine) console.log(rtkLine);
 
-  // Compress the provider-native body only if source-native compression did not run.
-  if (!headroomStats && headroomEligible && headroomEnabled && headroomStagePlan.stage === HEADROOM_STAGES.TARGET_NATIVE) {
-    try {
-      headroomStats = await compressWithHeadroom(translatedBody, {
-        enabled: true,
-        url: headroomUrl,
-        proxyToken: headroomProxyToken,
-        model: wireModel,
-        format: headroomStagePlan.format,
-        compressUserMessages: headroomCompressUserMessages,
-        sessionId: headroomSessionId,
-        preResponse,
-        clientSignal: clientSignal || null,
-        requestHeaders: clientRawRequest?.headers,
-        diagnostics: headroomDiagnostics,
-      });
-      captureHeadroomTurn();
-      if (headroomStats?.providerHeaders) forwardedProviderHeaders = headroomStats.providerHeaders;
-    } catch (error) {
-      const abortResult = handleHeadroomAbort(error);
-      if (abortResult) return abortResult;
-      headroomStats = null;
-    }
-  }
-  if (headroomEnabled && headroomEligible && headroomStagePlan.stage === HEADROOM_STAGES.BYPASS && headroomUrl) {
-    headroomDiagnostics.reason ||= "stage_bypass";
-  }
-  if (headroomEnabled && clientTokenSaverOptOut) {
-    headroomDiagnostics.reason ||= "client_opt_out";
-  }
-  const headroomLine = formatHeadroomLog(headroomStats);
-  if (headroomLine) log?.info?.("HEADROOM", `stage=${headroomStagePlan.stage} fmt=${headroomStagePlan.format || "-"} | ${headroomLine}`);
-  else if (headroomEnabled && !clientTokenSaverOptOut) log?.debug?.("HEADROOM", `skipped reason=${headroomDiagnostics.reason || headroomStagePlan.reason || "compression unavailable"}`);
-
   // Token-saver flags accumulator for the single "⚙" log line below.
   const xf = [];
 
   if (rtkStats?.hits?.length) xf.push(`RTK:${rtkStats.hits.length}`);
-  if (headroomEnabled) {
-    const headroomTag = formatHeadroomSummaryTag(headroomStats, headroomDiagnostics);
-    if (headroomTag) {
-      xf.push(headroomTag);
-      if (headroomSessionId) xf.push("SESSION:affinity");
-      else if (isInteractiveSse) xf.push("SESSION:stateless");
-    }
-  }
 
   // Caveman: inject terse-style system prompt
   if (tokenSaverEnabled && cavemanEnabled && cavemanLevel) {
@@ -557,9 +408,6 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const executor = getExecutor(provider);
   const isStream = Boolean(stream);
   let pendingReleased = false;
-  if (finalFormat !== FORMATS.CLAUDE && !(provider === "github" && executor.isClaudeModel(model))) {
-    forwardedProviderHeaders = null;
-  }
   const releasePending = (error = false) => {
     if (pendingReleased) return;
     pendingReleased = true;
@@ -623,11 +471,9 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     const result = await (preResponse ? preResponse.run(() => executor.execute({
       model, body: translatedBody, stream, credentials, providerSessionId: sessionSeed,
       clientTool, signal: streamController.signal, log, proxyOptions, preResponse,
-      customHeaders: forwardedProviderHeaders,
     })) : executor.execute({
       model, body: translatedBody, stream, credentials, providerSessionId: sessionSeed,
       clientTool, signal: streamController.signal, log, proxyOptions, preResponse,
-      customHeaders: forwardedProviderHeaders,
     }));
     providerResponse = bindResponseBody(result.response, { signal: preResponse ? AbortSignal.any([streamController.signal, preResponse.signal]) : streamController.signal });
     providerUrl = result.url;
@@ -645,14 +491,6 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     const isConnectTimeout = error.code === "UPSTREAM_CONNECT_TIMEOUT" || error.status === HTTP_STATUS.GATEWAY_TIMEOUT;
     const failureStatus = isClientAbort ? 499 : (isConnectTimeout ? HTTP_STATUS.GATEWAY_TIMEOUT : HTTP_STATUS.BAD_GATEWAY);
 
-    try {
-      headroomTurnContext?.complete?.({
-        statusCode: failureStatus,
-        status: failureStatus,
-        error,
-        latencyMs: Date.now() - requestStartTime,
-      });
-    } catch { /* best effort */ }
 
     if (preResponse?.signal.aborted || error?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" || error?.code === "CLIENT_ABORT") {
       streamController.abort(error);
@@ -723,11 +561,9 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
           const retryResult = await (preResponse ? preResponse.run(() => executor.execute({
             model, body: translatedBody, stream, credentials, providerSessionId: sessionSeed,
             clientTool, signal: streamController.signal, log, proxyOptions, preResponse,
-            customHeaders: forwardedProviderHeaders,
           })) : executor.execute({
             model, body: translatedBody, stream, credentials, providerSessionId: sessionSeed,
             clientTool, signal: streamController.signal, log, proxyOptions, preResponse,
-            customHeaders: forwardedProviderHeaders,
           }));
           retryResult.response = bindResponseBody(retryResult.response, { signal: preResponse ? AbortSignal.any([streamController.signal, preResponse.signal]) : streamController.signal });
           if (retryResult.response.ok) {
@@ -755,14 +591,6 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // Provider returned error
   if (!providerResponse.ok) {
     releasePending(true);
-    try {
-      headroomTurnContext?.complete?.({
-        statusCode: providerResponse.status,
-        status: providerResponse.status,
-        error: new Error(`Provider returned HTTP ${providerResponse.status}`),
-        latencyMs: Date.now() - requestStartTime,
-      });
-    } catch { /* best-effort */ }
     const terminalNoFallback = providerResponse.headers.get("x-9router-no-fallback") === "true";
     const originalProviderError = terminalNoFallback ? providerResponse.clone() : null;
     const { statusCode, message, resetsAtMs, resolvedModel, errorClass, retryable } = await parseUpstreamError(providerResponse, executor);
@@ -802,7 +630,6 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag,
     log, responsesClientDialect, responsesProviderDialect, releasePending,
     preResponse, upstreamHeadersAt, routeContext,
-    headroomTurnContext,
   };
   const appendLog = (extra) => appendRequestLog({ model, provider, connectionId, ...extra }).catch(() => { });
   const trackDone = () => releasePending();
@@ -824,7 +651,6 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const { onStreamComplete, streamDetailId } = buildOnStreamComplete({ ...sharedCtx });
   return handleStreamingResponse({ ...sharedCtx, providerResponse, sourceFormat, targetFormat: providerResponseFormat, userAgent, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, credentials });
   } catch (error) {
-    completeHeadroomTurn(error?.status || 502);
     if (preResponse?.signal.aborted || error?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" || error?.code === "CLIENT_ABORT") {
       streamController.abort(error);
       streamController.handleError(error);

@@ -43,6 +43,7 @@ vi.mock("@/sse/services/tokenRefresh.js", () => ({
 vi.mock("@/sse/utils/logger.js", () => ({
   debug: vi.fn(), info: vi.fn(), warn: vi.fn(), maskKey: vi.fn(),
 }));
+vi.mock("open-sse/services/projectId.js", () => ({ getProjectIdForConnection: vi.fn(async () => null) }));
 
 const { handleChat } = await import("@/sse/handlers/chat.js");
 
@@ -108,17 +109,17 @@ describe("Codex account capability routing", () => {
 });
 
 describe("chat credential exhaustion", () => {
-  it("does not cooldown or rotate an account for a terminal Headroom session 503", async () => {
+  it("does not cooldown or rotate an account for a terminal bridge 503", async () => {
     mocks.getProviderCredentials.mockResolvedValue({ connectionId: "ag-a", connectionName: "a", accessToken: "a", providerSpecificData: {} });
     mocks.handleChatCore.mockResolvedValue({
-      success: false, status: 503, error: "Headroom session compression unavailable",
-      errorClass: "compression_timeout", retryable: true, terminalNoFallback: true,
-      response: new Response("session unavailable", { status: 503, headers: { "x-9router-no-fallback": "true", "x-should-retry": "true" } }),
+      success: false, status: 503, error: "Bridge connection unavailable",
+      errorClass: "bridge_connection_unavailable", retryable: false, terminalNoFallback: true,
+      response: new Response("bridge unavailable", { status: 503, headers: { "x-9router-no-fallback": "true", "x-should-retry": "false", "x-9router-error-code": "bridge_connection_unavailable" } }),
     });
 
     const response = await handleChat(request());
     expect(response.status).toBe(503);
-    expect(response.headers.get("x-should-retry")).toBe("true");
+    expect(response.headers.get("x-should-retry")).toBe("false");
     expect(mocks.getProviderCredentials).toHaveBeenCalledTimes(1);
     expect(mocks.markAccountUnavailable).not.toHaveBeenCalled();
     expect(mocks.handleAntigravityQuotaError).not.toHaveBeenCalled();
