@@ -453,6 +453,25 @@ describe("handleChatCore Headroom diagnostics & session terminalNoFallback", () 
     expect(executeMock).not.toHaveBeenCalled();
   });
 
+  it("session lock timeout returns retryable 503 without provider dispatch", async () => {
+    global.fetch = vi.fn(async () => Response.json({ error: { type: "compression_timeout" } }, { status: 503 }));
+    const result = await handleChatCore({
+      body: { model: "gpt-4o", stream: false, messages: [{ role: "user", content: "hello" }] },
+      modelInfo: { provider: "openai", model: "gpt-4o" },
+      credentials: { apiKey: "test-key", providerSpecificData: {} },
+      log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn() },
+      connectionId: "test-lock-timeout", headroomEnabled: true,
+      headroomUrl: "http://localhost:8787",
+      clientRawRequest: { endpoint: "/v1/chat/completions", body: {}, headers: { accept: "application/json", "x-session-id": "session-lock-timeout" } },
+    });
+    expect(result.status).toBe(503);
+    expect(result.terminalNoFallback).toBe(true);
+    expect(result.response.headers.get("x-9router-no-fallback")).toBe("true");
+    expect(result.response.headers.get("x-9router-error-code")).toBe("compression_timeout");
+    expect(result.response.headers.get("x-should-retry")).toBe("true");
+    expect(executeMock).not.toHaveBeenCalled();
+  });
+
   it("session failure in SOURCE_NATIVE returns terminalNoFallback and provider calls zero", async () => {
     const log = { debug: vi.fn(), info: vi.fn(), warn: vi.fn() };
 
