@@ -728,6 +728,115 @@ except (AttributeError, ValueError, TypeError):
 PY
 }
 
+get_slot_drain_info() {
+  local slot="$1" container="9router-$1" hostname health
+  hostname="$(docker inspect "$container" --format '{{.Config.Hostname}}' 2>/dev/null)" || {
+    printf 'UNKNOWN -1 -1 -1\n'
+    return 1
+  }
+  [[ -n "$hostname" ]] || {
+    printf 'UNKNOWN -1 -1 -1\n'
+    return 1
+  }
+  health="$(timeout 6 docker exec "$container" wget -T 5 -qO- http://127.0.0.1:20128/api/health 2>/dev/null)" || {
+    printf 'UNKNOWN -1 -1 -1\n'
+    return 1
+  }
+  python3 - "$slot" "$hostname" "$health" <<'INNER_PY'
+import json
+import sys
+
+slot, hostname, raw_health = sys.argv[1:4]
+
+def unique_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate key")
+        result[key] = value
+    return result
+
+try:
+    payload = json.loads(raw_health, object_pairs_hook=unique_pairs)
+    prefix = hostname + "-"
+    identity = payload.get("instance_id")
+    if (payload.get("ok") is not True or payload.get("deployment_slot") != slot
+            or not isinstance(identity, str) or not identity.startswith(prefix)
+            or not identity[len(prefix):].isdecimal() or int(identity[len(prefix):]) <= 0):
+        print("UNKNOWN -1 -1 -1")
+        sys.exit(0)
+
+    if payload.get("active_requests_known") is not True:
+        print("UNKNOWN -1 -1 -1")
+        sys.exit(0)
+
+    active_req = payload.get("active_requests")
+    if not isinstance(active_req, int) or active_req < 0:
+        print("UNKNOWN -1 -1 -1")
+        sys.exit(0)
+
+    streams = payload.get("active_streams", -1)
+    if not isinstance(streams, int) or streams < 0:
+        streams = -1
+
+    oldest_ms = payload.get("oldest_active_ms")
+    if not isinstance(oldest_ms, int) or oldest_ms < 0:
+        oldest_ms = -1
+
+    if active_req == 0:
+        print(f"IDLE 0 {streams} {oldest_ms}")
+    else:
+        print(f"ACTIVE {active_req} {streams} {oldest_ms}")
+except Exception:
+    print("UNKNOWN -1 -1 -1")
+INNER_PY
+}
+
+slot_drain_state() {
+  local info state
+  info="$(get_slot_drain_info "$1")" || info="UNKNOWN -1 -1 -1"
+  read -r state _ <<< "$info"
+  printf '%s\n' "$state"
+}
+
+handoff_old_slot_to_drain() {
+  local slot="$1"
+  local fast_deadline=$((SECONDS + FAST_DRAIN_TIMEOUT))
+  local info state count streams oldest_ms
+
+  while (( SECONDS < fast_deadline )); do
+    info="$(get_slot_drain_info "$slot")" || info="UNKNOWN -1 -1 -1"
+    read -r state count streams oldest_ms <<< "$info"
+    if [[ "$state" == IDLE ]]; then
+      log "[drain] $slot idle"
+      compose stop "9router-$slot" || log "WARN: failed to stop idle slot $slot"
+      return 0
+    fi
+    sleep 1
+  done
+
+  info="$(get_slot_drain_info "$slot")" || info="UNKNOWN -1 -1 -1"
+  read -r state count streams oldest_ms <<< "$info"
+  case "$state" in
+    IDLE)
+      log "[drain] $slot idle"
+      compose stop "9router-$slot" || log "WARN: failed to stop idle slot $slot"
+      ;;
+    ACTIVE)
+      local diag=""
+      if [[ "$oldest_ms" =~ ^[0-9]+$ && "$oldest_ms" -ge 0 ]]; then
+        local oldest_s=$(( oldest_ms / 1000 ))
+        diag=" (streams=${streams}, oldest=${oldest_s}s)"
+      fi
+      log "[drain] $slot active_requests=$count$diag; keeping container running for deferred drain"
+      ;;
+    *)
+      log "[drain] $slot state unknown; leaving container untouched"
+      ;;
+  esac
+}
+
+
 show_status() {
   local strict="${1:-false}" configured_slot=unknown configured_gen=unknown observed_slot=unknown observed_gen=unknown mirror=none
   local blue green directory=unknown reason="" prepared health_ok=false route_info probe_info
@@ -813,11 +922,10 @@ do_rollback() {
   old_state="$(docker inspect "9router-$current" --format '{{.State.Status}}' 2>/dev/null)" || old_state=missing
   route_cutover "$target" "$current"
   sync_metadata "$target" "$current" "$image"
-  if [[ "$old_state" == running ]]; then
-    wait_slot_idle "$current" || die "Rollback drain timed out; old container remains running"
-    compose stop "9router-$current" || die "Rollback route acknowledged, but old container could not stop"
-  fi
   log "Rollback completed to $target"
+  if [[ "$old_state" == running ]]; then
+    handoff_old_slot_to_drain "$current"
+  fi
 }
 
 run_diagnostics() {
@@ -956,6 +1064,7 @@ COMPOSE_PROGRESS="${COMPOSE_PROGRESS:-plain}"
 PULL_HEARTBEAT_INTERVAL="${PULL_HEARTBEAT_INTERVAL:-15}"
 DRAIN_TIMEOUT="${DRAIN_TIMEOUT:-120}"
 DRAIN_POLL_SECONDS="${DRAIN_POLL_SECONDS:-2}"
+FAST_DRAIN_TIMEOUT="${FAST_DRAIN_TIMEOUT:-3}"
 PULL_HEARTBEAT_PID=""
 
 start_pull_heartbeat() {
@@ -1091,11 +1200,10 @@ do_deploy() {
   image="$(container_image "$target")" || die "Cannot inspect target immutable image"
   route_cutover "$target" "$current"
   sync_metadata "$target" "$current" "$image"
-  if [[ -n "$current" ]]; then
-    wait_slot_idle "$current" || die "Deployment route acknowledged but old slot remains running after drain timeout"
-    compose stop "9router-$current" || die "Route acknowledged but old slot could not stop"
-  fi
   log "Deployment completed: $target"
+  if [[ -n "$current" ]]; then
+    handoff_old_slot_to_drain "$current"
+  fi
 }
 
 acquire_deployment_lock() {
