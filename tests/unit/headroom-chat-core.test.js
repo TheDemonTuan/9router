@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { toNumericSessionId } from "../../open-sse/utils/sessionManager.js";
 
 const { executeMock } = vi.hoisted(() => ({
   executeMock: vi.fn(),
@@ -269,6 +270,32 @@ describe("handleChatCore Headroom diagnostics & session terminalNoFallback", () 
         }),
       }),
     }));
+  });
+
+  it("keeps the client session through SOURCE_NATIVE compression and translation", async () => {
+    const body = {
+      model: "claude-3-5-sonnet-20241022",
+      session_id: "client-conversation-42",
+      messages: [{ role: "user", content: "long source message" }],
+    };
+    global.fetch = vi.fn(async (_url, init) => {
+      const sent = JSON.parse(init.body);
+      expect(sent.session_id).toBeUndefined();
+      return Response.json({ body: { model: sent.model, messages: [{ role: "user", content: "short" }] } });
+    });
+    const credentials = { apiKey: "test-key", providerSpecificData: {} };
+    await handleChatCore({
+      body,
+      modelInfo: { provider: "antigravity", model: "claude-3-5-sonnet" },
+      credentials,
+      log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn() },
+      connectionId: "test-source-session", headroomEnabled: true,
+      headroomUrl: "http://localhost:8787", sourceFormatOverride: "claude",
+      clientRawRequest: { endpoint: "/v1/messages", body, headers: { accept: "application/json" } },
+    });
+    expect(body.session_id).toBe("client-conversation-42");
+    expect(credentials._clientSessionId).toBe("client-conversation-42");
+    expect(executeMock.mock.calls[0][0].body.request.sessionId).toBe(toNumericSessionId("client-conversation-42"));
   });
 
   it("handles client cancellation during Headroom compression with HTTP 499", async () => {
