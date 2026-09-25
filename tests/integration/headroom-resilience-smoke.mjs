@@ -421,15 +421,25 @@ if (!process.argv.includes("--child")) {
       assert.deepEqual(second.messages.slice(0, replayPrefixLength), first.messages, "session replay changed the returned prefix");
 
       const lockSessionId = `probe-lock-${name}`;
-      const concurrent = await Promise.allSettled(Array.from({ length: 2 }, (_, i) => {
+      const concurrentBodies = Array.from({ length: 2 }, (_, i) => {
         const body = fixture("openai", 262144);
         body.messages.push({ role: "user", content: `Concurrent synthetic turn ${i}` });
-        return compressWithHeadroom(body, { url, proxyToken: token, model: body.model, sessionId: lockSessionId });
-      }));
+        return body;
+      });
+      const concurrent = await Promise.allSettled(concurrentBodies.map((body) =>
+        compressWithHeadroom(body, { url, proxyToken: token, model: body.model, sessionId: lockSessionId })
+      ));
       const accepted = concurrent.filter((row) => row.status === "fulfilled" && row.value && !row.value.compressionSkipped).length;
       const busy = concurrent.filter((row) => row.status === "rejected" && row.reason?.code === "HEADROOM_SESSION_FAILURE" && row.reason.status === 503).length;
       assert.equal(accepted + busy, 2, "concurrent session requests must compress or return retryable 503");
-      const session = { replay: "identical_prefix", concurrent: { accepted, retryable503: busy } };
+      for (let i = 0; i < concurrent.length; i++) {
+        if (concurrent[i].status !== "fulfilled") continue;
+        assert.equal(concurrentBodies[i].messages.at(-1).content, `Concurrent synthetic turn ${i}`);
+      }
+      if (accepted === 2) {
+        assert.deepEqual(concurrentBodies[0].messages.slice(0, replayPrefixLength), concurrentBodies[1].messages.slice(0, replayPrefixLength), "concurrent session prefixes diverged");
+      }
+      const session = { replay: "identical_prefix", concurrent: { accepted, retryable503: busy, prefix: accepted === 2 ? "identical" : "not_compared" } };
       console.log(JSON.stringify({ session }));
       if (output) {
         await writeFile(output, JSON.stringify({ image, version, mode: "probe", results: probeResults, session }, null, 2));
