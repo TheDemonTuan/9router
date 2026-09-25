@@ -29,6 +29,8 @@ import { compressMessages, formatRtkLog } from "../rtk/index.js";
 import { compressWithHeadroom, formatHeadroomLog, formatHeadroomSizeLog } from "../rtk/headroom.js";
 import { selectHeadroomStage, HEADROOM_STAGES } from "../rtk/headroomStage.js";
 import { createHeadroomTurnContext } from "../rtk/headroomRelay.js";
+import { recordHeadroomBypass } from "../rtk/headroomRuntime.js";
+import { buildCompressEndpoint, isSafeOrigin } from "../rtk/headroomGateway.js";
 import { compressWithPxpipe } from "../rtk/pxpipe.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { sanitizeAlitpBaseOrigin, applyAlitpBaseOrigin } from "../providers/alibabaTokenPlanCatalog.js";
@@ -202,8 +204,8 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   let forwardedProviderHeaders = null;
 
   const handleHeadroomAbort = (error) => {
-    if (preResponse?.signal?.aborted || error?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED") {
-      const deadlineError = preResponse?.signal?.reason || error || createDeadlineError();
+    if (error?.code !== "CLIENT_ABORT" && (error?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" || preResponse?.signal?.aborted)) {
+      const deadlineError = error?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" ? error : preResponse?.signal?.reason || createDeadlineError();
       if (!deadlineError.code) deadlineError.code = "PRE_RESPONSE_DEADLINE_EXCEEDED";
       if (!deadlineError.status) deadlineError.status = 504;
       if (preResponse) throw deadlineError;
@@ -212,7 +214,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
         retryable: true,
       });
     }
-    if (clientSignal?.aborted || error?.code === "CLIENT_ABORT" || error?.name === "AbortError") {
+    if (error?.code === "CLIENT_ABORT" || (error?.code !== "PRE_RESPONSE_DEADLINE_EXCEEDED" && (clientSignal?.aborted || error?.name === "AbortError"))) {
       const abortError = error?.code === "CLIENT_ABORT" ? error : createClientAbortError();
       if (!abortError.code) abortError.code = "CLIENT_ABORT";
       if (!abortError.status) abortError.status = 499;
@@ -238,6 +240,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
         timeoutMs: headroomTimeoutMs,
         preResponse,
         clientSignal: clientSignal || null,
+        requestHeaders: clientRawRequest?.headers,
         diagnostics: headroomDiagnostics,
       });
       if (headroomStats?.providerHeaders) {
@@ -443,6 +446,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
         timeoutMs: headroomTimeoutMs,
         preResponse,
         clientSignal: clientSignal || null,
+        requestHeaders: clientRawRequest?.headers,
         diagnostics: headroomDiagnostics,
       });
       if (headroomStats?.providerHeaders) {
@@ -454,12 +458,22 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       headroomStats = null;
     }
   }
+  if (headroomEnabled && headroomEligible && headroomStagePlan.stage === HEADROOM_STAGES.BYPASS && headroomUrl) {
+    const endpoint = buildCompressEndpoint(headroomUrl);
+    if (isSafeOrigin(endpoint)) recordHeadroomBypass(endpoint, "stage_bypass");
+  }
   const headroomLine = formatHeadroomLog(headroomStats);
   const headroomSizeLine = formatHeadroomSizeLog(headroomDiagnostics);
+  const reason = headroomDiagnostics.reason || headroomStagePlan.reason || "compression unavailable";
+  if (headroomDiagnostics.transition === "opened") {
+    log?.warn?.("HEADROOM", `circuit_open reason=${reason} budget=${headroomDiagnostics.budgetMs ?? 0}ms elapsed=${Math.round(headroomDiagnostics.latencyMs ?? 0)}ms cooldown=30000ms`);
+  } else if (headroomDiagnostics.transition === "recovered") {
+    log?.info?.("HEADROOM", "circuit_closed half_open_probe=success");
+  }
   if (headroomLine) {
     log?.info?.("HEADROOM", `stage=${headroomStagePlan.stage} fmt=${headroomStagePlan.format || "-"} | ${headroomLine}${headroomSizeLine ? ` | ${headroomSizeLine}` : ""}`);
   } else if (headroomEnabled && !clientTokenSaverOptOut) {
-    log?.warn?.("HEADROOM", `skipped: ${headroomDiagnostics.reason || headroomStagePlan.reason || "compression unavailable"}${headroomDiagnostics.endpoint ? ` (${headroomDiagnostics.endpoint})` : ""}`);
+    log?.debug?.("HEADROOM", `skipped reason=${reason}${reason === "gateway_timeout" ? ` budget=${headroomDiagnostics.budgetMs}ms elapsed=${Math.round(headroomDiagnostics.latencyMs)}ms` : ""}`);
   }
 
   // Response usage relay context (Phase 3): active only when obligations.relay_usage === true
@@ -511,6 +525,9 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   const executor = getExecutor(provider);
   let pendingReleased = false;
+  if (finalFormat !== FORMATS.CLAUDE && !(provider === "github" && executor.isClaudeModel(model))) {
+    forwardedProviderHeaders = null;
+  }
   const releasePending = (error = false) => {
     if (pendingReleased) return;
     pendingReleased = true;

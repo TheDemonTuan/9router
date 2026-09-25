@@ -23,24 +23,35 @@ echo "=========================================================="
 TMP_ISOLATION_DIR=$(mktemp -d -t 9router-headroom-acceptance-XXXXXX)
 trap 'rm -rf "${TMP_ISOLATION_DIR}"' EXIT
 
-export HOME="${TMP_ISOLATION_DIR}/home"
-export DATA_DIR="${TMP_ISOLATION_DIR}/data"
-mkdir -p "${HOME}" "${DATA_DIR}"
+if command -v cygpath >/dev/null 2>&1; then
+  export HOME="$(cygpath -w "${TMP_ISOLATION_DIR}/home")"
+  export USERPROFILE="${HOME}"
+  export APPDATA="${HOME}"
+  export DATA_DIR="$(cygpath -w "${TMP_ISOLATION_DIR}/data")"
+else
+  export HOME="${TMP_ISOLATION_DIR}/home"
+  export USERPROFILE="${HOME}"
+  export APPDATA="${HOME}"
+  export DATA_DIR="${TMP_ISOLATION_DIR}/data"
+fi
+mkdir -p "${TMP_ISOLATION_DIR}/home" "${TMP_ISOLATION_DIR}/data"
 
 cd "${WORKTREE_ROOT}"
 
-echo "[Step 1/5] Running Headroom Focused Unit Suites..."
+echo "[Step 1/6] Running Headroom Focused Unit Suites..."
 cd tests
 bun run test --config vitest.config.js \
   unit/headroom.test.js \
   unit/headroom-responses-format.test.js \
   unit/headroom-detect.test.js \
   unit/headroom-chat-core.test.js \
-  unit/headroom-stage-invariants.test.js
+  unit/headroom-stage-invariants.test.js \
+  unit/claude-header-forwarding.test.js \
+  unit/headroom-resilience.test.js
 cd "${WORKTREE_ROOT}"
 
 if [[ "${MODE}" == "strong" ]]; then
-  echo "[Step 2/5] Running Affected Translator & Lifecycle Regressions..."
+  echo "[Step 2/6] Running Affected Translator & Lifecycle Regressions..."
   cd tests
   bun run test --config vitest.config.js \
     unit/dashboard-guard.test.js \
@@ -51,8 +62,10 @@ if [[ "${MODE}" == "strong" ]]; then
     translator/format-roundtrip.test.js \
     translator/responses-gemini-direct.test.js
   cd "${WORKTREE_ROOT}"
+  echo "[Step 3/6] Running isolated offline network smoke..."
+  bun tests/integration/headroom-resilience-smoke.mjs --offline
 
-  echo "[Step 3/5] Linting Changed Supported JavaScript Files..."
+  echo "[Step 4/6] Linting Changed Supported JavaScript Files..."
   CHANGED_JS=(
     open-sse/rtk/headroom.js
     open-sse/rtk/headroomGateway.js
@@ -67,13 +80,19 @@ if [[ "${MODE}" == "strong" ]]; then
     src/dashboardGuard.js
     src/lib/headroom/detect.js
     src/lib/headroom/process.js
-    src/sse/handlers/chat.js
+    open-sse/rtk/headroomRuntime.js
+    open-sse/utils/anthropicBeta.js
+    open-sse/config/runtimeConfig.js
+    src/app/api/settings/route.js
+    src/lib/db/repos/settingsRepo.js
+    src/lib/db/migrations/002-headroom-timeout-default.js
+    src/app/'(dashboard)'/dashboard/token-saver/TokenSaverClient.js
     src/app/api/headroom/proxy/[...path]/route.js
     src/app/api/headroom/status/route.js
   )
   bunx --no-install eslint "${CHANGED_JS[@]}"
 
-  echo "[Step 4/5] Checking Docker Compose Config..."
+  echo "[Step 5/6] Checking Docker Compose Config..."
   if command -v docker >/dev/null 2>&1; then
     docker compose config -q
     docker compose -f docker-compose.prod.yml config -q
@@ -92,7 +111,7 @@ if [[ "${MODE}" == "strong" ]]; then
     '
   fi
 
-  echo "[Step 5/5] Checking Bun Build Production Output..."
+  echo "[Step 6/6] Checking Bun Build Production Output..."
   bun run build
 fi
 

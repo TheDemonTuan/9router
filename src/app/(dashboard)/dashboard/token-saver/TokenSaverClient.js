@@ -14,7 +14,12 @@ export default function TokenSaverClient() {
   const [rtkEnabled, setRtkEnabledState] = useState(true);
   const [headroomEnabled, setHeadroomEnabled] = useState(false);
   const [headroomUrl, setHeadroomUrl] = useState("http://localhost:8787");
-  const [headroomTimeoutMs, setHeadroomTimeoutMs] = useState(3000);
+  const [headroomTimeoutMs, setHeadroomTimeoutMs] = useState("");
+  const [savedHeadroomTimeoutMs, setSavedHeadroomTimeoutMs] = useState(null);
+  const [headroomEffectiveTimeoutMs, setHeadroomEffectiveTimeoutMs] = useState(null);
+  const [headroomTimeoutSource, setHeadroomTimeoutSource] = useState(null);
+  const [headroomTimeoutError, setHeadroomTimeoutError] = useState("");
+  const [headroomSettingsLoaded, setHeadroomSettingsLoaded] = useState(false);
   const [headroomStatus, setHeadroomStatus] = useState({
     installed: false,
     running: false,
@@ -407,11 +412,34 @@ export default function TokenSaverClient() {
     patchSetting({ pxpipeMinChars: next });
   };
 
-  const handleHeadroomTimeoutBlur = () => {
-    const raw = Math.round(Number(headroomTimeoutMs));
-    const next = Number.isFinite(raw) && raw > 0 ? raw : 3000;
-    setHeadroomTimeoutMs(next);
-    patchSetting({ headroomTimeoutMs: next });
+  const handleHeadroomTimeoutBlur = async () => {
+    if (!headroomSettingsLoaded || headroomTimeoutSource === "env") return;
+    const savedCandidate = Number.isInteger(savedHeadroomTimeoutMs) && savedHeadroomTimeoutMs >= 1 && savedHeadroomTimeoutMs <= 2147483647 ? savedHeadroomTimeoutMs : headroomEffectiveTimeoutMs;
+    const raw = String(headroomTimeoutMs).trim();
+    const next = Number(raw);
+    if (!/^\d+$/.test(raw) || !Number.isInteger(next) || next < 1 || next > 2147483647) {
+      setHeadroomTimeoutMs(String(savedCandidate));
+      setHeadroomTimeoutError("Enter an integer between 1 and 2147483647.");
+      return;
+    }
+    if (next === savedHeadroomTimeoutMs) return;
+    try {
+      const response = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ headroomTimeoutMs: next }),
+      });
+      if (!response.ok) throw new Error("Unable to save timeout.");
+      const settings = await response.json();
+      setSavedHeadroomTimeoutMs(settings.headroomTimeoutMs);
+      setHeadroomTimeoutMs(String(settings.headroomTimeoutMs));
+      setHeadroomEffectiveTimeoutMs(settings.headroomEffectiveTimeoutMs);
+      setHeadroomTimeoutSource(settings.headroomTimeoutSource);
+      setHeadroomTimeoutError("");
+    } catch {
+      setHeadroomTimeoutMs(String(savedCandidate));
+      setHeadroomTimeoutError("Unable to save timeout.");
+    }
   };
 
   useEffect(() => {
@@ -423,7 +451,11 @@ export default function TokenSaverClient() {
           setRtkEnabledState(data.rtkEnabled !== false);
           setHeadroomEnabled(!!data.headroomEnabled);
           setHeadroomUrl(data.headroomUrl || "http://localhost:8787");
-          if (typeof data.headroomTimeoutMs === "number") setHeadroomTimeoutMs(data.headroomTimeoutMs);
+          setSavedHeadroomTimeoutMs(data.headroomTimeoutMs);
+          setHeadroomTimeoutMs(String(Number.isInteger(data.headroomTimeoutMs) && data.headroomTimeoutMs > 0 && data.headroomTimeoutMs <= 2147483647 ? data.headroomTimeoutMs : data.headroomEffectiveTimeoutMs));
+          setHeadroomEffectiveTimeoutMs(data.headroomEffectiveTimeoutMs);
+          setHeadroomTimeoutSource(data.headroomTimeoutSource);
+          setHeadroomSettingsLoaded(true);
           setCodeAware(data.headroomCodeAware === true);
           setKompress(data.headroomKompress !== false);
           setCavemanEnabled(!!data.cavemanEnabled);
@@ -853,16 +885,21 @@ export default function TokenSaverClient() {
             </p>
           </div>
           <div className="flex flex-col gap-1">
-            <p className="text-sm font-medium">Timeout (ms)</p>
+            <label htmlFor="headroom-timeout" className="text-sm font-medium">Timeout (ms)</label>
             <Input
-              value={String(headroomTimeoutMs)}
-              onChange={(e) => setHeadroomTimeoutMs(e.target.value)}
+              id="headroom-timeout"
+              value={headroomTimeoutMs}
+              onChange={(e) => { setHeadroomTimeoutMs(e.target.value); setHeadroomTimeoutError(""); }}
               onBlur={handleHeadroomTimeoutBlur}
-              placeholder="3000"
+              disabled={!headroomSettingsLoaded || headroomTimeoutSource === "env"}
+              aria-describedby="headroom-timeout-description"
+              aria-invalid={!!headroomTimeoutError}
               className="font-mono text-sm"
             />
-            <p className="text-xs text-text-muted">
-              Request timeout in milliseconds. Defaults to 3000 ms.
+            <p id="headroom-timeout-description" className={headroomTimeoutError ? "text-xs text-destructive" : "text-xs text-text-muted"}>
+              {headroomTimeoutError || (headroomTimeoutSource === "env"
+                ? `Effective: ${headroomEffectiveTimeoutMs} ms (HEADROOM_DEFAULT_TIMEOUT_MS overrides saved ${savedHeadroomTimeoutMs} ms).`
+                : `Saved: ${savedHeadroomTimeoutMs ?? "—"} ms. Effective: ${headroomEffectiveTimeoutMs ?? "—"} ms (${headroomTimeoutSource || "loading"}).`)}
             </p>
           </div>
           {headroomManaged ? (

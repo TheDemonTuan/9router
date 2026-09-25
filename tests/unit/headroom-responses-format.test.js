@@ -19,15 +19,7 @@ describe("compressWithHeadroom openai-responses format (#1998, #2132)", () => {
         session_affinity: false,
       });
       return new Response(JSON.stringify({
-        body: {
-          input: [
-            {
-              type: "message",
-              role: "user",
-              content: [{ type: "input_text", text: "compressed text" }],
-            },
-          ],
-        },
+        body: { model: payload.model, input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "compressed text" }] }] },
         turn_id: "turn_123",
         obligations: ["relay_usage"],
         headers: { "openai-beta": "responses-2025" },
@@ -95,34 +87,12 @@ describe("compressWithHeadroom openai-responses format (#1998, #2132)", () => {
         session_affinity: false,
       });
       return new Response(JSON.stringify({
-        body: {
-          input: [
-            {
-              type: "message",
-              role: "user",
-              content: [{ type: "input_text", text: "investigate" }],
-            },
-            {
-              type: "function_call",
-              call_id: "call_apply_patch_123",
-              name: "apply_patch",
-              arguments: "{\"patch\":\"diff\"}",
-            },
-            {
-              type: "function_call_output",
-              call_id: "call_apply_patch_123",
-              output: "ok",
-            },
-            {
-              type: "reasoning",
-              summary: [{ type: "summary_text", text: "Plan" }],
-              encrypted_content: "opaque_ciphertext",
-            },
-          ],
-        },
+        body: { model: payload.model, input: [
+          { ...payload.input[0], content: [{ type: "input_text", text: "investigate" }] },
+          payload.input[1], payload.input[2], payload.input[3],
+        ], tools: payload.tools },
         turn_id: "turn_abc",
         obligations: ["relay_usage"],
-        headers: { "x-custom-provider": "true" },
         tokens_before: 200,
         tokens_after: 120,
         tokens_saved: 80,

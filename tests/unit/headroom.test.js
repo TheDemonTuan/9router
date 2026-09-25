@@ -3,6 +3,7 @@ import { compressWithHeadroom, formatHeadroomLog, formatHeadroomSizeLog } from "
 
 afterEach(() => {
   vi.restoreAllMocks();
+  globalThis[Symbol.for("9router.headroom.runtime")]?.clear();
 });
 
 describe("compressWithHeadroom", () => {
@@ -18,32 +19,33 @@ describe("compressWithHeadroom", () => {
   });
 
   it("compresses messages in-place with Gateway v2 contract", async () => {
-    global.fetch = vi.fn(async () => new Response(JSON.stringify({
-      data: {
-        body: { messages: [{ role: "user", content: "short" }] },
-        turn_id: "turn_1",
-        obligations: { relay_usage: true },
-        headers: { "x-provider-req": "header-val" },
-      },
-      tokens_before: 100,
-      tokens_after: 20,
-      tokens_saved: 80,
-    }), { status: 200 }));
+    global.fetch = vi.fn(async (_url, init) => {
+      const sent = JSON.parse(init.body);
+      return new Response(JSON.stringify({
+        data: {
+          body: { model: sent.model, messages: [{ role: "user", content: "short" }] },
+          turn_id: "turn_1",
+          obligations: { relay_usage: true },
+          headers: { "Anthropic-Beta": "context-management-2025-06-27", authorization: "ignored" },
+        },
+        tokens_before: 100,
+        tokens_after: 20,
+        tokens_saved: 80,
+      }), { status: 200 });
+    });
     const body = { messages: [{ role: "user", content: "long" }] };
 
     const stats = await compressWithHeadroom(body, { enabled: true, url: "http://headroom:8787/", model: "gpt-4o" });
 
     expect(body.messages[0].content).toBe("short");
     expect(stats.tokens_saved).toBe(80);
-    expect(stats.providerHeaders).toEqual({ "x-provider-req": "header-val" });
+    expect(stats.providerHeaders).toEqual({ "anthropic-beta": "context-management-2025-06-27" });
     expect(global.fetch).toHaveBeenCalledWith("http://headroom:8787/v1/compress", expect.objectContaining({ method: "POST" }));
   });
 
   it("compresses responses input in-place with Gateway v2 contract", async () => {
-    global.fetch = vi.fn(async () => new Response(JSON.stringify({
-      data: {
-        body: { input: [{ role: "user", content: "short" }] },
-      },
+    global.fetch = vi.fn(async (_url, init) => new Response(JSON.stringify({
+      data: { body: { model: JSON.parse(init.body).model, input: [{ role: "user", content: "short" }] } },
     }), { status: 200 }));
     const body = { input: [{ role: "user", content: "long" }] };
 
@@ -59,18 +61,17 @@ describe("compressWithHeadroom", () => {
       return new Response(JSON.stringify({
         data: {
           body: {
+            model: requestPayload.model,
             messages: [
               { role: "user", content: "compressed earlier user" },
               { role: "assistant", content: "compressed assistant", tool_calls: [{ id: "tool_1", type: "function", function: { name: "read_file", arguments: "{\"path\":\"a.js\"}" } }] },
               { role: "system", content: "compressed system instruction" },
               { role: "user", content: "compressed current user" },
-              { role: "tool", content: [{ type: "text", text: "compressed tool output" }], tool_call_id: "tool_1" },
+              { role: "tool", content: "compressed tool output", tool_call_id: "tool_1" },
             ],
           },
         },
-        tokens_before: 100,
-        tokens_after: 40,
-        tokens_saved: 60,
+        tokens_before: 100, tokens_after: 40, tokens_saved: 60,
       }), { status: 200 });
     });
     const body = {
@@ -188,7 +189,7 @@ describe("compressWithHeadroom", () => {
 
     expect(stats).toBeNull();
     expect(body).toEqual(original);
-    expect(diagnostics.reason).toMatch(/order|mismatch/);
+    expect(diagnostics.reason).toBe("invariant_violation");
   });
 
   it("fails open on bad response", async () => {
@@ -231,7 +232,7 @@ describe("compressWithHeadroom", () => {
       sentBody = JSON.parse(init.body);
       return new Response(JSON.stringify({
         data: {
-          body: { messages: [{ role: "user", content: "compressed output" }] },
+          body: { model: sentBody.model, messages: [{ role: "user", content: "compressed output" }] },
           obligations: ["relay_usage"],
         },
       }), { status: 200 });
@@ -286,7 +287,7 @@ describe("compressWithHeadroom", () => {
 
     expect(stats).toBeNull();
     expect(body.messages[0].content).toBe("original text");
-    expect(diagnostics.reason).toBe("unsupported_obligation: redrive");
+    expect(diagnostics.reason).toBe("unsupported_obligation");
   });
 });
 

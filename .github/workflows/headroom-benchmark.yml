@@ -1,0 +1,45 @@
+name: Headroom Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      full_matrix:
+        description: "Run full 72-case legacy matrix instead of optimized 24-case matrix"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: headroom-benchmark-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  headroom-benchmark:
+    name: Headroom synthetic benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Pull pinned sidecar
+        run: docker pull ghcr.io/headroomlabs-ai/headroom:0.38.0@sha256:14e3dda1f041eef509af850ac7a32647d1c3e5d9bd66e3e8655dfd3a398273af
+
+      - name: Benchmark local-only synthetic traffic
+        run: bun tests/integration/headroom-resilience-smoke.mjs --sidecar ${{ inputs.full_matrix && '--full' || '' }} --output "$RUNNER_TEMP/headroom-benchmark.json"
+
+      - name: Upload synthetic measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: headroom-benchmark
+          path: ${{ runner.temp }}/headroom-benchmark.json
+          if-no-files-found: ignore
