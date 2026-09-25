@@ -209,6 +209,7 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
     const status = providerResponse.status || 502;
     if (log?.errorLine) log.errorLine(reqTag, "✗", `BLOCKED ${status} · ${provider}/${model} · non-SSE (${upstreamContentType})\n    ${shortMsg}`);
     else console.warn(`[STREAM] ${provider} | ${model} | blocked pipe: ${shortMsg} [${status}]`);
+    headroomTurnContext?.complete?.({ statusCode: status });
     streamController?.handleError?.(new Error(`upstream non-SSE: ${status}`));
     return {
       success: false,

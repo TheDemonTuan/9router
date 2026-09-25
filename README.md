@@ -597,11 +597,9 @@ http://headroom:8787
 http://host.docker.internal:8787
 ```
 
-If Headroom is down or returns an error, 9Router fails open and sends the original request.
+Integration targets [Headroom 0.38.0 @ 94206e2](https://github.com/headroomlabs-ai/headroom/blob/94206e265203acfd72a3b939e9a964e29175ad50/docs/content/docs/proxy.mdx). 9Router sends a native request to `/v1/compress` and forwards the complete returned provider body. When the client supplies a stable conversation ID, Headroom owns session replay and per-session locking. A session timeout/error returns a retryable 503 without provider dispatch or account/model fallback; stateless service errors may forward the original sanitized body. Client abort and the router's global pre-response deadline still apply. No router-specific Headroom timeout, circuit, prewarm or payload-size cutoff is configured.
 
-Gateway compression defaults to **10,000 ms**. A valid integer `HEADROOM_DEFAULT_TIMEOUT_MS` (1–2,147,483,647) overrides the dashboard setting; unset/invalid ENV leaves the saved setting active. The Token Saver page shows both the saved value and effective timeout. Legacy saved `3000` values migrate once to `10000`; a later explicit `3000` remains valid. The router reserves 1,500 ms from the pre-response deadline, including Gateway response-body parsing. Three consecutive service failures open a per-endpoint 30-second circuit; requests then continue with the original body. One request probes after cooldown. Headroom is stateless: no conversation/session affinity.
-
-Authenticated `GET /api/headroom/status` includes process-local `runtime` counters, circuit state, stable failure codes and a rolling 2,048-attempt latency sample (nearest-rank p50/p95/p99). Bypasses are excluded from latency. Replicas have independent counters; restarts and idle endpoint eviction reset their state. `bash tests/headroom-acceptance.sh --strong` runs offline checks, not the real sidecar. The real Headroom v0.38.0 Docker benchmark is separate; do not deploy based on the offline result alone.
+SOURCE_NATIVE translation and other enabled token savers can alter the provider-wire body after Headroom; Headroom's replay guarantee applies to its own native-format boundary, not every downstream transformation. The sidecar should run as a single process when using session affinity. `bash tests/headroom-acceptance.sh --strong` runs offline contract checks; replay/locking must also be verified against the pinned image before deployment.
 
 ### 🐴 Ponytail (Lazy Senior Dev)
 

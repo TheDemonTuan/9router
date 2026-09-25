@@ -108,6 +108,22 @@ describe("Codex account capability routing", () => {
 });
 
 describe("chat credential exhaustion", () => {
+  it("does not cooldown or rotate an account for a terminal Headroom session 503", async () => {
+    mocks.getProviderCredentials.mockResolvedValue({ connectionId: "ag-a", connectionName: "a", accessToken: "a", providerSpecificData: {} });
+    mocks.handleChatCore.mockResolvedValue({
+      success: false, status: 503, error: "Headroom session compression unavailable",
+      errorClass: "compression_timeout", retryable: true, terminalNoFallback: true,
+      response: new Response("session unavailable", { status: 503, headers: { "x-9router-no-fallback": "true", "x-should-retry": "true" } }),
+    });
+
+    const response = await handleChat(request());
+    expect(response.status).toBe(503);
+    expect(response.headers.get("x-should-retry")).toBe("true");
+    expect(mocks.getProviderCredentials).toHaveBeenCalledTimes(1);
+    expect(mocks.markAccountUnavailable).not.toHaveBeenCalled();
+    expect(mocks.handleAntigravityQuotaError).not.toHaveBeenCalled();
+  });
+
   it("returns terminal quota JSON before starting the stream", async () => {
     mocks.getProviderCredentials.mockResolvedValue({
       allRateLimited: true,

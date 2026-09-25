@@ -72,61 +72,6 @@ export const DEFAULT_MIN_TOKENS = 32000;
 export const TOKEN_SAVER_HEADER = "x-9router-token-saver";
 export const TOKEN_SAVER_HEADERS = ["x-9router-token-saver", "x-9r-token-saver"];
 
-// Headroom gateway runtime limits and timeouts
-export const HEADROOM_DEFAULT_TIMEOUT_MS = 10000;
-export const HEADROOM_MAX_TIMEOUT_MS = 2147483647;
-
-export function isValidHeadroomTimeout(value) {
-  return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= HEADROOM_MAX_TIMEOUT_MS;
-}
-
-export function resolveHeadroomTimeout(configuredTimeoutMs, envValue = process.env.HEADROOM_DEFAULT_TIMEOUT_MS) {
-  if (typeof envValue === "string" && /^\d+$/.test(envValue.trim())) {
-    const value = Number(envValue.trim());
-    if (isValidHeadroomTimeout(value)) return { timeoutMs: value, source: "env" };
-  }
-  if (isValidHeadroomTimeout(configuredTimeoutMs)) return { timeoutMs: configuredTimeoutMs, source: "settings" };
-  return { timeoutMs: HEADROOM_DEFAULT_TIMEOUT_MS, source: "default" };
-}
-export const HEADROOM_MAX_INFLIGHT = envMs("HEADROOM_MAX_INFLIGHT", 1);
-export const HEADROOM_RESERVE_TIMEOUT_MS = envMs("HEADROOM_RESERVE_TIMEOUT_MS", 1500);
-export const HEADROOM_UPSTREAM_MARGIN_MS = envMs("HEADROOM_UPSTREAM_MARGIN_MS", 2000);
-export const HEADROOM_UPSTREAM_TIMEOUT_MS = envMs("HEADROOM_UPSTREAM_TIMEOUT_MS", 0);
-export const HEADROOM_MAX_PAYLOAD_BYTES = 20 * 1024 * 1024; // 20MB
-export const HEADROOM_CIRCUIT_FAILURE_THRESHOLD = 3;
-export const HEADROOM_CIRCUIT_COOLDOWN_MS = 30000;
-export const HEADROOM_METRIC_SAMPLE_LIMIT = 2048;
-export const HEADROOM_RUNTIME_MAX_ENDPOINTS = 64;
-export const HEADROOM_GATEWAY_TURN_TTL_SECONDS = parseInt(process.env.HEADROOM_GATEWAY_TURN_TTL_SECONDS || "120", 10) || 120;
-
-// SSE admission and TTFT protection controls
-function envBool(name, def = true) {
-  const raw = process.env[name]?.trim?.().toLowerCase?.();
-  if (!raw) return def;
-  if (raw === "1" || raw === "true" || raw === "on" || raw === "yes") return true;
-  if (raw === "0" || raw === "false" || raw === "off" || raw === "no") return false;
-  return def;
-}
-
-export const HEADROOM_SSE_GUARD_ENABLED = envBool("HEADROOM_SSE_GUARD_ENABLED", true);
-export const HEADROOM_LATENCY_P95_LIMIT_MS = envMs("HEADROOM_LATENCY_P95_LIMIT_MS", 1500);
-export const HEADROOM_LATENCY_WINDOW_MS = envMs("HEADROOM_LATENCY_WINDOW_MS", 60000);
-export const HEADROOM_LATENCY_WINDOW_SIZE = Math.min(128, Math.max(8, envMs("HEADROOM_LATENCY_WINDOW_SIZE", 32)));
-export const HEADROOM_LATENCY_MIN_SAMPLES = Math.max(3, envMs("HEADROOM_LATENCY_MIN_SAMPLES", 5));
-export const HEADROOM_LATENCY_SINGLE_SPIKE_LIMIT_MS = envMs("HEADROOM_LATENCY_SINGLE_SPIKE_LIMIT_MS", 3000);
-export const HEADROOM_LATENCY_COOLDOWN_MS = envMs("HEADROOM_LATENCY_COOLDOWN_MS", 30000);
-export const HEADROOM_STATELESS_SSE_MAX_BYTES = envMs("HEADROOM_STATELESS_SSE_MAX_BYTES", 128 * 1024); // 128KB
-
-// Background session prewarm controls
-export const HEADROOM_PREWARM_ENABLED = envBool("HEADROOM_PREWARM_ENABLED", false);
-export const HEADROOM_PREWARM_MIN_TOKENS = envMs("HEADROOM_PREWARM_MIN_TOKENS", 50000);
-export const HEADROOM_PREWARM_MAX_QUEUE = envMs("HEADROOM_PREWARM_MAX_QUEUE", 8);
-export const HEADROOM_PREWARM_MAX_BYTES = envMs("HEADROOM_PREWARM_MAX_BYTES", 32 * 1024 * 1024); // 32MB snapshot cap
-export const HEADROOM_PREWARM_SESSION_CAP = envMs("HEADROOM_PREWARM_SESSION_CAP", 1024);
-export const HEADROOM_PREWARM_TIMEOUT_MS = envMs("HEADROOM_PREWARM_TIMEOUT_MS", 35000); // Dedicated background timeout
-export const HEADROOM_PREWARM_QUEUE_EXPIRY_MS = envMs("HEADROOM_PREWARM_QUEUE_EXPIRY_MS", 30000);
-export const HEADROOM_PREWARM_COOLDOWN_MS = envMs("HEADROOM_PREWARM_COOLDOWN_MS", 30000);
-export const HEADROOM_PREWARM_SESSION_TTL_MS = envMs("HEADROOM_PREWARM_SESSION_TTL_MS", 300000); // 5 minutes ready TTL
 
 // Retry config for 429 responses (legacy - kept for backward compatibility)
 export const RETRY_CONFIG = {

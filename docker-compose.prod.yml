@@ -15,8 +15,6 @@ services:
       HEADROOM_TOOL_SEARCH: "0"
       HEADROOM_OUTPUT_SHAPER: "0"
       HEADROOM_MODEL_ROUTER_ENABLED: "0"
-      HEADROOM_COMPRESSION_MAX_WORKERS: "1"
-      HEADROOM_COMPRESSION_TIMEOUT_SECONDS: "8"
       HEADROOM_PROXY_TOKEN: ${HEADROOM_PROXY_TOKEN:-}
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8787/readyz"]
@@ -50,8 +48,6 @@ services:
       INITIAL_PASSWORD: ${INITIAL_PASSWORD:?INITIAL_PASSWORD must be set for production}
       HEADROOM_URL: http://9router-headroom:8787
       HEADROOM_PROXY_TOKEN: ${HEADROOM_PROXY_TOKEN:-}
-      HEADROOM_DEFAULT_TIMEOUT_MS: ${HEADROOM_DEFAULT_TIMEOUT_MS:-}
-      HEADROOM_UPSTREAM_TIMEOUT_MS: "8000"
       PUBLIC_URL: ${PUBLIC_URL:-https://${DASHBOARD_HOST:-9router-admin.tuannguyenviet.site}}
       NEXT_PUBLIC_BASE_URL: ${PUBLIC_URL:-https://${DASHBOARD_HOST:-9router-admin.tuannguyenviet.site}}
       DASHBOARD_HOST: ${DASHBOARD_HOST:-9router-admin.tuannguyenviet.site}
@@ -95,8 +91,6 @@ services:
       INITIAL_PASSWORD: ${INITIAL_PASSWORD:?INITIAL_PASSWORD must be set for production}
       HEADROOM_URL: http://9router-headroom:8787
       HEADROOM_PROXY_TOKEN: ${HEADROOM_PROXY_TOKEN:-}
-      HEADROOM_DEFAULT_TIMEOUT_MS: ${HEADROOM_DEFAULT_TIMEOUT_MS:-}
-      HEADROOM_UPSTREAM_TIMEOUT_MS: "8000"
       PUBLIC_URL: ${PUBLIC_URL:-https://${DASHBOARD_HOST:-9router-admin.tuannguyenviet.site}}
       NEXT_PUBLIC_BASE_URL: ${PUBLIC_URL:-https://${DASHBOARD_HOST:-9router-admin.tuannguyenviet.site}}
       DASHBOARD_HOST: ${DASHBOARD_HOST:-9router-admin.tuannguyenviet.site}

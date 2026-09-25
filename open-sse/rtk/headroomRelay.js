@@ -40,12 +40,13 @@ export function normalizeRelayUsage(usage) {
 
   const promptTokens = usage.prompt_tokens ?? usage.input_tokens ?? usage.promptTokenCount ?? 0;
   const completionTokens = usage.completion_tokens ?? usage.output_tokens ?? usage.candidatesTokenCount ?? 0;
-  const cachedTokens = usage.prompt_tokens_details?.cached_tokens
-    ?? usage.cache_read_input_tokens
+  const cachedTokens = usage.cache_read_input_tokens
+    ?? usage.prompt_tokens_details?.cached_tokens
+    ?? usage.input_tokens_details?.cached_tokens
     ?? usage.cachedContentTokenCount
     ?? 0;
-  const cacheCreationTokens = usage.prompt_tokens_details?.cache_creation_tokens
-    ?? usage.cache_creation_input_tokens
+  const cacheCreationTokens = usage.cache_creation_input_tokens
+    ?? usage.prompt_tokens_details?.cache_creation_tokens
     ?? 0;
   const totalTokens = usage.total_tokens ?? (promptTokens + completionTokens);
 
@@ -87,7 +88,7 @@ export function createHeadroomTurnContext({
 
   let completed = false;
 
-  const complete = ({ statusCode = 200, status = null, usage = null, error = null, latencyMs = null } = {}) => {
+  const complete = ({ statusCode = null, status = null, usage = null, error = null, latencyMs = null } = {}) => {
     if (completed) return;
     completed = true;
 
@@ -115,7 +116,7 @@ export function createHeadroomTurnContext({
 
     const endpoint = buildResponseEndpoint(url);
     if (!isSafeOrigin(endpoint)) {
-      log?.debug?.("HEADROOM_RELAY", `relay skipped: unsafe origin ${endpoint}`);
+      log?.debug?.("HEADROOM_RELAY", "relay skipped: unsafe origin");
       return;
     }
 

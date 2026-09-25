@@ -1,6 +1,5 @@
 // tests/unit/headroom-responses-format.test.js
 // Modernized for Headroom 0.38.0 Native Gateway v2 contract.
-// Preserves Responses input structure, reasoning, tools, and call_ids safely.
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { compressWithHeadroom } from "../../open-sse/rtk/headroom.js";
 
@@ -10,7 +9,6 @@ describe("compressWithHeadroom openai-responses format (#1998, #2132)", () => {
   });
 
   it("keeps body.input in Responses format after compressing an openai-responses request", async () => {
-    // Gateway v2 contract returns top-level { body: { input: [...] }, turn_id, obligations, headers }
     global.fetch = vi.fn(async (_url, init) => {
       const payload = JSON.parse(init.body);
       expect(payload.gateway).toEqual({
@@ -30,6 +28,7 @@ describe("compressWithHeadroom openai-responses format (#1998, #2132)", () => {
     });
 
     const body = {
+      model: "gpt-5",
       input: [
         {
           type: "message",
@@ -87,10 +86,16 @@ describe("compressWithHeadroom openai-responses format (#1998, #2132)", () => {
         session_affinity: false,
       });
       return new Response(JSON.stringify({
-        body: { model: payload.model, input: [
-          { ...payload.input[0], content: [{ type: "input_text", text: "investigate" }] },
-          payload.input[1], payload.input[2], payload.input[3],
-        ], tools: payload.tools },
+        body: {
+          model: payload.model,
+          input: [
+            { ...payload.input[0], content: [{ type: "input_text", text: "investigate" }] },
+            payload.input[1],
+            payload.input[2],
+            payload.input[3],
+          ],
+          tools: payload.tools,
+        },
         turn_id: "turn_abc",
         obligations: ["relay_usage"],
         tokens_before: 200,
@@ -100,6 +105,7 @@ describe("compressWithHeadroom openai-responses format (#1998, #2132)", () => {
     });
 
     const body = {
+      model: "gpt-5",
       input: structuredClone(input),
       tools: [
         {
@@ -128,6 +134,7 @@ describe("compressWithHeadroom openai-responses format (#1998, #2132)", () => {
 
   it("updates instructions and compresses arguments/tool-outputs cleanly (Headroom 0.38 upstream)", async () => {
     const origBody = {
+      model: "gpt-4o",
       instructions: "You are an expert engineer. Follow all instructions carefully.",
       input: [
         {
@@ -202,20 +209,15 @@ describe("compressWithHeadroom openai-responses format (#1998, #2132)", () => {
     expect(body.input[4].output).toBe("Patch applied.");
   });
 
-  it("fails open and captures invariant detail when upstream returns corrupted arguments JSON", async () => {
+  it("fails open when upstream violates model sovereignty invariant", async () => {
     const origBody = {
+      model: "gpt-4o",
       instructions: "Instructions",
       input: [
         {
           type: "message",
           role: "user",
           content: "Run command",
-        },
-        {
-          type: "function_call",
-          call_id: "call_bad_1",
-          name: "exec_cmd",
-          arguments: "{\"cmd\":\"echo 1\"}",
         },
       ],
     };
@@ -224,12 +226,9 @@ describe("compressWithHeadroom openai-responses format (#1998, #2132)", () => {
       const payload = JSON.parse(init.body);
       return new Response(JSON.stringify({
         body: {
-          model: payload.model,
+          model: "wrong-model",
           instructions: payload.instructions,
-          input: [
-            payload.input[0],
-            { ...payload.input[1], arguments: "{broken-json" },
-          ],
+          input: payload.input,
         },
         turn_id: "turn_bad",
         obligations: [],
@@ -247,9 +246,7 @@ describe("compressWithHeadroom openai-responses format (#1998, #2132)", () => {
     });
 
     expect(result).toBeNull();
-    expect(diagnostics.reason).toBe("invariant_violation");
-    expect(diagnostics.detail).toBe("input.1.arguments");
-    // Body remains untouched (fail-open)
-    expect(body.input[1].arguments).toBe("{\"cmd\":\"echo 1\"}");
+    expect(diagnostics.reason).toBe("model_sovereignty_violation");
+    expect(body.instructions).toBe("Instructions");
   });
 });
