@@ -105,4 +105,44 @@ describe("headroom detect", () => {
     expect(isLoopbackHeadroomUrl("http://headroom:8787")).toBe(false);
     expect(isLoopbackHeadroomUrl("not-a-url")).toBe(false);
   });
+
+  it("extracts compression executor metrics from /health response", async () => {
+    const healthPayload = {
+      version: "0.38.0",
+      runtime: {
+        compression_executor: {
+          max_workers: 1,
+          queued: 0,
+          queued_max: 3,
+          queue_timeouts_total: 0,
+          queue_wait_seconds_total: 0.12,
+          queue_wait_seconds_max: 0.084,
+          running: 1,
+          in_flight: 1,
+          in_flight_max: 1,
+          run_seconds_total: 1.25,
+          run_seconds_max: 0.62,
+          leaked_threads_total: 0,
+          quarantine_active: false,
+          timed_out_workers: 0,
+          timed_out_workers_max: 0,
+          quarantine_activations_total: 0,
+          quarantine_skips_total: 0,
+        },
+      },
+    };
+    global.fetch = vi.fn(async (url) => {
+      if (String(url).endsWith("/health")) return new Response(JSON.stringify(healthPayload), { status: 200 });
+      return new Response("ok", { status: 200 });
+    });
+    mocks.execSync.mockImplementation(() => { throw new Error("not found"); });
+    mocks.execFileSync.mockImplementation(() => { throw new Error("pip unavailable"); });
+
+    const status = await getHeadroomStatus("http://headroom-metrics-test:8787");
+    expect(status.compressionExecutor).toBeDefined();
+    expect(status.compressionExecutor.max_workers).toBe(1);
+    expect(status.compressionExecutor.queued_max).toBe(3);
+    expect(status.compressionExecutor.run_seconds_max).toBe(0.62);
+    expect(status.compressionExecutor.quarantine_active).toBe(false);
+  });
 });
