@@ -42,7 +42,261 @@ function isValidJsonString(str) {
   }
 }
 
-export function validateBodyInvariants(original, compressed, format) {
+const DISCARDED_ANNOTATIONS = new Set([
+  "$id",
+  "$schema",
+  "$comment",
+  "title",
+  "examples",
+  "example",
+  "deprecated",
+  "readOnly",
+  "writeOnly",
+  "markdownDescription",
+]);
+
+function normalizeWhitespace(str) {
+  return typeof str === "string" ? str.replace(/\s+/g, " ").trim() : "";
+}
+
+function isAllowedDescriptionMutation(origDesc, compDesc) {
+  if (typeof origDesc !== "string" || typeof compDesc !== "string") return false;
+  if (origDesc === compDesc) return true;
+  const normOrig = normalizeWhitespace(origDesc);
+  const normComp = normalizeWhitespace(compDesc);
+  if (normOrig === normComp) return true;
+  const strippedComp = normComp.replace(/[.…\s]+$/, "");
+  if (!strippedComp) return true;
+  return normOrig.startsWith(strippedComp);
+}
+
+function validateSchemaInvariants(orig, comp, path) {
+  if (orig === comp) return { valid: true };
+  if (typeof orig === "boolean" || typeof comp === "boolean") {
+    return orig === comp ? { valid: true } : { valid: false, detail: path.join(".") };
+  }
+  if (!isObject(orig) || !isObject(comp)) {
+    if (typeof orig === "string" && typeof comp === "string" && path[path.length - 1] === "description") {
+      return isAllowedDescriptionMutation(orig, comp) ? { valid: true } : { valid: false, detail: path.join(".") };
+    }
+    return { valid: false, detail: path.join(".") };
+  }
+
+  // 1. type
+  if (orig.type !== undefined && orig.type !== comp.type) {
+    return { valid: false, detail: [...path, "type"].join(".") };
+  }
+
+  // 2. required
+  if (orig.required !== undefined || comp.required !== undefined) {
+    if (!Array.isArray(orig.required) || !Array.isArray(comp.required)) {
+      return { valid: false, detail: [...path, "required"].join(".") };
+    }
+    const origReq = [...orig.required].sort();
+    const compReq = [...comp.required].sort();
+    if (origReq.length !== compReq.length || !origReq.every((v, i) => v === compReq[i])) {
+      return { valid: false, detail: [...path, "required"].join(".") };
+    }
+  }
+
+  // 3. enum
+  if (orig.enum !== undefined && !deepEqual(orig.enum, comp.enum)) {
+    return { valid: false, detail: [...path, "enum"].join(".") };
+  }
+
+  // 4. const
+  if (orig.const !== undefined && !deepEqual(orig.const, comp.const)) {
+    return { valid: false, detail: [...path, "const"].join(".") };
+  }
+
+  // 5. properties
+  if (orig.properties !== undefined || comp.properties !== undefined) {
+    if (!isObject(orig.properties) || !isObject(comp.properties)) {
+      return { valid: false, detail: [...path, "properties"].join(".") };
+    }
+    const origProps = Object.keys(orig.properties).sort();
+    const compProps = Object.keys(comp.properties).sort();
+    if (origProps.length !== compProps.length || !origProps.every((v, i) => v === compProps[i])) {
+      return { valid: false, detail: [...path, "properties"].join(".") };
+    }
+    for (const prop of origProps) {
+      const res = validateSchemaInvariants(orig.properties[prop], comp.properties[prop], [...path, "properties", prop]);
+      if (!res.valid) return res;
+    }
+  }
+
+  // 6. items
+  if (orig.items !== undefined || comp.items !== undefined) {
+    if (Array.isArray(orig.items) || Array.isArray(comp.items)) {
+      if (!Array.isArray(orig.items) || !Array.isArray(comp.items) || orig.items.length !== comp.items.length) {
+        return { valid: false, detail: [...path, "items"].join(".") };
+      }
+      for (let i = 0; i < orig.items.length; i++) {
+        const res = validateSchemaInvariants(orig.items[i], comp.items[i], [...path, "items", i]);
+        if (!res.valid) return res;
+      }
+    } else if (isObject(orig.items) && isObject(comp.items)) {
+      const res = validateSchemaInvariants(orig.items, comp.items, [...path, "items"]);
+      if (!res.valid) return res;
+    } else if (!deepEqual(orig.items, comp.items)) {
+      return { valid: false, detail: [...path, "items"].join(".") };
+    }
+  }
+
+  // 7. additionalProperties
+  if (orig.additionalProperties !== undefined || comp.additionalProperties !== undefined) {
+    if (typeof orig.additionalProperties === "boolean" || typeof comp.additionalProperties === "boolean") {
+      if (orig.additionalProperties !== comp.additionalProperties) {
+        return { valid: false, detail: [...path, "additionalProperties"].join(".") };
+      }
+    } else if (isObject(orig.additionalProperties) && isObject(comp.additionalProperties)) {
+      const res = validateSchemaInvariants(orig.additionalProperties, comp.additionalProperties, [...path, "additionalProperties"]);
+      if (!res.valid) return res;
+    } else if (!deepEqual(orig.additionalProperties, comp.additionalProperties)) {
+      return { valid: false, detail: [...path, "additionalProperties"].join(".") };
+    }
+  }
+
+  // 8. description
+  if (orig.description !== undefined) {
+    if (comp.description !== undefined) {
+      if (!isAllowedDescriptionMutation(orig.description, comp.description)) {
+        return { valid: false, detail: [...path, "description"].join(".") };
+      }
+    }
+  } else if (comp.description !== undefined) {
+    return { valid: false, detail: [...path, "description"].join(".") };
+  }
+
+  // 9. definitions / $defs
+  for (const defKey of ["$defs", "definitions"]) {
+    if (orig[defKey] !== undefined || comp[defKey] !== undefined) {
+      if (!isObject(orig[defKey]) || !isObject(comp[defKey])) {
+        return { valid: false, detail: [...path, defKey].join(".") };
+      }
+      const origDefs = Object.keys(orig[defKey]).sort();
+      const compDefs = Object.keys(comp[defKey]).sort();
+      if (origDefs.length !== compDefs.length || !origDefs.every((v, i) => v === compDefs[i])) {
+        return { valid: false, detail: [...path, defKey].join(".") };
+      }
+      for (const d of origDefs) {
+        const res = validateSchemaInvariants(orig[defKey][d], comp[defKey][d], [...path, defKey, d]);
+        if (!res.valid) return res;
+      }
+    }
+  }
+
+  // 10. anyOf / allOf / oneOf
+  for (const combKey of ["anyOf", "allOf", "oneOf"]) {
+    if (orig[combKey] !== undefined || comp[combKey] !== undefined) {
+      if (!Array.isArray(orig[combKey]) || !Array.isArray(comp[combKey]) || orig[combKey].length !== comp[combKey].length) {
+        return { valid: false, detail: [...path, combKey].join(".") };
+      }
+      for (let i = 0; i < orig[combKey].length; i++) {
+        const res = validateSchemaInvariants(orig[combKey][i], comp[combKey][i], [...path, combKey, i]);
+        if (!res.valid) return res;
+      }
+    }
+  }
+
+  // 11. Extra keys in comp
+  const handled = new Set(["type", "required", "enum", "const", "properties", "items", "additionalProperties", "description", "$defs", "definitions", "anyOf", "allOf", "oneOf"]);
+  for (const key of Object.keys(comp)) {
+    if (DISCARDED_ANNOTATIONS.has(key) || handled.has(key)) continue;
+    if (!Object.prototype.hasOwnProperty.call(orig, key) || !deepEqual(orig[key], comp[key])) {
+      return { valid: false, detail: [...path, key].join(".") };
+    }
+  }
+
+  // 12. Keys in orig dropped in comp
+  for (const key of Object.keys(orig)) {
+    if (DISCARDED_ANNOTATIONS.has(key) || key === "description" || handled.has(key)) continue;
+    if (!Object.prototype.hasOwnProperty.call(comp, key)) {
+      return { valid: false, detail: [...path, key].join(".") };
+    }
+  }
+
+  return { valid: true };
+}
+
+export function validateToolsInvariants(originalTools, compressedTools, transforms = []) {
+  if (deepEqual(originalTools, compressedTools)) return { valid: true };
+
+  const transformList = Array.isArray(transforms) ? transforms : [];
+  const allowsCompaction = transformList.includes("tool_schema_compaction") || transformList.includes("tool_desc_compaction");
+  if (!allowsCompaction) {
+    return { valid: false, reason: "immutable_field_changed", detail: "tools" };
+  }
+
+  if (!Array.isArray(originalTools) || !Array.isArray(compressedTools)) {
+    return { valid: false, reason: "immutable_field_changed", detail: "tools" };
+  }
+  if (originalTools.length !== compressedTools.length) {
+    return { valid: false, reason: "immutable_field_changed", detail: "tools.length" };
+  }
+
+  for (let i = 0; i < originalTools.length; i++) {
+    const origTool = originalTools[i];
+    const compTool = compressedTools[i];
+    if (!isObject(origTool) || !isObject(compTool)) {
+      return { valid: false, reason: "immutable_field_changed", detail: `tools.${i}` };
+    }
+
+    if (origTool.type !== compTool.type) {
+      return { valid: false, reason: "immutable_field_changed", detail: `tools.${i}.type` };
+    }
+
+    const origFn = origTool.function;
+    const compFn = compTool.function;
+    if (Boolean(origFn) !== Boolean(compFn)) {
+      return { valid: false, reason: "immutable_field_changed", detail: `tools.${i}.function` };
+    }
+
+    const origTarget = origFn || origTool;
+    const compTarget = compFn || compTool;
+
+    if (origTarget.name !== compTarget.name) {
+      return { valid: false, reason: "immutable_field_changed", detail: `tools.${i}.name` };
+    }
+
+    if (origTarget.description !== undefined) {
+      if (compTarget.description !== undefined) {
+        if (!isAllowedDescriptionMutation(origTarget.description, compTarget.description)) {
+          return { valid: false, reason: "immutable_field_changed", detail: `tools.${i}.description` };
+        }
+      }
+    } else if (compTarget.description !== undefined) {
+      return { valid: false, reason: "immutable_field_changed", detail: `tools.${i}.description` };
+    }
+
+    const origSchema = origTarget.parameters || origTarget.input_schema;
+    const compSchema = compTarget.parameters || compTarget.input_schema;
+    if (origSchema !== undefined) {
+      if (compSchema === undefined) {
+        return { valid: false, reason: "immutable_field_changed", detail: `tools.${i}.parameters` };
+      }
+      const schemaField = origTarget.parameters ? "parameters" : "input_schema";
+      const schemaRes = validateSchemaInvariants(origSchema, compSchema, ["tools", i, schemaField]);
+      if (!schemaRes.valid) {
+        return { valid: false, reason: "immutable_field_changed", detail: schemaRes.detail };
+      }
+    } else if (compSchema !== undefined) {
+      return { valid: false, reason: "immutable_field_changed", detail: `tools.${i}.parameters` };
+    }
+
+    if (origTarget.strict !== undefined && origTarget.strict !== compTarget.strict) {
+      return { valid: false, reason: "immutable_field_changed", detail: `tools.${i}.strict` };
+    }
+
+    if (origTool.cache_control !== undefined && !deepEqual(origTool.cache_control, compTool.cache_control)) {
+      return { valid: false, reason: "immutable_field_changed", detail: `tools.${i}.cache_control` };
+    }
+  }
+
+  return { valid: true };
+}
+
+export function validateBodyInvariants(original, compressed, format, options = {}) {
   if (!isObject(original) || !isObject(compressed)) return { valid: false, reason: "invalid_body_root" };
   if (!isJsonValue(original) || !isJsonValue(compressed)) return { valid: false, reason: "invalid_json_tree" };
   const wireFormat = format || (Object.hasOwn(original, "input") ? "openai-responses" : "openai");
@@ -151,6 +405,11 @@ export function validateBodyInvariants(original, compressed, format) {
     for (const key of keys) {
       if (!Object.hasOwn(b, key)) return failed([...path, key]);
       const next = [...path, key];
+      if (path.length === 0 && key === "tools") {
+        const toolsRes = validateToolsInvariants(a[key], b[key], options?.transforms);
+        if (!toolsRes.valid) return toolsRes;
+        continue;
+      }
       const allowedRoots = wireFormat === "openai-responses"
         ? ["input", "instructions"]
         : (wireFormat === "claude" ? ["messages", "system"] : ["messages"]);

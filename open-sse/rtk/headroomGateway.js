@@ -304,10 +304,12 @@ export async function callHeadroomGateway({
   // Gateway v2 must return the complete provider envelope.
   const gatewayData = data?.data || {};
   const returnedBody = data?.body ?? gatewayData.body ?? null;
+  const transformsApplied = data?.transforms_applied || gatewayData.transforms_applied || [];
+  diagnostics.transforms_applied = transformsApplied;
   if (data?.compression_skipped === true || gatewayData.compression_skipped === true) {
     const rawSkipReason = data?.skip_reason ?? gatewayData.skip_reason ?? null;
     diagnostics.skip_reason = typeof rawSkipReason === "string" ? rawSkipReason : null;
-    const check = validateBodyInvariants(expectedBody, returnedBody, format);
+    const check = validateBodyInvariants(expectedBody, returnedBody, format, { transforms: transformsApplied });
     diagnostics.reason = check.valid ? "gateway_compression_skipped" : "invariant_violation";
     if (!check.valid) diagnostics.detail = check.detail || check.reason;
     return null;
@@ -333,7 +335,7 @@ export async function callHeadroomGateway({
   }
 
   // 8. Validate body invariants (IDs, reasoning summaries/encrypted, tool pairing, JSON arguments)
-  const invariantCheck = validateBodyInvariants(expectedBody, returnedBody, format);
+  const invariantCheck = validateBodyInvariants(expectedBody, returnedBody, format, { transforms: transformsApplied });
   if (!invariantCheck.valid) {
     diagnostics.reason = "invariant_violation";
     diagnostics.detail = invariantCheck.detail || invariantCheck.reason;
