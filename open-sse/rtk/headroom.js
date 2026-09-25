@@ -279,16 +279,7 @@ export async function compressWithHeadroom(
     });
 
     if (!data) return null;
-    const compressed = data.compressedBody;
-    if (format === "claude") {
-      body.messages = compressed.messages;
-      if (Object.hasOwn(compressed, "system")) body.system = compressed.system;
-    } else if (format === "openai-responses" || (!format && Object.hasOwn(body, "input"))) {
-      body.input = compressed.input;
-      if (Object.hasOwn(compressed, "instructions")) body.instructions = compressed.instructions;
-    } else {
-      body.messages = compressed.messages;
-    }
+    applyValidatedGatewayBody(body, data.compressedBody);
 
     diag.after = captureSizeSnapshot(body);
     if (sessionId && data.session) {
@@ -307,6 +298,26 @@ export async function compressWithHeadroom(
     setDiagnostic(diag, "gateway_unexpected_error");
     return null;
   }
+}
+
+export function applyValidatedGatewayBody(body, compressed) {
+  if (!body || typeof body !== "object" || !compressed || typeof compressed !== "object") {
+    return body;
+  }
+  const CONTROL_FIELDS = new Set(["gateway", "config", "token_budget", "session_id"]);
+
+  for (const key of Object.keys(body)) {
+    if (CONTROL_FIELDS.has(key) || !Object.prototype.hasOwnProperty.call(compressed, key)) {
+      delete body[key];
+    }
+  }
+
+  for (const [key, value] of Object.entries(compressed)) {
+    if (!CONTROL_FIELDS.has(key)) {
+      body[key] = value;
+    }
+  }
+  return body;
 }
 
 export function formatHeadroomLog(stats) {
