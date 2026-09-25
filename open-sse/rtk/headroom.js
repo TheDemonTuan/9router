@@ -160,6 +160,7 @@ export async function compressWithHeadroom(
     format,
     compressUserMessages = false,
     sessionId = null,
+    isSSE = false,
     timeoutMs = HEADROOM_DEFAULT_TIMEOUT_MS,
     preResponse = null,
     clientSignal = null,
@@ -200,6 +201,8 @@ export async function compressWithHeadroom(
         format: "openai",
         body: { messages: projection.messages },
         compressUserMessages,
+        sessionId,
+        isSSE,
         timeoutMs,
         preResponse,
         clientSignal,
@@ -223,6 +226,7 @@ export async function compressWithHeadroom(
       body,
       compressUserMessages,
       sessionId,
+      isSSE,
       timeoutMs,
       preResponse,
       clientSignal,
@@ -260,6 +264,39 @@ export function formatHeadroomLog(stats) {
   const delta = stats.tokens_saved || 0;
   const pct = before > 0 ? ((delta / before) * 100).toFixed(1) : "0";
   return `reported token delta=${delta} before=${before}${after ? ` after=${after}` : ""} (${pct}%)`.trim();
+}
+
+export function formatHeadroomSummaryTag(stats, diagnostics) {
+  const elapsed = Math.round(diagnostics?.latencyMs ?? stats?.latencyMs ?? 0);
+  const elapsedStr = elapsed > 0 ? ` ${elapsed}ms` : "";
+
+  if (stats) {
+    const saved = stats.tokens_saved;
+    const before = stats.tokens_before;
+    if (Number.isFinite(saved) && saved > 0 && Number.isFinite(before) && before > 0) {
+      const pct = Math.round((saved / before) * 100);
+      return `HEADROOM:${saved}tok/${pct}%${elapsedStr}`;
+    }
+    if (Number.isFinite(saved)) {
+      return `HEADROOM:${saved}tok${elapsedStr}`;
+    }
+    return `HEADROOM:ok${elapsedStr}`;
+  }
+
+  const reason = diagnostics?.reason;
+  if (!reason) return null;
+
+  if (reason === "gateway_timeout" || reason === "compression_timeout" || diagnostics?.skip_reason === "compression_timeout") {
+    return `HEADROOM:TIMEOUT${elapsedStr}`;
+  }
+  if (reason === "gateway_compression_skipped") {
+    const skip = diagnostics?.skip_reason ? `:${diagnostics.skip_reason}` : "";
+    return `HEADROOM:SKIP${skip}${elapsedStr}`;
+  }
+  if (reason.startsWith("circuit_") || reason === "capacity_busy" || reason.startsWith("latency_") || reason.endsWith("_bypass") || reason === "stateless_sse_payload_too_large" || reason === "client_opt_out") {
+    return `HEADROOM:BYPASS:${reason}${elapsedStr}`;
+  }
+  return `HEADROOM:BYPASS:${reason}${elapsedStr}`;
 }
 
 export function formatHeadroomSizeLog(diagnostics) {

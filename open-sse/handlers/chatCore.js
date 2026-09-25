@@ -26,7 +26,7 @@ import { takeRenamedToolNames } from "../utils/opencodeFingerprint.js";
 import { injectCaveman } from "../rtk/caveman.js";
 import { injectPonytail } from "../rtk/ponytail.js";
 import { compressMessages, formatRtkLog } from "../rtk/index.js";
-import { compressWithHeadroom, formatHeadroomLog, formatHeadroomSizeLog } from "../rtk/headroom.js";
+import { compressWithHeadroom, formatHeadroomLog, formatHeadroomSizeLog, formatHeadroomSummaryTag } from "../rtk/headroom.js";
 import { selectHeadroomStage, HEADROOM_STAGES } from "../rtk/headroomStage.js";
 import { createHeadroomTurnContext } from "../rtk/headroomRelay.js";
 import { recordHeadroomBypass } from "../rtk/headroomRuntime.js";
@@ -187,6 +187,35 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     sourceBody = JSON.parse(JSON.stringify(body));
   }
 
+  const clientRequestedStreaming = body.stream === true || sourceFormat === FORMATS.ANTIGRAVITY || sourceFormat === FORMATS.GEMINI || sourceFormat === FORMATS.GEMINI_CLI;
+  const providerRequiresStreaming = PROVIDERS[provider]?.forceStream === true && !isChatGptWebCompact;
+  let stream = isChatGptWebCompact ? false : (providerRequiresStreaming ? true : (body.stream !== false));
+
+  // Image generation models require non-streaming (Google v1internal:generateContent)
+  const modelType = getModelType(alias, model);
+  const isImageGenModel = modelType === "imageGen" || /image|imagen|image-generation/i.test(model);
+  if (isImageGenModel && (provider === "antigravity" || provider === "gemini-cli")) {
+    stream = false;
+  }
+
+  // DeepSeek-TUI: interactive TUI panel sends stream:true and needs SSE.
+  // Non-interactive mode (-p flag) sends without stream and can't parse SSE.
+  // Only force non-streaming when client didn't explicitly request it.
+  const detectedTool = detectClientTool(clientRawRequest?.headers || {}, body);
+  if (detectedTool === "deepseek-tui" && body.stream !== true) stream = false;
+
+  // Check client Accept header preference for non-streaming requests
+  // This fixes AI SDK compatibility where clients send Accept: application/json
+  const acceptHeader = clientRawRequest?.headers?.accept || "";
+  const clientPrefersJson = acceptHeader.includes("application/json");
+  const clientPrefersSSE = acceptHeader.includes("text/event-stream");
+  if (clientPrefersJson && !clientPrefersSSE && body.stream !== true && !providerRequiresStreaming) {
+    stream = false;
+  }
+
+  // Real client-visible SSE stream (excludes forced provider streaming that converts back to JSON)
+  const isInteractiveSse = Boolean(stream && (!providerRequiresStreaming || clientRequestedStreaming));
+
   const tokenSaverEnabled = !clientTokenSaverOptOut && !strictStructuredOutput && !nativePassthrough;
   // Headroom 0.38 natively handles structured Responses/messages, decoupled from nativePassthrough and strictStructuredOutput
   const headroomEligible = !clientTokenSaverOptOut;
@@ -198,6 +227,19 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     provider,
     isCompact: isChatGptWebCompact,
   });
+
+  // Single-point session resolution derived strictly from caller source/original payload before any mutation
+  const headroomSessionId = (headroomEligible && headroomEnabled && headroomStagePlan.stage !== HEADROOM_STAGES.BYPASS)
+    ? resolveHeadroomSessionId({
+      headers: clientRawRequest?.headers,
+      body: sourceBody,
+      apiKey,
+      provider,
+      model: upstreamModel,
+      format: headroomStagePlan.format,
+      compressUserMessages: headroomCompressUserMessages,
+    })
+    : null;
 
   const headroomDiagnostics = {};
   let headroomStats = null;
@@ -237,6 +279,8 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
         model: upstreamModel,
         format: headroomStagePlan.format,
         compressUserMessages: headroomCompressUserMessages,
+        sessionId: headroomSessionId,
+        isSSE: isInteractiveSse,
         timeoutMs: headroomTimeoutMs,
         preResponse,
         clientSignal: clientSignal || null,
@@ -262,32 +306,6 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     : null;
   const preTranslateRtkLine = formatRtkLog(preTranslateRtk);
   if (preTranslateRtkLine) console.log(preTranslateRtkLine);
-
-  const clientRequestedStreaming = body.stream === true || sourceFormat === FORMATS.ANTIGRAVITY || sourceFormat === FORMATS.GEMINI || sourceFormat === FORMATS.GEMINI_CLI;
-  const providerRequiresStreaming = PROVIDERS[provider]?.forceStream === true && !isChatGptWebCompact;
-  let stream = isChatGptWebCompact ? false : (providerRequiresStreaming ? true : (body.stream !== false));
-
-  // Image generation models require non-streaming (Google v1internal:generateContent)
-  const modelType = getModelType(alias, model);
-  const isImageGenModel = modelType === "imageGen" || /image|imagen|image-generation/i.test(model);
-  if (isImageGenModel && (provider === "antigravity" || provider === "gemini-cli")) {
-    stream = false;
-  }
-
-  // DeepSeek-TUI: interactive TUI panel sends stream:true and needs SSE.
-  // Non-interactive mode (-p flag) sends without stream and can't parse SSE.
-  // Only force non-streaming when client didn't explicitly request it.
-  const detectedTool = detectClientTool(clientRawRequest?.headers || {}, body);
-  if (detectedTool === "deepseek-tui" && body.stream !== true) stream = false;
-
-  // Check client Accept header preference for non-streaming requests
-  // This fixes AI SDK compatibility where clients send Accept: application/json
-  const acceptHeader = clientRawRequest?.headers?.accept || "";
-  const clientPrefersJson = acceptHeader.includes("application/json");
-  const clientPrefersSSE = acceptHeader.includes("text/event-stream");
-  if (clientPrefersJson && !clientPrefersSSE && body.stream !== true && !providerRequiresStreaming) {
-    stream = false;
-  }
 
   const reqLogger = await createRequestLogger(sourceFormat, targetFormat, model, {
     redactPayloads: provider === "chatgpt-web",
@@ -436,15 +454,6 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // Runs TARGET_NATIVE (after translate) or PROJECTED (Kiro), only if not already run in SOURCE_NATIVE.
   if (!headroomStats && headroomEligible && headroomEnabled && (headroomStagePlan.stage === HEADROOM_STAGES.TARGET_NATIVE || headroomStagePlan.stage === HEADROOM_STAGES.PROJECTED)) {
     try {
-      const headroomSessionId = resolveHeadroomSessionId({
-        headers: clientRawRequest?.headers,
-        body: translatedBody,
-        apiKey,
-        provider,
-        model: upstreamModel,
-        format: headroomStagePlan.format,
-        compressUserMessages: headroomCompressUserMessages,
-      });
       headroomStats = await compressWithHeadroom(translatedBody, {
         enabled: true,
         url: headroomUrl,
@@ -453,6 +462,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
         format: headroomStagePlan.format,
         compressUserMessages: headroomCompressUserMessages,
         sessionId: headroomSessionId,
+        isSSE: isInteractiveSse,
         timeoutMs: headroomTimeoutMs,
         preResponse,
         clientSignal: clientSignal || null,
@@ -469,16 +479,22 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     }
   }
   if (headroomEnabled && headroomEligible && headroomStagePlan.stage === HEADROOM_STAGES.BYPASS && headroomUrl) {
+    headroomDiagnostics.reason ||= "stage_bypass";
     const endpoint = buildCompressEndpoint(headroomUrl);
     if (isSafeOrigin(endpoint)) recordHeadroomBypass(endpoint, "stage_bypass");
+  }
+  if (headroomEnabled && clientTokenSaverOptOut) {
+    headroomDiagnostics.reason ||= "client_opt_out";
   }
   const headroomLine = formatHeadroomLog(headroomStats);
   const headroomSizeLine = formatHeadroomSizeLog(headroomDiagnostics);
   const reason = headroomDiagnostics.reason || headroomStagePlan.reason || "compression unavailable";
-  if (headroomDiagnostics.transition === "opened") {
-    log?.warn?.("HEADROOM", `circuit_open reason=${reason} budget=${headroomDiagnostics.budgetMs ?? 0}ms elapsed=${Math.round(headroomDiagnostics.latencyMs ?? 0)}ms cooldown=30000ms`);
-  } else if (headroomDiagnostics.transition === "recovered") {
-    log?.info?.("HEADROOM", "circuit_closed half_open_probe=success");
+  if (headroomDiagnostics.transition === "opened" || headroomDiagnostics.transition === "latency_opened") {
+    const isLatency = headroomDiagnostics.transition === "latency_opened";
+    log?.warn?.("HEADROOM", `${isLatency ? "latency_guard_open" : "circuit_open"} reason=${reason} budget=${headroomDiagnostics.budgetMs ?? 0}ms elapsed=${Math.round(headroomDiagnostics.latencyMs ?? 0)}ms cooldown=30000ms`);
+  } else if (headroomDiagnostics.transition === "recovered" || headroomDiagnostics.transition === "latency_recovered") {
+    const isLatency = headroomDiagnostics.transition === "latency_recovered";
+    log?.info?.("HEADROOM", `${isLatency ? "latency_guard_closed" : "circuit_closed"} half_open_probe=success`);
   }
   if (headroomLine) {
     log?.info?.("HEADROOM", `stage=${headroomStagePlan.stage} fmt=${headroomStagePlan.format || "-"} | ${headroomLine}${headroomSizeLine ? ` | ${headroomSizeLine}` : ""}`);
@@ -508,7 +524,14 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const xf = [];
 
   if (rtkStats?.hits?.length) xf.push(`RTK:${rtkStats.hits.length}`);
-  if (headroomStats?.tokens_saved) xf.push(`HEADROOM:${headroomStats.tokens_saved}`);
+  if (headroomEnabled) {
+    const headroomTag = formatHeadroomSummaryTag(headroomStats, headroomDiagnostics);
+    if (headroomTag) {
+      xf.push(headroomTag);
+      if (headroomSessionId) xf.push("SESSION:affinity");
+      else if (isInteractiveSse) xf.push("SESSION:stateless");
+    }
+  }
 
   // Caveman: inject terse-style system prompt
   if (tokenSaverEnabled && cavemanEnabled && cavemanLevel) {

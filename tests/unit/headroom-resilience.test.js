@@ -140,4 +140,47 @@ describe("Headroom resilience boundaries", () => {
     expect(diagnostics.queue.circuitState).toBe("CLOSED");
     expect(diagnostics.queue.inFlight).toBeDefined();
   });
+
+  it("trips latency guard when p95 exceeds 1500ms on SSE, admits 1 probe after cooldown and recovers", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T12:00:00Z"));
+    const endpoint = "http://127.0.0.1:54328/v1/compress";
+
+    // 5 attempts with latency > 1500ms for SSE
+    for (let i = 0; i < 5; i++) {
+      const ticket = beginHeadroomAttempt(endpoint, { bypassInFlight: true, isSSE: true }).ticket;
+      markHeadroomAttemptStarted(ticket);
+      finishHeadroomAttempt(ticket, { kind: "success", latencyMs: 1600 + i * 20 });
+    }
+
+    // Next SSE request should be blocked by latency guard
+    const sseBlocked = beginHeadroomAttempt(endpoint, { isSSE: true });
+    expect(sseBlocked.reason).toBe("latency_guard_open");
+
+    // Non-SSE request still allowed through circuit
+    const jsonAllowed = beginHeadroomAttempt(endpoint, { isSSE: false });
+    expect(jsonAllowed.ticket).toBeDefined();
+    finishHeadroomAttempt(jsonAllowed.ticket, { kind: "success", latencyMs: 100 });
+
+    // Advance beyond 30s cooldown
+    vi.advanceTimersByTime(30001);
+
+    // First SSE becomes probe
+    const probeAttempt = beginHeadroomAttempt(endpoint, { isSSE: true });
+    expect(probeAttempt.ticket).toBeDefined();
+    expect(probeAttempt.ticket.latencyProbe).toBe(true);
+
+    // Second concurrent SSE receives latency_probe_in_flight
+    const probeBlocked = beginHeadroomAttempt(endpoint, { isSSE: true });
+    expect(probeBlocked.reason).toBe("latency_probe_in_flight");
+
+    // Probe finishes fast -> recovers
+    markHeadroomAttemptStarted(probeAttempt.ticket);
+    const transition = finishHeadroomAttempt(probeAttempt.ticket, { kind: "success", latencyMs: 250 });
+    expect(transition).toBe("latency_recovered");
+
+    const snapshot = getHeadroomRuntimeSnapshot(endpoint);
+    expect(snapshot.latencyGuard.state).toBe("CLOSED");
+    expect(snapshot.latencyGuard.probeInFlight).toBe(false);
+  });
 });

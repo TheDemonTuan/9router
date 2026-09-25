@@ -10,6 +10,8 @@ import {
   HEADROOM_UPSTREAM_MARGIN_MS,
   HEADROOM_UPSTREAM_TIMEOUT_MS,
   HEADROOM_MAX_PAYLOAD_BYTES,
+  HEADROOM_SSE_GUARD_ENABLED,
+  HEADROOM_STATELESS_SSE_MAX_BYTES,
 } from "../config/runtimeConfig.js";
 import { validateBodyInvariants } from "./headroomInvariants.js";
 import { createDeadlineError, createClientAbortError } from "../utils/preResponseBudget.js";
@@ -98,6 +100,7 @@ export async function callHeadroomGateway({
   body,
   compressUserMessages = false,
   sessionId = null,
+  isSSE = false,
   timeoutMs = HEADROOM_DEFAULT_TIMEOUT_MS,
   preResponse = null,
   clientSignal = null,
@@ -139,17 +142,7 @@ export async function callHeadroomGateway({
     return null;
   }
 
-  if (preResponse?.signal?.aborted) throw preResponse.signal.reason?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" ? preResponse.signal.reason : createDeadlineError();
-  if (clientSignal?.aborted) throw clientSignal.reason?.code === "CLIENT_ABORT" ? clientSignal.reason : createClientAbortError();
-  const admission = beginHeadroomAttempt(endpoint);
-  if (!admission.ticket) {
-    diagnostics.reason = admission.reason;
-    recordHeadroomBypass(endpoint, admission.reason);
-    return null;
-  }
-  const ticket = admission.ticket;
-  try {
-  // 2. Resource bounds: check payload size limit (max 20MB)
+  // Pre-dispatch bounds and fast local bypasses before acquiring inflight slot
   const estimatedSize = jsonByteSize(body);
   if (estimatedSize === 0) {
     diagnostics.reason = "invalid_body_root";
@@ -157,8 +150,25 @@ export async function callHeadroomGateway({
   }
   if (estimatedSize > HEADROOM_MAX_PAYLOAD_BYTES) {
     diagnostics.reason = "payload_too_large";
+    recordHeadroomBypass(endpoint, diagnostics.reason);
     return null;
   }
+  if (HEADROOM_SSE_GUARD_ENABLED && isSSE && !sessionId && estimatedSize >= HEADROOM_STATELESS_SSE_MAX_BYTES) {
+    diagnostics.reason = "stateless_sse_payload_too_large";
+    recordHeadroomBypass(endpoint, diagnostics.reason);
+    return null;
+  }
+
+  if (preResponse?.signal?.aborted) throw preResponse.signal.reason?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" ? preResponse.signal.reason : createDeadlineError();
+  if (clientSignal?.aborted) throw clientSignal.reason?.code === "CLIENT_ABORT" ? clientSignal.reason : createClientAbortError();
+  const admission = beginHeadroomAttempt(endpoint, { isSSE });
+  if (!admission.ticket) {
+    diagnostics.reason = admission.reason;
+    recordHeadroomBypass(endpoint, admission.reason);
+    return null;
+  }
+  const ticket = admission.ticket;
+  try {
 
   // 3. Assemble Gateway v2 request payload (stateless, marker-free, client controls locked)
   // Strip any client-supplied headroom control fields from upstream envelope

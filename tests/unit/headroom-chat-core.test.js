@@ -616,4 +616,125 @@ describe("handleChatCore Headroom diagnostics", () => {
     expect(receivedPayload.config.session_id).toBeUndefined();
     expect(receivedPayload.gateway.session_affinity).toBe(false);
   });
+
+  it("derives and forwards session_id in SOURCE_NATIVE for Antigravity requests", async () => {
+    const log = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), line: vi.fn() };
+    let receivedPayload = null;
+
+    global.fetch = vi.fn(async (url, init) => {
+      if (String(url).includes("/v1/compress")) {
+        receivedPayload = JSON.parse(init.body);
+        return new Response(JSON.stringify({
+          data: {
+            body: { ...((({ gateway, config, ...providerBody }) => providerBody)(receivedPayload)), messages: [{ role: "user", content: "compressed_text" }] },
+            turn_id: "turn_sn_sess_1",
+          },
+          tokens_before: 100,
+          tokens_after: 40,
+          tokens_saved: 60,
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    const claudeBody = {
+      model: "claude-3-5-sonnet-20241022",
+      metadata: { user_id: "user_session_12345678-1234-1234-1234-123456789abc" },
+      messages: [{ role: "user", content: "hello from claude code session" }],
+    };
+
+    await handleChatCore({
+      body: claudeBody,
+      modelInfo: { provider: "antigravity", model: "claude-3-5-sonnet" },
+      credentials: { apiKey: "antigravity-user-key", providerSpecificData: {} },
+      log,
+      connectionId: "test-conn",
+      headroomEnabled: true,
+      headroomUrl: "http://localhost:8787",
+      sourceFormatOverride: "claude",
+      clientRawRequest: {
+        endpoint: "/v1/messages",
+        body: claudeBody,
+        headers: { accept: "application/json" },
+      },
+    });
+
+    expect(receivedPayload).toBeTruthy();
+    expect(receivedPayload.config?.session_id).toMatch(/^s_[0-9a-f]{32}$/);
+    expect(receivedPayload.gateway.session_affinity).toBe(true);
+
+    const gearCalls = log.line.mock.calls.filter((call) => call[1] === "⚙");
+    expect(gearCalls.length).toBeGreaterThan(0);
+    expect(gearCalls[0][2]).toContain("HEADROOM:60tok/60%");
+    expect(gearCalls[0][2]).toContain("SESSION:affinity");
+  });
+
+  it("emits HEADROOM:0tok in gear line when token savings are 0", async () => {
+    const log = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), line: vi.fn() };
+
+    global.fetch = vi.fn(async (url, init) => {
+      if (String(url).includes("/v1/compress")) {
+        const payload = JSON.parse(init.body);
+        return new Response(JSON.stringify({
+          data: {
+            body: { ...((({ gateway, config, ...providerBody }) => providerBody)(payload)), messages: [{ role: "user", content: "same" }] },
+            turn_id: "turn_zero_1",
+          },
+          tokens_before: 50,
+          tokens_after: 50,
+          tokens_saved: 0,
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    await handleChatCore({
+      body: { model: "gpt-4o", stream: false, messages: [{ role: "user", content: "same text" }] },
+      modelInfo: { provider: "openai", model: "gpt-4o" },
+      credentials: { apiKey: "test-key", providerSpecificData: {} },
+      log,
+      connectionId: "test-conn",
+      headroomEnabled: true,
+      headroomUrl: "http://localhost:8787",
+      clientRawRequest: {
+        endpoint: "/v1/chat/completions",
+        body: {},
+        headers: { accept: "application/json" },
+      },
+    });
+
+    const gearCalls = log.line.mock.calls.filter((call) => call[1] === "⚙");
+    expect(gearCalls.length).toBeGreaterThan(0);
+    expect(gearCalls[0][2]).toContain("HEADROOM:0tok");
+  });
+
+  it("bypasses Headroom before network when stateless SSE payload exceeds cutoff", async () => {
+    const log = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), line: vi.fn() };
+    const largeContent = "a".repeat(150 * 1024);
+
+    global.fetch = vi.fn(async () => {
+      throw new Error("Headroom gateway should not be called for large stateless SSE");
+    });
+
+    await handleChatCore({
+      body: { model: "gpt-4o", stream: true, messages: [{ role: "user", content: largeContent }] },
+      modelInfo: { provider: "openai", model: "gpt-4o" },
+      credentials: { apiKey: "test-key", providerSpecificData: {} },
+      log,
+      connectionId: "test-conn",
+      headroomEnabled: true,
+      headroomUrl: "http://localhost:8787",
+      clientRawRequest: {
+        endpoint: "/v1/chat/completions",
+        body: {},
+        headers: { accept: "text/event-stream" },
+      },
+    });
+
+    expect(global.fetch).not.toHaveBeenCalled();
+    const gearCalls = log.line.mock.calls.filter((call) => call[1] === "⚙");
+    expect(gearCalls.length).toBeGreaterThan(0);
+    expect(gearCalls[0][2]).toContain("HEADROOM:BYPASS:stateless_sse_payload_too_large");
+    expect(gearCalls[0][2]).toContain("SESSION:stateless");
+  });
 });

@@ -99,6 +99,24 @@ export const HEADROOM_METRIC_SAMPLE_LIMIT = 2048;
 export const HEADROOM_RUNTIME_MAX_ENDPOINTS = 64;
 export const HEADROOM_GATEWAY_TURN_TTL_SECONDS = parseInt(process.env.HEADROOM_GATEWAY_TURN_TTL_SECONDS || "120", 10) || 120;
 
+// SSE admission and TTFT protection controls
+function envBool(name, def = true) {
+  const raw = process.env[name]?.trim?.().toLowerCase?.();
+  if (!raw) return def;
+  if (raw === "1" || raw === "true" || raw === "on" || raw === "yes") return true;
+  if (raw === "0" || raw === "false" || raw === "off" || raw === "no") return false;
+  return def;
+}
+
+export const HEADROOM_SSE_GUARD_ENABLED = envBool("HEADROOM_SSE_GUARD_ENABLED", true);
+export const HEADROOM_LATENCY_P95_LIMIT_MS = envMs("HEADROOM_LATENCY_P95_LIMIT_MS", 1500);
+export const HEADROOM_LATENCY_WINDOW_MS = envMs("HEADROOM_LATENCY_WINDOW_MS", 60000);
+export const HEADROOM_LATENCY_WINDOW_SIZE = Math.min(128, Math.max(8, envMs("HEADROOM_LATENCY_WINDOW_SIZE", 32)));
+export const HEADROOM_LATENCY_MIN_SAMPLES = Math.max(3, envMs("HEADROOM_LATENCY_MIN_SAMPLES", 5));
+export const HEADROOM_LATENCY_SINGLE_SPIKE_LIMIT_MS = envMs("HEADROOM_LATENCY_SINGLE_SPIKE_LIMIT_MS", 3000);
+export const HEADROOM_LATENCY_COOLDOWN_MS = envMs("HEADROOM_LATENCY_COOLDOWN_MS", 30000);
+export const HEADROOM_STATELESS_SSE_MAX_BYTES = envMs("HEADROOM_STATELESS_SSE_MAX_BYTES", 128 * 1024); // 128KB
+
 // Retry config for 429 responses (legacy - kept for backward compatibility)
 export const RETRY_CONFIG = {
   maxAttempts: 2,

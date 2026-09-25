@@ -62,6 +62,7 @@ describe("GET /api/headroom/status", () => {
     expect(data.managedPid).toBeUndefined();
     expect(data.running).toBe(true);
     expect(data.sidecarVersion).toBe("0.38.0");
+    expect(data.runtime).toEqual({ circuitState: "CLOSED" });
   });
 
   it("permits rawDashboardAvailable only when viewer and service are both local and running", async () => {
