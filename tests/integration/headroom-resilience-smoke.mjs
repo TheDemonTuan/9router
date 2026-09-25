@@ -12,7 +12,7 @@ if (!process.argv.includes("--child")) {
   const env = { ...process.env, HOME: sandbox, USERPROFILE: sandbox, APPDATA: sandbox,
     DATA_DIR: join(sandbox, "data"), HEADROOM_DEFAULT_TIMEOUT_MS: "" };
   for (const key of Object.keys(env)) if (/^(https?_proxy|all_proxy)$/i.test(key) || /^(OPENAI|ANTHROPIC|GEMINI|GOOGLE|GITHUB).*?(KEY|TOKEN)$/i.test(key)) delete env[key];
-  const args = [process.execPath, import.meta.path, "--child", `--${mode}`, ...(process.argv.includes("--probe") ? ["--probe"] : []), ...(output ? ["--output", output] : [])];
+  const args = [process.execPath, import.meta.path, "--child", `--${mode}`, ...(process.argv.includes("--probe") ? ["--probe"] : []), ...(process.argv.includes("--full") ? ["--full"] : []), ...(output ? ["--output", output] : [])];
   try {
     const child = Bun.spawn(args, { env, stdout: "inherit", stderr: "inherit" });
     const code = await child.exited;
@@ -200,20 +200,43 @@ if (!process.argv.includes("--child")) {
     const version = docker("exec", name, "python", "-c", "import headroom; from headroom._version import __version__; print(__version__)");
     assert.equal(version, "0.38.0");
     if (process.argv.includes("--probe")) {
+      const probeResults = [];
       for (const format of ["openai", "claude", "openai-responses", "kiro"]) {
         const body = fixture(format, 262144);
         const projected = format === "kiro" ? { model: body.model, messages: collectKiroHeadroomMessages(body).messages } : body;
         const before = bytes(projected);
         const diagnostics = {};
         const result = await compressWithHeadroom(body, { url, proxyToken: token, model: body.model, format, timeoutMs: 10000, diagnostics });
-        const output = format === "kiro" ? { model: body.model, messages: collectKiroHeadroomMessages(body).messages } : body;
-        const after = bytes(output);
+        const outputBody = format === "kiro" ? { model: body.model, messages: collectKiroHeadroomMessages(body).messages } : body;
+        const after = bytes(outputBody);
         assert.ok(result && after < before, `${format} did not compress a synthetic tool result`);
-        console.log(JSON.stringify({ format, before, after,
-          tokensBefore: result.tokens_before, tokensAfter: result.tokens_after, transforms: result.transforms_applied,
-          reason: diagnostics.reason || null }));
+        const item = {
+          format,
+          before,
+          after,
+          tokensBefore: result.tokens_before,
+          tokensAfter: result.tokens_after,
+          transforms: result.transforms_applied,
+          reason: diagnostics.reason || null
+        };
+        probeResults.push(item);
+        console.log(JSON.stringify(item));
+      }
+      if (output) {
+        await writeFile(output, JSON.stringify({
+          image,
+          version,
+          mode: "probe",
+          results: probeResults,
+        }, null, 2));
       }
     } else {
+    const isFull = process.argv.includes("--full");
+    const transports = isFull ? ["raw", "facade"] : ["facade"];
+    const concurrencies = isFull ? [1, 4, 8] : [1, 8];
+    const coldWaves = isFull ? 10 : 2;
+    const warmupSamples = isFull ? 8 : 3;
+    const warmSamples = isFull ? 100 : 16;
     const report = { image, version, hardware: { cpus: cpus().length, totalMemoryBytes: totalmem() }, cases: [], prefix: null };
     async function sample(format, size, mode) {
       const input = fixture(format, size);
@@ -233,8 +256,8 @@ if (!process.argv.includes("--child")) {
         elapsedMs: performance.now() - started, inputBytes, outputBytes: accepted ? bytes(outputBody) : null,
         tokensBefore: result?.tokens_before ?? null, tokensAfter: result?.tokens_after ?? null };
     }
-    for (const transport of ["raw", "facade"]) for (const format of ["openai", "claude", "openai-responses", "kiro"])
-      for (const size of [16384, 262144, 2097152]) for (const concurrency of [1, 4, 8]) {
+    for (const transport of transports) for (const format of ["openai", "claude", "openai-responses", "kiro"])
+      for (const size of [16384, 262144, 2097152]) for (const concurrency of concurrencies) {
         let peakObservedMemoryBytes = 0;
         const observeMemory = () => { peakObservedMemoryBytes = Math.max(peakObservedMemoryBytes, memoryBytes(docker("stats", "--no-stream", "--format", "{{.MemUsage}}", name)) || 0); };
         globalThis[Symbol.for("9router.headroom.runtime")]?.clear();
@@ -242,15 +265,15 @@ if (!process.argv.includes("--child")) {
         for (const phase of ["cold", "warm"]) {
           const rows = [];
           if (phase === "cold") {
-            for (let wave = 0; wave < 10; wave++) {
+            for (let wave = 0; wave < coldWaves; wave++) {
               docker("restart", name);
               await ready();
               rows.push(...await Promise.all(Array.from({ length: concurrency }, () => sample(format, size, transport))));
               observeMemory();
             }
           } else {
-            for (let n = 0; n < 8; n += concurrency) await Promise.all(Array.from({ length: Math.min(concurrency, 8 - n) }, () => sample(format, size, transport)));
-            for (let n = 0; n < 100; n += concurrency) rows.push(...await Promise.all(Array.from({ length: Math.min(concurrency, 100 - n) }, () => sample(format, size, transport))));
+            for (let n = 0; n < warmupSamples; n += concurrency) await Promise.all(Array.from({ length: Math.min(concurrency, warmupSamples - n) }, () => sample(format, size, transport)));
+            for (let n = 0; n < warmSamples; n += concurrency) rows.push(...await Promise.all(Array.from({ length: Math.min(concurrency, warmSamples - n) }, () => sample(format, size, transport))));
             observeMemory();
           }
           summary[phase] = { samples: rows.length, accepted: rows.filter((r) => r.accepted).length,
