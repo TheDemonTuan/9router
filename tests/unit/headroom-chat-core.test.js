@@ -298,6 +298,42 @@ describe("handleChatCore Headroom diagnostics & session terminalNoFallback", () 
     expect(executeMock.mock.calls[0][0].body.request.sessionId).toBe(toNumericSessionId("client-conversation-42"));
   });
 
+  it("translates Responses to CX native before Headroom and forwards its complete body", async () => {
+    const body = {
+      model: "cx/gpt-5.4", stream: false,
+      instructions: "Keep the answer concise.",
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "Original question" }] }],
+    };
+    global.fetch = vi.fn(async (url, init) => {
+      expect(String(url)).toBe("http://localhost:8787/v1/compress");
+      const sent = JSON.parse(init.body);
+      expect(sent).toMatchObject({ model: "gpt-5.4", gateway: { can_redrive: false, can_relay_response: true } });
+      expect(sent.input).toEqual(body.input);
+      expect(sent.messages).toBeUndefined();
+      expect(sent.instructions).toBe(body.instructions);
+      const { gateway, config, ...providerBody } = sent;
+      return Response.json({
+        body: { ...providerBody, instructions: "Compressed instructions", input: [{ ...sent.input[0], content: [{ type: "input_text", text: "Compressed question" }] }], new_field: "forwarded" },
+      });
+    });
+    const result = await handleChatCore({
+      body, modelInfo: { provider: "codex", model: "gpt-5.4" },
+      credentials: { apiKey: "synthetic-key", providerSpecificData: {} },
+      log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn() },
+      connectionId: "test-responses-cx", headroomEnabled: true,
+      headroomUrl: "http://localhost:8787", sourceFormatOverride: "openai-responses",
+      clientRawRequest: { endpoint: "/v1/responses", body, headers: { accept: "application/json" } },
+    });
+    expect(result.response.status).toBe(200);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(executeMock).toHaveBeenCalledTimes(1);
+    expect(executeMock.mock.calls[0][0].body).toMatchObject({
+      model: "gpt-5.4", instructions: "Compressed instructions", new_field: "forwarded",
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "Compressed question" }] }],
+    });
+    expect(executeMock.mock.calls[0][0].body.messages).toBeUndefined();
+  });
+
   it("handles client cancellation during Headroom compression with HTTP 499", async () => {
     const log = { debug: vi.fn(), info: vi.fn(), warn: vi.fn() };
     const clientController = new AbortController();
