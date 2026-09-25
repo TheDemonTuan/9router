@@ -202,11 +202,11 @@ if (!process.argv.includes("--child")) {
     if (process.argv.includes("--probe")) {
       for (const format of ["openai", "claude", "openai-responses", "kiro"]) {
         const body = fixture(format, 262144);
-        const projected = format === "kiro" ? { messages: collectKiroHeadroomMessages(body).messages } : body;
+        const projected = format === "kiro" ? { model: body.model, messages: collectKiroHeadroomMessages(body).messages } : body;
         const before = bytes(projected);
         const diagnostics = {};
         const result = await compressWithHeadroom(body, { url, proxyToken: token, model: body.model, format, timeoutMs: 10000, diagnostics });
-        const output = format === "kiro" ? { messages: collectKiroHeadroomMessages(body).messages } : body;
+        const output = format === "kiro" ? { model: body.model, messages: collectKiroHeadroomMessages(body).messages } : body;
         const after = bytes(output);
         assert.ok(result && after < before, `${format} did not compress a synthetic tool result`);
         console.log(JSON.stringify({ format, before, after,
@@ -217,7 +217,7 @@ if (!process.argv.includes("--child")) {
     const report = { image, version, hardware: { cpus: cpus().length, totalMemoryBytes: totalmem() }, cases: [], prefix: null };
     async function sample(format, size, mode) {
       const input = fixture(format, size);
-      const projected = format === "kiro" ? { messages: collectKiroHeadroomMessages(input).messages } : input;
+      const projected = format === "kiro" ? { model: input.model, messages: collectKiroHeadroomMessages(input).messages } : input;
       const inputBytes = bytes(projected);
       assert.ok(inputBytes >= size && inputBytes <= 20 * 1024 * 1024, "Synthetic payload size out of bounds");
       const original = mode === "facade" && format !== "kiro" ? structuredClone(projected) : projected;
@@ -227,8 +227,8 @@ if (!process.argv.includes("--child")) {
         ? await callHeadroomGateway({ url, proxyToken: token, body: projected, model: input.model, format: format === "kiro" ? "openai" : format, timeoutMs: 30000, diagnostics: diag })
         : await compressWithHeadroom(input, { url, proxyToken: token, model: input.model, format, timeoutMs: 10000, diagnostics: diag });
       const accepted = !!result;
-      const outputBody = mode === "raw" ? result?.compressedBody : format === "kiro" ? { messages: collectKiroHeadroomMessages(input).messages } : input;
-      if (accepted) assert.equal(validateBodyInvariants(original, outputBody, format === "kiro" ? "openai" : format).valid, true);
+      const outputBody = mode === "raw" ? result?.compressedBody : format === "kiro" ? { model: input.model, messages: collectKiroHeadroomMessages(input).messages } : input;
+      if (accepted) assert.equal(validateBodyInvariants(original, outputBody, format === "kiro" ? "openai" : format).valid, true, `${mode}/${format}/${size}: envelope mismatch`);
       return { accepted, reason: diag.reason || null, latencyMs: diag.latencyMs ?? null,
         elapsedMs: performance.now() - started, inputBytes, outputBytes: accepted ? bytes(outputBody) : null,
         tokensBefore: result?.tokens_before ?? null, tokensAfter: result?.tokens_after ?? null };
@@ -255,6 +255,7 @@ if (!process.argv.includes("--child")) {
           }
           summary[phase] = { samples: rows.length, accepted: rows.filter((r) => r.accepted).length,
             skipped: rows.filter((r) => r.reason === "gateway_compression_skipped").length,
+            compressed: rows.filter((r) => r.accepted && r.outputBytes < r.inputBytes).length,
             timeouts: rows.filter((r) => r.reason === "gateway_timeout").length,
             circuitBypass: rows.filter((r) => r.reason === "circuit_open" || r.reason === "circuit_probe_in_flight").length,
             invariantRejects: rows.filter((r) => r.reason === "invariant_violation").length,
@@ -290,7 +291,7 @@ if (!process.argv.includes("--child")) {
     assert.ok(Object.values(counts).every((count) => count > 0), "At least one format had zero accepted compression results");
     for (const format of Object.keys(counts)) {
       const cases = report.cases.filter((item) => item.transport === "facade" && item.format === format);
-      assert.ok(cases.some((item) => item.warm.inputBytes > item.warm.outputBytes && item.warm.accepted > 0), `${format} did not reduce provider bytes`);
+      assert.ok(cases.some((item) => item.warm.compressed > 0), `${format} did not reduce provider bytes`);
       assert.ok(cases.every((item) => item.warm.invariantRejects === 0 && item.cold.invariantRejects === 0), `${format} produced an invariant rejection`);
     }
     }
