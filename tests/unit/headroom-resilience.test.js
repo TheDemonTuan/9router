@@ -218,11 +218,42 @@ describe("Headroom resilience boundaries", () => {
     // Single spike on stateless SSE (hasSession: false)
     const ticket = beginHeadroomAttempt(endpoint, { bypassInFlight: true, isSSE: true, hasSession: false }).ticket;
     markHeadroomAttemptStarted(ticket);
-    const trans = finishHeadroomAttempt(ticket, { kind: "neutral", reason: "invariant_violation", latencyMs: 3552 });
+    const trans = finishHeadroomAttempt(ticket, { kind: "success", latencyMs: 3552 });
     expect(trans).toBe("latency_opened");
 
     const blocked = beginHeadroomAttempt(endpoint, { isSSE: true, hasSession: false });
     expect(blocked.reason).toBe("latency_guard_open");
+  });
+
+  it("isolates latency guard from neutral invariant_violation outcomes even with spike or high historical p95", () => {
+    const endpoint = "http://127.0.0.1:54331/v1/compress";
+
+    // 1. Single spike with invariant_violation on stateless SSE must NOT open guard
+    const ticket1 = beginHeadroomAttempt(endpoint, { bypassInFlight: true, isSSE: true, hasSession: false }).ticket;
+    markHeadroomAttemptStarted(ticket1);
+    const trans1 = finishHeadroomAttempt(ticket1, { kind: "neutral", reason: "invariant_violation", latencyMs: 3552 });
+    expect(trans1).toBeNull();
+
+    const nextAttempt = beginHeadroomAttempt(endpoint, { isSSE: true, hasSession: false });
+    expect(nextAttempt.ticket).toBeDefined();
+    expect(nextAttempt.reason).toBeUndefined();
+    finishHeadroomAttempt(nextAttempt.ticket, { kind: "success", latencyMs: 200 });
+
+    // 2. High historical P95 followed by an invariant_violation at 372ms must NOT open guard
+    for (let i = 0; i < 4; i++) {
+      const t = beginHeadroomAttempt(endpoint, { bypassInFlight: true, isSSE: true, hasSession: false }).ticket;
+      markHeadroomAttemptStarted(t);
+      finishHeadroomAttempt(t, { kind: "success", latencyMs: 1800 });
+    }
+    const invTicket = beginHeadroomAttempt(endpoint, { bypassInFlight: true, isSSE: true, hasSession: false }).ticket;
+    markHeadroomAttemptStarted(invTicket);
+    const transInv = finishHeadroomAttempt(invTicket, { kind: "neutral", reason: "invariant_violation", latencyMs: 372 });
+    expect(transInv).toBeNull();
+
+    const allowed = beginHeadroomAttempt(endpoint, { isSSE: true, hasSession: false });
+    expect(allowed.ticket).toBeDefined();
+    expect(allowed.reason).toBeUndefined();
+    finishHeadroomAttempt(allowed.ticket, { kind: "success", latencyMs: 150 });
   });
 
   it("formats invariant summary tag with path detail or fallback", () => {

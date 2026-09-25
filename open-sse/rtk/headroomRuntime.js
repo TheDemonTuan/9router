@@ -160,6 +160,11 @@ export function finishHeadroomAttempt(ticket, { kind, reason, latencyMs } = {}) 
   if (ticket.probe) s.probeInFlight = false;
   if (ticket.latencyProbe && guard) guard.probeInFlight = false;
 
+  const isLatencyLearningOutcome = (
+    kind === "success"
+    || (kind === "service_failure" && (reason === "gateway_timeout" || reason === "compression_timeout" || Number.isFinite(latencyMs)))
+  );
+
   if (ticket.attempted && Number.isFinite(latencyMs)) {
     s.samples[s.samplePosition++ % WINDOW] = latencyMs;
     s.sampleCount = Math.min(WINDOW, s.sampleCount + 1);
@@ -168,7 +173,7 @@ export function finishHeadroomAttempt(ticket, { kind, reason, latencyMs } = {}) 
     s.latencyMin = Math.min(s.latencyMin ?? latencyMs, latencyMs);
     s.latencyMax = Math.max(s.latencyMax ?? latencyMs, latencyMs);
 
-    if (guard && ticket.isSSE && guard.enabled) {
+    if (guard && ticket.isSSE && guard.enabled && isLatencyLearningOutcome) {
       guard.recent.push({ latencyMs, ts: now });
       if (guard.recent.length > HEADROOM_LATENCY_WINDOW_SIZE) {
         guard.recent.splice(0, guard.recent.length - HEADROOM_LATENCY_WINDOW_SIZE);
@@ -241,7 +246,7 @@ export function finishHeadroomAttempt(ticket, { kind, reason, latencyMs } = {}) 
           latencyTransition = "latency_opened";
         }
       }
-    } else if (guard.state === "CLOSED") {
+    } else if (guard.state === "CLOSED" && isLatencyLearningOutcome) {
       const shouldOpen = isTimeout || p95Exceeded || (!ticket.hasSession && isSevereSpike);
       if (shouldOpen) {
         guard.state = "OPEN";
@@ -249,6 +254,17 @@ export function finishHeadroomAttempt(ticket, { kind, reason, latencyMs } = {}) 
         guard.opened++;
         guard.generation++;
         latencyTransition = "latency_opened";
+
+        const trigger = isTimeout ? "timeout" : (p95Exceeded ? "p95_exceeded" : "severe_spike");
+        ticket.latencyTrigger = {
+          trigger,
+          p95: recentP95,
+          threshold: HEADROOM_LATENCY_P95_LIMIT_MS,
+          samples: guard.recent.length,
+          currentOutcome: reason || kind,
+          currentLatency: latencyMs,
+          lane: ticket.lane || null,
+        };
       }
     }
   }
