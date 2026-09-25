@@ -39,8 +39,6 @@ async function showSettingsMenu(breadcrumb = []) {
       // RTK section
       const rtkOn = data?.settings?.rtkEnabled !== false;
       lines.push(`  RTK:      ${rtkOn ? `${COLORS.green}ON${COLORS.reset}` : `${COLORS.red}OFF${COLORS.reset}`} ${COLORS.dim}(Token Saver)${COLORS.reset}`);
-      const headroomOn = data?.settings?.headroomEnabled === true;
-      lines.push(`  Headroom: ${headroomOn ? `${COLORS.green}ON${COLORS.reset}` : `${COLORS.red}OFF${COLORS.reset}`} ${COLORS.dim}(${data?.settings?.headroomUrl || "http://localhost:8787"})${COLORS.reset}`);
 
       // Auth mode section
       const authMode = data?.settings?.authMode || "password";
@@ -74,13 +72,6 @@ async function showSettingsMenu(breadcrumb = []) {
           return `Token Saver (RTK): ${on ? "ON" : "OFF"} → toggle`;
         },
         action: async (d) => { await toggleRtk(d?.settings?.rtkEnabled !== false); return true; }
-      },
-      {
-        label: (d) => {
-          const on = d?.settings?.headroomEnabled === true;
-          return `Token Saver (Headroom): ${on ? "ON" : "OFF"} → toggle`;
-        },
-        action: async (d) => { await toggleHeadroom(d?.settings?.headroomEnabled === true); return true; }
       },
       {
         label: "🔑 Reset Password to Default",
@@ -169,16 +160,6 @@ async function toggleRtk(currentlyOn) {
   await pause();
 }
 
-async function toggleHeadroom(currentlyOn) {
-  const next = !currentlyOn;
-  const result = await api.updateSettings({ headroomEnabled: next });
-  if (result.success) {
-    showStatus(`Headroom ${next ? "enabled" : "disabled"}`, "success");
-  } else {
-    showStatus(`Failed: ${result.error}`, "error");
-  }
-  await pause();
-}
 
 /**
  * Reset dashboard password to default via server API (writes the live SQLite DB).

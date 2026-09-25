@@ -44,18 +44,7 @@ function makeLongDiff() {
 describe("token savers on Cursor (pre-translate RTK)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    global.fetch = vi.fn(async (url, init) => {
-      if (String(url).includes("/v1/compress")) {
-        const payload = JSON.parse(init.body);
-        return new Response(JSON.stringify({
-          messages: payload.messages,
-          tokens_before: 8000,
-          tokens_after: 2500,
-          tokens_saved: 5500,
-        }), { status: 200, headers: { "content-type": "application/json" } });
-      }
-      throw new Error(`unexpected fetch: ${url}`);
-    });
+    global.fetch = vi.fn(async (url) => { throw new Error(`unexpected fetch: ${url}`); });
     executeMock.mockResolvedValue({
       response: new Response(JSON.stringify({
         id: "chatcmpl-test",
@@ -68,33 +57,28 @@ describe("token savers on Cursor (pre-translate RTK)", () => {
     });
   });
 
-  it("compresses role:tool git diffs before openai→cursor rewrite, then injects Headroom/Caveman/Ponytail", async () => {
+  it("compresses role:tool git diffs before openai→cursor rewrite, then injects Caveman/Ponytail", async () => {
     const diff = makeLongDiff();
     const log = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), line: vi.fn() };
+    const input = {
+      model: "cu/default", stream: false,
+      messages: [
+        { role: "system", content: "hi" },
+        { role: "user", content: "run git diff" },
+        { role: "assistant", content: null, tool_calls: [{ id: "call_1", type: "function", function: { name: "Bash", arguments: '{"command":"git diff"}' } }] },
+        { role: "tool", tool_call_id: "call_1", content: diff },
+        { role: "user", content: "summarize" },
+      ],
+    };
+
 
     await handleChatCore({
-      body: {
-        model: "cu/default",
-        stream: false,
-        messages: [
-          { role: "system", content: "hi" },
-          { role: "user", content: "run git diff" },
-          {
-            role: "assistant",
-            content: null,
-            tool_calls: [{ id: "call_1", type: "function", function: { name: "Bash", arguments: JSON.stringify({ command: "git diff" }) } }],
-          },
-          { role: "tool", tool_call_id: "call_1", content: diff },
-          { role: "user", content: "summarize" },
-        ],
-      },
+      body: input,
       modelInfo: { provider: "cursor", model: "default" },
       credentials: { apiKey: "test-key", providerSpecificData: {} },
       log,
       connectionId: "test-conn",
       rtkEnabled: true,
-      headroomEnabled: true,
-      headroomUrl: "http://localhost:8787",
       cavemanEnabled: true,
       cavemanLevel: "full",
       ponytailEnabled: true,
@@ -116,16 +100,35 @@ describe("token savers on Cursor (pre-translate RTK)", () => {
     expect(blob).not.toContain("UNIQUE_PADDING_150");
     expect(blob).toContain("lazy senior developer");
     expect(blob).toMatch(/Respond like a caveman|drop filler|ACTIVE EVERY RESPONSE/i);
+    expect(input.messages[3].content).toBe(diff);
+    expect(input.messages[0].content).toBe("hi");
+    expect(global.fetch).not.toHaveBeenCalled();
 
-    expect(global.fetch).toHaveBeenCalledWith(
-      "http://localhost:8787/v1/compress",
-      expect.any(Object)
-    );
-
-    const xf = log.line.mock.calls.find((c) => c[1] === "⚙");
-    expect(xf, "expected ⚙ saver log").toBeTruthy();
-    expect(xf[2]).toContain("RTK:");
-    expect(xf[2]).toContain("CAVEMAN:full");
-    expect(xf[2]).toContain("PONYTAIL:full");
   });
+
+  for (const header of ["x-9router-token-saver", "x-9r-token-saver"]) {
+    it(`keeps tool content and system prompt unchanged with ${header}: off`, async () => {
+      const diff = makeLongDiff();
+      const body = { model: "cu/default", stream: false, messages: [
+        { role: "system", content: "original system" },
+        { role: "assistant", content: null, tool_calls: [{ id: "call_keep", type: "function", function: { name: "Bash", arguments: '{"command":"git diff"}' } }] },
+        { role: "tool", tool_call_id: "call_keep", content: diff },
+      ] };
+      await handleChatCore({
+        body, modelInfo: { provider: "cursor", model: "default" },
+        credentials: { apiKey: "test-key", providerSpecificData: {} },
+        connectionId: "test-conn", rtkEnabled: true,
+        cavemanEnabled: true, cavemanLevel: "full", ponytailEnabled: true, ponytailLevel: "full",
+        clientRawRequest: { endpoint: "/v1/chat/completions", body, headers: { [header]: "off", accept: "application/json" } },
+      });
+      const dispatched = executeMock.mock.calls[0][0].body;
+      const wireText = dispatched.messages.map((message) => message.content || "").join("\n");
+      expect(wireText).toContain(diff);
+      expect(wireText).toContain("call_keep");
+      expect(wireText).toContain("original system");
+      expect(wireText).not.toContain("lazy senior developer");
+      expect(body.messages[2].content).toBe(diff);
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+  }
 });

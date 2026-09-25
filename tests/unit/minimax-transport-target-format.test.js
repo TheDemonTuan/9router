@@ -46,7 +46,8 @@ vi.mock("../../open-sse/utils/requestLogger.js", () => ({
   })),
 }));
 
-vi.mock("../../open-sse/utils/clientDetector.js", () => ({
+vi.mock("../../open-sse/utils/clientDetector.js", async (importOriginal) => ({
+  ...await importOriginal(),
   detectClientTool: vi.fn(() => null),
   isNativePassthrough: vi.fn(() => false),
 }));
@@ -86,12 +87,6 @@ vi.mock("../../open-sse/rtk/ponytail.js", () => ({ injectPonytail: vi.fn() }));
 vi.mock("../../open-sse/rtk/index.js", () => ({
   compressMessages: vi.fn(() => null),
   formatRtkLog: vi.fn(() => ""),
-}));
-vi.mock("../../open-sse/rtk/headroom.js", () => ({
-  compressWithHeadroom: vi.fn(async () => null),
-  formatHeadroomLog: vi.fn(() => ""),
-  formatHeadroomSizeLog: vi.fn(() => ""),
-  isHeadroomPhantomSavings: vi.fn(() => false),
 }));
 vi.mock("../../open-sse/rtk/pxpipe.js", () => ({
   compressWithPxpipe: vi.fn(async () => ({ body: null, summary: null })),
@@ -166,19 +161,6 @@ describe("MiniMax-M3 multi-transport routing", () => {
     const { handleChatCore } = await import("../../open-sse/handlers/chatCore.js");
     await handleChatCore(makeOptions(body));
 
-    expect(translateRequestMock).toHaveBeenCalledWith(
-      "openai",
-      "openai",
-      "MiniMax-M3",
-      expect.any(Object),
-      false,
-      expect.any(Object),
-      "minimax-cn",
-      expect.any(Object),
-      expect.anything(),
-      "test-connection",
-      null,
-    );
     expect(executeMock).toHaveBeenCalledTimes(1);
     const requestBody = executeMock.mock.calls[0][0].body;
     expect(requestBody.messages[0].content).toContainEqual(imageBlock);

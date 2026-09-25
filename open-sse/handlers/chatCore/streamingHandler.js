@@ -209,7 +209,6 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
     const status = providerResponse.status || 502;
     if (log?.errorLine) log.errorLine(reqTag, "✗", `BLOCKED ${status} · ${provider}/${model} · non-SSE (${upstreamContentType})\n    ${shortMsg}`);
     else console.warn(`[STREAM] ${provider} | ${model} | blocked pipe: ${shortMsg} [${status}]`);
-    headroomTurnContext?.complete?.({ statusCode: status });
     streamController?.handleError?.(new Error(`upstream non-SSE: ${status}`));
     return {
       success: false,
@@ -280,20 +279,10 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
 /**
  * Build onStreamComplete callback for streaming usage tracking.
  */
-export function buildOnStreamComplete({ provider, model, connectionId, apiKey, requestStartTime, body, stream, finalBody, translatedBody, clientRawRequest, pxpipe, reqTag, log, releasePending, routeContext = null, headroomTurnContext = null }) {
+export function buildOnStreamComplete({ provider, model, connectionId, apiKey, requestStartTime, body, stream, finalBody, translatedBody, clientRawRequest, pxpipe, reqTag, log, releasePending, routeContext = null }) {
   const streamDetailId = `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
 
   const onStreamComplete = (contentObj, usage, ttftAt, outcome = { status: "completed", successful: true }, metrics = {}) => {
-    try {
-      const isSuccessful = outcome?.successful !== false;
-      const statusCode = isSuccessful ? 200 : 502;
-      headroomTurnContext?.complete?.({
-        statusCode,
-        status: statusCode,
-        usage,
-        latencyMs: Date.now() - requestStartTime,
-      });
-    } catch { /* best-effort */ }
     const latency = {
       ttft: ttftAt ? ttftAt - requestStartTime : null,
       ftext: ttftAt ? ttftAt - requestStartTime : null,

@@ -536,7 +536,6 @@ a third party under a provider named "Self-hosted".
 | Feature                                                                           | What It Does                                                                             | Why It Matters                                    |
 | --------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------- |
 | 🚀 **RTK Token Saver** ([RTK](https://github.com/rtk-ai/rtk) ⭐40K)               | Compress tool outputs (`git diff`, `grep`, `ls`, `tree`...) before sending to LLM        | Save **20-40% input tokens** per request          |
-| 🧠 **Headroom Token Saver** ([Headroom](https://github.com/chopratejas/headroom)) | Optional external `/v1/compress` proxy before provider routing                           | Save more context tokens without changing clients |
 | 🪨 **Caveman Mode** ([Caveman](https://github.com/JuliusBrussee/caveman) ⭐52K)   | Inject caveman-speak prompt → LLM replies terse, technical substance preserved           | Save **up to 65% output tokens**                  |
 | 🐴 **Ponytail** ([Ponytail](https://github.com/DietrichGebert/ponytail))          | Inject "lazy senior dev" prompt → LLM writes minimal, YAGNI-first code (Lite/Full/Ultra) | **Fewer output tokens, less refactoring**         |
 | 🎯 **Smart 3-Tier Fallback**                                                      | Auto-route: Subscription → Cheap → Free                                                  | Never stop coding, zero downtime                  |
@@ -569,37 +568,6 @@ Tool outputs (`git diff`, `grep`, `find`, `ls`, `tree`, log dumps...) often eat 
 Without RTK: 47K tokens sent to LLM
 With RTK:    28K tokens sent to LLM   (40% saved · same context · same answer)
 ```
-
-### 🧠 Headroom Token Saver
-
-Headroom is optional and runs separately. 9Router calls Headroom's local `/v1/compress` endpoint, then keeps normal routing, fallback, auth, and usage tracking:
-
-```
-Client → 9Router → Headroom /v1/compress → 9Router → provider
-```
-
-Local setup:
-
-```bash
-pip install "headroom-ai[proxy]"
-headroom proxy --port 8787
-```
-
-Enable in Dashboard → Endpoint → Token Saver → Headroom. Default URL: `http://localhost:8787`.
-
-Docker examples:
-
-```bash
-# Headroom service in same Docker network
-http://headroom:8787
-
-# Headroom running on host machine
-http://host.docker.internal:8787
-```
-
-Integration targets [Headroom 0.38.0 @ 94206e2](https://github.com/headroomlabs-ai/headroom/blob/94206e265203acfd72a3b939e9a964e29175ad50/docs/content/docs/proxy.mdx). 9Router sends a native request to `/v1/compress` and forwards the complete returned provider body. When the client supplies a stable conversation ID, Headroom owns session replay and per-session locking. A session timeout/error returns a retryable 503 without provider dispatch or account/model fallback; stateless service errors may forward the original sanitized body. Client abort and the router's global pre-response deadline still apply. No router-specific Headroom timeout, circuit, prewarm or payload-size cutoff is configured.
-
-SOURCE_NATIVE translation and other enabled token savers can alter the provider-wire body after Headroom; Headroom's replay guarantee applies to its own native-format boundary, not every downstream transformation. The sidecar should run as a single process when using session affinity. `bash tests/headroom-acceptance.sh --strong` runs offline contract checks; replay/locking must also be verified against the pinned image before deployment.
 
 ### 🐴 Ponytail (Lazy Senior Dev)
 
