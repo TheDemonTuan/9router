@@ -105,12 +105,13 @@ describe("Headroom invariants wire contract", () => {
       reason: "model_sovereignty_violation",
     });
 
-    // Invalid route type or provider reroute
+    // Provider is advisory; the router never uses it to select the upstream.
+    expect(validateBodyInvariants(orig, { model: "gpt-4o", messages: [] }, { route: { model: "gpt-4o", provider: "openai" } })).toEqual({ valid: true });
     expect(validateBodyInvariants(orig, { model: "gpt-4o", messages: [] }, { route: "invalid" })).toEqual({
       valid: false,
       reason: "model_sovereignty_violation",
     });
-    expect(validateBodyInvariants(orig, { model: "gpt-4o", messages: [] }, { route: { provider: "elsewhere" } })).toEqual({
+    expect(validateBodyInvariants(orig, { model: "gpt-4o", messages: [] }, { route: { provider: 42 } })).toEqual({
       valid: false,
       reason: "model_sovereignty_violation",
     });

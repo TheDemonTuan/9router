@@ -5,7 +5,7 @@ const object = (value) => value !== null && typeof value === "object" && !Array.
 export function validateBodyInvariants(original, returned, { route, obligations = [], turnId, headers } = {}) {
   if (!object(original) || !object(returned)) return { valid: false, reason: "gateway_invalid_body" };
   if (CONTROL_FIELDS.some((field) => Object.hasOwn(returned, field))) return { valid: false, reason: "gateway_control_field" };
-  if (returned.model !== original.model || (route != null && (!object(route) || (route.model !== undefined && route.model !== original.model) || route.provider != null))) {
+  if (returned.model !== original.model || (route != null && (!object(route) || (route.model !== undefined && route.model !== original.model) || (route.provider != null && typeof route.provider !== "string")))) {
     return { valid: false, reason: "model_sovereignty_violation" };
   }
   if (!Array.isArray(obligations) || obligations.some((value) => value !== "relay_usage")) {
