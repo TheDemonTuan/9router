@@ -163,7 +163,12 @@ export async function callHeadroomGateway({
   if (preResponse?.signal?.aborted) throw preResponse.signal.reason?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" ? preResponse.signal.reason : createDeadlineError();
   if (clientSignal?.aborted) throw clientSignal.reason?.code === "CLIENT_ABORT" ? clientSignal.reason : createClientAbortError();
   const hasSession = Boolean(sessionId && typeof sessionId === "string" && !compressUserMessages);
-  const admission = beginHeadroomAttempt(endpoint, { isSSE: isBackgroundPrewarm ? false : isSSE, hasSession, isBackground: isBackgroundPrewarm });
+  const admission = beginHeadroomAttempt(endpoint, {
+    isSSE: isBackgroundPrewarm ? false : isSSE,
+    hasSession,
+    isBackground: isBackgroundPrewarm,
+    format,
+  });
   if (!admission.ticket) {
     diagnostics.reason = admission.reason;
     recordHeadroomBypass(endpoint, admission.reason);
@@ -397,5 +402,8 @@ export async function callHeadroomGateway({
       : !ticket.attempted ? "local_bypass"
         : isServiceFailure ? "service_failure" : "neutral";
     diagnostics.transition = finishHeadroomAttempt(ticket, { kind, reason, latencyMs: ticket.attempted ? diagnostics.latencyMs : undefined });
+    if (ticket.latencyTrigger) {
+      diagnostics.latencyTrigger = ticket.latencyTrigger;
+    }
   }
 }

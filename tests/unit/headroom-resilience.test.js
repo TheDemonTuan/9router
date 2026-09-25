@@ -256,6 +256,50 @@ describe("Headroom resilience boundaries", () => {
     finishHeadroomAttempt(allowed.ticket, { kind: "success", latencyMs: 150 });
   });
 
+  it("scopes latency guard admission by format/session lane", () => {
+    const endpoint = "http://127.0.0.1:54332/v1/compress";
+
+    // 1. Degrade openai-responses/session lane with 5 slow requests
+    for (let i = 0; i < 5; i++) {
+      const ticket = beginHeadroomAttempt(endpoint, {
+        isSSE: true,
+        hasSession: true,
+        format: "openai-responses",
+        bypassInFlight: true,
+      }).ticket;
+      markHeadroomAttemptStarted(ticket);
+      finishHeadroomAttempt(ticket, { kind: "success", latencyMs: 2000 });
+    }
+
+    // 2. Next request on openai-responses/session should be blocked
+    const responsesSessionBlocked = beginHeadroomAttempt(endpoint, {
+      isSSE: true,
+      hasSession: true,
+      format: "openai-responses",
+    });
+    expect(responsesSessionBlocked.reason).toBe("latency_guard_open");
+
+    // 3. But openai/stateless request on the same endpoint is NOT blocked
+    const openaiStatelessAllowed = beginHeadroomAttempt(endpoint, {
+      isSSE: true,
+      hasSession: false,
+      format: "openai",
+    });
+    expect(openaiStatelessAllowed.ticket).toBeDefined();
+    expect(openaiStatelessAllowed.reason).toBeUndefined();
+    finishHeadroomAttempt(openaiStatelessAllowed.ticket, { kind: "success", latencyMs: 200 });
+
+    // 4. openai-responses/stateless is also in its own lane and not blocked
+    const responsesStatelessAllowed = beginHeadroomAttempt(endpoint, {
+      isSSE: true,
+      hasSession: false,
+      format: "openai-responses",
+    });
+    expect(responsesStatelessAllowed.ticket).toBeDefined();
+    expect(responsesStatelessAllowed.reason).toBeUndefined();
+    finishHeadroomAttempt(responsesStatelessAllowed.ticket, { kind: "success", latencyMs: 200 });
+  });
+
   it("formats invariant summary tag with path detail or fallback", () => {
     expect(formatHeadroomSummaryTag(null, { reason: "invariant_violation", detail: "input.127.arguments", latencyMs: 3552 }))
       .toBe("HEADROOM:BYPASS:invariant(input.127.arguments) 3552ms");

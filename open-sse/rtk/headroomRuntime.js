@@ -30,21 +30,52 @@ function code(reason) {
   if (/^gateway_http_\d{3}$/.test(reason || "")) return "gateway_http_4xx";
   return "invariant_violation";
 }
+export function normalizeHeadroomLane(format, hasSession) {
+  const fmt = (format && typeof format === "string") ? format.toLowerCase() : "default";
+  const sessionType = hasSession ? "session" : "stateless";
+  return `${fmt}/${sessionType}`;
+}
+
+function createLatencyGuard(enabled = HEADROOM_SSE_GUARD_ENABLED) {
+  return {
+    enabled,
+    state: "CLOSED",
+    openUntil: 0,
+    generation: 0,
+    probeInFlight: false,
+    opened: 0,
+    recent: [],
+  };
+}
+
+function getLaneGuard(current, lane) {
+  current.latencyGuards ||= new Map();
+  let guard = current.latencyGuards.get(lane);
+  if (!guard) {
+    if (current.latencyGuards.size >= 16) {
+      for (const [key, candidateGuard] of current.latencyGuards) {
+        if (candidateGuard.state === "CLOSED" && !candidateGuard.probeInFlight) {
+          current.latencyGuards.delete(key);
+          break;
+        }
+      }
+    }
+    guard = createLatencyGuard(HEADROOM_SSE_GUARD_ENABLED);
+    current.latencyGuards.set(lane, guard);
+  }
+  return guard;
+}
+
 function state() {
+  const defaultGuard = createLatencyGuard();
+  const latencyGuards = new Map([["default/stateless", defaultGuard]]);
   return {
     state: "CLOSED", failures: 0, openUntil: 0, generation: 0, probeInFlight: false,
     inFlight: 0, lastUsed: Date.now(), requests: 0, success: 0, timeout: 0, bypass: 0,
     opened: 0, cancelled: 0, outcomes: Object.create(null), samples: new Float64Array(WINDOW),
     samplePosition: 0, sampleCount: 0, latencyCount: 0, latencySum: 0, latencyMin: null, latencyMax: null,
-    latencyGuard: {
-      enabled: HEADROOM_SSE_GUARD_ENABLED,
-      state: "CLOSED",
-      openUntil: 0,
-      generation: 0,
-      probeInFlight: false,
-      opened: 0,
-      recent: [],
-    },
+    latencyGuard: defaultGuard,
+    latencyGuards,
   };
 }
 function entry(endpoint, create = false) {
@@ -55,7 +86,11 @@ function entry(endpoint, create = false) {
     if (map.size >= CAPACITY) {
       let victim;
       for (const [key, candidate] of map) {
-        if (candidate.inFlight === 0 && candidate.state === "CLOSED" && candidate.latencyGuard?.state === "CLOSED" && (!victim || candidate.lastUsed < victim[1].lastUsed)) victim = [key, candidate];
+        const allGuardsClosed = !candidate.latencyGuards
+          || Array.from(candidate.latencyGuards.values()).every((g) => g.state === "CLOSED");
+        if (candidate.inFlight === 0 && candidate.state === "CLOSED" && allGuardsClosed && (!victim || candidate.lastUsed < victim[1].lastUsed)) {
+          victim = [key, candidate];
+        }
       }
       if (!victim) return null;
       map.delete(victim[0]);
@@ -79,7 +114,7 @@ function calculateRecentP95(guard, now) {
   return sorted[Math.ceil(0.95 * sorted.length) - 1] ?? null;
 }
 
-export function beginHeadroomAttempt(endpoint, { bypassInFlight = false, isSSE = false, hasSession = false, isBackground = false } = {}) {
+export function beginHeadroomAttempt(endpoint, { bypassInFlight = false, isSSE = false, hasSession = false, isBackground = false, format } = {}) {
   const current = entry(endpoint, true);
   if (!current) return { reason: "runtime_capacity" };
   const now = Date.now();
@@ -91,17 +126,11 @@ export function beginHeadroomAttempt(endpoint, { bypassInFlight = false, isSSE =
   }
   if (current.state === "HALF_OPEN" && current.probeInFlight) return { reason: "circuit_probe_in_flight" };
 
-  // 2. Dedicated latency guard for SSE (foreground only)
+  // 2. Dedicated latency guard for SSE (foreground only) scoped by format and session lane
   let latencyProbe = false;
-  const guard = current.latencyGuard ||= {
-    enabled: HEADROOM_SSE_GUARD_ENABLED,
-    state: "CLOSED",
-    openUntil: 0,
-    generation: 0,
-    probeInFlight: false,
-    opened: 0,
-    recent: [],
-  };
+  const lane = normalizeHeadroomLane(format, hasSession);
+  const guard = getLaneGuard(current, lane);
+  current.latencyGuard = guard;
 
   if (!isBackground && isSSE && guard.enabled) {
     if (guard.state === "OPEN") {
@@ -126,6 +155,8 @@ export function beginHeadroomAttempt(endpoint, { bypassInFlight = false, isSSE =
   return {
     ticket: {
       current,
+      lane,
+      guard,
       generation: current.generation,
       probe,
       latencyProbe,
@@ -154,7 +185,7 @@ export function finishHeadroomAttempt(ticket, { kind, reason, latencyMs } = {}) 
   if (ticket.finalized) return null;
   ticket.finalized = true;
   const s = ticket.current;
-  const guard = s.latencyGuard;
+  const guard = ticket.guard || s.latencyGuard;
   const now = Date.now();
   s.inFlight--;
   if (ticket.probe) s.probeInFlight = false;
@@ -271,12 +302,18 @@ export function finishHeadroomAttempt(ticket, { kind, reason, latencyMs } = {}) 
 
   return circuitTransition || latencyTransition;
 }
-export function getHeadroomRuntimeSnapshot(endpoint) {
+export function getHeadroomRuntimeSnapshot(endpoint, { format, hasSession } = {}) {
   const s = entry(endpoint);
   const now = Date.now();
   const samples = s ? Array.from(s.samples.slice(0, s.sampleCount)).sort((a, b) => a - b) : [];
   const percentile = (p) => samples.length ? samples[Math.ceil(p * samples.length) - 1] : null;
-  const guard = s?.latencyGuard;
+
+  let guard = s?.latencyGuard;
+  let targetLane = null;
+  if (s && (format !== undefined || hasSession !== undefined)) {
+    targetLane = normalizeHeadroomLane(format, hasSession);
+    guard = s.latencyGuards?.get(targetLane) || guard;
+  }
   const recentP95 = guard ? calculateRecentP95(guard, now) : null;
 
   return {
@@ -291,6 +328,7 @@ export function getHeadroomRuntimeSnapshot(endpoint) {
     latencyGuard: {
       enabled: Boolean(guard?.enabled),
       state: guard?.state || "CLOSED",
+      lane: targetLane || null,
       openUntil: guard?.openUntil || 0,
       remainingCooldownMs: guard?.openUntil ? Math.max(0, guard.openUntil - now) : 0,
       probeInFlight: Boolean(guard?.probeInFlight),
