@@ -408,6 +408,131 @@ describe("Headroom 0.38 Responses upstream mutation invariants", () => {
     expect(res.valid).toBe(false);
     expect(res.detail).toContain("internal_chat_message_metadata_passthrough");
   });
+
+  it("12. allows tools schema compaction when transform tool_schema_compaction is present", () => {
+    const orig = {
+      model: "gpt-4o",
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+      tools: [
+        {
+          type: "function",
+          name: "get_weather",
+          description: "   Get current weather for location   ",
+          parameters: {
+            $schema: "http://json-schema.org/draft-07/schema#",
+            $id: "https://example.com/weather.json",
+            $comment: "weather comment",
+            title: "WeatherParams",
+            type: "object",
+            properties: {
+              location: {
+                type: "string",
+                title: "City Name",
+                description: "The city, e.g. San Francisco",
+                examples: ["San Francisco", "Tokyo"],
+                deprecated: false,
+                readOnly: false,
+                writeOnly: false,
+                markdownDescription: "City name in English",
+              },
+            },
+            required: ["location"],
+          },
+        },
+      ],
+    };
+    const comp = {
+      model: "gpt-4o",
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+      tools: [
+        {
+          type: "function",
+          name: "get_weather",
+          description: "Get current weather for location",
+          parameters: {
+            type: "object",
+            properties: {
+              location: {
+                type: "string",
+                description: "The city, e.g. San Francisco",
+              },
+            },
+            required: ["location"],
+          },
+        },
+      ],
+    };
+
+    const res = validateBodyInvariants(orig, comp, "openai-responses", {
+      transforms: ["tool_schema_compaction"],
+    });
+    expect(res).toEqual({ valid: true });
+  });
+
+  it("13. rejects tools schema changes when transforms does not include tool_schema_compaction", () => {
+    const orig = {
+      model: "gpt-4o",
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+      tools: [
+        {
+          type: "function",
+          name: "get_weather",
+          description: "Get current weather",
+          parameters: {
+            title: "WeatherParams",
+            type: "object",
+            properties: { location: { type: "string" } },
+            required: ["location"],
+          },
+        },
+      ],
+    };
+    const comp = structuredClone(orig);
+    delete comp.tools[0].parameters.title;
+
+    const res = validateBodyInvariants(orig, comp, "openai-responses");
+    expect(res.valid).toBe(false);
+    expect(res.detail).toBe("tools");
+  });
+
+  it("14. rejects tool mutations breaking name, ordering, required or properties", () => {
+    const orig = {
+      model: "gpt-4o",
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+      tools: [
+        {
+          type: "function",
+          name: "get_weather",
+          description: "Get current weather",
+          parameters: {
+            type: "object",
+            properties: { location: { type: "string" } },
+            required: ["location"],
+          },
+        },
+      ],
+    };
+
+    // 1. Tool name changed
+    const compName = structuredClone(orig);
+    compName.tools[0].name = "fetch_weather";
+    expect(validateBodyInvariants(orig, compName, "openai-responses", { transforms: ["tool_schema_compaction"] }).valid).toBe(false);
+
+    // 2. Required array changed
+    const compReq = structuredClone(orig);
+    compReq.tools[0].parameters.required = [];
+    expect(validateBodyInvariants(orig, compReq, "openai-responses", { transforms: ["tool_schema_compaction"] }).valid).toBe(false);
+
+    // 3. Properties key changed
+    const compProp = structuredClone(orig);
+    compProp.tools[0].parameters.properties = { city: { type: "string" } };
+    expect(validateBodyInvariants(orig, compProp, "openai-responses", { transforms: ["tool_schema_compaction"] }).valid).toBe(false);
+
+    // 4. Type changed
+    const compType = structuredClone(orig);
+    compType.tools[0].parameters.properties.location.type = "number";
+    expect(validateBodyInvariants(orig, compType, "openai-responses", { transforms: ["tool_schema_compaction"] }).valid).toBe(false);
+  });
 });
 
 describe("Headroom security origin validation", () => {

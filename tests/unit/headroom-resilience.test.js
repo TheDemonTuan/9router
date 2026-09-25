@@ -218,11 +218,86 @@ describe("Headroom resilience boundaries", () => {
     // Single spike on stateless SSE (hasSession: false)
     const ticket = beginHeadroomAttempt(endpoint, { bypassInFlight: true, isSSE: true, hasSession: false }).ticket;
     markHeadroomAttemptStarted(ticket);
-    const trans = finishHeadroomAttempt(ticket, { kind: "neutral", reason: "invariant_violation", latencyMs: 3552 });
+    const trans = finishHeadroomAttempt(ticket, { kind: "success", latencyMs: 3552 });
     expect(trans).toBe("latency_opened");
 
     const blocked = beginHeadroomAttempt(endpoint, { isSSE: true, hasSession: false });
     expect(blocked.reason).toBe("latency_guard_open");
+  });
+
+  it("isolates latency guard from neutral invariant_violation outcomes even with spike or high historical p95", () => {
+    const endpoint = "http://127.0.0.1:54331/v1/compress";
+
+    // 1. Single spike with invariant_violation on stateless SSE must NOT open guard
+    const ticket1 = beginHeadroomAttempt(endpoint, { bypassInFlight: true, isSSE: true, hasSession: false }).ticket;
+    markHeadroomAttemptStarted(ticket1);
+    const trans1 = finishHeadroomAttempt(ticket1, { kind: "neutral", reason: "invariant_violation", latencyMs: 3552 });
+    expect(trans1).toBeNull();
+
+    const nextAttempt = beginHeadroomAttempt(endpoint, { isSSE: true, hasSession: false });
+    expect(nextAttempt.ticket).toBeDefined();
+    expect(nextAttempt.reason).toBeUndefined();
+    finishHeadroomAttempt(nextAttempt.ticket, { kind: "success", latencyMs: 200 });
+
+    // 2. High historical P95 followed by an invariant_violation at 372ms must NOT open guard
+    for (let i = 0; i < 4; i++) {
+      const t = beginHeadroomAttempt(endpoint, { bypassInFlight: true, isSSE: true, hasSession: false }).ticket;
+      markHeadroomAttemptStarted(t);
+      finishHeadroomAttempt(t, { kind: "success", latencyMs: 1800 });
+    }
+    const invTicket = beginHeadroomAttempt(endpoint, { bypassInFlight: true, isSSE: true, hasSession: false }).ticket;
+    markHeadroomAttemptStarted(invTicket);
+    const transInv = finishHeadroomAttempt(invTicket, { kind: "neutral", reason: "invariant_violation", latencyMs: 372 });
+    expect(transInv).toBeNull();
+
+    const allowed = beginHeadroomAttempt(endpoint, { isSSE: true, hasSession: false });
+    expect(allowed.ticket).toBeDefined();
+    expect(allowed.reason).toBeUndefined();
+    finishHeadroomAttempt(allowed.ticket, { kind: "success", latencyMs: 150 });
+  });
+
+  it("scopes latency guard admission by format/session lane", () => {
+    const endpoint = "http://127.0.0.1:54332/v1/compress";
+
+    // 1. Degrade openai-responses/session lane with 5 slow requests
+    for (let i = 0; i < 5; i++) {
+      const ticket = beginHeadroomAttempt(endpoint, {
+        isSSE: true,
+        hasSession: true,
+        format: "openai-responses",
+        bypassInFlight: true,
+      }).ticket;
+      markHeadroomAttemptStarted(ticket);
+      finishHeadroomAttempt(ticket, { kind: "success", latencyMs: 2000 });
+    }
+
+    // 2. Next request on openai-responses/session should be blocked
+    const responsesSessionBlocked = beginHeadroomAttempt(endpoint, {
+      isSSE: true,
+      hasSession: true,
+      format: "openai-responses",
+    });
+    expect(responsesSessionBlocked.reason).toBe("latency_guard_open");
+
+    // 3. But openai/stateless request on the same endpoint is NOT blocked
+    const openaiStatelessAllowed = beginHeadroomAttempt(endpoint, {
+      isSSE: true,
+      hasSession: false,
+      format: "openai",
+    });
+    expect(openaiStatelessAllowed.ticket).toBeDefined();
+    expect(openaiStatelessAllowed.reason).toBeUndefined();
+    finishHeadroomAttempt(openaiStatelessAllowed.ticket, { kind: "success", latencyMs: 200 });
+
+    // 4. openai-responses/stateless is also in its own lane and not blocked
+    const responsesStatelessAllowed = beginHeadroomAttempt(endpoint, {
+      isSSE: true,
+      hasSession: false,
+      format: "openai-responses",
+    });
+    expect(responsesStatelessAllowed.ticket).toBeDefined();
+    expect(responsesStatelessAllowed.reason).toBeUndefined();
+    finishHeadroomAttempt(responsesStatelessAllowed.ticket, { kind: "success", latencyMs: 200 });
   });
 
   it("formats invariant summary tag with path detail or fallback", () => {

@@ -803,4 +803,243 @@ describe("handleChatCore Headroom diagnostics", () => {
     expect(gearCalls.length).toBeGreaterThan(0);
     expect(gearCalls[0][2]).toContain("HEADROOM:BYPASS:invariant(messages.1.tool_calls.0.function.arguments)");
   });
+
+  it("executes tool-heavy Responses request with session affinity through Headroom 0.38 tool compaction into Antigravity", async () => {
+    const log = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), line: vi.fn() };
+
+    // 75 items in input
+    const input = [];
+    for (let i = 0; i < 75; i++) {
+      if (i % 3 === 0) {
+        input.push({ type: "message", role: "user", content: [{ type: "input_text", text: `User turn ${i} long text message` }] });
+      } else if (i % 3 === 1) {
+        input.push({ type: "function_call", call_id: `call_${i}`, name: "tool_search", arguments: JSON.stringify({ query: `query ${i}` }) });
+      } else {
+        input.push({ type: "function_call_output", call_id: `call_${i - 1}`, output: `Result of tool execution for turn ${i}` });
+      }
+    }
+
+    const tools = [
+      {
+        type: "function",
+        name: "tool_search",
+        description: "   Search the database for items   ",
+        parameters: {
+          $schema: "http://json-schema.org/draft-07/schema#",
+          title: "SearchParameters",
+          type: "object",
+          properties: {
+            query: {
+              type: "string",
+              title: "Query String",
+              description: "   The query to run   ",
+              examples: ["select * from users"],
+            },
+            limit: {
+              type: "number",
+              title: "Result Limit",
+              description: "Maximum number of rows to return",
+              default: 10,
+            },
+          },
+          required: ["query"],
+        },
+      },
+      {
+        type: "function",
+        name: "tool_execute",
+        description: "Execute a command securely in environment",
+        parameters: {
+          $id: "https://example.com/exec.schema.json",
+          $comment: "Internal tool execution schema",
+          type: "object",
+          properties: {
+            cmd: {
+              type: "string",
+              description: "Command to execute",
+              deprecated: false,
+            },
+          },
+          required: ["cmd"],
+        },
+      },
+    ];
+
+    let receivedHeadroomPayload = null;
+    global.fetch = vi.fn(async (url, init) => {
+      if (String(url).includes("/v1/compress")) {
+        receivedHeadroomPayload = JSON.parse(init.body);
+        const { gateway, config, ...cleanPayload } = receivedHeadroomPayload;
+
+        // Headroom 0.38 compacts tool schemas (removes $schema, title, examples, trims description)
+        const compactedTools = [
+          {
+            type: "function",
+            name: "tool_search",
+            description: "Search the database for items",
+            parameters: {
+              type: "object",
+              properties: {
+                query: {
+                  type: "string",
+                  description: "The query to run",
+                },
+                limit: {
+                  type: "number",
+                  description: "Maximum number of rows to return",
+                  default: 10,
+                },
+              },
+              required: ["query"],
+            },
+          },
+          {
+            type: "function",
+            name: "tool_execute",
+            description: "Execute a command securely in environment",
+            parameters: {
+              type: "object",
+              properties: {
+                cmd: {
+                  type: "string",
+                  description: "Command to execute",
+                },
+              },
+              required: ["cmd"],
+            },
+          },
+        ];
+
+        return new Response(JSON.stringify({
+          data: {
+            body: {
+              ...cleanPayload,
+              input: cleanPayload.input.map((item) => (item.type === "message" ? { ...item, content: [{ type: "input_text", text: "compressed" }] } : item)),
+              tools: compactedTools,
+            },
+            turn_id: "turn_tool_heavy_1",
+          },
+          transforms_applied: ["tool_schema_compaction", "tool_desc_compaction"],
+          tokens_before: 5000,
+          tokens_after: 2500,
+          tokens_saved: 2500,
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    const responsesBody = {
+      model: "gemini-2.5-pro",
+      input,
+      tools,
+      stream: true,
+    };
+
+    await handleChatCore({
+      body: responsesBody,
+      modelInfo: { provider: "antigravity", model: "gemini-2.5-pro" },
+      credentials: { apiKey: "test-antigravity-key", providerSpecificData: {} },
+      log,
+      connectionId: "test-conn-tool-heavy",
+      headroomEnabled: true,
+      headroomUrl: "http://localhost:8787",
+      sourceFormatOverride: "openai-responses",
+      clientRawRequest: {
+        endpoint: "/v1/responses",
+        body: responsesBody,
+        headers: {
+          accept: "text/event-stream",
+          "x-session-id": "client-responses-sess-99",
+        },
+      },
+    });
+
+    // 1. Headroom received session affinity and full toolset
+    expect(receivedHeadroomPayload).toBeTruthy();
+    expect(receivedHeadroomPayload.gateway.session_affinity).toBe(true);
+    expect(receivedHeadroomPayload.config.session_id).toMatch(/^s_/);
+    expect(receivedHeadroomPayload.input.length).toBe(75);
+    expect(receivedHeadroomPayload.tools.length).toBe(2);
+
+    // 2. Headroom compression accepted and forwarded to Antigravity executor
+    expect(executeMock).toHaveBeenCalledTimes(1);
+    const agCall = executeMock.mock.calls[0][0];
+    const agReq = agCall.body.request;
+    expect(agReq.tools).toBeDefined();
+    const decls = agReq.tools[0].functionDeclarations;
+    expect(decls.length).toBe(2);
+    expect(decls[0].name).toBe("tool_search");
+    expect(decls[0].description).toBe("Search the database for items");
+    expect(decls[1].name).toBe("tool_execute");
+
+    // Compaction verified: $schema, title, examples stripped from parameters
+    const schema0 = decls[0].parametersJsonSchema || decls[0].parameters;
+    expect(schema0.$schema).toBeUndefined();
+    expect(schema0.title).toBeUndefined();
+    expect(schema0.properties.query.title).toBeUndefined();
+    expect(schema0.properties.query.examples).toBeUndefined();
+    expect(schema0.required).toEqual(["query"]);
+
+    // Gear log emitted token savings
+    const gearCalls = log.line.mock.calls.filter((call) => call[1] === "⚙");
+    expect(gearCalls.length).toBeGreaterThan(0);
+    expect(gearCalls[0][2]).toContain("HEADROOM:2500tok/50%");
+    expect(gearCalls[0][2]).toContain("SESSION:affinity");
+  });
+
+  it("fails open and preserves original tools when Headroom corrupts tool names or required fields", async () => {
+    const log = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), line: vi.fn() };
+
+    global.fetch = vi.fn(async (url, init) => {
+      const payload = JSON.parse(init.body);
+      const { gateway, config, ...cleanPayload } = payload;
+      return new Response(JSON.stringify({
+        data: {
+          body: {
+            ...cleanPayload,
+            // Corrupt tool name
+            tools: [
+              {
+                ...cleanPayload.tools[0],
+                name: "unauthorized_name_change",
+              },
+            ],
+          },
+          turn_id: "turn_corrupt_tool",
+        },
+        transforms_applied: ["tool_schema_compaction"],
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+
+    const body = {
+      model: "gemini-2.5-pro",
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hello" }] }],
+      tools: [{ type: "function", name: "valid_tool", parameters: { type: "object", properties: { a: { type: "string" } } } }],
+    };
+
+    await handleChatCore({
+      body,
+      modelInfo: { provider: "antigravity", model: "gemini-2.5-pro" },
+      credentials: { apiKey: "test-antigravity-key", providerSpecificData: {} },
+      log,
+      connectionId: "test-conn-tool-fail",
+      headroomEnabled: true,
+      headroomUrl: "http://localhost:8787",
+      sourceFormatOverride: "openai-responses",
+      clientRawRequest: {
+        endpoint: "/v1/responses",
+        body,
+        headers: { accept: "application/json" },
+      },
+    });
+
+    // Invariant violation warning logged with tools field detail, transform, tools count and schema bytes
+    const warnCalls = log.warn.mock.calls.filter((call) => call[0] === "HEADROOM");
+    expect(warnCalls.some((call) => call[1].includes("invariant_violation field=tools.0.name transform=tool_schema_compaction tools=1→1"))).toBe(true);
+
+    // Fail-open: Antigravity executor received original unmutated tool
+    expect(executeMock).toHaveBeenCalledTimes(1);
+    const decls = executeMock.mock.calls[0][0].body.request.tools[0].functionDeclarations;
+    expect(decls[0].name).toBe("valid_tool");
+  });
 });
