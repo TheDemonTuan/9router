@@ -202,6 +202,214 @@ describe("Headroom invariants guard", () => {
   });
 });
 
+describe("Headroom 0.38 Responses upstream mutation invariants", () => {
+  const createBaseResponsesBody = () => ({
+    model: "gpt-4o",
+    instructions: "You are a helpful coding assistant.",
+    input: [
+      {
+        type: "message",
+        id: "msg_1",
+        status: "completed",
+        role: "user",
+        content: [{ type: "input_text", text: "Please inspect the repo and fix the bug." }],
+      },
+      {
+        type: "function_call",
+        id: "fc_1",
+        call_id: "call_read_1",
+        name: "readFile",
+        arguments: JSON.stringify({ path: "src/index.js", lines: 100 }),
+      },
+      {
+        type: "function_call_output",
+        id: "fco_1",
+        call_id: "call_read_1",
+        output: "function output long contents",
+      },
+      {
+        type: "local_shell_call",
+        id: "lsc_1",
+        call_id: "call_sh_1",
+        name: "bash",
+        input: "git status --porcelain",
+      },
+      {
+        type: "local_shell_call_output",
+        id: "lsco_1",
+        call_id: "call_sh_1",
+        output: "M open-sse/rtk/headroomInvariants.js\n",
+      },
+      {
+        type: "apply_patch_call",
+        id: "apc_1",
+        call_id: "call_patch_1",
+        name: "apply_patch",
+        input: "*** patch line 1 ***\n*** patch line 2 ***",
+      },
+      {
+        type: "apply_patch_call_output",
+        id: "apco_1",
+        call_id: "call_patch_1",
+        output: "patch applied successfully",
+      },
+      {
+        type: "custom_tool_call",
+        id: "ctc_1",
+        call_id: "call_custom_1",
+        name: "special_tool",
+        input: "custom command with arguments",
+      },
+      {
+        type: "custom_tool_call_output",
+        id: "ctco_1",
+        call_id: "call_custom_1",
+        output: "custom tool execution output",
+      },
+      {
+        type: "reasoning",
+        id: "rs_1",
+        summary: [{ type: "summary_text", text: "Planning the next steps..." }],
+        encrypted_content: "opaque_encrypted_token_stream",
+      },
+      {
+        type: "message",
+        id: "msg_2",
+        status: "completed",
+        role: "assistant",
+        content: "Here is the summary.",
+        internal_chat_message_metadata_passthrough: { traceId: "tr_abc123" },
+      },
+    ],
+    tools: [{ type: "function", name: "readFile" }],
+  });
+
+  it("1. allows instructions to be compressed (string -> string)", () => {
+    const orig = createBaseResponsesBody();
+    const comp = structuredClone(orig);
+    comp.instructions = "Helpful assistant.";
+    expect(validateBodyInvariants(orig, comp, "openai-responses")).toEqual({ valid: true });
+  });
+
+  it("2. allows function_call_output.output to be compressed (text/text-array)", () => {
+    const orig = createBaseResponsesBody();
+    const comp = structuredClone(orig);
+    comp.input[2].output = "compressed output";
+    expect(validateBodyInvariants(orig, comp, "openai-responses")).toEqual({ valid: true });
+
+    // Text array form
+    const origArray = createBaseResponsesBody();
+    origArray.input[2].output = [{ type: "output_text", text: "long output text" }];
+    const compArray = structuredClone(origArray);
+    compArray.input[2].output = [{ type: "output_text", text: "short output" }];
+    expect(validateBodyInvariants(origArray, compArray, "openai-responses")).toEqual({ valid: true });
+  });
+
+  it("3. allows local_shell_call_output.output to be compressed", () => {
+    const orig = createBaseResponsesBody();
+    const comp = structuredClone(orig);
+    comp.input[4].output = "M headroomInvariants.js\n";
+    expect(validateBodyInvariants(orig, comp, "openai-responses")).toEqual({ valid: true });
+  });
+
+  it("4. allows apply_patch_call_output.output to be compressed", () => {
+    const orig = createBaseResponsesBody();
+    const comp = structuredClone(orig);
+    comp.input[6].output = "ok";
+    expect(validateBodyInvariants(orig, comp, "openai-responses")).toEqual({ valid: true });
+  });
+
+  it("5. allows custom_tool_call.input, local_shell_call.input, apply_patch_call.input to be compressed", () => {
+    const orig = createBaseResponsesBody();
+    const comp = structuredClone(orig);
+    comp.input[3].input = "git status"; // local_shell_call.input
+    comp.input[5].input = "patch diff"; // apply_patch_call.input
+    comp.input[7].input = "custom command"; // custom_tool_call.input
+    expect(validateBodyInvariants(orig, comp, "openai-responses")).toEqual({ valid: true });
+  });
+
+  it("6. allows function_call.arguments when compressed to valid JSON", () => {
+    const orig = createBaseResponsesBody();
+    const comp = structuredClone(orig);
+    comp.input[1].arguments = JSON.stringify({ path: "src/index.js" });
+    expect(validateBodyInvariants(orig, comp, "openai-responses")).toEqual({ valid: true });
+  });
+
+  it("7. rejects function_call.arguments when compressed to corrupted JSON", () => {
+    const orig = createBaseResponsesBody();
+    const comp = structuredClone(orig);
+    comp.input[1].arguments = "{broken json, missing brace";
+    const res = validateBodyInvariants(orig, comp, "openai-responses");
+    expect(res.valid).toBe(false);
+    expect(res.detail).toBe("input.1.arguments");
+  });
+
+  it("8. rejects reasoning.encrypted_content mutation", () => {
+    const orig = createBaseResponsesBody();
+    const comp = structuredClone(orig);
+    comp.input[9].encrypted_content = "altered_ciphertext";
+    const res = validateBodyInvariants(orig, comp, "openai-responses");
+    expect(res.valid).toBe(false);
+    expect(res.detail).toBe("input.9.encrypted_content");
+  });
+
+  it("9. rejects call_id mutation on function_call or outputs", () => {
+    const orig = createBaseResponsesBody();
+    const comp = structuredClone(orig);
+    comp.input[1].call_id = "call_different";
+    const res = validateBodyInvariants(orig, comp, "openai-responses");
+    expect(res.valid).toBe(false);
+    expect(res.detail).toBe("input.1.call_id");
+  });
+
+  it("10. rejects item ID, order, type, or status mutations", () => {
+    const orig = createBaseResponsesBody();
+    // ID mutation
+    const compId = structuredClone(orig);
+    compId.input[0].id = "msg_tampered";
+    expect(validateBodyInvariants(orig, compId, "openai-responses")).toEqual({
+      valid: false,
+      reason: "immutable_field_changed",
+      detail: "input.0.id",
+    });
+
+    // Status mutation
+    const compStatus = structuredClone(orig);
+    compStatus.input[0].status = "in_progress";
+    expect(validateBodyInvariants(orig, compStatus, "openai-responses")).toEqual({
+      valid: false,
+      reason: "immutable_field_changed",
+      detail: "input.0.status",
+    });
+
+    // Type mutation
+    const compType = structuredClone(orig);
+    compType.input[0].type = "reasoning";
+    expect(validateBodyInvariants(orig, compType, "openai-responses").valid).toBe(false);
+
+    // Order mutation
+    const compOrder = structuredClone(orig);
+    const tmp = compOrder.input[0];
+    compOrder.input[0] = compOrder.input[1];
+    compOrder.input[1] = tmp;
+    expect(validateBodyInvariants(orig, compOrder, "openai-responses").valid).toBe(false);
+
+    // Item count mutation
+    const compCount = structuredClone(orig);
+    compCount.input.pop();
+    expect(validateBodyInvariants(orig, compCount, "openai-responses").valid).toBe(false);
+  });
+
+  it("11. rejects metadata / internal_chat_message_metadata_passthrough changes", () => {
+    const orig = createBaseResponsesBody();
+    const comp = structuredClone(orig);
+    comp.input[10].internal_chat_message_metadata_passthrough.traceId = "tr_tampered";
+    const res = validateBodyInvariants(orig, comp, "openai-responses");
+    expect(res.valid).toBe(false);
+    expect(res.detail).toContain("internal_chat_message_metadata_passthrough");
+  });
+});
+
 describe("Headroom security origin validation", () => {
   it("strictly whitelists internal and private hosts", () => {
     expect(isInternalHost("localhost")).toBe(true);
