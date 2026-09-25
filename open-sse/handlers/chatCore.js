@@ -386,7 +386,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     if (clientTool === "claude") normalizeClaudePassthrough(translatedBody, translatedBody.model);
   } else {
     try {
-      translatedBody = translateRequest(sourceFormat, targetFormat, upstreamModel, sourceBody, stream, credentials, provider, reqLogger, stripList, connectionId, clientTool);
+      translatedBody = translateRequest(sourceFormat, targetFormat, upstreamModel, sourceBody, stream, credentials, provider, reqLogger, stripList, connectionId, clientTool, body);
     } catch (error) {
       const message = error?.message
         ? (error.code === "unsupported_feature" || error.code === "invalid_thinking_level"

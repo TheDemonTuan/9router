@@ -50,7 +50,7 @@ function stripContentTypes(body, stripList = []) {
 }
 
 // Translate request: source -> openai -> target
-export function translateRequest(sourceFormat, targetFormat, model, body, stream = true, credentials = null, provider = null, reqLogger = null, stripList = [], connectionId = null, clientTool = null) {
+export function translateRequest(sourceFormat, targetFormat, model, body, stream = true, credentials = null, provider = null, reqLogger = null, stripList = [], connectionId = null, clientTool = null, sessionSourceBody = null) {
   ensureInitialized();
   let result = body;
 
@@ -91,7 +91,7 @@ export function translateRequest(sourceFormat, targetFormat, model, body, stream
   if (!isAlibabaTokenPlan) thinkingIntent = captureThinking(result);
 
   // Capture session id from the original body (envelope still intact, e.g. antigravity request.sessionId)
-  const clientSessionId = captureSessionId(result, credentials, connectionId, targetFormat);
+  const clientSessionId = captureSessionId(sessionSourceBody || result, credentials, connectionId, targetFormat);
   // Expose to downstream translators (gemini-cli/antigravity envelopes) that run after envelope is stripped
   if (credentials) credentials._clientSessionId = clientSessionId;
 
