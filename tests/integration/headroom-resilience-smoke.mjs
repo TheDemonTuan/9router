@@ -395,6 +395,15 @@ if (!process.argv.includes("--child")) {
         const diagnostics = {};
         const result = await compressWithHeadroom(body, { url, proxyToken: token, model: body.model, format, diagnostics });
         const after = bytes(body);
+        if (diagnostics.reason === "model_sovereignty_violation") {
+          const raw = await fetch(`${url}/v1/compress`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-Headroom-Proxy-Token": token },
+            body: JSON.stringify({ ...fixture(format, 262144), gateway: { can_redrive: false, can_relay_response: true, session_affinity: false } }),
+          });
+          const envelope = await raw.json();
+          console.log(JSON.stringify({ format, status: raw.status, inputModel: fixture(format, 262144).model, returnedModel: envelope.body?.model ?? envelope.data?.body?.model, route: envelope.route ?? envelope.data?.route, errorType: envelope.error?.type }));
+        }
         assert.ok(result && after < before, `${format} did not compress synthetic tool result: ${JSON.stringify({ accepted: Boolean(result), before, after, diagnostics, transforms: result?.transforms_applied })}`);
         const item = {
           format,
