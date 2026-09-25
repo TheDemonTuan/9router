@@ -316,7 +316,18 @@ export async function callHeadroomGateway({
     diagnostics.skip_reason = typeof rawSkipReason === "string" ? rawSkipReason : null;
     const check = validateBodyInvariants(expectedBody, returnedBody, format, { transforms: transformsApplied });
     diagnostics.reason = check.valid ? "gateway_compression_skipped" : "invariant_violation";
-    if (!check.valid) diagnostics.detail = check.detail || check.reason;
+    if (!check.valid) {
+      diagnostics.detail = check.detail || check.reason;
+      if (diagnostics.detail === "tools" || diagnostics.detail?.startsWith("tools")) {
+        const bTools = Array.isArray(expectedBody?.tools) ? expectedBody.tools : [];
+        const aTools = Array.isArray(returnedBody?.tools) ? returnedBody.tools : [];
+        diagnostics.tools_diag = {
+          transform: transformsApplied.find((t) => t.includes("tool")) || transformsApplied[0] || "none",
+          count: `${bTools.length}→${aTools.length}`,
+          bytes: `${jsonByteSize(bTools)}→${jsonByteSize(aTools)}`,
+        };
+      }
+    }
     return null;
   }
   if (!returnedBody) {
@@ -344,6 +355,15 @@ export async function callHeadroomGateway({
   if (!invariantCheck.valid) {
     diagnostics.reason = "invariant_violation";
     diagnostics.detail = invariantCheck.detail || invariantCheck.reason;
+    if (diagnostics.detail === "tools" || diagnostics.detail?.startsWith("tools")) {
+      const bTools = Array.isArray(expectedBody?.tools) ? expectedBody.tools : [];
+      const aTools = Array.isArray(returnedBody?.tools) ? returnedBody.tools : [];
+      diagnostics.tools_diag = {
+        transform: transformsApplied.find((t) => t.includes("tool")) || transformsApplied[0] || "none",
+        count: `${bTools.length}→${aTools.length}`,
+        bytes: `${jsonByteSize(bTools)}→${jsonByteSize(aTools)}`,
+      };
+    }
     return null;
   }
   const responseHeaders = data.headers ?? gatewayData.headers ?? null;

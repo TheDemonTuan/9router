@@ -1033,9 +1033,9 @@ describe("handleChatCore Headroom diagnostics", () => {
       },
     });
 
-    // Invariant violation warning logged with tools field detail
+    // Invariant violation warning logged with tools field detail, transform, tools count and schema bytes
     const warnCalls = log.warn.mock.calls.filter((call) => call[0] === "HEADROOM");
-    expect(warnCalls.some((call) => call[1].includes("invariant_violation field=tools.0.name"))).toBe(true);
+    expect(warnCalls.some((call) => call[1].includes("invariant_violation field=tools.0.name transform=tool_schema_compaction tools=1→1"))).toBe(true);
 
     // Fail-open: Antigravity executor received original unmutated tool
     expect(executeMock).toHaveBeenCalledTimes(1);

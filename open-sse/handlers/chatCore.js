@@ -493,8 +493,19 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const reason = headroomDiagnostics.reason || headroomStagePlan.reason || "compression unavailable";
   if (headroomDiagnostics.transition === "opened" || headroomDiagnostics.transition === "latency_opened") {
     const isLatency = headroomDiagnostics.transition === "latency_opened";
-    const fieldPart = headroomDiagnostics.detail ? ` field=${headroomDiagnostics.detail}` : "";
-    log?.warn?.("HEADROOM", `${isLatency ? "latency_guard_open" : "circuit_open"} reason=${reason}${fieldPart} budget=${headroomDiagnostics.budgetMs ?? 0}ms elapsed=${Math.round(headroomDiagnostics.latencyMs ?? 0)}ms cooldown=30000ms`);
+    if (isLatency) {
+      const trig = headroomDiagnostics.latencyTrigger;
+      const trigParts = [];
+      if (trig?.trigger) trigParts.push(`trigger=${trig.trigger}`);
+      if (trig?.p95 != null) trigParts.push(`p95=${Math.round(trig.p95)}ms threshold=${trig.threshold}ms samples=${trig.samples}`);
+      trigParts.push(`currentOutcome=${reason}`);
+      trigParts.push(`currentLatency=${Math.round(headroomDiagnostics.latencyMs ?? 0)}ms`);
+      if (trig?.lane) trigParts.push(`lane=${trig.lane}`);
+      log?.warn?.("HEADROOM", `latency_guard_open ${trigParts.join(" ")} cooldown=30000ms`);
+    } else {
+      const fieldPart = headroomDiagnostics.detail ? ` field=${headroomDiagnostics.detail}` : "";
+      log?.warn?.("HEADROOM", `circuit_open reason=${reason}${fieldPart} budget=${headroomDiagnostics.budgetMs ?? 0}ms elapsed=${Math.round(headroomDiagnostics.latencyMs ?? 0)}ms cooldown=30000ms`);
+    }
   } else if (headroomDiagnostics.transition === "recovered" || headroomDiagnostics.transition === "latency_recovered") {
     const isLatency = headroomDiagnostics.transition === "latency_recovered";
     log?.info?.("HEADROOM", `${isLatency ? "latency_guard_closed" : "circuit_closed"} half_open_probe=success`);
@@ -510,7 +521,10 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       log?.warn?.("HEADROOM", `timeout reason=${reason}${headroomDiagnostics.skip_reason ? ` skipReason=${headroomDiagnostics.skip_reason}` : ""} budget=${headroomDiagnostics.budgetMs ?? 0}ms elapsed=${Math.round(headroomDiagnostics.latencyMs ?? 0)}ms${sizeParts ? ` ${sizeParts}` : ""}${queueParts ? ` ${queueParts}` : ""}`);
     } else if (reason === "invariant_violation") {
       const field = headroomDiagnostics.detail ? ` field=${headroomDiagnostics.detail}` : "";
-      log?.warn?.("HEADROOM", `invariant_violation${field} elapsed=${Math.round(headroomDiagnostics.latencyMs ?? 0)}ms`);
+      const toolsPart = headroomDiagnostics.tools_diag
+        ? ` transform=${headroomDiagnostics.tools_diag.transform} tools=${headroomDiagnostics.tools_diag.count} schemaBytes=${headroomDiagnostics.tools_diag.bytes}`
+        : "";
+      log?.warn?.("HEADROOM", `invariant_violation${field}${toolsPart} elapsed=${Math.round(headroomDiagnostics.latencyMs ?? 0)}ms`);
     } else {
       log?.debug?.("HEADROOM", `skipped reason=${reason}`);
     }
