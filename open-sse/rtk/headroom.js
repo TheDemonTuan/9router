@@ -6,6 +6,12 @@
 
 import { callHeadroomGateway } from "./headroomGateway.js";
 import { HEADROOM_DEFAULT_TIMEOUT_MS } from "../config/runtimeConfig.js";
+import {
+  shouldAttemptPrewarm,
+  enqueuePrewarmJob,
+  recordWarmupSuccess,
+  buildWarmupKey,
+} from "./headroomWarmup.js";
 
 function jsonBytes(value) {
   try {
@@ -166,6 +172,7 @@ export async function compressWithHeadroom(
     clientSignal = null,
     diagnostics = null,
     requestHeaders = null,
+    log = null,
   } = {}
 ) {
   if (!enabled) {
@@ -184,6 +191,36 @@ export async function compressWithHeadroom(
   const diag = diagnostics || {};
   if (!diag.before) {
     diag.before = captureSizeSnapshot(body);
+  }
+
+  // Prewarm decision check for large cold SSE sessions
+  const endpoint = url;
+  const prewarmDecision = shouldAttemptPrewarm({
+    isSSE,
+    sessionId,
+    body,
+    format,
+    endpoint,
+  });
+
+  if (prewarmDecision.eligible && prewarmDecision.sessionStatus.state === "COLD") {
+    const enqueued = enqueuePrewarmJob({
+      endpoint,
+      proxyToken,
+      model,
+      format,
+      body,
+      sessionId,
+      callGatewayFn: callHeadroomGateway,
+      log,
+    });
+    setDiagnostic(diag, "cold_large_prewarm_queued");
+    diag.prewarm = { enqueued, estimatedTokens: prewarmDecision.estimatedTokens };
+    return null;
+  }
+  if (prewarmDecision.sessionStatus?.state === "WARMING" || prewarmDecision.sessionStatus?.state === "QUEUED") {
+    setDiagnostic(diag, "prewarm_in_flight_bypass");
+    return null;
   }
 
   try {
@@ -213,6 +250,13 @@ export async function compressWithHeadroom(
       const compressedMsgs = data.compressedBody?.messages || data.compressedBody;
       if (!applyKiroHeadroomMessages(projection, compressedMsgs, diag)) return null;
       diag.after = captureSizeSnapshot(body);
+      if (sessionId && data.session) {
+        const warmupKey = buildWarmupKey({ endpoint: url, sessionId, format });
+        recordWarmupSuccess(warmupKey, {
+          frozenCount: data.session.frozen_message_count || 0,
+          unit: "messages",
+        });
+      }
       return data;
     }
 
@@ -247,6 +291,13 @@ export async function compressWithHeadroom(
     }
 
     diag.after = captureSizeSnapshot(body);
+    if (sessionId && data.session) {
+      const warmupKey = buildWarmupKey({ endpoint: url, sessionId, format });
+      recordWarmupSuccess(warmupKey, {
+        frozenCount: data.session.frozen_message_count || 0,
+        unit: format === "openai-responses" ? "responses_text_slots" : "messages",
+      });
+    }
     return data;
   } catch (error) {
     // Propagate client abort / preResponse deadline errors
@@ -298,7 +349,7 @@ export function formatHeadroomSummaryTag(stats, diagnostics) {
     const detail = diagnostics?.detail ? `(${diagnostics.detail})` : "";
     return `HEADROOM:BYPASS:invariant${detail || "_violation"}${elapsedStr}`;
   }
-  if (reason.startsWith("circuit_") || reason === "capacity_busy" || reason.startsWith("latency_") || reason.endsWith("_bypass") || reason === "stateless_sse_payload_too_large" || reason === "client_opt_out") {
+  if (reason.startsWith("circuit_") || reason === "capacity_busy" || reason.startsWith("latency_") || reason.endsWith("_bypass") || reason === "stateless_sse_payload_too_large" || reason === "client_opt_out" || reason === "cold_large_prewarm_queued" || reason === "prewarm_in_flight_bypass") {
     return `HEADROOM:BYPASS:${reason}${elapsedStr}`;
   }
   return `HEADROOM:BYPASS:${reason}${elapsedStr}`;

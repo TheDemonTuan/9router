@@ -79,7 +79,7 @@ function calculateRecentP95(guard, now) {
   return sorted[Math.ceil(0.95 * sorted.length) - 1] ?? null;
 }
 
-export function beginHeadroomAttempt(endpoint, { bypassInFlight = false, isSSE = false, hasSession = false } = {}) {
+export function beginHeadroomAttempt(endpoint, { bypassInFlight = false, isSSE = false, hasSession = false, isBackground = false } = {}) {
   const current = entry(endpoint, true);
   if (!current) return { reason: "runtime_capacity" };
   const now = Date.now();
@@ -91,7 +91,7 @@ export function beginHeadroomAttempt(endpoint, { bypassInFlight = false, isSSE =
   }
   if (current.state === "HALF_OPEN" && current.probeInFlight) return { reason: "circuit_probe_in_flight" };
 
-  // 2. Dedicated latency guard for SSE
+  // 2. Dedicated latency guard for SSE (foreground only)
   let latencyProbe = false;
   const guard = current.latencyGuard ||= {
     enabled: HEADROOM_SSE_GUARD_ENABLED,
@@ -103,7 +103,7 @@ export function beginHeadroomAttempt(endpoint, { bypassInFlight = false, isSSE =
     recent: [],
   };
 
-  if (isSSE && guard.enabled) {
+  if (!isBackground && isSSE && guard.enabled) {
     if (guard.state === "OPEN") {
       if (now < guard.openUntil) return { reason: "latency_guard_open" };
       guard.state = "HALF_OPEN";
@@ -130,8 +130,9 @@ export function beginHeadroomAttempt(endpoint, { bypassInFlight = false, isSSE =
       probe,
       latencyProbe,
       latencyGeneration: guard.generation,
-      isSSE,
+      isSSE: isBackground ? false : isSSE,
       hasSession: Boolean(hasSession),
+      isBackground: Boolean(isBackground),
       attempted: false,
       finalized: false,
     },

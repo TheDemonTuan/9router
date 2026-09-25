@@ -286,6 +286,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
         clientSignal: clientSignal || null,
         requestHeaders: clientRawRequest?.headers,
         diagnostics: headroomDiagnostics,
+        log,
       });
       if (headroomStats?.providerHeaders) {
         forwardedProviderHeaders = headroomStats.providerHeaders;
@@ -468,6 +469,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
         clientSignal: clientSignal || null,
         requestHeaders: clientRawRequest?.headers,
         diagnostics: headroomDiagnostics,
+        log,
       });
       if (headroomStats?.providerHeaders) {
         forwardedProviderHeaders = headroomStats.providerHeaders;
