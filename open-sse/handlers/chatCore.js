@@ -542,6 +542,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   if (passthrough && clientTool === "claude") anchorClaudeCache(translatedBody);
 
   const executor = getExecutor(provider);
+  const isStream = Boolean(stream);
   let pendingReleased = false;
   if (finalFormat !== FORMATS.CLAUDE && !(provider === "github" && executor.isClaudeModel(model))) {
     forwardedProviderHeaders = null;
@@ -549,9 +550,9 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const releasePending = (error = false) => {
     if (pendingReleased) return;
     pendingReleased = true;
-    trackPendingRequest(model, provider, connectionId, false, error);
+    trackPendingRequest(model, provider, connectionId, false, error, { requestId: reqTag, stream: isStream });
   };
-  trackPendingRequest(model, provider, connectionId, true);
+  trackPendingRequest(model, provider, connectionId, true, false, { requestId: reqTag, stream: isStream });
   appendRequestLog({ model, provider, connectionId, status: "PENDING" }).catch(() => { });
 
   const msgCount = translatedBody.messages?.length || translatedBody.input?.length || translatedBody.contents?.length || translatedBody.request?.contents?.length || 0;

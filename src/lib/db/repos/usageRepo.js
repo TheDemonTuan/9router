@@ -18,6 +18,7 @@ const PERIOD_MS = { "24h": 86400000, "7d": 604800000, "30d": 2592000000, "60d": 
 if (!global._pendingRequests) global._pendingRequests = { byModel: {}, byAccount: {} };
 // Deployment drain uses this counter; unlike dashboard pending stats, it never expires.
 if (!global._livePendingRequests) global._livePendingRequests = { byModel: {}, byAccount: {} };
+if (!global._liveActiveEntries) global._liveActiveEntries = new Map();
 if (!global._lastErrorProvider) global._lastErrorProvider = { provider: "", ts: 0 };
 if (!global._statsEmitter) {
   global._statsEmitter = new EventEmitter();
@@ -30,6 +31,7 @@ if (!global._statsEmitTimers) global._statsEmitTimers = { pending: null, update:
 
 const pendingRequests = global._pendingRequests;
 const livePendingRequests = global._livePendingRequests;
+const liveActiveEntries = global._liveActiveEntries;
 const lastErrorProvider = global._lastErrorProvider;
 const pendingTimers = global._pendingTimers;
 const recentRing = global._recentRing;
@@ -152,7 +154,7 @@ async function calculateCost(provider, model, tokens) {
   }
 }
 
-export function trackPendingRequest(model, provider, connectionId, started, error = false) {
+export function trackPendingRequest(model, provider, connectionId, started, error = false, meta = {}) {
   const modelKey = provider ? `${model} (${provider})` : model;
   const timerKey = `${connectionId}|${modelKey}`;
 
@@ -176,6 +178,55 @@ export function trackPendingRequest(model, provider, connectionId, started, erro
 
   updateCounter(pendingRequests);
   updateCounter(livePendingRequests);
+
+  // Track detailed live request lifecycle for zero-leak stream drain diagnostics
+  if (started) {
+    const entryId = meta?.requestId || `${modelKey}|${Date.now()}|${Math.random().toString(36).slice(2, 8)}`;
+    liveActiveEntries.set(entryId, {
+      id: entryId,
+      modelKey,
+      connectionId: connectionId || null,
+      startedAt: Date.now(),
+      isStream: meta?.stream === true,
+    });
+  } else {
+    if (meta?.requestId && liveActiveEntries.has(meta.requestId)) {
+      liveActiveEntries.delete(meta.requestId);
+    } else {
+      let candidateKey = null;
+      let oldestStartedAt = Infinity;
+      for (const [key, entry] of liveActiveEntries.entries()) {
+        if (entry.modelKey === modelKey && (!connectionId || entry.connectionId === connectionId)) {
+          if (entry.startedAt < oldestStartedAt) {
+            oldestStartedAt = entry.startedAt;
+            candidateKey = key;
+          }
+        }
+      }
+      if (!candidateKey && liveActiveEntries.size > 0) {
+        for (const [key, entry] of liveActiveEntries.entries()) {
+          if (entry.startedAt < oldestStartedAt) {
+            oldestStartedAt = entry.startedAt;
+            candidateKey = key;
+          }
+        }
+      }
+      if (candidateKey) {
+        liveActiveEntries.delete(candidateKey);
+      }
+    }
+
+    const totalLiveCount = Object.values(livePendingRequests.byModel || {}).reduce((sum, n) => sum + (n || 0), 0);
+    if (totalLiveCount === 0) {
+      liveActiveEntries.clear();
+    } else if (liveActiveEntries.size > totalLiveCount) {
+      while (liveActiveEntries.size > totalLiveCount) {
+        const firstKey = liveActiveEntries.keys().next().value;
+        if (firstKey) liveActiveEntries.delete(firstKey);
+        else break;
+      }
+    }
+  }
 
   if (started) {
     clearTimeout(pendingTimers[timerKey]);
@@ -270,7 +321,46 @@ export async function getActiveRequests() {
     .slice(0, 20);
 
   const errorProvider = (Date.now() - lastErrorProvider.ts < 10000) ? lastErrorProvider.provider : "";
-  return { activeRequests, liveActiveRequests, activeRequestsKnown: true, recentRequests, errorProvider };
+
+  const totalLive = liveActiveRequests.reduce((total, row) => total + row.count, 0);
+  let activeStreams = 0;
+  let activeNonStream = 0;
+  let oldestActiveMs = null;
+
+  if (totalLive > 0) {
+    const now = Date.now();
+    let minStartedAt = Infinity;
+    for (const entry of liveActiveEntries.values()) {
+      if (entry.isStream) {
+        activeStreams++;
+      } else {
+        activeNonStream++;
+      }
+      if (typeof entry.startedAt === "number" && entry.startedAt < minStartedAt) {
+        minStartedAt = entry.startedAt;
+      }
+    }
+    const trackedTotal = activeStreams + activeNonStream;
+    if (trackedTotal < totalLive) {
+      activeNonStream += (totalLive - trackedTotal);
+    }
+    if (minStartedAt !== Infinity) {
+      oldestActiveMs = Math.max(0, now - minStartedAt);
+    } else {
+      oldestActiveMs = 0;
+    }
+  }
+
+  return {
+    activeRequests,
+    liveActiveRequests,
+    activeRequestsKnown: true,
+    recentRequests,
+    errorProvider,
+    activeStreams,
+    activeNonStream,
+    oldestActiveMs,
+  };
 }
 
 export async function saveRequestUsage(entry) {
