@@ -473,7 +473,15 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   if (headroomLine) {
     log?.info?.("HEADROOM", `stage=${headroomStagePlan.stage} fmt=${headroomStagePlan.format || "-"} | ${headroomLine}${headroomSizeLine ? ` | ${headroomSizeLine}` : ""}`);
   } else if (headroomEnabled && !clientTokenSaverOptOut) {
-    log?.debug?.("HEADROOM", `skipped reason=${reason}${reason === "gateway_timeout" ? ` budget=${headroomDiagnostics.budgetMs}ms elapsed=${Math.round(headroomDiagnostics.latencyMs)}ms` : ""}`);
+    if (reason === "gateway_timeout" || headroomDiagnostics.skip_reason === "compression_timeout") {
+      const b = headroomDiagnostics.before;
+      const q = headroomDiagnostics.queue;
+      const sizeParts = b ? `body=${b.bodyBytes}B msgs=${b.messageCount ?? "?"} tools=${b.toolSchemaBytes ?? 0}B toolHistory=${b.toolHistoryBytes ?? 0}B` : "";
+      const queueParts = q ? `inFlight=${q.inFlight} circuit=${q.circuitState}` : "";
+      log?.warn?.("HEADROOM", `timeout reason=${reason}${headroomDiagnostics.skip_reason ? ` skipReason=${headroomDiagnostics.skip_reason}` : ""} budget=${headroomDiagnostics.budgetMs ?? 0}ms elapsed=${Math.round(headroomDiagnostics.latencyMs ?? 0)}ms${sizeParts ? ` ${sizeParts}` : ""}${queueParts ? ` ${queueParts}` : ""}`);
+    } else {
+      log?.debug?.("HEADROOM", `skipped reason=${reason}`);
+    }
   }
 
   // Response usage relay context (Phase 3): active only when obligations.relay_usage === true

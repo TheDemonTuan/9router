@@ -7,6 +7,8 @@ import {
   resolveHeadroomTimeout,
   HEADROOM_DEFAULT_TIMEOUT_MS,
   HEADROOM_RESERVE_TIMEOUT_MS,
+  HEADROOM_UPSTREAM_MARGIN_MS,
+  HEADROOM_UPSTREAM_TIMEOUT_MS,
   HEADROOM_MAX_PAYLOAD_BYTES,
 } from "../config/runtimeConfig.js";
 import { validateBodyInvariants } from "./headroomInvariants.js";
@@ -129,6 +131,13 @@ export async function callHeadroomGateway({
     return null;
   }
 
+  // Pre-dispatch contract admission: if upstream timeout is declared,
+  // ensure available budget accommodates upstream execution plus transport margin.
+  if (HEADROOM_UPSTREAM_TIMEOUT_MS > 0 && budgetMs < HEADROOM_UPSTREAM_TIMEOUT_MS + HEADROOM_UPSTREAM_MARGIN_MS) {
+    diagnostics.reason = "insufficient_upstream_budget";
+    return null;
+  }
+
   if (preResponse?.signal?.aborted) throw preResponse.signal.reason?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" ? preResponse.signal.reason : createDeadlineError();
   if (clientSignal?.aborted) throw clientSignal.reason?.code === "CLIENT_ABORT" ? clientSignal.reason : createClientAbortError();
   const admission = beginHeadroomAttempt(endpoint);
@@ -197,7 +206,12 @@ export async function callHeadroomGateway({
     diagnostics.latencyMs = performance.now() - startTime;
     return null;
   }
-  const timer = setTimeout(() => localCtrl.abort(timeoutError), remaining);
+    diagnostics.queue = {
+      inFlight: ticket.current.inFlight,
+      circuitState: ticket.current.state,
+      failures: ticket.current.failures,
+    };
+    const timer = setTimeout(() => localCtrl.abort(timeoutError), remaining);
   diagnostics.budgetMs = budgetMs;
   let data;
   try {
@@ -259,6 +273,8 @@ export async function callHeadroomGateway({
   const gatewayData = data?.data || {};
   const returnedBody = data?.body ?? gatewayData.body ?? null;
   if (data?.compression_skipped === true || gatewayData.compression_skipped === true) {
+    const rawSkipReason = data?.skip_reason ?? gatewayData.skip_reason ?? null;
+    diagnostics.skip_reason = typeof rawSkipReason === "string" ? rawSkipReason : null;
     const check = validateBodyInvariants(expectedBody, returnedBody, format);
     diagnostics.reason = check.valid ? "gateway_compression_skipped" : "invariant_violation";
     if (!check.valid) diagnostics.detail = check.detail || check.reason;
@@ -324,9 +340,15 @@ export async function callHeadroomGateway({
   };
   } finally {
     const reason = diagnostics.reason;
+    const isServiceFailure = (
+      ["gateway_timeout", "gateway_dns_error", "gateway_connection_refused", "gateway_connection_reset",
+        "gateway_fetch_error", "gateway_http_5xx", "gateway_http_429", "gateway_invalid_json_response",
+        "gateway_missing_compressed_body"].includes(reason)
+      || (reason === "gateway_compression_skipped" && diagnostics.skip_reason === "compression_timeout")
+    );
     const kind = diagnostics.accepted ? "success" : diagnostics.cancelled ? "cancelled"
       : !ticket.attempted ? "local_bypass"
-        : ["gateway_timeout", "gateway_dns_error", "gateway_connection_refused", "gateway_connection_reset", "gateway_fetch_error", "gateway_http_5xx", "gateway_http_429", "gateway_invalid_json_response", "gateway_missing_compressed_body", "gateway_compression_skipped"].includes(reason) ? "service_failure" : "neutral";
+        : isServiceFailure ? "service_failure" : "neutral";
     diagnostics.transition = finishHeadroomAttempt(ticket, { kind, reason, latencyMs: ticket.attempted ? diagnostics.latencyMs : undefined });
   }
 }
