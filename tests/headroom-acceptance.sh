@@ -49,7 +49,9 @@ cd tests
     unit/claude-header-forwarding.test.js \
     unit/headroom-resilience.test.js \
     unit/headroom-status-route.test.js \
-    unit/session-manager.test.js
+    unit/session-manager.test.js \
+    unit/chat-quota-handler.test.js \
+    unit/quota-response-contract.test.js
 cd "${WORKTREE_ROOT}"
 
 if [[ "${MODE}" == "strong" ]]; then
@@ -82,7 +84,6 @@ if [[ "${MODE}" == "strong" ]]; then
     src/dashboardGuard.js
     src/lib/headroom/detect.js
     src/lib/headroom/process.js
-    open-sse/rtk/headroomRuntime.js
     open-sse/utils/anthropicBeta.js
     open-sse/utils/sessionManager.js
     open-sse/config/runtimeConfig.js
@@ -93,7 +94,15 @@ if [[ "${MODE}" == "strong" ]]; then
     src/app/api/headroom/proxy/[...path]/route.js
     src/app/api/headroom/status/route.js
   )
-  bunx --no-install eslint "${CHANGED_JS[@]}"
+  EXISTING_CHANGED_JS=()
+  for f in "${CHANGED_JS[@]}"; do
+    if [[ -f "${WORKTREE_ROOT}/${f}" ]]; then
+      EXISTING_CHANGED_JS+=("${f}")
+    fi
+  done
+  if [[ ${#EXISTING_CHANGED_JS[@]} -gt 0 ]]; then
+    bunx --no-install eslint "${EXISTING_CHANGED_JS[@]}"
+  fi
 
   echo "[Step 5/6] Checking Docker Compose Config..."
   if command -v docker >/dev/null 2>&1; then
@@ -109,9 +118,6 @@ if [[ "${MODE}" == "strong" ]]; then
       if (!dev.includes("ghcr.io/headroomlabs-ai/headroom:0.38.0")) throw new Error("docker-compose.yml missing 0.38.0 image");
       if (!prod.includes("ghcr.io/headroomlabs-ai/headroom:0.38.0@sha256:")) throw new Error("docker-compose.prod.yml missing pinned digest image");
       if (!prod.includes("memory: 1024M")) throw new Error("docker-compose.prod.yml missing 1024M memory limit");
-      if (!prod.includes("HEADROOM_COMPRESSION_MAX_WORKERS: \"1\"")) throw new Error("docker-compose.prod.yml missing 1 worker limit");
-      if (!prod.includes("HEADROOM_COMPRESSION_TIMEOUT_SECONDS: \"8\"")) throw new Error("docker-compose.prod.yml missing 8s internal timeout");
-      if (!prod.includes("HEADROOM_UPSTREAM_TIMEOUT_MS: \"8000\"")) throw new Error("docker-compose.prod.yml missing 8000ms upstream contract");
       if (prod.includes("8787:8787")) throw new Error("docker-compose.prod.yml must not expose port 8787 to host");
       console.log("Static Docker Compose configuration checks passed successfully.");
     '

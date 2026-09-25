@@ -26,11 +26,9 @@ import { takeRenamedToolNames } from "../utils/opencodeFingerprint.js";
 import { injectCaveman } from "../rtk/caveman.js";
 import { injectPonytail } from "../rtk/ponytail.js";
 import { compressMessages, formatRtkLog } from "../rtk/index.js";
-import { compressWithHeadroom, formatHeadroomLog, formatHeadroomSizeLog, formatHeadroomSummaryTag } from "../rtk/headroom.js";
+import { compressWithHeadroom, formatHeadroomLog, formatHeadroomSummaryTag } from "../rtk/headroom.js";
 import { selectHeadroomStage, HEADROOM_STAGES } from "../rtk/headroomStage.js";
 import { createHeadroomTurnContext } from "../rtk/headroomRelay.js";
-import { recordHeadroomBypass } from "../rtk/headroomRuntime.js";
-import { buildCompressEndpoint, isSafeOrigin } from "../rtk/headroomGateway.js";
 import { compressWithPxpipe } from "../rtk/pxpipe.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { sanitizeAlitpBaseOrigin, applyAlitpBaseOrigin } from "../providers/alibabaTokenPlanCatalog.js";
@@ -68,7 +66,7 @@ export function stripContinuityFields(body) {
   return body;
 }
 
-export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomProxyToken, headroomCompressUserMessages, headroomTimeoutMs, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, clientSignal, preResponse = null, routeContext: inputRouteContext = null, routeReason = "direct", effectiveModel = null }) {
+export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomProxyToken, headroomCompressUserMessages, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, clientSignal, preResponse = null, routeContext: inputRouteContext = null, routeReason = "direct", effectiveModel = null }) {
   const { provider, model } = modelInfo;
   const requestStartTime = Date.now();
   // Stable per-session color so all lines of one CLI conversation share a tag
@@ -244,8 +242,30 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const headroomDiagnostics = {};
   let headroomStats = null;
   let forwardedProviderHeaders = null;
+  let headroomTurnContext = null;
+  const completeHeadroomTurn = (statusCode = 400) => headroomTurnContext?.complete?.({ statusCode });
+  const captureHeadroomTurn = () => {
+    if (!headroomStats) return;
+    headroomTurnContext = createHeadroomTurnContext({
+      url: headroomUrl, proxyToken: headroomProxyToken,
+      turnId: headroomStats.turnId, obligations: headroomStats.obligations,
+      startTime: requestStartTime, log,
+    });
+  };
 
   const handleHeadroomAbort = (error) => {
+    if (error?.code === "HEADROOM_SESSION_FAILURE" && preResponse?.signal?.aborted) throw preResponse.signal.reason;
+    if (error?.code === "HEADROOM_SESSION_FAILURE" && clientSignal?.aborted) throw createClientAbortError();
+    if (error?.code === "HEADROOM_SESSION_FAILURE") {
+      const result = createErrorResult(error.status || 503, "Headroom session compression unavailable", null, {
+        errorClass: error.reason || "headroom_session_failure",
+        retryable: error.retryable === true,
+      });
+      result.terminalNoFallback = true;
+      result.response.headers.set("x-9router-no-fallback", "true");
+      result.response.headers.set("x-9router-error-code", error.reason || "headroom_session_failure");
+      return result;
+    }
     if (error?.code !== "CLIENT_ABORT" && (error?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" || preResponse?.signal?.aborted)) {
       const deadlineError = error?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" ? error : preResponse?.signal?.reason || createDeadlineError();
       if (!deadlineError.code) deadlineError.code = "PRE_RESPONSE_DEADLINE_EXCEEDED";
@@ -276,21 +296,17 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
         enabled: true,
         url: headroomUrl,
         proxyToken: headroomProxyToken,
-        model: upstreamModel,
+        model: sourceBody.model || upstreamModel,
         format: headroomStagePlan.format,
         compressUserMessages: headroomCompressUserMessages,
         sessionId: headroomSessionId,
-        isSSE: isInteractiveSse,
-        timeoutMs: headroomTimeoutMs,
         preResponse,
         clientSignal: clientSignal || null,
         requestHeaders: clientRawRequest?.headers,
         diagnostics: headroomDiagnostics,
-        log,
       });
-      if (headroomStats?.providerHeaders) {
-        forwardedProviderHeaders = headroomStats.providerHeaders;
-      }
+      captureHeadroomTurn();
+      if (headroomStats?.providerHeaders) forwardedProviderHeaders = headroomStats.providerHeaders;
     } catch (error) {
       const abortResult = handleHeadroomAbort(error);
       if (abortResult) return abortResult;
@@ -336,9 +352,15 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     }
     // Convert remote image URLs to base64 for targets that can't fetch URLs.
     try {
-      const n = await prefetchRemoteImages(sourceBody, sourceFormat, targetFormat, { signal: undefined });
+      const n = await prefetchRemoteImages(sourceBody, sourceFormat, targetFormat, { signal: preResponse?.signal || clientSignal });
       if (n > 0) log?.debug?.("MODALITY", `prefetched ${n} remote image(s) for ${targetFormat}`);
-    } catch (e) { log?.warn?.("MODALITY", `image prefetch failed: ${e.message}`); }
+    } catch (e) {
+      if (preResponse?.signal?.aborted || clientSignal?.aborted) {
+        completeHeadroomTurn(preResponse?.signal?.reason?.status || clientSignal?.reason?.status || 499);
+        throw preResponse?.signal?.reason || clientSignal?.reason || e;
+      }
+      log?.warn?.("MODALITY", `image prefetch failed: ${e.message}`);
+    }
   }
 
   let translatedBody;
@@ -371,9 +393,11 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
             ? error.message
             : `Failed to translate request for ${sourceFormat} → ${targetFormat}: ${error.message}`)
         : `Failed to translate request for ${sourceFormat} → ${targetFormat}`;
+      completeHeadroomTurn();
       return createErrorResult(HTTP_STATUS.BAD_REQUEST, message);
     }
     if (!translatedBody) {
+      completeHeadroomTurn();
       return createErrorResult(HTTP_STATUS.BAD_REQUEST, `Failed to translate request for ${sourceFormat} → ${targetFormat}`);
     }
     responseSchemaValidation = translatedBody._responseSchemaValidation || translatedBody.request?._responseSchemaValidation;
@@ -391,6 +415,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     try {
       validateCodexResponsesRequest(body);
     } catch (error) {
+      completeHeadroomTurn();
       return createErrorResult(HTTP_STATUS.BAD_REQUEST, error.message);
     }
   }
@@ -451,29 +476,24 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const rtkLine = formatRtkLog(rtkStats);
   if (rtkLine) console.log(rtkLine);
 
-  // Headroom: optional external gateway compression; fail open if proxy is absent.
-  // Runs TARGET_NATIVE (after translate) or PROJECTED (Kiro), only if not already run in SOURCE_NATIVE.
-  if (!headroomStats && headroomEligible && headroomEnabled && (headroomStagePlan.stage === HEADROOM_STAGES.TARGET_NATIVE || headroomStagePlan.stage === HEADROOM_STAGES.PROJECTED)) {
+  // Compress the provider-native body only if source-native compression did not run.
+  if (!headroomStats && headroomEligible && headroomEnabled && headroomStagePlan.stage === HEADROOM_STAGES.TARGET_NATIVE) {
     try {
       headroomStats = await compressWithHeadroom(translatedBody, {
         enabled: true,
         url: headroomUrl,
         proxyToken: headroomProxyToken,
-        model: upstreamModel,
+        model: wireModel,
         format: headroomStagePlan.format,
         compressUserMessages: headroomCompressUserMessages,
         sessionId: headroomSessionId,
-        isSSE: isInteractiveSse,
-        timeoutMs: headroomTimeoutMs,
         preResponse,
         clientSignal: clientSignal || null,
         requestHeaders: clientRawRequest?.headers,
         diagnostics: headroomDiagnostics,
-        log,
       });
-      if (headroomStats?.providerHeaders) {
-        forwardedProviderHeaders = headroomStats.providerHeaders;
-      }
+      captureHeadroomTurn();
+      if (headroomStats?.providerHeaders) forwardedProviderHeaders = headroomStats.providerHeaders;
     } catch (error) {
       const abortResult = handleHeadroomAbort(error);
       if (abortResult) return abortResult;
@@ -482,63 +502,13 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   }
   if (headroomEnabled && headroomEligible && headroomStagePlan.stage === HEADROOM_STAGES.BYPASS && headroomUrl) {
     headroomDiagnostics.reason ||= "stage_bypass";
-    const endpoint = buildCompressEndpoint(headroomUrl);
-    if (isSafeOrigin(endpoint)) recordHeadroomBypass(endpoint, "stage_bypass");
   }
   if (headroomEnabled && clientTokenSaverOptOut) {
     headroomDiagnostics.reason ||= "client_opt_out";
   }
   const headroomLine = formatHeadroomLog(headroomStats);
-  const headroomSizeLine = formatHeadroomSizeLog(headroomDiagnostics);
-  const reason = headroomDiagnostics.reason || headroomStagePlan.reason || "compression unavailable";
-  if (headroomDiagnostics.transition === "opened" || headroomDiagnostics.transition === "latency_opened") {
-    const isLatency = headroomDiagnostics.transition === "latency_opened";
-    if (isLatency) {
-      const trig = headroomDiagnostics.latencyTrigger;
-      const trigParts = [];
-      if (trig?.trigger) trigParts.push(`trigger=${trig.trigger}`);
-      if (trig?.p95 != null) trigParts.push(`p95=${Math.round(trig.p95)}ms threshold=${trig.threshold}ms samples=${trig.samples}`);
-      trigParts.push(`currentOutcome=${reason}`);
-      trigParts.push(`currentLatency=${Math.round(headroomDiagnostics.latencyMs ?? 0)}ms`);
-      if (trig?.lane) trigParts.push(`lane=${trig.lane}`);
-      log?.warn?.("HEADROOM", `latency_guard_open ${trigParts.join(" ")} cooldown=30000ms`);
-    } else {
-      const fieldPart = headroomDiagnostics.detail ? ` field=${headroomDiagnostics.detail}` : "";
-      log?.warn?.("HEADROOM", `circuit_open reason=${reason}${fieldPart} budget=${headroomDiagnostics.budgetMs ?? 0}ms elapsed=${Math.round(headroomDiagnostics.latencyMs ?? 0)}ms cooldown=30000ms`);
-    }
-  } else if (headroomDiagnostics.transition === "recovered" || headroomDiagnostics.transition === "latency_recovered") {
-    const isLatency = headroomDiagnostics.transition === "latency_recovered";
-    log?.info?.("HEADROOM", `${isLatency ? "latency_guard_closed" : "circuit_closed"} half_open_probe=success`);
-  }
-  if (headroomLine) {
-    log?.info?.("HEADROOM", `stage=${headroomStagePlan.stage} fmt=${headroomStagePlan.format || "-"} | ${headroomLine}${headroomSizeLine ? ` | ${headroomSizeLine}` : ""}`);
-  } else if (headroomEnabled && !clientTokenSaverOptOut) {
-    if (reason === "gateway_timeout" || reason === "compression_timeout" || headroomDiagnostics.skip_reason === "compression_timeout") {
-      const b = headroomDiagnostics.before;
-      const q = headroomDiagnostics.queue;
-      const sizeParts = b ? `body=${b.bodyBytes}B msgs=${b.messageCount ?? "?"} tools=${b.toolSchemaBytes ?? 0}B toolHistory=${b.toolHistoryBytes ?? 0}B` : "";
-      const queueParts = q ? `inFlight=${q.inFlight} circuit=${q.circuitState}` : "";
-      log?.warn?.("HEADROOM", `timeout reason=${reason}${headroomDiagnostics.skip_reason ? ` skipReason=${headroomDiagnostics.skip_reason}` : ""} budget=${headroomDiagnostics.budgetMs ?? 0}ms elapsed=${Math.round(headroomDiagnostics.latencyMs ?? 0)}ms${sizeParts ? ` ${sizeParts}` : ""}${queueParts ? ` ${queueParts}` : ""}`);
-    } else if (reason === "invariant_violation") {
-      const field = headroomDiagnostics.detail ? ` field=${headroomDiagnostics.detail}` : "";
-      const toolsPart = headroomDiagnostics.tools_diag
-        ? ` transform=${headroomDiagnostics.tools_diag.transform} tools=${headroomDiagnostics.tools_diag.count} schemaBytes=${headroomDiagnostics.tools_diag.bytes}`
-        : "";
-      log?.warn?.("HEADROOM", `invariant_violation${field}${toolsPart} elapsed=${Math.round(headroomDiagnostics.latencyMs ?? 0)}ms`);
-    } else {
-      log?.debug?.("HEADROOM", `skipped reason=${reason}`);
-    }
-  }
-
-  // Response usage relay context (Phase 3): active only when obligations.relay_usage === true
-  const headroomTurnContext = createHeadroomTurnContext({
-    url: headroomUrl,
-    proxyToken: headroomProxyToken,
-    turnId: headroomStats?.turnId,
-    obligations: headroomStats?.obligations,
-    startTime: requestStartTime,
-    log,
-  });
+  if (headroomLine) log?.info?.("HEADROOM", `stage=${headroomStagePlan.stage} fmt=${headroomStagePlan.format || "-"} | ${headroomLine}`);
+  else if (headroomEnabled && !clientTokenSaverOptOut) log?.debug?.("HEADROOM", `skipped reason=${headroomDiagnostics.reason || headroomStagePlan.reason || "compression unavailable"}`);
 
   // Token-saver flags accumulator for the single "⚙" log line below.
   const xf = [];
@@ -854,6 +824,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const { onStreamComplete, streamDetailId } = buildOnStreamComplete({ ...sharedCtx });
   return handleStreamingResponse({ ...sharedCtx, providerResponse, sourceFormat, targetFormat: providerResponseFormat, userAgent, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, credentials });
   } catch (error) {
+    completeHeadroomTurn(error?.status || 502);
     if (preResponse?.signal.aborted || error?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" || error?.code === "CLIENT_ABORT") {
       streamController.abort(error);
       streamController.handleError(error);

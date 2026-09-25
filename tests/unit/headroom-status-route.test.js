@@ -5,7 +5,6 @@ const mocks = vi.hoisted(() => ({
   getHeadroomStatus: vi.fn(),
   getSettings: vi.fn(),
   getManagedPid: vi.fn(),
-  getHeadroomRuntimeSnapshot: vi.fn(),
 }));
 
 vi.mock("@/dashboardGuard", () => ({
@@ -23,10 +22,6 @@ vi.mock("@/lib/localDb", () => ({
 
 vi.mock("@/lib/headroom/process", () => ({
   getManagedPid: mocks.getManagedPid,
-}));
-
-vi.mock("open-sse/rtk/headroomRuntime.js", () => ({
-  getHeadroomRuntimeSnapshot: mocks.getHeadroomRuntimeSnapshot,
 }));
 
 import { GET } from "../../src/app/api/headroom/status/route.js";
@@ -47,9 +42,10 @@ describe("GET /api/headroom/status", () => {
       sidecarVersion: "0.38.0",
       gatewaySupported: true,
       extras: { code: false, ml: false },
+      compressionExecutor: { max_workers: 1 },
+      observedAt: 12345,
     });
     mocks.getManagedPid.mockReturnValue(12345);
-    mocks.getHeadroomRuntimeSnapshot.mockReturnValue({ circuitState: "CLOSED" });
 
     const req = new Request("http://localhost:20127/api/headroom/status");
     const res = await GET(req);
@@ -62,7 +58,10 @@ describe("GET /api/headroom/status", () => {
     expect(data.managedPid).toBeUndefined();
     expect(data.running).toBe(true);
     expect(data.sidecarVersion).toBe("0.38.0");
-    expect(data.runtime).toEqual({ circuitState: "CLOSED" });
+    expect(data.upstreamRuntime).toEqual({
+      compression_executor: { max_workers: 1 },
+      observedAt: 12345,
+    });
   });
 
   it("permits rawDashboardAvailable only when viewer and service are both local and running", async () => {
@@ -78,7 +77,6 @@ describe("GET /api/headroom/status", () => {
       extras: { code: false, ml: false },
     });
     mocks.getManagedPid.mockReturnValue(12345);
-    mocks.getHeadroomRuntimeSnapshot.mockReturnValue({ circuitState: "CLOSED" });
 
     const req = new Request("http://localhost:20127/api/headroom/status");
     const res = await GET(req);
@@ -103,7 +101,6 @@ describe("GET /api/headroom/status", () => {
       extras: { code: false, ml: false },
     });
     mocks.getManagedPid.mockReturnValue(null);
-    mocks.getHeadroomRuntimeSnapshot.mockReturnValue({ circuitState: "CLOSED" });
 
     const req = new Request("http://localhost:20127/api/headroom/status");
     const res = await GET(req);

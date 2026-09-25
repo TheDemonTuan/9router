@@ -1,6 +1,5 @@
 import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
-import { HEADROOM_DEFAULT_TIMEOUT_MS, resolveHeadroomTimeout } from "../../../../open-sse/config/runtimeConfig.js";
 
 const DEFAULT_MITM_ROUTER_BASE = "http://localhost:20128";
 const DEFAULT_HEADROOM_URL = process.env.HEADROOM_URL || "http://localhost:8787";
@@ -54,7 +53,6 @@ const DEFAULT_SETTINGS = {
   headroomEnabled: false,
   headroomUrl: DEFAULT_HEADROOM_URL,
   headroomCompressUserMessages: false,
-  headroomTimeoutMs: HEADROOM_DEFAULT_TIMEOUT_MS,
   cavemanEnabled: false,
   cavemanLevel: "full",
   ponytailEnabled: false,
@@ -97,9 +95,9 @@ export function mergeWithDefaults(raw) {
       }
     }
   }
-  const { timeoutMs, source } = resolveHeadroomTimeout(raw?.headroomTimeoutMs);
-  merged.headroomEffectiveTimeoutMs = timeoutMs;
-  merged.headroomTimeoutSource = source;
+  delete merged.headroomTimeoutMs;
+  delete merged.headroomEffectiveTimeoutMs;
+  delete merged.headroomTimeoutSource;
   return merged;
 }
 
@@ -111,7 +109,12 @@ export async function getSettings() {
 // Atomic read-merge-write inside transaction (prevents losing concurrent updates)
 export async function updateSettings(updates) {
   const db = await getAdapter();
-  const { headroomEffectiveTimeoutMs, headroomTimeoutSource, ...persistedUpdates } = updates;
+  const {
+    headroomTimeoutMs: _legacyTimeout,
+    headroomEffectiveTimeoutMs: _legacyEffective,
+    headroomTimeoutSource: _legacySource,
+    ...persistedUpdates
+  } = updates;
   let next;
   db.transaction(function () {
     const row = db.get(`SELECT data FROM settings WHERE id = 1`);

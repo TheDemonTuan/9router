@@ -1,9 +1,8 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { compressWithHeadroom, formatHeadroomLog, formatHeadroomSizeLog } from "../../open-sse/rtk/headroom.js";
+import { compressWithHeadroom, formatHeadroomLog, formatHeadroomSummaryTag } from "../../open-sse/rtk/headroom.js";
 
 afterEach(() => {
   vi.restoreAllMocks();
-  globalThis[Symbol.for("9router.headroom.runtime")]?.clear();
 });
 
 describe("compressWithHeadroom", () => {
@@ -25,7 +24,7 @@ describe("compressWithHeadroom", () => {
         data: {
           body: { model: sent.model, messages: [{ role: "user", content: "short" }] },
           turn_id: "turn_1",
-          obligations: { relay_usage: true },
+          obligations: ["relay_usage"],
           headers: { "Anthropic-Beta": "context-management-2025-06-27", authorization: "ignored" },
         },
         tokens_before: 100,
@@ -43,6 +42,35 @@ describe("compressWithHeadroom", () => {
     expect(global.fetch).toHaveBeenCalledWith("http://headroom:8787/v1/compress", expect.objectContaining({ method: "POST" }));
   });
 
+  it("forwards the complete returned body, including added and removed fields", async () => {
+    global.fetch = vi.fn(async (_url, init) => {
+      const sent = JSON.parse(init.body);
+      return Response.json({
+        body: {
+          model: sent.model,
+          messages: [{ role: "user", content: "short" }],
+          stream: false,
+          metadata: { upstream: "kept" },
+          tools: [{ type: "function", function: { name: "search", description: "compact" } }],
+        },
+      });
+    });
+    const body = {
+      model: "gpt-4o", stream: true, temperature: 0.7,
+      messages: [{ role: "user", content: "long" }],
+      tools: [{ type: "function", function: { name: "search", description: "long description" } }],
+    };
+    const originalRef = body;
+    const result = await compressWithHeadroom(body, { url: "http://localhost:8787", model: "gpt-4o" });
+    expect(result).toBeTruthy();
+    expect(body).toBe(originalRef);
+    expect(body).toEqual({
+      model: "gpt-4o", stream: false, messages: [{ role: "user", content: "short" }],
+      metadata: { upstream: "kept" },
+      tools: [{ type: "function", function: { name: "search", description: "compact" } }],
+    });
+  });
+
   it("compresses responses input in-place with Gateway v2 contract", async () => {
     global.fetch = vi.fn(async (_url, init) => new Response(JSON.stringify({
       data: { body: { model: JSON.parse(init.body).model, input: [{ role: "user", content: "short" }] } },
@@ -54,176 +82,40 @@ describe("compressWithHeadroom", () => {
     expect(body.input[0].content).toBe("short");
   });
 
-  it("compresses Kiro conversationState history/currentMessage in-place", async () => {
-    let requestPayload;
-    global.fetch = vi.fn(async (_url, init) => {
-      requestPayload = JSON.parse(init.body);
-      return new Response(JSON.stringify({
-        data: {
-          body: {
-            model: requestPayload.model,
-            messages: [
-              { role: "user", content: "compressed earlier user" },
-              { role: "assistant", content: "compressed assistant", tool_calls: [{ id: "tool_1", type: "function", function: { name: "read_file", arguments: "{\"path\":\"a.js\"}" } }] },
-              { role: "system", content: "compressed system instruction" },
-              { role: "user", content: "compressed current user" },
-              { role: "tool", content: "compressed tool output", tool_call_id: "tool_1" },
-            ],
-          },
-        },
-        tokens_before: 100, tokens_after: 40, tokens_saved: 60,
-      }), { status: 200 });
-    });
-    const body = {
-      profileArn: "arn:test",
-      conversationState: {
-        chatTriggerType: "MANUAL",
-        conversationId: "conv-1",
-        history: [
-          {
-            userInputMessage: {
-              content: "earlier user",
-              modelId: "claude-sonnet-4.5",
-            },
-          },
-          {
-            assistantResponseMessage: {
-              content: "assistant response",
-              toolUses: [
-                {
-                  toolUseId: "tool_1",
-                  name: "read_file",
-                  input: { path: "a.js" },
-                },
-              ],
-            },
-          },
-        ],
-        currentMessage: {
-          userInputMessage: {
-            content: "current user",
-            modelId: "claude-sonnet-4.5",
-            systemInstruction: "native system instruction",
-            userInputMessageContext: {
-              tools: [{ toolSpecification: { name: "read_file" } }],
-              toolResults: [
-                {
-                  toolUseId: "tool_1",
-                  status: "success",
-                  content: [{ text: "long tool output" }],
-                },
-              ],
-            },
-          },
-        },
-      },
-    };
-
-    const stats = await compressWithHeadroom(body, {
-      enabled: true,
-      url: "http://localhost:8787",
-      model: "claude-sonnet-4.5",
-      format: "kiro",
-      compressUserMessages: true,
-    });
-
-    expect(stats.tokens_saved).toBe(60);
-    expect(requestPayload).toMatchObject({
-      model: "claude-sonnet-4.5",
-      config: { compress_user_messages: true },
-      gateway: { can_redrive: false, can_relay_response: true, session_affinity: false },
-      messages: [
-        { role: "user", content: "earlier user" },
-        {
-          role: "assistant",
-          content: "assistant response",
-          tool_calls: [
-            {
-              id: "tool_1",
-              type: "function",
-              function: { name: "read_file", arguments: "{\"path\":\"a.js\"}" },
-            },
-          ],
-        },
-        { role: "system", content: "native system instruction" },
-        { role: "user", content: "current user" },
-        { role: "tool", content: "long tool output", tool_call_id: "tool_1" },
-      ],
-    });
-    expect(body.conversationState.history[0].userInputMessage.content).toBe("compressed earlier user");
-    expect(body.conversationState.history[1].assistantResponseMessage.content).toBe("compressed assistant");
-    expect(body.conversationState.currentMessage.userInputMessage.systemInstruction).toBe("compressed system instruction");
-    expect(body.conversationState.currentMessage.userInputMessage.content).toBe("compressed current user");
-    expect(body.conversationState.currentMessage.userInputMessage.userInputMessageContext.toolResults[0].content[0].text)
-      .toBe("compressed tool output");
-  });
-
-  it("fails open when Kiro Headroom output does not preserve message order", async () => {
-    global.fetch = vi.fn(async () => new Response(JSON.stringify({
-      data: {
-        body: { messages: [{ role: "assistant", content: "wrong role" }] },
-      },
-      tokens_saved: 10,
-    }), { status: 200 }));
-    const body = {
-      conversationState: {
-        currentMessage: {
-          userInputMessage: {
-            content: "original",
-            modelId: "claude-sonnet-4.5",
-          },
-        },
-        history: [],
-      },
-    };
-    const original = structuredClone(body);
-    const diagnostics = {};
-
-    const stats = await compressWithHeadroom(body, {
-      enabled: true,
-      url: "http://localhost:8787",
-      model: "claude-sonnet-4.5",
-      format: "kiro",
-      diagnostics,
-    });
-
-    expect(stats).toBeNull();
-    expect(body).toEqual(original);
-    expect(diagnostics.reason).toBe("invariant_violation");
-  });
-
-  it("fails open on bad response", async () => {
+  it("stateless errors fail open", async () => {
     global.fetch = vi.fn(async () => new Response(JSON.stringify({ error: "bad" }), { status: 500 }));
     const body = { messages: [{ role: "user", content: "long" }] };
+    const diagnostics = {};
 
-    const stats = await compressWithHeadroom(body, { enabled: true, url: "http://localhost:8787" });
+    const stats = await compressWithHeadroom(body, { enabled: true, url: "http://localhost:8787", diagnostics });
 
     expect(stats).toBeNull();
     expect(body.messages[0].content).toBe("long");
+    expect(diagnostics.reason).toBe("gateway_http_500");
   });
 
-  it("bypasses when budget is exhausted", async () => {
-    global.fetch = vi.fn();
-    const body = { messages: [{ role: "user", content: "hello" }] };
+  it("stateless 200 compression_skipped returns body", async () => {
+    const body = { model: "gpt-4o", messages: [{ role: "user", content: "short text" }] };
+    const originalContent = body.messages[0].content;
+    global.fetch = vi.fn(async () => new Response(JSON.stringify({
+      compression_skipped: true,
+      skip_reason: "content_too_short",
+      body,
+    }), { status: 200 }));
     const diagnostics = {};
-
-    // preResponse with less than 1500ms reserve
-    const mockPreResponse = {
-      remainingMs: () => 1000,
-      signal: new AbortController().signal,
-    };
 
     const stats = await compressWithHeadroom(body, {
       enabled: true,
       url: "http://localhost:8787",
-      timeoutMs: 1000,
-      preResponse: mockPreResponse,
+      model: "gpt-4o",
       diagnostics,
     });
 
-    expect(stats).toBeNull();
-    expect(global.fetch).not.toHaveBeenCalled();
-    expect(diagnostics.reason).toBe("budget_exhausted");
+    expect(stats).not.toBeNull();
+    expect(stats.compressionSkipped).toBe(true);
+    expect(body.messages[0].content).toBe(originalContent);
+    expect(diagnostics.reason).toBe("gateway_compression_skipped");
+    expect(diagnostics.skip_reason).toBe("content_too_short");
   });
 
   it("locks client control over gateway flags and config", async () => {
@@ -234,6 +126,7 @@ describe("compressWithHeadroom", () => {
         data: {
           body: { model: sentBody.model, messages: [{ role: "user", content: "compressed output" }] },
           obligations: ["relay_usage"],
+          turn_id: "turn-sec-1",
         },
       }), { status: 200 });
     });
@@ -267,27 +160,135 @@ describe("compressWithHeadroom", () => {
     expect(sentBody.session_id).toBeUndefined();
   });
 
-  it("fails open and rejects response with unsupported obligations (e.g. redrive)", async () => {
+  it("session HTTP 503 fails closed via HEADROOM_SESSION_FAILURE, status 503, retryable true", async () => {
     global.fetch = vi.fn(async () => new Response(JSON.stringify({
-      data: {
-        body: { messages: [{ role: "user", content: "injected retrieval" }] },
-        obligations: ["redrive", "relay_usage"],
-      },
-    }), { status: 200 }));
+      error: { type: "session_busy" },
+    }), { status: 503 }));
 
-    const body = { messages: [{ role: "user", content: "original text" }] };
-    const diagnostics = {};
+    const body = { model: "gpt-4o", messages: [{ role: "user", content: "text" }] };
+    let caught = null;
+    try {
+      await compressWithHeadroom(body, {
+        enabled: true,
+        url: "http://headroom:8787",
+        model: "gpt-4o",
+        sessionId: "session-123",
+      });
+    } catch (err) {
+      caught = err;
+    }
 
-    const stats = await compressWithHeadroom(body, {
-      enabled: true,
-      url: "http://headroom:8787",
-      model: "gpt-4o",
-      diagnostics,
+    expect(caught).not.toBeNull();
+    expect(caught.code).toBe("HEADROOM_SESSION_FAILURE");
+    expect(caught.status).toBe(503);
+    expect(caught.retryable).toBe(true);
+    expect(caught.reason).toBe("session_busy");
+  });
+
+  it("invalid session body fails closed before gateway dispatch", async () => {
+    global.fetch = vi.fn();
+    await expect(compressWithHeadroom(null, {
+      enabled: true, url: "http://headroom:8787", sessionId: "session-123",
+    })).rejects.toMatchObject({ code: "HEADROOM_SESSION_FAILURE", status: 502, retryable: false });
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it("session connection failure fails closed via HEADROOM_SESSION_FAILURE", async () => {
+    global.fetch = vi.fn(async () => {
+      const err = new Error("ECONNREFUSED");
+      err.code = "ECONNREFUSED";
+      throw err;
     });
 
-    expect(stats).toBeNull();
-    expect(body.messages[0].content).toBe("original text");
-    expect(diagnostics.reason).toBe("unsupported_obligation");
+    const body = { model: "gpt-4o", messages: [{ role: "user", content: "text" }] };
+    let caught = null;
+    try {
+      await compressWithHeadroom(body, {
+        enabled: true,
+        url: "http://headroom:8787",
+        model: "gpt-4o",
+        sessionId: "session-123",
+      });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).not.toBeNull();
+    expect(caught.code).toBe("HEADROOM_SESSION_FAILURE");
+    expect(caught.status).toBe(503);
+    expect(caught.retryable).toBe(true);
+  });
+
+  it("session invalid response fails closed via HEADROOM_SESSION_FAILURE, status 502", async () => {
+    global.fetch = vi.fn(async () => new Response("not-valid-json", { status: 200 }));
+
+    const body = { model: "gpt-4o", messages: [{ role: "user", content: "text" }] };
+    let caught = null;
+    try {
+      await compressWithHeadroom(body, {
+        enabled: true,
+        url: "http://headroom:8787",
+        model: "gpt-4o",
+        sessionId: "session-123",
+      });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).not.toBeNull();
+    expect(caught.code).toBe("HEADROOM_SESSION_FAILURE");
+    expect(caught.status).toBe(502);
+  });
+
+  it("session 200 compression_skipped fails closed via HEADROOM_SESSION_FAILURE, status 502", async () => {
+    const body = { model: "gpt-4o", messages: [{ role: "user", content: "text" }] };
+    global.fetch = vi.fn(async () => new Response(JSON.stringify({
+      compression_skipped: true,
+      body,
+    }), { status: 200 }));
+
+    let caught = null;
+    try {
+      await compressWithHeadroom(body, {
+        enabled: true,
+        url: "http://headroom:8787",
+        model: "gpt-4o",
+        sessionId: "session-123",
+      });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).not.toBeNull();
+    expect(caught.code).toBe("HEADROOM_SESSION_FAILURE");
+    expect(caught.status).toBe(502);
+    expect(caught.reason).toBe("session_compression_skipped");
+  });
+
+  it("propagates clientSignal abort immediately", async () => {
+    const controller = new AbortController();
+    controller.abort({ code: "CLIENT_ABORT" });
+    const body = { messages: [{ role: "user", content: "test" }] };
+
+    await expect(compressWithHeadroom(body, {
+      enabled: true,
+      url: "http://headroom:8787",
+      clientSignal: controller.signal,
+    })).rejects.toMatchObject({ code: "CLIENT_ABORT" });
+  });
+
+  it("propagates preResponse deadline exceeded immediately", async () => {
+    const controller = new AbortController();
+    const deadlineErr = new Error("Deadline exceeded");
+    deadlineErr.code = "PRE_RESPONSE_DEADLINE_EXCEEDED";
+    controller.abort(deadlineErr);
+    const body = { messages: [{ role: "user", content: "test" }] };
+
+    await expect(compressWithHeadroom(body, {
+      enabled: true,
+      url: "http://headroom:8787",
+      preResponse: { signal: controller.signal },
+    })).rejects.toMatchObject({ code: "PRE_RESPONSE_DEADLINE_EXCEEDED" });
   });
 });
 
@@ -296,11 +297,21 @@ describe("formatHeadroomLog", () => {
     expect(formatHeadroomLog({ tokens_before: 100, tokens_after: 25, tokens_saved: 75 }))
       .toBe("reported token delta=75 before=100 after=25 (75.0%)");
   });
+});
 
-  it("reports effective payload, tool-schema, and tool-history sizes with byte delta", () => {
-    expect(formatHeadroomSizeLog({
-      before: { bodyBytes: 1000, messageBytes: 800, toolSchemaBytes: 100, toolHistoryBytes: 500 },
-      after: { bodyBytes: 900, messageBytes: 700, toolSchemaBytes: 100, toolHistoryBytes: 400 },
-    })).toContain("body=1000B→900B (Δ=100B, 10.0%)");
+describe("formatHeadroomSummaryTag", () => {
+  it("formats compressed summary tag", () => {
+    expect(formatHeadroomSummaryTag({ tokens_saved: 80, tokens_before: 100 }, { latencyMs: 50 }))
+      .toBe("HEADROOM:80tok/80% 50ms");
+  });
+
+  it("formats skip summary tag", () => {
+    expect(formatHeadroomSummaryTag({ compressionSkipped: true }, { skip_reason: "content_too_short", latencyMs: 12 }))
+      .toBe("HEADROOM:BYPASS:content_too_short 12ms");
+  });
+
+  it("formats bypass diagnostic reason tag", () => {
+    expect(formatHeadroomSummaryTag(null, { reason: "stage_bypass", latencyMs: 5 }))
+      .toBe("HEADROOM:BYPASS:stage_bypass 5ms");
   });
 });

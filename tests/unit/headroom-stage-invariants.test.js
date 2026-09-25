@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { selectHeadroomStage, HEADROOM_STAGES } from "../../open-sse/rtk/headroomStage.js";
-import { validateBodyInvariants, deepEqual } from "../../open-sse/rtk/headroomInvariants.js";
+import { validateBodyInvariants } from "../../open-sse/rtk/headroomInvariants.js";
 import { normalizeRelayUsage, createHeadroomTurnContext, hasRelayUsage } from "../../open-sse/rtk/headroomRelay.js";
 import { isInternalHost, isSafeOrigin } from "../../open-sse/rtk/headroomGateway.js";
 
@@ -17,13 +17,14 @@ describe("Headroom pure stage selector", () => {
   });
 
   it("selects SOURCE_NATIVE when target is non-native but source is native", () => {
-    // Codex Responses -> Antigravity (Google contents[])
     expect(selectHeadroomStage({ sourceFormat: "openai-responses", targetFormat: "antigravity", provider: "antigravity" }))
       .toEqual({ stage: HEADROOM_STAGES.SOURCE_NATIVE, format: "openai-responses" });
 
-    // Claude -> Gemini
     expect(selectHeadroomStage({ sourceFormat: "claude", targetFormat: "gemini", provider: "gemini" }))
       .toEqual({ stage: HEADROOM_STAGES.SOURCE_NATIVE, format: "claude" });
+
+    expect(selectHeadroomStage({ sourceFormat: "openai", targetFormat: "kiro", provider: "kiro" }))
+      .toEqual({ stage: HEADROOM_STAGES.SOURCE_NATIVE, format: "openai" });
   });
 
   it("bypasses when both formats are non-native", () => {
@@ -31,507 +32,157 @@ describe("Headroom pure stage selector", () => {
       .toBe(HEADROOM_STAGES.BYPASS);
   });
 
-  it("selects PROJECTED for Kiro format", () => {
-    expect(selectHeadroomStage({ sourceFormat: "openai", targetFormat: "kiro", provider: "kiro" }))
-      .toEqual({ stage: HEADROOM_STAGES.PROJECTED, format: "kiro" });
-  });
-
-  it("bypasses cursor and special streams", () => {
+  it("bypasses cursor, binary streams, compact, and bridge", () => {
     expect(selectHeadroomStage({ sourceFormat: "cursor", targetFormat: "cursor", provider: "cursor" }).stage)
       .toBe(HEADROOM_STAGES.BYPASS);
     expect(selectHeadroomStage({ sourceFormat: "openai", targetFormat: "commandcode", provider: "commandcode" }).stage)
       .toBe(HEADROOM_STAGES.BYPASS);
+    expect(selectHeadroomStage({ sourceFormat: "openai", targetFormat: "openai", isCompact: true }).stage)
+      .toBe(HEADROOM_STAGES.BYPASS);
+    expect(selectHeadroomStage({ sourceFormat: "openai", targetFormat: "openai", isBridge: true }).stage)
+      .toBe(HEADROOM_STAGES.BYPASS);
   });
 });
 
-describe("Headroom invariants guard", () => {
-  it("accepts valid text compression in messages", () => {
-    const orig = { messages: [{ role: "user", content: "hello world" }] };
-    const comp = { messages: [{ role: "user", content: "hello" }] };
-    expect(validateBodyInvariants(orig, comp, "openai")).toEqual({ valid: true });
-  });
-
-  it("rejects message count mismatch", () => {
-    const orig = { messages: [{ role: "user", content: "1" }, { role: "assistant", content: "2" }] };
-    const comp = { messages: [{ role: "user", content: "1" }] };
-    expect(validateBodyInvariants(orig, comp, "openai").valid).toBe(false);
-  });
-
-  it("rejects altered tool_call_id or corrupted tool arguments JSON", () => {
-    const orig = {
-      messages: [{
-        role: "assistant",
-        tool_calls: [{ id: "call_1", type: "function", function: { name: "test", arguments: "{\"a\":1}" } }],
-      }],
-    };
-    const compBadId = {
-      messages: [{
-        role: "assistant",
-        tool_calls: [{ id: "call_different", type: "function", function: { name: "test", arguments: "{\"a\":1}" } }],
-      }],
-    };
-    expect(validateBodyInvariants(orig, compBadId, "openai").valid).toBe(false);
-
-    const compBadJson = {
-      messages: [{
-        role: "assistant",
-        tool_calls: [{ id: "call_1", type: "function", function: { name: "test", arguments: "{corrupted json" } }],
-      }],
-    };
-    expect(validateBodyInvariants(orig, compBadJson, "openai").valid).toBe(false);
-  });
-
-  it("preserves Responses encrypted_content", () => {
-    const orig = {
-      input: [{
-        type: "reasoning",
-        encrypted_content: "enc_123",
-      }],
-    };
-    const compTampered = {
-      input: [{
-        type: "reasoning",
-        encrypted_content: "enc_tampered",
-      }],
-    };
-    expect(validateBodyInvariants(orig, compTampered, "openai-responses").valid).toBe(false);
-  });
-
-  it("rejects Responses item id and status mismatches", () => {
-    const orig = {
-      input: [{
-        type: "message",
-        id: "msg_orig_123",
-        status: "in_progress",
-        role: "user",
-        content: [{ type: "input_text", text: "hello" }],
-      }],
-    };
-    const compAlteredId = {
-      input: [{
-        type: "message",
-        id: "msg_tampered_456",
-        status: "in_progress",
-        role: "user",
-        content: [{ type: "input_text", text: "hello" }],
-      }],
-    };
-    expect(validateBodyInvariants(orig, compAlteredId, "openai-responses").valid).toBe(false);
-
-    const compAlteredStatus = {
-      input: [{
-        type: "message",
-        id: "msg_orig_123",
-        status: "completed",
-        role: "user",
-        content: [{ type: "input_text", text: "hello" }],
-      }],
-    };
-    expect(validateBodyInvariants(orig, compAlteredStatus, "openai-responses").valid).toBe(false);
-  });
-
-  it("guards unknown Responses items with deep equality", () => {
-    const orig = {
-      input: [{
-        type: "local_shell_call",
-        id: "shell_1",
-        command: "ls -la",
-        env: { FOO: "bar" },
-      }],
-    };
-    const compSame = {
-      input: [{
-        type: "local_shell_call",
-        id: "shell_1",
-        command: "ls -la",
-        env: { FOO: "bar" },
-      }],
-    };
-    expect(validateBodyInvariants(orig, compSame, "openai-responses")).toEqual({ valid: true });
-
-    const compAltered = {
-      input: [{
-        type: "local_shell_call",
-        id: "shell_1",
-        command: "rm -rf /",
-        env: { FOO: "bar" },
-      }],
-    };
-    expect(validateBodyInvariants(orig, compAltered, "openai-responses").valid).toBe(false);
-  });
-
-  it("preserves Claude thinking blocks and signatures", () => {
-    const orig = {
-      messages: [{
-        role: "assistant",
-        content: [
-          { type: "thinking", thinking: "deep thoughts", signature: "sig_abc" },
-          { type: "text", text: "result" },
-        ],
-      }],
-    };
-    const compValid = {
-      messages: [{
-        role: "assistant",
-        content: [
-          { type: "thinking", thinking: "deep thoughts", signature: "sig_abc" },
-          { type: "text", text: "compressed result" },
-        ],
-      }],
-    };
-    expect(validateBodyInvariants(orig, compValid, "claude")).toEqual({ valid: true });
-
-    const compDropped = {
-      messages: [{
-        role: "assistant",
-        content: [{ type: "text", text: "compressed result" }],
-      }],
-    };
-    expect(validateBodyInvariants(orig, compDropped, "claude").valid).toBe(false);
-
-    const compAlteredSig = {
-      messages: [{
-        role: "assistant",
-        content: [
-          { type: "thinking", thinking: "deep thoughts", signature: "sig_corrupted" },
-          { type: "text", text: "compressed result" },
-        ],
-      }],
-    };
-    expect(validateBodyInvariants(orig, compAlteredSig, "claude").valid).toBe(false);
-  });
-});
-
-describe("Headroom 0.38 Responses upstream mutation invariants", () => {
-  const createBaseResponsesBody = () => ({
-    model: "gpt-4o",
-    instructions: "You are a helpful coding assistant.",
-    input: [
-      {
-        type: "message",
-        id: "msg_1",
-        status: "completed",
-        role: "user",
-        content: [{ type: "input_text", text: "Please inspect the repo and fix the bug." }],
-      },
-      {
-        type: "function_call",
-        id: "fc_1",
-        call_id: "call_read_1",
-        name: "readFile",
-        arguments: JSON.stringify({ path: "src/index.js", lines: 100 }),
-      },
-      {
-        type: "function_call_output",
-        id: "fco_1",
-        call_id: "call_read_1",
-        output: "function output long contents",
-      },
-      {
-        type: "local_shell_call",
-        id: "lsc_1",
-        call_id: "call_sh_1",
-        name: "bash",
-        input: "git status --porcelain",
-      },
-      {
-        type: "local_shell_call_output",
-        id: "lsco_1",
-        call_id: "call_sh_1",
-        output: "M open-sse/rtk/headroomInvariants.js\n",
-      },
-      {
-        type: "apply_patch_call",
-        id: "apc_1",
-        call_id: "call_patch_1",
-        name: "apply_patch",
-        input: "*** patch line 1 ***\n*** patch line 2 ***",
-      },
-      {
-        type: "apply_patch_call_output",
-        id: "apco_1",
-        call_id: "call_patch_1",
-        output: "patch applied successfully",
-      },
-      {
-        type: "custom_tool_call",
-        id: "ctc_1",
-        call_id: "call_custom_1",
-        name: "special_tool",
-        input: "custom command with arguments",
-      },
-      {
-        type: "custom_tool_call_output",
-        id: "ctco_1",
-        call_id: "call_custom_1",
-        output: "custom tool execution output",
-      },
-      {
-        type: "reasoning",
-        id: "rs_1",
-        summary: [{ type: "summary_text", text: "Planning the next steps..." }],
-        encrypted_content: "opaque_encrypted_token_stream",
-      },
-      {
-        type: "message",
-        id: "msg_2",
-        status: "completed",
-        role: "assistant",
-        content: "Here is the summary.",
-        internal_chat_message_metadata_passthrough: { traceId: "tr_abc123" },
-      },
-    ],
-    tools: [{ type: "function", name: "readFile" }],
-  });
-
-  it("1. allows instructions to be compressed (string -> string)", () => {
-    const orig = createBaseResponsesBody();
-    const comp = structuredClone(orig);
-    comp.instructions = "Helpful assistant.";
-    expect(validateBodyInvariants(orig, comp, "openai-responses")).toEqual({ valid: true });
-  });
-
-  it("2. allows function_call_output.output to be compressed (text/text-array)", () => {
-    const orig = createBaseResponsesBody();
-    const comp = structuredClone(orig);
-    comp.input[2].output = "compressed output";
-    expect(validateBodyInvariants(orig, comp, "openai-responses")).toEqual({ valid: true });
-
-    // Text array form
-    const origArray = createBaseResponsesBody();
-    origArray.input[2].output = [{ type: "output_text", text: "long output text" }];
-    const compArray = structuredClone(origArray);
-    compArray.input[2].output = [{ type: "output_text", text: "short output" }];
-    expect(validateBodyInvariants(origArray, compArray, "openai-responses")).toEqual({ valid: true });
-  });
-
-  it("3. allows local_shell_call_output.output to be compressed", () => {
-    const orig = createBaseResponsesBody();
-    const comp = structuredClone(orig);
-    comp.input[4].output = "M headroomInvariants.js\n";
-    expect(validateBodyInvariants(orig, comp, "openai-responses")).toEqual({ valid: true });
-  });
-
-  it("4. allows apply_patch_call_output.output to be compressed", () => {
-    const orig = createBaseResponsesBody();
-    const comp = structuredClone(orig);
-    comp.input[6].output = "ok";
-    expect(validateBodyInvariants(orig, comp, "openai-responses")).toEqual({ valid: true });
-  });
-
-  it("5. allows custom_tool_call.input, local_shell_call.input, apply_patch_call.input to be compressed", () => {
-    const orig = createBaseResponsesBody();
-    const comp = structuredClone(orig);
-    comp.input[3].input = "git status"; // local_shell_call.input
-    comp.input[5].input = "patch diff"; // apply_patch_call.input
-    comp.input[7].input = "custom command"; // custom_tool_call.input
-    expect(validateBodyInvariants(orig, comp, "openai-responses")).toEqual({ valid: true });
-  });
-
-  it("6. allows function_call.arguments when compressed to valid JSON", () => {
-    const orig = createBaseResponsesBody();
-    const comp = structuredClone(orig);
-    comp.input[1].arguments = JSON.stringify({ path: "src/index.js" });
-    expect(validateBodyInvariants(orig, comp, "openai-responses")).toEqual({ valid: true });
-  });
-
-  it("7. rejects function_call.arguments when compressed to corrupted JSON", () => {
-    const orig = createBaseResponsesBody();
-    const comp = structuredClone(orig);
-    comp.input[1].arguments = "{broken json, missing brace";
-    const res = validateBodyInvariants(orig, comp, "openai-responses");
-    expect(res.valid).toBe(false);
-    expect(res.detail).toBe("input.1.arguments");
-  });
-
-  it("8. rejects reasoning.encrypted_content mutation", () => {
-    const orig = createBaseResponsesBody();
-    const comp = structuredClone(orig);
-    comp.input[9].encrypted_content = "altered_ciphertext";
-    const res = validateBodyInvariants(orig, comp, "openai-responses");
-    expect(res.valid).toBe(false);
-    expect(res.detail).toBe("input.9.encrypted_content");
-  });
-
-  it("9. rejects call_id mutation on function_call or outputs", () => {
-    const orig = createBaseResponsesBody();
-    const comp = structuredClone(orig);
-    comp.input[1].call_id = "call_different";
-    const res = validateBodyInvariants(orig, comp, "openai-responses");
-    expect(res.valid).toBe(false);
-    expect(res.detail).toBe("input.1.call_id");
-  });
-
-  it("10. rejects item ID, order, type, or status mutations", () => {
-    const orig = createBaseResponsesBody();
-    // ID mutation
-    const compId = structuredClone(orig);
-    compId.input[0].id = "msg_tampered";
-    expect(validateBodyInvariants(orig, compId, "openai-responses")).toEqual({
-      valid: false,
-      reason: "immutable_field_changed",
-      detail: "input.0.id",
-    });
-
-    // Status mutation
-    const compStatus = structuredClone(orig);
-    compStatus.input[0].status = "in_progress";
-    expect(validateBodyInvariants(orig, compStatus, "openai-responses")).toEqual({
-      valid: false,
-      reason: "immutable_field_changed",
-      detail: "input.0.status",
-    });
-
-    // Type mutation
-    const compType = structuredClone(orig);
-    compType.input[0].type = "reasoning";
-    expect(validateBodyInvariants(orig, compType, "openai-responses").valid).toBe(false);
-
-    // Order mutation
-    const compOrder = structuredClone(orig);
-    const tmp = compOrder.input[0];
-    compOrder.input[0] = compOrder.input[1];
-    compOrder.input[1] = tmp;
-    expect(validateBodyInvariants(orig, compOrder, "openai-responses").valid).toBe(false);
-
-    // Item count mutation
-    const compCount = structuredClone(orig);
-    compCount.input.pop();
-    expect(validateBodyInvariants(orig, compCount, "openai-responses").valid).toBe(false);
-  });
-
-  it("11. rejects metadata / internal_chat_message_metadata_passthrough changes", () => {
-    const orig = createBaseResponsesBody();
-    const comp = structuredClone(orig);
-    comp.input[10].internal_chat_message_metadata_passthrough.traceId = "tr_tampered";
-    const res = validateBodyInvariants(orig, comp, "openai-responses");
-    expect(res.valid).toBe(false);
-    expect(res.detail).toContain("internal_chat_message_metadata_passthrough");
-  });
-
-  it("12. allows tools schema compaction when transform tool_schema_compaction is present", () => {
+describe("Headroom invariants wire contract", () => {
+  it("accepts whole body message and tool compaction", () => {
     const orig = {
       model: "gpt-4o",
-      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+      messages: [{ role: "user", content: "hello world long text" }],
       tools: [
         {
           type: "function",
-          name: "get_weather",
-          description: "   Get current weather for location   ",
-          parameters: {
-            $schema: "http://json-schema.org/draft-07/schema#",
-            $id: "https://example.com/weather.json",
-            $comment: "weather comment",
-            title: "WeatherParams",
-            type: "object",
-            properties: {
-              location: {
-                type: "string",
-                title: "City Name",
-                description: "The city, e.g. San Francisco",
-                examples: ["San Francisco", "Tokyo"],
-                deprecated: false,
-                readOnly: false,
-                writeOnly: false,
-                markdownDescription: "City name in English",
-              },
+          function: {
+            name: "test",
+            description: "Verbose description to be compacted",
+            parameters: {
+              $schema: "http://json-schema.org/draft-07/schema#",
+              type: "object",
+              properties: { a: { type: "string" } },
             },
-            required: ["location"],
           },
         },
       ],
     };
     const comp = {
       model: "gpt-4o",
-      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+      messages: [{ role: "user", content: "hello" }],
       tools: [
         {
           type: "function",
-          name: "get_weather",
-          description: "Get current weather for location",
-          parameters: {
-            type: "object",
-            properties: {
-              location: {
-                type: "string",
-                description: "The city, e.g. San Francisco",
-              },
-            },
-            required: ["location"],
+          function: {
+            name: "test",
+            description: "Compacted",
+            parameters: { type: "object", properties: { a: { type: "string" } } },
           },
         },
       ],
     };
 
-    const res = validateBodyInvariants(orig, comp, "openai-responses", {
-      transforms: ["tool_schema_compaction"],
+    expect(validateBodyInvariants(orig, comp)).toEqual({ valid: true });
+  });
+
+  it("rejects non-object root payloads", () => {
+    expect(validateBodyInvariants(null, {})).toEqual({ valid: false, reason: "gateway_invalid_body" });
+    expect(validateBodyInvariants({}, null)).toEqual({ valid: false, reason: "gateway_invalid_body" });
+    expect(validateBodyInvariants([], {})).toEqual({ valid: false, reason: "gateway_invalid_body" });
+    expect(validateBodyInvariants({}, [])).toEqual({ valid: false, reason: "gateway_invalid_body" });
+    expect(validateBodyInvariants("string", {})).toEqual({ valid: false, reason: "gateway_invalid_body" });
+  });
+
+  it("rejects model sovereignty violations on returned body or route", () => {
+    const orig = { model: "gpt-4o", messages: [] };
+
+    // Body model mismatch
+    expect(validateBodyInvariants(orig, { model: "gpt-4o-mini", messages: [] })).toEqual({
+      valid: false,
+      reason: "model_sovereignty_violation",
     });
-    expect(res).toEqual({ valid: true });
+
+    // Route model mismatch
+    expect(validateBodyInvariants(orig, { model: "gpt-4o", messages: [] }, { route: { model: "claude-3-5-sonnet" } })).toEqual({
+      valid: false,
+      reason: "model_sovereignty_violation",
+    });
+
+    // Invalid route type or provider reroute
+    expect(validateBodyInvariants(orig, { model: "gpt-4o", messages: [] }, { route: "invalid" })).toEqual({
+      valid: false,
+      reason: "model_sovereignty_violation",
+    });
+    expect(validateBodyInvariants(orig, { model: "gpt-4o", messages: [] }, { route: { provider: "elsewhere" } })).toEqual({
+      valid: false,
+      reason: "model_sovereignty_violation",
+    });
   });
 
-  it("13. rejects tools schema changes when transforms does not include tool_schema_compaction", () => {
-    const orig = {
-      model: "gpt-4o",
-      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
-      tools: [
-        {
-          type: "function",
-          name: "get_weather",
-          description: "Get current weather",
-          parameters: {
-            title: "WeatherParams",
-            type: "object",
-            properties: { location: { type: "string" } },
-            required: ["location"],
-          },
-        },
-      ],
-    };
-    const comp = structuredClone(orig);
-    delete comp.tools[0].parameters.title;
-
-    const res = validateBodyInvariants(orig, comp, "openai-responses");
-    expect(res.valid).toBe(false);
-    expect(res.detail).toBe("tools");
+  it("rejects control fields returned from gateway", () => {
+    const orig = { model: "gpt-4o", messages: [] };
+    for (const field of ["config", "gateway", "token_budget", "session_id", "_headroom_responses_view"]) {
+      const comp = { model: "gpt-4o", messages: [], [field]: true };
+      expect(validateBodyInvariants(orig, comp)).toEqual({
+        valid: false,
+        reason: "gateway_control_field",
+      });
+    }
   });
 
-  it("14. rejects tool mutations breaking name, ordering, required or properties", () => {
-    const orig = {
-      model: "gpt-4o",
-      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
-      tools: [
-        {
-          type: "function",
-          name: "get_weather",
-          description: "Get current weather",
-          parameters: {
-            type: "object",
-            properties: { location: { type: "string" } },
-            required: ["location"],
-          },
-        },
-      ],
-    };
+  it("rejects unsupported obligations and missing/malformed turn_id", () => {
+    const orig = { model: "gpt-4o", messages: [] };
+    const comp = { model: "gpt-4o", messages: [] };
 
-    // 1. Tool name changed
-    const compName = structuredClone(orig);
-    compName.tools[0].name = "fetch_weather";
-    expect(validateBodyInvariants(orig, compName, "openai-responses", { transforms: ["tool_schema_compaction"] }).valid).toBe(false);
+    expect(validateBodyInvariants(orig, comp, { obligations: "not-an-array" })).toEqual({
+      valid: false,
+      reason: "unsupported_obligation",
+    });
 
-    // 2. Required array changed
-    const compReq = structuredClone(orig);
-    compReq.tools[0].parameters.required = [];
-    expect(validateBodyInvariants(orig, compReq, "openai-responses", { transforms: ["tool_schema_compaction"] }).valid).toBe(false);
+    expect(validateBodyInvariants(orig, comp, { obligations: ["redrive"] })).toEqual({
+      valid: false,
+      reason: "unsupported_obligation",
+    });
 
-    // 3. Properties key changed
-    const compProp = structuredClone(orig);
-    compProp.tools[0].parameters.properties = { city: { type: "string" } };
-    expect(validateBodyInvariants(orig, compProp, "openai-responses", { transforms: ["tool_schema_compaction"] }).valid).toBe(false);
+    expect(validateBodyInvariants(orig, comp, { obligations: ["relay_usage", "unknown"] })).toEqual({
+      valid: false,
+      reason: "unsupported_obligation",
+    });
 
-    // 4. Type changed
-    const compType = structuredClone(orig);
-    compType.tools[0].parameters.properties.location.type = "number";
-    expect(validateBodyInvariants(orig, compType, "openai-responses", { transforms: ["tool_schema_compaction"] }).valid).toBe(false);
+    expect(validateBodyInvariants(orig, comp, { obligations: ["relay_usage"], turnId: null })).toEqual({
+      valid: false,
+      reason: "gateway_invalid_turn_id",
+    });
+
+    expect(validateBodyInvariants(orig, comp, { obligations: ["relay_usage"], turnId: "" })).toEqual({
+      valid: false,
+      reason: "gateway_invalid_turn_id",
+    });
+
+    expect(validateBodyInvariants(orig, comp, { obligations: ["relay_usage"], turnId: "a".repeat(129) })).toEqual({
+      valid: false,
+      reason: "gateway_invalid_turn_id",
+    });
+
+    expect(validateBodyInvariants(orig, comp, { obligations: ["relay_usage"], turnId: "turn_ok" })).toEqual({
+      valid: true,
+    });
+  });
+
+  it("rejects invalid provider headers", () => {
+    const orig = { model: "gpt-4o", messages: [] };
+    const comp = { model: "gpt-4o", messages: [] };
+
+    expect(validateBodyInvariants(orig, comp, { headers: "invalid" })).toEqual({
+      valid: false,
+      reason: "gateway_invalid_provider_headers",
+    });
+
+    expect(validateBodyInvariants(orig, comp, { headers: { "anthropic-beta": 123 } })).toEqual({
+      valid: false,
+      reason: "gateway_invalid_provider_headers",
+    });
+
+    expect(validateBodyInvariants(orig, comp, { headers: { "anthropic-beta": "valid-string" } })).toEqual({
+      valid: true,
+    });
   });
 });
 
@@ -583,21 +234,22 @@ describe("Headroom response relay", () => {
     vi.restoreAllMocks();
   });
 
-  it("handles Headroom 0.38 array obligations and legacy objects", () => {
+  it("handles Headroom array obligations", () => {
     expect(hasRelayUsage(["relay_usage"])).toBe(true);
     expect(hasRelayUsage(["redrive", "relay_usage"])).toBe(true);
     expect(hasRelayUsage(["redrive"])).toBe(false);
-    expect(hasRelayUsage({ relay_usage: true })).toBe(true);
-    expect(hasRelayUsage({ relay_usage: false })).toBe(false);
+    expect(hasRelayUsage([])).toBe(false);
     expect(hasRelayUsage(null)).toBe(false);
   });
 
   it("normalizes diverse provider usage without double-counting", () => {
-    // OpenAI usage
     expect(normalizeRelayUsage({ prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }))
       .toEqual({ input_tokens: 10, output_tokens: 5, cached_tokens: 0, total_tokens: 15 });
 
-    // Anthropic cache counters with creation and read
+    expect(normalizeRelayUsage({
+      input_tokens: 30, output_tokens: 4, input_tokens_details: { cached_tokens: 12 },
+    })).toEqual({ input_tokens: 30, output_tokens: 4, cached_tokens: 12, total_tokens: 34 });
+
     expect(normalizeRelayUsage({
       input_tokens: 100,
       output_tokens: 20,
@@ -613,7 +265,7 @@ describe("Headroom response relay", () => {
     });
   });
 
-  it("completes once and fires async relay request with Headroom 0.38 integer status and no ttl_seconds", async () => {
+  it("completes once and fires async relay request with integer status", async () => {
     global.fetch = vi.fn(async () => new Response("ok", { status: 200 }));
     const ctx = createHeadroomTurnContext({
       url: "http://headroom:8787",
@@ -625,7 +277,6 @@ describe("Headroom response relay", () => {
 
     expect(ctx.isEligible).toBe(true);
     ctx.complete({ statusCode: 200, usage: { prompt_tokens: 50, completion_tokens: 25 } });
-    // Second complete is ignored (complete-once)
     ctx.complete({ statusCode: 500 });
 
     expect(global.fetch).toHaveBeenCalledTimes(1);
@@ -645,7 +296,6 @@ describe("Headroom response relay", () => {
         total_tokens: 75,
       },
     });
-    expect(sentPayload.ttl_seconds).toBeUndefined();
   });
 
   it("relays error status as integer HTTP status code", async () => {
@@ -662,6 +312,13 @@ describe("Headroom response relay", () => {
     expect(global.fetch).toHaveBeenCalledTimes(1);
     const sentPayload = JSON.parse(global.fetch.mock.calls[0][1].body);
     expect(sentPayload.status).toBe(429);
+  });
+
+  it("uses a failed status when relay completes with an error only", () => {
+    global.fetch = vi.fn(async () => Response.json({ action: "done" }));
+    const ctx = createHeadroomTurnContext({ url: "http://headroom:8787", turnId: "turn_error", obligations: ["relay_usage"] });
+    ctx.complete({ error: new Error("provider unavailable") });
+    expect(JSON.parse(global.fetch.mock.calls[0][1].body).status).toBe(502);
   });
 
   it("suppresses response relay when obligations does not include relay_usage", () => {

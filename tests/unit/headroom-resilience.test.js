@@ -1,313 +1,290 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { validateBodyInvariants } from "../../open-sse/rtk/headroomInvariants.js";
 import { callHeadroomGateway } from "../../open-sse/rtk/headroomGateway.js";
-import { resolveHeadroomTimeout } from "../../open-sse/config/runtimeConfig.js";
-import { beginHeadroomAttempt, markHeadroomAttemptStarted, finishHeadroomAttempt, getHeadroomRuntimeSnapshot } from "../../open-sse/rtk/headroomRuntime.js";
 import { mergeAnthropicBetaHeaders } from "../../open-sse/utils/anthropicBeta.js";
-import { formatHeadroomSummaryTag } from "../../open-sse/rtk/headroom.js";
 
 afterEach(() => {
-  vi.useRealTimers();
   vi.restoreAllMocks();
-  globalThis[Symbol.for("9router.headroom.runtime")]?.clear();
 });
 
-describe("Headroom resilience boundaries", () => {
-  it("uses valid ENV before DB; rejects non-decimal ENV and invalid DB", () => {
-    expect(resolveHeadroomTimeout(undefined, "")).toEqual({ timeoutMs: 10000, source: "default" });
-    expect(resolveHeadroomTimeout(15000, " 12000 ")).toEqual({ timeoutMs: 12000, source: "env" });
-    for (const invalid of ["1junk", "-2", "1.5", "Infinity", "2147483648"]) {
-      expect(resolveHeadroomTimeout(15000, invalid).timeoutMs).toBe(15000);
-    }
-    expect(resolveHeadroomTimeout("15000", "").timeoutMs).toBe(10000);
+describe("Headroom invariants wire contract", () => {
+  it("accepts whole body and tools compaction", () => {
+    const original = {
+      model: "claude-sonnet",
+      messages: [{ role: "user", content: "long context ".repeat(50) }],
+      tools: [{ type: "function", function: { name: "test", parameters: { type: "object", properties: { a: { type: "string" } } } } }],
+    };
+    const returned = {
+      model: "claude-sonnet",
+      messages: [{ role: "user", content: "short" }],
+      tools: [{ type: "function", function: { name: "test", parameters: { type: "object" } } }],
+    };
+
+    expect(validateBodyInvariants(original, returned)).toEqual({ valid: true });
   });
 
-  it("allows text but not valid JSON argument changes, metadata, error traces, or reasoning", () => {
-    const body = { model: "claude-sonnet", metadata: { state: null }, messages: [{ role: "assistant", content: [
-      { type: "text", text: "long" }, { type: "tool_use", id: "1", input: { path: "config.json" } },
-      { type: "tool_result", is_error: true, content: "trace" }, { type: "thinking", thinking: "opaque", signature: "sig" },
-    ] }] };
-    const compressed = structuredClone(body);
-    compressed.messages[0].content[0].text = "short";
-    expect(validateBodyInvariants(body, compressed, "claude").valid).toBe(true);
-    for (const mutate of [
-      (b) => { b.messages[0].content[1].input.path = "other.json"; },
-      (b) => { b.messages[0].content[2].content = "hidden"; },
-      (b) => { b.messages[0].content[3].signature = "other"; },
-      (b) => { b.metadata.state = ""; },
-      (b) => { b.messages[0].content[0].text = ["short"]; },
-    ]) {
-      const changed = structuredClone(compressed);
-      mutate(changed);
-      expect(validateBodyInvariants(body, changed, "claude").valid).toBe(false);
+  it("rejects model sovereignty violations", () => {
+    const original = { model: "claude-sonnet", messages: [] };
+    const returnedDiffModel = { model: "gpt-4o", messages: [] };
+    expect(validateBodyInvariants(original, returnedDiffModel)).toEqual({
+      valid: false,
+      reason: "model_sovereignty_violation",
+    });
+
+    const returnedSame = { model: "claude-sonnet", messages: [] };
+    expect(validateBodyInvariants(original, returnedSame, { route: { model: "gpt-4o" } })).toEqual({
+      valid: false,
+      reason: "model_sovereignty_violation",
+    });
+  });
+
+  it("rejects returned gateway control fields", () => {
+    const original = { model: "gpt-4o", messages: [] };
+    for (const field of ["config", "gateway", "token_budget", "session_id", "_headroom_responses_view"]) {
+      const returned = { model: "gpt-4o", messages: [], [field]: {} };
+      expect(validateBodyInvariants(original, returned)).toEqual({
+        valid: false,
+        reason: "gateway_control_field",
+      });
     }
   });
 
-  it("opens on third service failure, admits one probe, ignores stale success, recovers", () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
-    const endpoint = "http://127.0.0.1:54321/v1/compress";
-    const stale = beginHeadroomAttempt(endpoint).ticket;
-    markHeadroomAttemptStarted(stale);
-    for (let n = 0; n < 3; n++) {
-      const ticket = beginHeadroomAttempt(endpoint, { bypassInFlight: true }).ticket;
-      markHeadroomAttemptStarted(ticket);
-      expect(finishHeadroomAttempt(ticket, { kind: "service_failure", reason: "gateway_timeout", latencyMs: 20 })).toBe(n === 2 ? "opened" : null);
-    }
-    finishHeadroomAttempt(stale, { kind: "success", latencyMs: 20 });
-    expect(beginHeadroomAttempt(endpoint).reason).toBe("circuit_open");
-    vi.advanceTimersByTime(30000);
-    const probe = beginHeadroomAttempt(endpoint).ticket;
-    expect(beginHeadroomAttempt(endpoint).reason).toBe("circuit_probe_in_flight");
-    markHeadroomAttemptStarted(probe);
-    expect(finishHeadroomAttempt(probe, { kind: "success", latencyMs: 10 })).toBe("recovered");
-    const snapshot = getHeadroomRuntimeSnapshot(endpoint);
-    expect(snapshot.headroom_circuit_open).toBe(0);
-    expect(snapshot.headroom_timeout).toBe(3);
-    expect(snapshot.headroom_success).toBe(2);
-    expect(snapshot.headroom_latency_ms.p95).toBe(20);
+  it("rejects unsupported obligations or missing/invalid turn_id", () => {
+    const original = { model: "gpt-4o", messages: [] };
+    const returned = { model: "gpt-4o", messages: [] };
+
+    expect(validateBodyInvariants(original, returned, { obligations: ["redrive"] })).toEqual({
+      valid: false,
+      reason: "unsupported_obligation",
+    });
+
+    expect(validateBodyInvariants(original, returned, { obligations: ["relay_usage"], turnId: null })).toEqual({
+      valid: false,
+      reason: "gateway_invalid_turn_id",
+    });
+
+    expect(validateBodyInvariants(original, returned, { obligations: ["relay_usage"], turnId: "" })).toEqual({
+      valid: false,
+      reason: "gateway_invalid_turn_id",
+    });
+
+    expect(validateBodyInvariants(original, returned, { obligations: ["relay_usage"], turnId: "x".repeat(129) })).toEqual({
+      valid: false,
+      reason: "gateway_invalid_turn_id",
+    });
+
+    expect(validateBodyInvariants(original, returned, { obligations: ["relay_usage"], turnId: "valid_turn_1" })).toEqual({
+      valid: true,
+    });
   });
 
-  it("sanitizes gateway headers, rejects malformed beta, preserves host/model rules", async () => {
-    const body = { model: "claude-haiku", messages: [{ role: "user", content: "original" }] };
+  it("rejects invalid provider headers", () => {
+    const original = { model: "gpt-4o", messages: [] };
+    const returned = { model: "gpt-4o", messages: [] };
+
+    expect(validateBodyInvariants(original, returned, { headers: "not-an-object" })).toEqual({
+      valid: false,
+      reason: "gateway_invalid_provider_headers",
+    });
+
+    expect(validateBodyInvariants(original, returned, { headers: { "test-header": 123 } })).toEqual({
+      valid: false,
+      reason: "gateway_invalid_provider_headers",
+    });
+
+    expect(validateBodyInvariants(original, returned, { headers: { "test-header": "valid" } })).toEqual({
+      valid: true,
+    });
+  });
+});
+
+describe("callHeadroomGateway resilience & session semantics", () => {
+  it("sanitizes gateway headers, rejects malformed beta, strips client controls", async () => {
+    const body = {
+      model: "claude-haiku",
+      messages: [{ role: "user", content: "original" }],
+      config: { evil: true },
+      session_id: "fake",
+    };
     let captured;
     global.fetch = vi.fn(async (_, options) => {
       captured = JSON.parse(options.body);
-      return Response.json({ body: { ...body, messages: [{ role: "user", content: "short" }] },
-        headers: { "Anthropic-Beta": "context-management-2025-06-27", cookie: "ignored" } });
+      return Response.json({
+        body: { model: body.model, messages: [{ role: "user", content: "short" }] },
+        headers: { "Anthropic-Beta": "context-management-2025-06-27", cookie: "ignored" },
+      });
     });
     const diagnostics = {};
-    const data = await callHeadroomGateway({ url: "http://127.0.0.1:54322", model: body.model, body,
-      format: "openai", requestHeaders: { "ANTHROPIC-BETA": "a,b,a", cookie: "private" }, diagnostics });
+    const data = await callHeadroomGateway({
+      url: "http://127.0.0.1:54322",
+      model: body.model,
+      body,
+      requestHeaders: { "ANTHROPIC-BETA": "a,b,a", cookie: "private" },
+      diagnostics,
+    });
+
     expect(data.providerHeaders).toEqual({ "anthropic-beta": "context-management-2025-06-27" });
     expect(captured.gateway.request_headers).toEqual({ "anthropic-beta": "a,b" });
+    expect(captured.config).toBeUndefined();
+    expect(captured.session_id).toBeUndefined();
+
     const headers = { "Anthropic-Beta": "claude-code-20250219,effort-2025-11-24" };
     mergeAnthropicBetaHeaders(headers, data.providerHeaders["anthropic-beta"], { model: "claude-haiku", stripClaudeCode: true });
     expect(headers).toEqual({ "anthropic-beta": "context-management-2025-06-27" });
-    global.fetch = vi.fn(async () => Response.json({ body, headers: { "anthropic-beta": "a\r\nb" } }));
+
+    global.fetch = vi.fn(async () => Response.json({
+      body: { model: body.model, messages: [] },
+      headers: { "anthropic-beta": "a\r\nb" },
+    }));
     const rejected = {};
-    expect(await callHeadroomGateway({ url: "http://127.0.0.1:54323", model: body.model, body, format: "openai", diagnostics: rejected })).toBeNull();
+    expect(await callHeadroomGateway({ url: "http://127.0.0.1:54323", model: body.model, body, diagnostics: rejected })).toBeNull();
     expect(rejected.reason).toBe("gateway_invalid_provider_headers");
   });
-  it("rejects skipped responses that change immutable arguments", async () => {
-    const original = { model: "gpt-4o", messages: [{ role: "assistant", tool_calls: [{ id: "call-1", type: "function", function: { name: "read", arguments: "{\"path\":\"config.json\"}" } }] }] };
-    global.fetch = vi.fn(async () => Response.json({ compression_skipped: true, body: { ...original, messages: [{ role: "assistant", tool_calls: [{ id: "call-1", type: "function", function: { name: "read", arguments: "{\"path\":\"other.json\"}" } }] }] } }));
+
+  it("stateless errors fail open (returns null, sets diagnostics.reason)", async () => {
+    const body = { model: "gpt-4o", messages: [{ role: "user", content: "hi" }] };
+
+    // 500 error
+    global.fetch = vi.fn(async () => new Response("Internal Server Error", { status: 500 }));
+    const diag500 = {};
+    const res500 = await callHeadroomGateway({ url: "http://127.0.0.1:54324", body, model: body.model, diagnostics: diag500 });
+    expect(res500).toBeNull();
+    expect(diag500.reason).toBe("gateway_http_500");
+
+    // Network ECONNREFUSED
+    global.fetch = vi.fn(async () => {
+      const err = new Error("ECONNREFUSED");
+      err.code = "ECONNREFUSED";
+      throw err;
+    });
+    const diagConn = {};
+    const resConn = await callHeadroomGateway({ url: "http://127.0.0.1:54325", body, model: body.model, diagnostics: diagConn });
+    expect(resConn).toBeNull();
+    expect(diagConn.reason).toBe("gateway_connection_refused");
+  });
+
+  it("stateless 200 compression_skipped returns body and sets skip diagnostics", async () => {
+    const body = { model: "gpt-4o", messages: [{ role: "user", content: "short" }] };
+    global.fetch = vi.fn(async () => Response.json({
+      compression_skipped: true,
+      skip_reason: "content_too_short",
+      body,
+    }));
     const diagnostics = {};
-    expect(await callHeadroomGateway({ url: "http://127.0.0.1:54324", body: original, model: original.model, format: "openai", diagnostics })).toBeNull();
-    expect(diagnostics.reason).toBe("invariant_violation");
-    expect(original.messages[0].tool_calls[0].function.arguments).toBe("{\"path\":\"config.json\"}");
+    const res = await callHeadroomGateway({ url: "http://127.0.0.1:54326", body, model: body.model, diagnostics });
+    expect(res).not.toBeNull();
+    expect(res.compressionSkipped).toBe(true);
+    expect(diagnostics.reason).toBe("gateway_compression_skipped");
+    expect(diagnostics.skip_reason).toBe("content_too_short");
   });
 
-  it("treats normal compression_skipped as neutral, preserves skip_reason, does not trip circuit", async () => {
-    const original = { model: "gpt-4o", messages: [{ role: "user", content: "short" }] };
-    global.fetch = vi.fn(async () => Response.json({ compression_skipped: true, skip_reason: "content_too_short", body: original }));
-    const endpoint = "http://127.0.0.1:54325";
-    for (let i = 0; i < 3; i++) {
-      const diagnostics = {};
-      const res = await callHeadroomGateway({ url: endpoint, body: original, model: original.model, format: "openai", diagnostics });
-      expect(res).toBeNull();
-      expect(diagnostics.reason).toBe("gateway_compression_skipped");
-      expect(diagnostics.skip_reason).toBe("content_too_short");
-    }
-    const snapshot = getHeadroomRuntimeSnapshot(`${endpoint}/v1/compress`);
-    expect(snapshot.headroom_circuit_open).toBe(0);
-    expect(snapshot.circuitState).toBe("CLOSED");
+  it("session HTTP 503 fails closed via HEADROOM_SESSION_FAILURE, status 503, retryable true", async () => {
+    const body = { model: "gpt-4o", messages: [{ role: "user", content: "short" }] };
+    global.fetch = vi.fn(async () => new Response(JSON.stringify({
+      error: { type: "session_busy" },
+    }), { status: 503 }));
+
+    await expect(callHeadroomGateway({
+      url: "http://127.0.0.1:54327",
+      body,
+      model: body.model,
+      sessionId: "sess-resilience-1",
+    })).rejects.toMatchObject({
+      code: "HEADROOM_SESSION_FAILURE",
+      status: 503,
+      retryable: true,
+      reason: "session_busy",
+    });
   });
 
-  it("treats compression_timeout skip_reason as service failure and trips circuit after 3 attempts", async () => {
-    const original = { model: "gpt-4o", messages: [{ role: "user", content: "heavy payload" }] };
-    global.fetch = vi.fn(async () => Response.json({ compression_skipped: true, skip_reason: "compression_timeout", body: original }));
-    const endpoint = "http://127.0.0.1:54326";
-    for (let i = 0; i < 3; i++) {
-      const diagnostics = {};
-      const res = await callHeadroomGateway({ url: endpoint, body: original, model: original.model, format: "openai", diagnostics });
-      expect(res).toBeNull();
-      expect(diagnostics.reason).toBe("gateway_compression_skipped");
-      expect(diagnostics.skip_reason).toBe("compression_timeout");
-    }
-    const snapshot = getHeadroomRuntimeSnapshot(`${endpoint}/v1/compress`);
-    expect(snapshot.headroom_circuit_open).toBe(1);
-    expect(snapshot.circuitState).toBe("OPEN");
+  it("session connection error fails closed via HEADROOM_SESSION_FAILURE, status 503, retryable true", async () => {
+    const body = { model: "gpt-4o", messages: [{ role: "user", content: "short" }] };
+    global.fetch = vi.fn(async () => {
+      const err = new Error("connect ECONNREFUSED");
+      err.code = "ECONNREFUSED";
+      throw err;
+    });
+
+    await expect(callHeadroomGateway({
+      url: "http://127.0.0.1:54328",
+      body,
+      model: body.model,
+      sessionId: "sess-resilience-2",
+    })).rejects.toMatchObject({
+      code: "HEADROOM_SESSION_FAILURE",
+      status: 503,
+      retryable: true,
+      reason: "gateway_connection_refused",
+    });
   });
 
-  it("captures queue metrics and pre-flight sizes upon timeout", async () => {
-    const original = { model: "gpt-4o", messages: [{ role: "user", content: "latency test" }] };
-    global.fetch = vi.fn(() => new Promise((resolve) => setTimeout(resolve, 500)));
-    const diagnostics = {};
-    const res = await callHeadroomGateway({ url: "http://127.0.0.1:54327", body: original, model: original.model, format: "openai", timeoutMs: 20, diagnostics });
-    expect(res).toBeNull();
-    expect(diagnostics.reason).toBe("gateway_timeout");
-    expect(diagnostics.queue).toBeDefined();
-    expect(diagnostics.queue.circuitState).toBe("CLOSED");
-    expect(diagnostics.queue.inFlight).toBeDefined();
+  it("session invalid response fails closed via HEADROOM_SESSION_FAILURE, status 502, retryable false", async () => {
+    const body = { model: "gpt-4o", messages: [{ role: "user", content: "short" }] };
+    global.fetch = vi.fn(async () => new Response("{invalid-json", { status: 200 }));
+
+    await expect(callHeadroomGateway({
+      url: "http://127.0.0.1:54329",
+      body,
+      model: body.model,
+      sessionId: "sess-resilience-3",
+    })).rejects.toMatchObject({
+      code: "HEADROOM_SESSION_FAILURE",
+      status: 502,
+      retryable: false,
+      reason: "gateway_invalid_json_response",
+    });
   });
 
-  it("trips latency guard when p95 exceeds 1500ms on SSE, admits 1 probe after cooldown and recovers", () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-01-01T12:00:00Z"));
-    const endpoint = "http://127.0.0.1:54328/v1/compress";
+  it("handles concurrent sessions without state cross-talk", async () => {
+    const bodies = Array.from({ length: 4 }, (_, i) => ({
+      model: "gpt-4o",
+      messages: [{ role: "user", content: `msg-${i}` }],
+    }));
 
-    // 5 attempts with latency > 1500ms for SSE
-    for (let i = 0; i < 5; i++) {
-      const ticket = beginHeadroomAttempt(endpoint, { bypassInFlight: true, isSSE: true }).ticket;
-      markHeadroomAttemptStarted(ticket);
-      finishHeadroomAttempt(ticket, { kind: "success", latencyMs: 1600 + i * 20 });
-    }
+    global.fetch = vi.fn(async (_url, init) => {
+      const parsed = JSON.parse(init.body);
+      return Response.json({
+        body: {
+          model: parsed.model,
+          messages: [{ role: "user", content: `compressed-${parsed.config.session_id}` }],
+        },
+        turn_id: `turn-${parsed.config.session_id}`,
+        obligations: ["relay_usage"],
+      });
+    });
 
-    // Next SSE request should be blocked by latency guard
-    const sseBlocked = beginHeadroomAttempt(endpoint, { isSSE: true });
-    expect(sseBlocked.reason).toBe("latency_guard_open");
+    const results = await Promise.all(
+      bodies.map((b, i) => callHeadroomGateway({
+        url: "http://127.0.0.1:54330",
+        body: b,
+        model: b.model,
+        sessionId: `sess-${i}`,
+      }))
+    );
 
-    // Non-SSE request still allowed through circuit
-    const jsonAllowed = beginHeadroomAttempt(endpoint, { isSSE: false });
-    expect(jsonAllowed.ticket).toBeDefined();
-    finishHeadroomAttempt(jsonAllowed.ticket, { kind: "success", latencyMs: 100 });
-
-    // Advance beyond 30s cooldown
-    vi.advanceTimersByTime(30001);
-
-    // First SSE becomes probe
-    const probeAttempt = beginHeadroomAttempt(endpoint, { isSSE: true });
-    expect(probeAttempt.ticket).toBeDefined();
-    expect(probeAttempt.ticket.latencyProbe).toBe(true);
-
-    // Second concurrent SSE receives latency_probe_in_flight
-    const probeBlocked = beginHeadroomAttempt(endpoint, { isSSE: true });
-    expect(probeBlocked.reason).toBe("latency_probe_in_flight");
-
-    // Probe finishes fast -> recovers
-    markHeadroomAttemptStarted(probeAttempt.ticket);
-    const transition = finishHeadroomAttempt(probeAttempt.ticket, { kind: "success", latencyMs: 250 });
-    expect(transition).toBe("latency_recovered");
-
-    const snapshot = getHeadroomRuntimeSnapshot(endpoint);
-    expect(snapshot.latencyGuard.state).toBe("CLOSED");
-    expect(snapshot.latencyGuard.probeInFlight).toBe(false);
-  });
-
-  it("session-affinity SSE does not open latency guard on single 3500ms spike, but opens on p95 > 1500ms or timeout", () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-01-01T12:00:00Z"));
-    const endpoint = "http://127.0.0.1:54329/v1/compress";
-
-    // 1. Single cold-start spike of 3552ms with session affinity
-    const ticket1 = beginHeadroomAttempt(endpoint, { bypassInFlight: true, isSSE: true, hasSession: true }).ticket;
-    markHeadroomAttemptStarted(ticket1);
-    const trans1 = finishHeadroomAttempt(ticket1, { kind: "neutral", reason: "invariant_violation", latencyMs: 3552 });
-    expect(trans1).toBeNull();
-
-    // Guard remains CLOSED because session affinity protects warm turn 2
-    const nextAttempt = beginHeadroomAttempt(endpoint, { isSSE: true, hasSession: true });
-    expect(nextAttempt.ticket).toBeDefined();
-    expect(nextAttempt.reason).toBeUndefined();
-    finishHeadroomAttempt(nextAttempt.ticket, { kind: "success", latencyMs: 300 });
-
-    // 2. But a genuine timeout on session-affinity SSE opens guard immediately
-    const timeoutTicket = beginHeadroomAttempt(endpoint, { bypassInFlight: true, isSSE: true, hasSession: true }).ticket;
-    markHeadroomAttemptStarted(timeoutTicket);
-    const transTimeout = finishHeadroomAttempt(timeoutTicket, { kind: "service_failure", reason: "gateway_timeout", latencyMs: 10000 });
-    expect(transTimeout).toBe("latency_opened");
-
-    const blockedAfterTimeout = beginHeadroomAttempt(endpoint, { isSSE: true, hasSession: true });
-    expect(blockedAfterTimeout.reason).toBe("latency_guard_open");
-  });
-
-  it("stateless SSE opens latency guard immediately on single severe spike >= 3000ms", () => {
-    const endpoint = "http://127.0.0.1:54330/v1/compress";
-
-    // Single spike on stateless SSE (hasSession: false)
-    const ticket = beginHeadroomAttempt(endpoint, { bypassInFlight: true, isSSE: true, hasSession: false }).ticket;
-    markHeadroomAttemptStarted(ticket);
-    const trans = finishHeadroomAttempt(ticket, { kind: "success", latencyMs: 3552 });
-    expect(trans).toBe("latency_opened");
-
-    const blocked = beginHeadroomAttempt(endpoint, { isSSE: true, hasSession: false });
-    expect(blocked.reason).toBe("latency_guard_open");
-  });
-
-  it("isolates latency guard from neutral invariant_violation outcomes even with spike or high historical p95", () => {
-    const endpoint = "http://127.0.0.1:54331/v1/compress";
-
-    // 1. Single spike with invariant_violation on stateless SSE must NOT open guard
-    const ticket1 = beginHeadroomAttempt(endpoint, { bypassInFlight: true, isSSE: true, hasSession: false }).ticket;
-    markHeadroomAttemptStarted(ticket1);
-    const trans1 = finishHeadroomAttempt(ticket1, { kind: "neutral", reason: "invariant_violation", latencyMs: 3552 });
-    expect(trans1).toBeNull();
-
-    const nextAttempt = beginHeadroomAttempt(endpoint, { isSSE: true, hasSession: false });
-    expect(nextAttempt.ticket).toBeDefined();
-    expect(nextAttempt.reason).toBeUndefined();
-    finishHeadroomAttempt(nextAttempt.ticket, { kind: "success", latencyMs: 200 });
-
-    // 2. High historical P95 followed by an invariant_violation at 372ms must NOT open guard
     for (let i = 0; i < 4; i++) {
-      const t = beginHeadroomAttempt(endpoint, { bypassInFlight: true, isSSE: true, hasSession: false }).ticket;
-      markHeadroomAttemptStarted(t);
-      finishHeadroomAttempt(t, { kind: "success", latencyMs: 1800 });
+      expect(results[i].compressedBody.messages[0].content).toBe(`compressed-sess-${i}`);
+      expect(results[i].turnId).toBe(`turn-sess-${i}`);
     }
-    const invTicket = beginHeadroomAttempt(endpoint, { bypassInFlight: true, isSSE: true, hasSession: false }).ticket;
-    markHeadroomAttemptStarted(invTicket);
-    const transInv = finishHeadroomAttempt(invTicket, { kind: "neutral", reason: "invariant_violation", latencyMs: 372 });
-    expect(transInv).toBeNull();
-
-    const allowed = beginHeadroomAttempt(endpoint, { isSSE: true, hasSession: false });
-    expect(allowed.ticket).toBeDefined();
-    expect(allowed.reason).toBeUndefined();
-    finishHeadroomAttempt(allowed.ticket, { kind: "success", latencyMs: 150 });
   });
 
-  it("scopes latency guard admission by format/session lane", () => {
-    const endpoint = "http://127.0.0.1:54332/v1/compress";
+  it("fails closed on session compression_skipped", async () => {
+    const body = { model: "gpt-4o", messages: [{ role: "user", content: "short" }] };
+    global.fetch = vi.fn(async () => Response.json({
+      compression_skipped: true,
+      body,
+    }));
 
-    // 1. Degrade openai-responses/session lane with 5 slow requests
-    for (let i = 0; i < 5; i++) {
-      const ticket = beginHeadroomAttempt(endpoint, {
-        isSSE: true,
-        hasSession: true,
-        format: "openai-responses",
-        bypassInFlight: true,
-      }).ticket;
-      markHeadroomAttemptStarted(ticket);
-      finishHeadroomAttempt(ticket, { kind: "success", latencyMs: 2000 });
-    }
-
-    // 2. Next request on openai-responses/session should be blocked
-    const responsesSessionBlocked = beginHeadroomAttempt(endpoint, {
-      isSSE: true,
-      hasSession: true,
-      format: "openai-responses",
+    await expect(callHeadroomGateway({
+      url: "http://127.0.0.1:54331",
+      body,
+      model: body.model,
+      sessionId: "sess-skip-fail",
+    })).rejects.toMatchObject({
+      code: "HEADROOM_SESSION_FAILURE",
+      status: 502,
+      retryable: false,
+      reason: "session_compression_skipped",
     });
-    expect(responsesSessionBlocked.reason).toBe("latency_guard_open");
-
-    // 3. But openai/stateless request on the same endpoint is NOT blocked
-    const openaiStatelessAllowed = beginHeadroomAttempt(endpoint, {
-      isSSE: true,
-      hasSession: false,
-      format: "openai",
-    });
-    expect(openaiStatelessAllowed.ticket).toBeDefined();
-    expect(openaiStatelessAllowed.reason).toBeUndefined();
-    finishHeadroomAttempt(openaiStatelessAllowed.ticket, { kind: "success", latencyMs: 200 });
-
-    // 4. openai-responses/stateless is also in its own lane and not blocked
-    const responsesStatelessAllowed = beginHeadroomAttempt(endpoint, {
-      isSSE: true,
-      hasSession: false,
-      format: "openai-responses",
-    });
-    expect(responsesStatelessAllowed.ticket).toBeDefined();
-    expect(responsesStatelessAllowed.reason).toBeUndefined();
-    finishHeadroomAttempt(responsesStatelessAllowed.ticket, { kind: "success", latencyMs: 200 });
-  });
-
-  it("formats invariant summary tag with path detail or fallback", () => {
-    expect(formatHeadroomSummaryTag(null, { reason: "invariant_violation", detail: "input.127.arguments", latencyMs: 3552 }))
-      .toBe("HEADROOM:BYPASS:invariant(input.127.arguments) 3552ms");
-
-    expect(formatHeadroomSummaryTag(null, { reason: "invariant_violation", latencyMs: 3552 }))
-      .toBe("HEADROOM:BYPASS:invariant_violation 3552ms");
-
-    expect(formatHeadroomSummaryTag(null, { reason: "gateway_timeout", latencyMs: 10000 }))
-      .toBe("HEADROOM:TIMEOUT 10000ms");
   });
 });

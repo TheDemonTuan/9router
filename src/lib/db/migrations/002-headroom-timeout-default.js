@@ -1,4 +1,4 @@
-import { HEADROOM_DEFAULT_TIMEOUT_MS } from "../../../../open-sse/config/runtimeConfig.js";
+const HISTORICAL_HEADROOM_DEFAULT_TIMEOUT_MS = 10000;
 
 const headroomTimeoutDefault = {
   version: 2,
@@ -14,7 +14,7 @@ const headroomTimeoutDefault = {
       return;
     }
     if (!settings || typeof settings !== "object" || Array.isArray(settings) || settings.headroomTimeoutMs !== 3000) return;
-    settings.headroomTimeoutMs = HEADROOM_DEFAULT_TIMEOUT_MS;
+    settings.headroomTimeoutMs = HISTORICAL_HEADROOM_DEFAULT_TIMEOUT_MS;
     db.run("UPDATE settings SET data = ? WHERE id = 1", [JSON.stringify(settings)]);
   },
 };

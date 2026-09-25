@@ -7,7 +7,6 @@ import { getMetaSync, setMetaSync } from "./helpers/metaStore.js";
 import { makeBackupDir, backupFile, backupDbLite, pruneOldBackups } from "./backup.js";
 import { getAppVersion } from "./version.js";
 import { stringifyJson } from "./helpers/jsonCol.js";
-import { HEADROOM_DEFAULT_TIMEOUT_MS } from "../../../open-sse/config/runtimeConfig.js";
 
 // Marker file: prevents re-importing legacy JSON when user wipes data.sqlite.
 const MIGRATED_MARKER = path.join(DB_DIR, ".migrated-from-json");
@@ -115,7 +114,6 @@ function importLegacyMain(adapter, data) {
 
   if (data.settings) {
     const settings = { ...data.settings };
-    if (settings.headroomTimeoutMs === 3000) settings.headroomTimeoutMs = HEADROOM_DEFAULT_TIMEOUT_MS;
     adapter.run(`INSERT INTO settings(id, data) VALUES(1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data`, [stringifyJson(settings)]);
   }
 
