@@ -4,6 +4,7 @@ import { callHeadroomGateway } from "../../open-sse/rtk/headroomGateway.js";
 import { resolveHeadroomTimeout } from "../../open-sse/config/runtimeConfig.js";
 import { beginHeadroomAttempt, markHeadroomAttemptStarted, finishHeadroomAttempt, getHeadroomRuntimeSnapshot } from "../../open-sse/rtk/headroomRuntime.js";
 import { mergeAnthropicBetaHeaders } from "../../open-sse/utils/anthropicBeta.js";
+import { formatHeadroomSummaryTag } from "../../open-sse/rtk/headroom.js";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -182,5 +183,56 @@ describe("Headroom resilience boundaries", () => {
     const snapshot = getHeadroomRuntimeSnapshot(endpoint);
     expect(snapshot.latencyGuard.state).toBe("CLOSED");
     expect(snapshot.latencyGuard.probeInFlight).toBe(false);
+  });
+
+  it("session-affinity SSE does not open latency guard on single 3500ms spike, but opens on p95 > 1500ms or timeout", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T12:00:00Z"));
+    const endpoint = "http://127.0.0.1:54329/v1/compress";
+
+    // 1. Single cold-start spike of 3552ms with session affinity
+    const ticket1 = beginHeadroomAttempt(endpoint, { bypassInFlight: true, isSSE: true, hasSession: true }).ticket;
+    markHeadroomAttemptStarted(ticket1);
+    const trans1 = finishHeadroomAttempt(ticket1, { kind: "neutral", reason: "invariant_violation", latencyMs: 3552 });
+    expect(trans1).toBeNull();
+
+    // Guard remains CLOSED because session affinity protects warm turn 2
+    const nextAttempt = beginHeadroomAttempt(endpoint, { isSSE: true, hasSession: true });
+    expect(nextAttempt.ticket).toBeDefined();
+    expect(nextAttempt.reason).toBeUndefined();
+    finishHeadroomAttempt(nextAttempt.ticket, { kind: "success", latencyMs: 300 });
+
+    // 2. But a genuine timeout on session-affinity SSE opens guard immediately
+    const timeoutTicket = beginHeadroomAttempt(endpoint, { bypassInFlight: true, isSSE: true, hasSession: true }).ticket;
+    markHeadroomAttemptStarted(timeoutTicket);
+    const transTimeout = finishHeadroomAttempt(timeoutTicket, { kind: "service_failure", reason: "gateway_timeout", latencyMs: 10000 });
+    expect(transTimeout).toBe("latency_opened");
+
+    const blockedAfterTimeout = beginHeadroomAttempt(endpoint, { isSSE: true, hasSession: true });
+    expect(blockedAfterTimeout.reason).toBe("latency_guard_open");
+  });
+
+  it("stateless SSE opens latency guard immediately on single severe spike >= 3000ms", () => {
+    const endpoint = "http://127.0.0.1:54330/v1/compress";
+
+    // Single spike on stateless SSE (hasSession: false)
+    const ticket = beginHeadroomAttempt(endpoint, { bypassInFlight: true, isSSE: true, hasSession: false }).ticket;
+    markHeadroomAttemptStarted(ticket);
+    const trans = finishHeadroomAttempt(ticket, { kind: "neutral", reason: "invariant_violation", latencyMs: 3552 });
+    expect(trans).toBe("latency_opened");
+
+    const blocked = beginHeadroomAttempt(endpoint, { isSSE: true, hasSession: false });
+    expect(blocked.reason).toBe("latency_guard_open");
+  });
+
+  it("formats invariant summary tag with path detail or fallback", () => {
+    expect(formatHeadroomSummaryTag(null, { reason: "invariant_violation", detail: "input.127.arguments", latencyMs: 3552 }))
+      .toBe("HEADROOM:BYPASS:invariant(input.127.arguments) 3552ms");
+
+    expect(formatHeadroomSummaryTag(null, { reason: "invariant_violation", latencyMs: 3552 }))
+      .toBe("HEADROOM:BYPASS:invariant_violation 3552ms");
+
+    expect(formatHeadroomSummaryTag(null, { reason: "gateway_timeout", latencyMs: 10000 }))
+      .toBe("HEADROOM:TIMEOUT 10000ms");
   });
 });

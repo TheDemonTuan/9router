@@ -32,6 +32,16 @@ const isJsonValue = (value) => {
   return isObject(value) && Object.values(value).every(isJsonValue);
 };
 
+function isValidJsonString(str) {
+  if (typeof str !== "string") return false;
+  try {
+    JSON.parse(str);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function validateBodyInvariants(original, compressed, format) {
   if (!isObject(original) || !isObject(compressed)) return { valid: false, reason: "invalid_body_root" };
   if (!isJsonValue(original) || !isJsonValue(compressed)) return { valid: false, reason: "invalid_json_tree" };
@@ -57,26 +67,75 @@ export function validateBodyInvariants(original, compressed, format) {
       if (block.type !== "tool_result" || block.is_error === true || leaf !== "content") return false;
       return path.length === 5 || (path.length === 7 && typeof nested === "number" && sub === "text" && block.content?.[nested]?.type === "text");
     }
-    if (root !== "input") return false;
-    if (path.length === 1) return true;
-    if (typeof index !== "number") return false;
-    const item = original.input?.[index];
-    if (!item || typeof item !== "object") return false;
-    const message = item.type === "message" || (!item.type && item.role);
-    const result = item.type === "function_call_output" || item.type === "custom_tool_call_output";
-    if (message && field === "content" || result && field === "output") {
-      if (path.length === 3) return true;
-      if (typeof part === "number" && path.length === 5) {
-        const block = item[field]?.[part];
-        return ["input_text", "output_text", "text"].includes(block?.type) && leaf === "text";
+    if (wireFormat === "openai-responses") {
+      if (root === "instructions" && path.length === 1) return true;
+      if (root !== "input" || typeof index !== "number") return false;
+      const item = original.input?.[index];
+      if (!item || typeof item !== "object") return false;
+
+      const message = item.type === "message" || (!item.type && item.role);
+      if (message && field === "content") {
+        if (path.length === 3) return true;
+        if (typeof part === "number" && path.length === 5 && leaf === "text") {
+          const block = item.content?.[part];
+          return ["input_text", "output_text", "text"].includes(block?.type);
+        }
+      }
+
+      const result = item.type === "function_call_output"
+        || item.type === "custom_tool_call_output"
+        || item.type === "local_shell_call_output"
+        || item.type === "apply_patch_call_output";
+      if (result && field === "output") {
+        if (path.length === 3) return true;
+        if (typeof part === "number" && path.length === 5 && leaf === "text") {
+          const block = item.output?.[part];
+          return ["input_text", "output_text", "text"].includes(block?.type);
+        }
+      }
+
+      const toolInput = item.type === "custom_tool_call"
+        || item.type === "local_shell_call"
+        || item.type === "apply_patch_call";
+      if (toolInput && field === "input" && path.length === 3) {
+        return true;
       }
     }
     return false;
   }
 
+  function checkFunctionArguments(a, b, path) {
+    if (wireFormat !== "openai-responses") return null;
+    const [root, index, field] = path;
+    if (root !== "input" || typeof index !== "number" || field !== "arguments" || path.length !== 3) {
+      return null;
+    }
+    const item = original.input?.[index];
+    if (item?.type !== "function_call") return null;
+
+    if (typeof a !== "string" || typeof b !== "string") {
+      return failed(path);
+    }
+    const aValid = isValidJsonString(a);
+    if (aValid) {
+      if (isValidJsonString(b)) {
+        return { valid: true };
+      }
+      return failed(path);
+    }
+    return a === b ? { valid: true } : failed(path);
+  }
+
   function compare(a, b, path = []) {
-    if (textPath(path) && typeof a === "string" && typeof b === "string") return null;
     if (a === b) return null;
+    if (textPath(path) && typeof a === "string" && typeof b === "string") return null;
+
+    const argCheck = checkFunctionArguments(a, b, path);
+    if (argCheck) {
+      if (argCheck.valid) return null;
+      return argCheck;
+    }
+
     if (Array.isArray(a)) {
       if (!Array.isArray(b) || a.length !== b.length) return failed(path);
       for (let i = 0; i < a.length; i++) {
@@ -92,7 +151,10 @@ export function validateBodyInvariants(original, compressed, format) {
     for (const key of keys) {
       if (!Object.hasOwn(b, key)) return failed([...path, key]);
       const next = [...path, key];
-      if (!["messages", "system", "input"].includes(path[0] ?? key)) {
+      const allowedRoots = wireFormat === "openai-responses"
+        ? ["input", "instructions"]
+        : (wireFormat === "claude" ? ["messages", "system"] : ["messages"]);
+      if (!allowedRoots.includes(path[0] ?? key)) {
         if (!deepEqual(a[key], b[key])) return failed(next);
         continue;
       }

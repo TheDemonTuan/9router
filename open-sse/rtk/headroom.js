@@ -241,6 +241,7 @@ export async function compressWithHeadroom(
       if (Object.hasOwn(compressed, "system")) body.system = compressed.system;
     } else if (format === "openai-responses" || (!format && Object.hasOwn(body, "input"))) {
       body.input = compressed.input;
+      if (Object.hasOwn(compressed, "instructions")) body.instructions = compressed.instructions;
     } else {
       body.messages = compressed.messages;
     }
@@ -292,6 +293,10 @@ export function formatHeadroomSummaryTag(stats, diagnostics) {
   if (reason === "gateway_compression_skipped") {
     const skip = diagnostics?.skip_reason ? `:${diagnostics.skip_reason}` : "";
     return `HEADROOM:SKIP${skip}${elapsedStr}`;
+  }
+  if (reason === "invariant_violation") {
+    const detail = diagnostics?.detail ? `(${diagnostics.detail})` : "";
+    return `HEADROOM:BYPASS:invariant${detail || "_violation"}${elapsedStr}`;
   }
   if (reason.startsWith("circuit_") || reason === "capacity_busy" || reason.startsWith("latency_") || reason.endsWith("_bypass") || reason === "stateless_sse_payload_too_large" || reason === "client_opt_out") {
     return `HEADROOM:BYPASS:${reason}${elapsedStr}`;

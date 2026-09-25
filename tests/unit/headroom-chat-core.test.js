@@ -25,6 +25,7 @@ vi.mock("../../open-sse/utils/requestLogger.js", () => ({
 vi.mock("../../open-sse/utils/stream.js", () => ({
   COLORS: { red: "", reset: "" },
   createPassthroughStreamWithLogger: vi.fn(() => new TransformStream()),
+  createSSETransformStreamWithLogger: vi.fn(() => new TransformStream()),
 }));
 
 vi.mock("@/lib/usageDb.js", () => ({
@@ -736,5 +737,70 @@ describe("handleChatCore Headroom diagnostics", () => {
     expect(gearCalls.length).toBeGreaterThan(0);
     expect(gearCalls[0][2]).toContain("HEADROOM:BYPASS:stateless_sse_payload_too_large");
     expect(gearCalls[0][2]).toContain("SESSION:stateless");
+  });
+
+  it("logs invariant_violation with field detail and emits invariant tag in gear line", async () => {
+    const log = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), line: vi.fn() };
+
+    global.fetch = vi.fn(async (url, init) => {
+      if (String(url).includes("/v1/compress")) {
+        const payload = JSON.parse(init.body);
+        const { gateway, config, ...cleanPayload } = payload;
+        return new Response(JSON.stringify({
+          data: {
+            body: {
+              ...cleanPayload,
+              // Corrupt the function call arguments
+              messages: [
+                payload.messages[0],
+                {
+                  role: "assistant",
+                  tool_calls: [{ id: "call_1", type: "function", function: { name: "read", arguments: "{broken-json" } }],
+                },
+              ],
+            },
+            turn_id: "turn_corrupted_1",
+          },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    const body = {
+      model: "gpt-4o",
+      stream: false,
+      messages: [
+        { role: "user", content: "inspect repo" },
+        {
+          role: "assistant",
+          tool_calls: [{ id: "call_1", type: "function", function: { name: "read", arguments: "{\"path\":\"a.js\"}" } }],
+        },
+      ],
+    };
+
+    await handleChatCore({
+      body,
+      modelInfo: { provider: "openai", model: "gpt-4o" },
+      credentials: { apiKey: "test-key", providerSpecificData: {} },
+      log,
+      connectionId: "test-conn",
+      headroomEnabled: true,
+      headroomUrl: "http://localhost:8787",
+      clientRawRequest: {
+        endpoint: "/v1/chat/completions",
+        body,
+        headers: { accept: "application/json" },
+      },
+    });
+
+    // Verify warning logged with field detail
+    const warnCalls = log.warn.mock.calls.filter((call) => call[0] === "HEADROOM");
+    expect(warnCalls.length).toBeGreaterThan(0);
+    expect(warnCalls.some((call) => call[1].includes("invariant_violation field=messages.1.tool_calls.0.function.arguments"))).toBe(true);
+
+    // Verify gear line contains HEADROOM:BYPASS:invariant(messages.1.tool_calls.0.function.arguments)
+    const gearCalls = log.line.mock.calls.filter((call) => call[1] === "⚙");
+    expect(gearCalls.length).toBeGreaterThan(0);
+    expect(gearCalls[0][2]).toContain("HEADROOM:BYPASS:invariant(messages.1.tool_calls.0.function.arguments)");
   });
 });

@@ -491,7 +491,8 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const reason = headroomDiagnostics.reason || headroomStagePlan.reason || "compression unavailable";
   if (headroomDiagnostics.transition === "opened" || headroomDiagnostics.transition === "latency_opened") {
     const isLatency = headroomDiagnostics.transition === "latency_opened";
-    log?.warn?.("HEADROOM", `${isLatency ? "latency_guard_open" : "circuit_open"} reason=${reason} budget=${headroomDiagnostics.budgetMs ?? 0}ms elapsed=${Math.round(headroomDiagnostics.latencyMs ?? 0)}ms cooldown=30000ms`);
+    const fieldPart = headroomDiagnostics.detail ? ` field=${headroomDiagnostics.detail}` : "";
+    log?.warn?.("HEADROOM", `${isLatency ? "latency_guard_open" : "circuit_open"} reason=${reason}${fieldPart} budget=${headroomDiagnostics.budgetMs ?? 0}ms elapsed=${Math.round(headroomDiagnostics.latencyMs ?? 0)}ms cooldown=30000ms`);
   } else if (headroomDiagnostics.transition === "recovered" || headroomDiagnostics.transition === "latency_recovered") {
     const isLatency = headroomDiagnostics.transition === "latency_recovered";
     log?.info?.("HEADROOM", `${isLatency ? "latency_guard_closed" : "circuit_closed"} half_open_probe=success`);
@@ -505,6 +506,9 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       const sizeParts = b ? `body=${b.bodyBytes}B msgs=${b.messageCount ?? "?"} tools=${b.toolSchemaBytes ?? 0}B toolHistory=${b.toolHistoryBytes ?? 0}B` : "";
       const queueParts = q ? `inFlight=${q.inFlight} circuit=${q.circuitState}` : "";
       log?.warn?.("HEADROOM", `timeout reason=${reason}${headroomDiagnostics.skip_reason ? ` skipReason=${headroomDiagnostics.skip_reason}` : ""} budget=${headroomDiagnostics.budgetMs ?? 0}ms elapsed=${Math.round(headroomDiagnostics.latencyMs ?? 0)}ms${sizeParts ? ` ${sizeParts}` : ""}${queueParts ? ` ${queueParts}` : ""}`);
+    } else if (reason === "invariant_violation") {
+      const field = headroomDiagnostics.detail ? ` field=${headroomDiagnostics.detail}` : "";
+      log?.warn?.("HEADROOM", `invariant_violation${field} elapsed=${Math.round(headroomDiagnostics.latencyMs ?? 0)}ms`);
     } else {
       log?.debug?.("HEADROOM", `skipped reason=${reason}`);
     }

@@ -161,7 +161,8 @@ export async function callHeadroomGateway({
 
   if (preResponse?.signal?.aborted) throw preResponse.signal.reason?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" ? preResponse.signal.reason : createDeadlineError();
   if (clientSignal?.aborted) throw clientSignal.reason?.code === "CLIENT_ABORT" ? clientSignal.reason : createClientAbortError();
-  const admission = beginHeadroomAttempt(endpoint, { isSSE });
+  const hasSession = Boolean(sessionId && typeof sessionId === "string" && !compressUserMessages);
+  const admission = beginHeadroomAttempt(endpoint, { isSSE, hasSession });
   if (!admission.ticket) {
     diagnostics.reason = admission.reason;
     recordHeadroomBypass(endpoint, admission.reason);

@@ -79,7 +79,7 @@ function calculateRecentP95(guard, now) {
   return sorted[Math.ceil(0.95 * sorted.length) - 1] ?? null;
 }
 
-export function beginHeadroomAttempt(endpoint, { bypassInFlight = false, isSSE = false } = {}) {
+export function beginHeadroomAttempt(endpoint, { bypassInFlight = false, isSSE = false, hasSession = false } = {}) {
   const current = entry(endpoint, true);
   if (!current) return { reason: "runtime_capacity" };
   const now = Date.now();
@@ -131,6 +131,7 @@ export function beginHeadroomAttempt(endpoint, { bypassInFlight = false, isSSE =
       latencyProbe,
       latencyGeneration: guard.generation,
       isSSE,
+      hasSession: Boolean(hasSession),
       attempted: false,
       finalized: false,
     },
@@ -240,7 +241,8 @@ export function finishHeadroomAttempt(ticket, { kind, reason, latencyMs } = {}) 
         }
       }
     } else if (guard.state === "CLOSED") {
-      if (isTimeout || isSevereSpike || p95Exceeded) {
+      const shouldOpen = isTimeout || p95Exceeded || (!ticket.hasSession && isSevereSpike);
+      if (shouldOpen) {
         guard.state = "OPEN";
         guard.openUntil = now + HEADROOM_LATENCY_COOLDOWN_MS;
         guard.opened++;
