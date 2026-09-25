@@ -89,6 +89,24 @@ if (!process.argv.includes("--child")) {
     assert.equal(result.original.messages[1].content, "compressed");
     assert.equal(result.result.providerHeaders.cookie, undefined);
     assert.equal(providerBody.messages[1].content, "compressed");
+
+    // Stateless SSE payload cutoff test: large stateless payload bypasses sidecar HTTP call entirely
+    const largeBody = body();
+    largeBody.messages[0].content = "x".repeat(150 * 1024);
+    const largeDiag = {};
+    const beforeLargeAttempts = attempts;
+    const largeResult = await compressWithHeadroom(largeBody, {
+      url,
+      model: "synthetic",
+      format: "openai",
+      isSSE: true,
+      sessionId: null,
+      diagnostics: largeDiag,
+    });
+    assert.equal(largeResult, null);
+    assert.equal(largeDiag.reason, "stateless_sse_payload_too_large");
+    assert.equal(attempts, beforeLargeAttempts, "large stateless SSE should bypass without calling sidecar");
+
     mode = "tampered";
     result = await run();
     assert.equal(result.diagnostics.reason, "invariant_violation");
@@ -116,7 +134,7 @@ if (!process.argv.includes("--child")) {
     const probes = await Promise.all(Array.from({ length: 8 }, () => run()));
     assert.equal(probes.filter((item) => item.result).length, 1);
     assert.equal(getHeadroomRuntimeSnapshot(`${url}/v1/compress`).headroom_circuit_open, 0);
-    console.log(JSON.stringify({ mode: "offline", attempts, providerCalls, breaker: "recovered", timeout: "body bounded", invariant: "rejected" }));
+    console.log(JSON.stringify({ mode: "offline", attempts, providerCalls, breaker: "recovered", timeout: "body bounded", invariant: "rejected", statelessCutoff: "bypassed" }));
   } finally { sidecar.stop(true); provider.stop(true); }
 } else {
   const image = "ghcr.io/headroomlabs-ai/headroom:0.38.0@sha256:14e3dda1f041eef509af850ac7a32647d1c3e5d9bd66e3e8655dfd3a398273af";
