@@ -49,7 +49,7 @@ describe("Headroom resilience boundaries", () => {
     const stale = beginHeadroomAttempt(endpoint).ticket;
     markHeadroomAttemptStarted(stale);
     for (let n = 0; n < 3; n++) {
-      const ticket = beginHeadroomAttempt(endpoint).ticket;
+      const ticket = beginHeadroomAttempt(endpoint, { bypassInFlight: true }).ticket;
       markHeadroomAttemptStarted(ticket);
       expect(finishHeadroomAttempt(ticket, { kind: "service_failure", reason: "gateway_timeout", latencyMs: 20 })).toBe(n === 2 ? "opened" : null);
     }

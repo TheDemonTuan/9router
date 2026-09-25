@@ -40,15 +40,16 @@ cd "${WORKTREE_ROOT}"
 
 echo "[Step 1/6] Running Headroom Focused Unit Suites..."
 cd tests
-bun run test --config vitest.config.js \
-  unit/headroom.test.js \
-  unit/headroom-responses-format.test.js \
-  unit/headroom-detect.test.js \
-  unit/headroom-chat-core.test.js \
-  unit/headroom-stage-invariants.test.js \
-  unit/claude-header-forwarding.test.js \
-  unit/headroom-resilience.test.js \
-  unit/headroom-status-route.test.js
+  bun run test --config vitest.config.js \
+    unit/headroom.test.js \
+    unit/headroom-responses-format.test.js \
+    unit/headroom-detect.test.js \
+    unit/headroom-chat-core.test.js \
+    unit/headroom-stage-invariants.test.js \
+    unit/claude-header-forwarding.test.js \
+    unit/headroom-resilience.test.js \
+    unit/headroom-status-route.test.js \
+    unit/session-manager.test.js
 cd "${WORKTREE_ROOT}"
 
 if [[ "${MODE}" == "strong" ]]; then
@@ -83,6 +84,7 @@ if [[ "${MODE}" == "strong" ]]; then
     src/lib/headroom/process.js
     open-sse/rtk/headroomRuntime.js
     open-sse/utils/anthropicBeta.js
+    open-sse/utils/sessionManager.js
     open-sse/config/runtimeConfig.js
     src/app/api/settings/route.js
     src/lib/db/repos/settingsRepo.js

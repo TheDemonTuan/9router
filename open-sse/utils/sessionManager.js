@@ -260,6 +260,54 @@ function assistantTextSessionId(scope, body) {
  * @param {string} [opts.scope] - Provider scope to isolate cache keys across providers
  * @returns {{sessionId: string, ephemeral: boolean}} A session id plus whether it is one-shot
  */
+export function resolveHeadroomSessionId({
+    headers,
+    body,
+    apiKey,
+    provider = "",
+    model = "",
+    format = "",
+    compressUserMessages = false,
+} = {}) {
+    if (compressUserMessages) return null;
+    let rawConversation = null;
+    const claude = extractClaudeCodeSession(body?.metadata?.user_id)
+        || headerValue(headers, CLAUDE_CODE_SESSION_HEADER);
+    if (claude) {
+        rawConversation = `claude:${claude}`;
+    } else {
+        const turnMetadata = parseCodexTurnMetadata(headers, body);
+        const threadId = normalizeSessionId(turnMetadata?.thread_id)
+            || normalizeSessionId(body?.client_metadata?.thread_id)
+            || normalizeSessionId(body?.metadata?.thread_id)
+            || normalizeSessionId(body?.thread_id)
+            || normalizeSessionId(body?.threadId);
+        if (threadId) {
+            rawConversation = `thread:${threadId}`;
+        } else {
+            for (const key of SESSION_HEADER_KEYS) {
+                const val = headerValue(headers, key);
+                if (val) {
+                    rawConversation = `header:${val}`;
+                    break;
+                }
+            }
+            if (!rawConversation) {
+                const bodyConv = normalizeSessionId(body?.session_id) || normalizeSessionId(body?.conversation_id);
+                if (bodyConv) rawConversation = `body:${bodyConv}`;
+            }
+        }
+    }
+    if (!rawConversation) return null;
+    const principal = apiKey ? `key:${sha16(String(apiKey))}` : "local";
+    const scopeTag = `${provider}:${model}:${format}`;
+    const digest = crypto.createHash("sha256")
+        .update(`${principal}|${scopeTag}|${rawConversation}`)
+        .digest("hex")
+        .slice(0, 32);
+    return `s_${digest}`;
+}
+
 export function resolveSessionIdentity({ headers, body, connectionId, workspaceId, scope = "" } = {}) {
     const client = extractClientSessionId(headers, body, scope);
     if (client) return { sessionId: client, ephemeral: false };

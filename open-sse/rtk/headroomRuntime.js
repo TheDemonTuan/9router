@@ -3,6 +3,7 @@ import {
   HEADROOM_CIRCUIT_COOLDOWN_MS as COOLDOWN,
   HEADROOM_METRIC_SAMPLE_LIMIT as WINDOW,
   HEADROOM_RUNTIME_MAX_ENDPOINTS as CAPACITY,
+  HEADROOM_MAX_INFLIGHT,
 } from "../config/runtimeConfig.js";
 
 const STORE = Symbol.for("9router.headroom.runtime");
@@ -11,7 +12,7 @@ const codes = new Set([
   "gateway_timeout", "gateway_dns_error", "gateway_connection_refused", "gateway_connection_reset",
   "gateway_fetch_error", "gateway_http_5xx", "gateway_http_429", "gateway_invalid_json_response",
   "gateway_missing_compressed_body", "gateway_compression_skipped", "gateway_invalid_provider_headers",
-  "invariant_violation", "circuit_open", "circuit_probe_in_flight", "runtime_capacity",
+  "invariant_violation", "circuit_open", "circuit_probe_in_flight", "runtime_capacity", "capacity_busy", "compression_timeout",
   "payload_too_large", "budget_exhausted", "insufficient_upstream_budget", "unsafe_proxy_origin", "missing_proxy_url", "missing_body",
   "stage_bypass", "gateway_http_4xx", "model_sovereignty_violation", "unsupported_obligation",
 ]);
@@ -47,7 +48,7 @@ function entry(endpoint, create = false) {
   if (current && create) current.lastUsed = Date.now();
   return current;
 }
-export function beginHeadroomAttempt(endpoint) {
+export function beginHeadroomAttempt(endpoint, { bypassInFlight = false } = {}) {
   const current = entry(endpoint, true);
   if (!current) return { reason: "runtime_capacity" };
   if (current.state === "OPEN") {
@@ -56,6 +57,9 @@ export function beginHeadroomAttempt(endpoint) {
   }
   if (current.state === "HALF_OPEN" && current.probeInFlight) return { reason: "circuit_probe_in_flight" };
   const probe = current.state === "HALF_OPEN";
+  if (!probe && !bypassInFlight && current.inFlight >= HEADROOM_MAX_INFLIGHT) {
+    return { reason: "capacity_busy" };
+  }
   if (probe) current.probeInFlight = true;
   current.inFlight++;
   return { ticket: { current, generation: current.generation, probe, attempted: false, finalized: false } };
@@ -92,7 +96,7 @@ export function finishHeadroomAttempt(ticket, { kind, reason, latencyMs } = {}) 
     s.bypass++;
     const label = code(reason);
     s.outcomes[label] = (s.outcomes[label] || 0) + 1;
-    if (reason === "gateway_timeout") s.timeout++;
+    if (reason === "gateway_timeout" || reason === "compression_timeout") s.timeout++;
   }
   if (ticket.generation !== s.generation) return null;
   if (kind === "service_failure") {
@@ -104,12 +108,17 @@ export function finishHeadroomAttempt(ticket, { kind, reason, latencyMs } = {}) 
       s.generation++;
       return "opened";
     }
-  } else if (kind === "success" || kind === "neutral") {
+  } else if (kind === "success") {
     const recovered = ticket.probe;
     s.state = "CLOSED";
     s.failures = 0;
     s.openUntil = 0;
     if (recovered) { s.generation++; return "recovered"; }
+  } else if (kind === "neutral") {
+    if (ticket.probe) {
+      s.state = "OPEN";
+      s.openUntil = 0;
+    }
   } else if (ticket.probe) {
     s.state = "OPEN";
     s.openUntil = 0;

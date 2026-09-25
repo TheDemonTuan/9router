@@ -97,6 +97,7 @@ export async function callHeadroomGateway({
   format,
   body,
   compressUserMessages = false,
+  sessionId = null,
   timeoutMs = HEADROOM_DEFAULT_TIMEOUT_MS,
   preResponse = null,
   clientSignal = null,
@@ -171,13 +172,18 @@ export async function callHeadroomGateway({
 
   const expectedBody = Object.fromEntries(Object.entries(cleanBody).filter(([, value]) => value !== undefined));
   if (model !== undefined) expectedBody.model = model;
+  const config = {};
+  if (compressUserMessages) config.compress_user_messages = true;
+  if (sessionId && typeof sessionId === "string" && !compressUserMessages) {
+    config.session_id = sessionId;
+  }
   const payload = {
     ...expectedBody,
-    ...(compressUserMessages ? { config: { compress_user_messages: true } } : {}),
+    ...(Object.keys(config).length > 0 ? { config } : {}),
     gateway: {
       can_redrive: false,
       can_relay_response: true,
-      session_affinity: false,
+      session_affinity: Boolean(config.session_id),
     },
   };
   const requestBeta = normalizeAnthropicBeta(betaFromHeaders(requestHeaders));
@@ -227,8 +233,22 @@ export async function callHeadroomGateway({
     if (combinedSignal.aborted) throw combinedSignal.reason;
     if (!res.ok) {
       diagnostics.httpStatus = res.status;
-      diagnostics.reason = res.status >= 500 && res.status <= 599 ? "gateway_http_5xx" : `gateway_http_${res.status}`;
-      res.body?.cancel().catch(() => {});
+      let errData = null;
+      try {
+        const text = await res.text();
+        errData = JSON.parse(text);
+      } catch {
+        // ignore parse error
+      }
+      const errType = errData?.error?.type;
+      if (typeof errType === "string" && errType) {
+        diagnostics.error_type = errType;
+      }
+      if (errType === "compression_timeout" || errType === "session_busy") {
+        diagnostics.reason = errType;
+      } else {
+        diagnostics.reason = res.status >= 500 && res.status <= 599 ? "gateway_http_5xx" : `gateway_http_${res.status}`;
+      }
       return null;
     }
     try {
@@ -341,7 +361,7 @@ export async function callHeadroomGateway({
   } finally {
     const reason = diagnostics.reason;
     const isServiceFailure = (
-      ["gateway_timeout", "gateway_dns_error", "gateway_connection_refused", "gateway_connection_reset",
+      ["gateway_timeout", "compression_timeout", "gateway_dns_error", "gateway_connection_refused", "gateway_connection_reset",
         "gateway_fetch_error", "gateway_http_5xx", "gateway_http_429", "gateway_invalid_json_response",
         "gateway_missing_compressed_body"].includes(reason)
       || (reason === "gateway_compression_skipped" && diagnostics.skip_reason === "compression_timeout")
