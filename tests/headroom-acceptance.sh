@@ -47,7 +47,8 @@ bun run test --config vitest.config.js \
   unit/headroom-chat-core.test.js \
   unit/headroom-stage-invariants.test.js \
   unit/claude-header-forwarding.test.js \
-  unit/headroom-resilience.test.js
+  unit/headroom-resilience.test.js \
+  unit/headroom-status-route.test.js
 cd "${WORKTREE_ROOT}"
 
 if [[ "${MODE}" == "strong" ]]; then
@@ -106,6 +107,9 @@ if [[ "${MODE}" == "strong" ]]; then
       if (!dev.includes("ghcr.io/headroomlabs-ai/headroom:0.38.0")) throw new Error("docker-compose.yml missing 0.38.0 image");
       if (!prod.includes("ghcr.io/headroomlabs-ai/headroom:0.38.0@sha256:")) throw new Error("docker-compose.prod.yml missing pinned digest image");
       if (!prod.includes("memory: 1024M")) throw new Error("docker-compose.prod.yml missing 1024M memory limit");
+      if (!prod.includes("HEADROOM_COMPRESSION_MAX_WORKERS: \"1\"")) throw new Error("docker-compose.prod.yml missing 1 worker limit");
+      if (!prod.includes("HEADROOM_COMPRESSION_TIMEOUT_SECONDS: \"8\"")) throw new Error("docker-compose.prod.yml missing 8s internal timeout");
+      if (!prod.includes("HEADROOM_UPSTREAM_TIMEOUT_MS: \"8000\"")) throw new Error("docker-compose.prod.yml missing 8000ms upstream contract");
       if (prod.includes("8787:8787")) throw new Error("docker-compose.prod.yml must not expose port 8787 to host");
       console.log("Static Docker Compose configuration checks passed successfully.");
     '

@@ -120,6 +120,68 @@ export function findPython310() {
   return fallback;
 }
 
+export function extractCompressionExecutorMetrics(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+
+  const toFiniteNum = (val) => {
+    if (typeof val !== "number" || !Number.isFinite(val) || val < 0) return null;
+    return val;
+  };
+  const toInt = (val) => {
+    const num = toFiniteNum(val);
+    return num !== null ? Math.floor(num) : null;
+  };
+
+  const max_workers = toInt(raw.max_workers ?? raw.compression_max_workers);
+  const queued = toInt(raw.queued ?? raw._compression_queued);
+  const queued_max = toInt(raw.queued_max ?? raw._compression_queued_max);
+  const queue_timeouts_total = toInt(raw.queue_timeouts_total ?? raw._compression_queue_timeouts);
+  const queue_wait_seconds_total = toFiniteNum(raw.queue_wait_seconds_total ?? raw._compression_queue_wait_seconds_total);
+  const queue_wait_seconds_max = toFiniteNum(raw.queue_wait_seconds_max ?? raw._compression_queue_wait_seconds_max);
+
+  const running = toInt(raw.running ?? raw.in_flight ?? raw._compression_in_flight);
+  const in_flight = toInt(raw.in_flight ?? raw.running ?? raw._compression_in_flight);
+  const in_flight_max = toInt(raw.in_flight_max ?? raw._compression_in_flight_max);
+
+  const run_seconds_total = toFiniteNum(raw.run_seconds_total ?? raw._compression_run_seconds_total);
+  const run_seconds_max = toFiniteNum(raw.run_seconds_max ?? raw._compression_run_seconds_max);
+
+  const leaked_threads_total = toInt(raw.leaked_threads_total ?? raw._compression_leaked_threads);
+
+  const quarantine_active = typeof raw.quarantine_active === "boolean"
+    ? raw.quarantine_active
+    : typeof raw.timed_out_workers === "number"
+      ? raw.timed_out_workers > 0
+      : typeof raw._compression_timed_out_in_flight === "number"
+        ? raw._compression_timed_out_in_flight > 0
+        : false;
+
+  const timed_out_workers = toInt(raw.timed_out_workers ?? raw._compression_timed_out_in_flight);
+  const timed_out_workers_max = toInt(raw.timed_out_workers_max ?? raw._compression_timed_out_in_flight_max);
+  const quarantine_activations_total = toInt(raw.quarantine_activations_total ?? raw._compression_quarantine_activations);
+  const quarantine_skips_total = toInt(raw.quarantine_skips_total ?? raw._compression_quarantine_skips);
+
+  return {
+    max_workers,
+    queued,
+    queued_max,
+    queue_timeouts_total,
+    queue_wait_seconds_total,
+    queue_wait_seconds_max,
+    running,
+    in_flight,
+    in_flight_max,
+    run_seconds_total,
+    run_seconds_max,
+    leaked_threads_total,
+    quarantine_active,
+    timed_out_workers,
+    timed_out_workers_max,
+    quarantine_activations_total,
+    quarantine_skips_total,
+  };
+}
+
 let probeCache = { url: null, timestamp: 0, data: null };
 
 // Probe whether a Headroom proxy is reachable at the given URL by hitting /health.
@@ -134,9 +196,9 @@ export async function probeProxyRunning(url) {
   }
 }
 
-// Detailed synthetic cached probe: reachable, ready, version, gateway_supported
+// Detailed synthetic cached probe: reachable, ready, version, gateway_supported, compression_executor
 export async function probeProxyDetails(url) {
-  if (!url) return { reachable: false, ready: false, sidecarVersion: null, gatewaySupported: false };
+  if (!url) return { reachable: false, ready: false, sidecarVersion: null, gatewaySupported: false, compressionExecutor: null };
   const base = String(url).replace(/\/$/, "");
   const now = Date.now();
   if (probeCache.url === base && (now - probeCache.timestamp) < 2000 && probeCache.data) {
@@ -147,6 +209,7 @@ export async function probeProxyDetails(url) {
   let ready = false;
   let sidecarVersion = null;
   let gatewaySupported = false;
+  let compressionExecutor = null;
 
   try {
     const res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(HEADROOM_HEALTH_TIMEOUT_MS) });
@@ -155,6 +218,10 @@ export async function probeProxyDetails(url) {
       try {
         const body = await res.json();
         if (body?.version) sidecarVersion = body.version;
+        const executorRaw = body?.runtime?.compression_executor || body?.compression_executor;
+        if (executorRaw) {
+          compressionExecutor = extractCompressionExecutorMetrics(executorRaw);
+        }
       } catch { /* ignore non-json */ }
     }
   } catch {
@@ -187,7 +254,7 @@ export async function probeProxyDetails(url) {
     gatewaySupported = true;
   }
 
-  const result = { reachable, ready, sidecarVersion, gatewaySupported };
+  const result = { reachable, ready, sidecarVersion, gatewaySupported, compressionExecutor, observedAt: now };
   probeCache = { url: base, timestamp: now, data: result };
   return result;
 }
@@ -226,6 +293,8 @@ export async function getHeadroomStatus(url) {
     localPipVersion: extrasStatus.version,
     gatewaySupported: probe.gatewaySupported,
     extras: extrasStatus.extras,
+    compressionExecutor: probe.compressionExecutor || null,
+    observedAt: probe.observedAt || null,
   };
 }
 

@@ -77,6 +77,7 @@ jobs:
             unit/headroom-stage-invariants.test.js \
             unit/claude-header-forwarding.test.js \
             unit/headroom-resilience.test.js \
+            unit/headroom-status-route.test.js \
             --reporter=verbose
 
       - name: Run isolated offline resilience smoke

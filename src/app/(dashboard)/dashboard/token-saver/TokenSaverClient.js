@@ -475,7 +475,8 @@ export default function TokenSaverClient() {
 
   const headroomRunning = !!headroomStatus.running;
   const headroomReady = !!headroomStatus.ready;
-  const headroomLocalUrl = headroomStatus.localUrl !== false;
+  const headroomLocalUrl = headroomStatus.localUrl === true;
+  const rawDashboardAvailable = headroomStatus.rawDashboardAvailable === true;
   const headroomStatusLabel = headroomStatus.loading
     ? "Checking…"
     : headroomReady
@@ -492,6 +493,7 @@ export default function TokenSaverClient() {
   const headroomCanStart = !!headroomStatus.canStart;
   const headroomManaged =
     headroomLocalUrl && !!headroomStatus.managedPid;
+  const upstreamExecutor = headroomStatus.upstreamRuntime?.compression_executor || headroomStatus.compressionExecutor || null;
 
   const pxpipeHealthy = pxpipeHealth?.healthy === true;
   const pxpipeStatusLabel = pxpipeStatus.loading
@@ -845,7 +847,7 @@ export default function TokenSaverClient() {
               <div className="flex items-center justify-between">
                 <span className="font-medium text-text-muted">Gateway Engine</span>
                 <span className="font-mono text-text">
-                  {headroomStatus.sidecarVersion ? `v${headroomStatus.sidecarVersion}` : "v0.38.0"}
+                  {headroomStatus.sidecarVersion ? `v${headroomStatus.sidecarVersion}` : "—"}
                 </span>
               </div>
               <div className="flex items-center justify-between">
@@ -854,7 +856,7 @@ export default function TokenSaverClient() {
                   {headroomReady ? "● Ready" : "○ Initializing"}
                 </span>
               </div>
-              {headroomLocalUrl ? (
+              {rawDashboardAvailable ? (
                 <a
                   href="/api/headroom/proxy/dashboard"
                   target="_blank"
@@ -865,8 +867,27 @@ export default function TokenSaverClient() {
                 </a>
               ) : (
                 <p className="mt-1 text-center text-xs text-text-muted">
-                  Remote diagnostics active. Raw dashboard restricted to localhost.
+                  Remote diagnostics active. Raw dashboard restricted to local viewer.
                 </p>
+              )}
+
+              {upstreamExecutor && (
+                <div className="mt-2 pt-2 border-t border-border flex flex-col gap-1 text-[11px] font-mono">
+                  <div className="flex justify-between text-text-muted">
+                    <span>Workers: <strong className="text-text">{upstreamExecutor.max_workers ?? "—"}</strong></span>
+                    <span>Running: <strong className="text-text">{upstreamExecutor.running ?? 0}</strong></span>
+                    <span>Queued: <strong className="text-text">{upstreamExecutor.queued ?? 0}</strong> (max: {upstreamExecutor.queued_max ?? 0})</span>
+                  </div>
+                  <div className="flex justify-between text-text-muted">
+                    <span>Max queue: <strong className="text-text">{upstreamExecutor.queue_wait_seconds_max != null ? `${Math.round(upstreamExecutor.queue_wait_seconds_max * 1000)}ms` : "—"}</strong></span>
+                    <span>Max runtime: <strong className="text-text">{upstreamExecutor.run_seconds_max != null ? `${Math.round(upstreamExecutor.run_seconds_max * 1000)}ms` : "—"}</strong></span>
+                  </div>
+                  <div className="flex justify-between text-text-muted">
+                    <span>Timed out: <strong className={upstreamExecutor.timed_out_workers ? "text-error" : "text-text"}>{upstreamExecutor.timed_out_workers ?? 0}</strong></span>
+                    <span>Leaked: <strong className={upstreamExecutor.leaked_threads_total ? "text-warning" : "text-text"}>{upstreamExecutor.leaked_threads_total ?? 0}</strong></span>
+                    <span>Quarantine: <strong className={upstreamExecutor.quarantine_active ? "text-error" : "text-success"}>{upstreamExecutor.quarantine_active ? "Yes" : "No"}</strong></span>
+                  </div>
+                </div>
               )}
             </div>
           )}

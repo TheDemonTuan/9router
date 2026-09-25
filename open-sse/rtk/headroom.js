@@ -29,10 +29,13 @@ export function captureSizeSnapshot(body) {
     message?.role === "tool"
     || message?.role === "function"
     || message?.tool_calls?.length
+    || message?.type === "function_call"
+    || message?.type === "function_call_output"
     || message?.content?.some?.((part) => part?.type === "tool_use" || part?.type === "tool_result")
   ) || [];
   return {
     bodyBytes: jsonBytes(body),
+    messageCount: Array.isArray(messages) ? messages.length : 0,
     messageBytes: messages ? jsonBytes(messages) : 0,
     toolSchemaBytes: jsonBytes(body?.tools || []),
     toolHistoryBytes: jsonBytes(toolHistory),
@@ -177,6 +180,9 @@ export async function compressWithHeadroom(
   }
 
   const diag = diagnostics || {};
+  if (!diag.before) {
+    diag.before = captureSizeSnapshot(body);
+  }
 
   try {
     // 1. Kiro special format: projection mapping
@@ -200,7 +206,6 @@ export async function compressWithHeadroom(
         requestHeaders,
       });
       if (!data) return null;
-      diag.before = captureSizeSnapshot(body);
       const compressedMsgs = data.compressedBody?.messages || data.compressedBody;
       if (!applyKiroHeadroomMessages(projection, compressedMsgs, diag)) return null;
       diag.after = captureSizeSnapshot(body);
@@ -224,7 +229,6 @@ export async function compressWithHeadroom(
     });
 
     if (!data) return null;
-    diag.before = captureSizeSnapshot(body);
     const compressed = data.compressedBody;
     if (format === "claude") {
       body.messages = compressed.messages;

@@ -96,4 +96,48 @@ describe("Headroom resilience boundaries", () => {
     expect(diagnostics.reason).toBe("invariant_violation");
     expect(original.messages[0].tool_calls[0].function.arguments).toBe("{\"path\":\"config.json\"}");
   });
+
+  it("treats normal compression_skipped as neutral, preserves skip_reason, does not trip circuit", async () => {
+    const original = { model: "gpt-4o", messages: [{ role: "user", content: "short" }] };
+    global.fetch = vi.fn(async () => Response.json({ compression_skipped: true, skip_reason: "content_too_short", body: original }));
+    const endpoint = "http://127.0.0.1:54325";
+    for (let i = 0; i < 3; i++) {
+      const diagnostics = {};
+      const res = await callHeadroomGateway({ url: endpoint, body: original, model: original.model, format: "openai", diagnostics });
+      expect(res).toBeNull();
+      expect(diagnostics.reason).toBe("gateway_compression_skipped");
+      expect(diagnostics.skip_reason).toBe("content_too_short");
+    }
+    const snapshot = getHeadroomRuntimeSnapshot(`${endpoint}/v1/compress`);
+    expect(snapshot.headroom_circuit_open).toBe(0);
+    expect(snapshot.circuitState).toBe("CLOSED");
+  });
+
+  it("treats compression_timeout skip_reason as service failure and trips circuit after 3 attempts", async () => {
+    const original = { model: "gpt-4o", messages: [{ role: "user", content: "heavy payload" }] };
+    global.fetch = vi.fn(async () => Response.json({ compression_skipped: true, skip_reason: "compression_timeout", body: original }));
+    const endpoint = "http://127.0.0.1:54326";
+    for (let i = 0; i < 3; i++) {
+      const diagnostics = {};
+      const res = await callHeadroomGateway({ url: endpoint, body: original, model: original.model, format: "openai", diagnostics });
+      expect(res).toBeNull();
+      expect(diagnostics.reason).toBe("gateway_compression_skipped");
+      expect(diagnostics.skip_reason).toBe("compression_timeout");
+    }
+    const snapshot = getHeadroomRuntimeSnapshot(`${endpoint}/v1/compress`);
+    expect(snapshot.headroom_circuit_open).toBe(1);
+    expect(snapshot.circuitState).toBe("OPEN");
+  });
+
+  it("captures queue metrics and pre-flight sizes upon timeout", async () => {
+    const original = { model: "gpt-4o", messages: [{ role: "user", content: "latency test" }] };
+    global.fetch = vi.fn(() => new Promise((resolve) => setTimeout(resolve, 500)));
+    const diagnostics = {};
+    const res = await callHeadroomGateway({ url: "http://127.0.0.1:54327", body: original, model: original.model, format: "openai", timeoutMs: 20, diagnostics });
+    expect(res).toBeNull();
+    expect(diagnostics.reason).toBe("gateway_timeout");
+    expect(diagnostics.queue).toBeDefined();
+    expect(diagnostics.queue.circuitState).toBe("CLOSED");
+    expect(diagnostics.queue.inFlight).toBeDefined();
+  });
 });

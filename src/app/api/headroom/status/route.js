@@ -17,7 +17,15 @@ export async function GET(request) {
     const status = await getHeadroomStatus(url);
     const managedPid = getManagedPid();
 
-    if (!isLocalRequest(request)) {
+    const isLocal = isLocalRequest(request);
+    const serviceLocal = Boolean(status.localUrl);
+    const rawDashboardAvailable = Boolean(isLocal && serviceLocal && status.running);
+    const upstreamRuntime = status.compressionExecutor ? {
+      compression_executor: status.compressionExecutor,
+      observedAt: status.observedAt,
+    } : null;
+
+    if (!isLocal) {
       // Remote view excludes local process details and configured endpoint (which may contain credentials).
       return NextResponse.json({
         running: status.running,
@@ -26,11 +34,22 @@ export async function GET(request) {
         gatewaySupported: status.gatewaySupported,
         ready: status.ready,
         extras: status.extras,
+        localUrl: false,
+        rawDashboardAvailable: false,
         runtime,
+        upstreamRuntime,
       }, { headers: { "Cache-Control": "no-store" } });
     }
 
-    return NextResponse.json({ ...status, url, managedPid, runtime }, { headers: { "Cache-Control": "no-store" } });
+    return NextResponse.json({
+      ...status,
+      localUrl: serviceLocal,
+      rawDashboardAvailable,
+      url,
+      managedPid,
+      runtime,
+      upstreamRuntime,
+    }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
