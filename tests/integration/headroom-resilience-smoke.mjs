@@ -408,8 +408,31 @@ if (!process.argv.includes("--child")) {
         probeResults.push(item);
         console.log(JSON.stringify(item));
       }
+      const replayInput = fixture("openai", 262144);
+      const replayPrefixLength = replayInput.messages.length;
+      const replaySessionId = `probe-replay-${name}`;
+      const first = structuredClone(replayInput);
+      const firstTurn = await compressWithHeadroom(first, { url, proxyToken: token, model: first.model, sessionId: replaySessionId });
+      assert.ok(firstTurn && !firstTurn.compressionSkipped, "first session turn was not compressed");
+      const second = structuredClone(replayInput);
+      second.messages.push({ role: "assistant", content: "Synthetic prior answer." }, { role: "user", content: "Next question." });
+      const secondTurn = await compressWithHeadroom(second, { url, proxyToken: token, model: second.model, sessionId: replaySessionId });
+      assert.ok(secondTurn && !secondTurn.compressionSkipped, "second session turn was not compressed");
+      assert.deepEqual(second.messages.slice(0, replayPrefixLength), first.messages, "session replay changed the returned prefix");
+
+      const lockSessionId = `probe-lock-${name}`;
+      const concurrent = await Promise.allSettled(Array.from({ length: 2 }, (_, i) => {
+        const body = fixture("openai", 262144);
+        body.messages.push({ role: "user", content: `Concurrent synthetic turn ${i}` });
+        return compressWithHeadroom(body, { url, proxyToken: token, model: body.model, sessionId: lockSessionId });
+      }));
+      const accepted = concurrent.filter((row) => row.status === "fulfilled" && row.value && !row.value.compressionSkipped).length;
+      const busy = concurrent.filter((row) => row.status === "rejected" && row.reason?.code === "HEADROOM_SESSION_FAILURE" && row.reason.status === 503).length;
+      assert.equal(accepted + busy, 2, "concurrent session requests must compress or return retryable 503");
+      const session = { replay: "identical_prefix", concurrent: { accepted, retryable503: busy } };
+      console.log(JSON.stringify({ session }));
       if (output) {
-        await writeFile(output, JSON.stringify({ image, version, mode: "probe", results: probeResults }, null, 2));
+        await writeFile(output, JSON.stringify({ image, version, mode: "probe", results: probeResults, session }, null, 2));
       }
     } else {
       const isFull = process.argv.includes("--full");
