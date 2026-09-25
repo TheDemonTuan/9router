@@ -525,4 +525,95 @@ describe("handleChatCore Headroom diagnostics", () => {
 
     expect(executeMock).not.toHaveBeenCalled();
   });
+
+  it("derives and forwards headroomSessionId in TARGET_NATIVE when conversation identity exists", async () => {
+    const log = { debug: vi.fn(), info: vi.fn(), warn: vi.fn() };
+    let receivedPayload = null;
+
+    global.fetch = vi.fn(async (url, init) => {
+      if (String(url).includes("/v1/compress")) {
+        receivedPayload = JSON.parse(init.body);
+        return new Response(JSON.stringify({
+          data: {
+            body: { ...((({ gateway, config, ...providerBody }) => providerBody)(receivedPayload)), messages: [{ role: "user", content: "compressed" }] },
+            turn_id: "turn_sess_1",
+          },
+          tokens_before: 50,
+          tokens_after: 20,
+          tokens_saved: 30,
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    await handleChatCore({
+      body: { model: "gpt-4o", stream: false, messages: [{ role: "user", content: "original" }] },
+      modelInfo: { provider: "openai", model: "gpt-4o" },
+      credentials: { apiKey: "secret-key", providerSpecificData: {} },
+      log,
+      connectionId: "test-conn",
+      headroomEnabled: true,
+      headroomUrl: "http://localhost:8787",
+      headroomCompressUserMessages: false,
+      clientRawRequest: {
+        endpoint: "/v1/chat/completions",
+        body: {},
+        headers: {
+          accept: "application/json",
+          "x-session-id": "client-thread-42",
+        },
+      },
+    });
+
+    expect(receivedPayload).toBeTruthy();
+    expect(receivedPayload.config).toBeDefined();
+    expect(receivedPayload.config.session_id).toMatch(/^s_[0-9a-f]{32}$/);
+    expect(receivedPayload.config.session_id).not.toContain("secret-key");
+    expect(receivedPayload.gateway.session_affinity).toBe(true);
+  });
+
+  it("omits session_id and disables session_affinity when headroomCompressUserMessages is true", async () => {
+    const log = { debug: vi.fn(), info: vi.fn(), warn: vi.fn() };
+    let receivedPayload = null;
+
+    global.fetch = vi.fn(async (url, init) => {
+      if (String(url).includes("/v1/compress")) {
+        receivedPayload = JSON.parse(init.body);
+        return new Response(JSON.stringify({
+          data: {
+            body: { ...((({ gateway, config, ...providerBody }) => providerBody)(receivedPayload)), messages: [{ role: "user", content: "compressed" }] },
+            turn_id: "turn_sess_2",
+          },
+          tokens_before: 50,
+          tokens_after: 20,
+          tokens_saved: 30,
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    await handleChatCore({
+      body: { model: "gpt-4o", stream: false, messages: [{ role: "user", content: "original" }] },
+      modelInfo: { provider: "openai", model: "gpt-4o" },
+      credentials: { apiKey: "secret-key", providerSpecificData: {} },
+      log,
+      connectionId: "test-conn",
+      headroomEnabled: true,
+      headroomUrl: "http://localhost:8787",
+      headroomCompressUserMessages: true,
+      clientRawRequest: {
+        endpoint: "/v1/chat/completions",
+        body: {},
+        headers: {
+          accept: "application/json",
+          "x-session-id": "client-thread-42",
+        },
+      },
+    });
+
+    expect(receivedPayload).toBeTruthy();
+    expect(receivedPayload.config).toEqual({ compress_user_messages: true });
+    expect(receivedPayload.config.session_id).toBeUndefined();
+    expect(receivedPayload.gateway.session_affinity).toBe(false);
+  });
 });

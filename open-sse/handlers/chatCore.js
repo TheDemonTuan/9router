@@ -37,7 +37,7 @@ import { sanitizeAlitpBaseOrigin, applyAlitpBaseOrigin } from "../providers/alib
 import { stripUnsupportedModalities } from "../translator/concerns/modality.js";
 import { prefetchRemoteImages } from "../translator/concerns/prefetch.js";
 import { defaultClaudeToolType, shouldDefaultClaudeToolType } from "../translator/concerns/toolCall.js";
-import { resolveSessionId } from "../utils/sessionManager.js";
+import { resolveSessionId, resolveHeadroomSessionId } from "../utils/sessionManager.js";
 import { createRouteContext, formatRoute } from "../utils/modelRoute.js";
 import { bindResponseBody } from "../utils/responseLifecycle.js";
 
@@ -436,6 +436,15 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // Runs TARGET_NATIVE (after translate) or PROJECTED (Kiro), only if not already run in SOURCE_NATIVE.
   if (!headroomStats && headroomEligible && headroomEnabled && (headroomStagePlan.stage === HEADROOM_STAGES.TARGET_NATIVE || headroomStagePlan.stage === HEADROOM_STAGES.PROJECTED)) {
     try {
+      const headroomSessionId = resolveHeadroomSessionId({
+        headers: clientRawRequest?.headers,
+        body: translatedBody,
+        apiKey,
+        provider,
+        model: upstreamModel,
+        format: headroomStagePlan.format,
+        compressUserMessages: headroomCompressUserMessages,
+      });
       headroomStats = await compressWithHeadroom(translatedBody, {
         enabled: true,
         url: headroomUrl,
@@ -443,6 +452,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
         model: upstreamModel,
         format: headroomStagePlan.format,
         compressUserMessages: headroomCompressUserMessages,
+        sessionId: headroomSessionId,
         timeoutMs: headroomTimeoutMs,
         preResponse,
         clientSignal: clientSignal || null,
@@ -473,7 +483,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   if (headroomLine) {
     log?.info?.("HEADROOM", `stage=${headroomStagePlan.stage} fmt=${headroomStagePlan.format || "-"} | ${headroomLine}${headroomSizeLine ? ` | ${headroomSizeLine}` : ""}`);
   } else if (headroomEnabled && !clientTokenSaverOptOut) {
-    if (reason === "gateway_timeout" || headroomDiagnostics.skip_reason === "compression_timeout") {
+    if (reason === "gateway_timeout" || reason === "compression_timeout" || headroomDiagnostics.skip_reason === "compression_timeout") {
       const b = headroomDiagnostics.before;
       const q = headroomDiagnostics.queue;
       const sizeParts = b ? `body=${b.bodyBytes}B msgs=${b.messageCount ?? "?"} tools=${b.toolSchemaBytes ?? 0}B toolHistory=${b.toolHistoryBytes ?? 0}B` : "";
