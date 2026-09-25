@@ -742,7 +742,7 @@ get_slot_drain_info() {
     printf 'UNKNOWN -1 -1 -1\n'
     return 1
   }
-  python3 - "$slot" "$hostname" "$health" <<'INNER_PY'
+  python3 - "$slot" "$hostname" "$health" <<'PY'
 import json
 import sys
 
@@ -789,7 +789,7 @@ try:
         print(f"ACTIVE {active_req} {streams} {oldest_ms}")
 except Exception:
     print("UNKNOWN -1 -1 -1")
-INNER_PY
+PY
 }
 
 slot_drain_state() {
@@ -836,6 +836,65 @@ handoff_old_slot_to_drain() {
   esac
 }
 
+cleanup_draining_slots() {
+  local route_path="$TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME"
+  local route_info current="" current_gen=""
+  if ! route_info="$(read_active_route_slot "$route_path" 2>/dev/null)"; then
+    log "[cleaner] Cannot read active route from $route_path; skipping cleanup"
+    return 0
+  fi
+  read -r current current_gen <<< "$route_info"
+  if [[ "$current" != blue && "$current" != green ]]; then
+    log "[cleaner] No active blue/green slot in route; skipping cleanup"
+    return 0
+  fi
+
+  for slot in blue green; do
+    [[ "$slot" != "$current" ]] || continue
+
+    local container="9router-$slot"
+    local c_state
+    c_state="$(docker inspect "$container" --format '{{.State.Status}}' 2>/dev/null || true)"
+    [[ "$c_state" == running ]] || continue
+
+    local info state count streams oldest_ms
+    info="$(get_slot_drain_info "$slot")" || info="UNKNOWN -1 -1 -1"
+    read -r state count streams oldest_ms <<< "$info"
+
+    case "$state" in
+      IDLE)
+        # Double check route and generation to prevent race with rollback or new deployment
+        local recheck_info recheck_slot recheck_gen
+        if ! recheck_info="$(read_active_route_slot "$route_path" 2>/dev/null)"; then
+          log "[cleaner] Route re-read failed before stopping $slot; aborting stop"
+          continue
+        fi
+        read -r recheck_slot recheck_gen <<< "$recheck_info"
+        if [[ -n "${FAKE_GEN_CHANGE_RECHECK:-}" ]]; then
+          recheck_gen="99999999999999999999999999999999"
+        fi
+        if [[ "$recheck_slot" != "$current" || "$recheck_gen" != "$current_gen" ]]; then
+          log "[cleaner] Route changed ($current@$current_gen -> $recheck_slot@$recheck_gen); aborting stop for $slot"
+          continue
+        fi
+
+        log "[cleaner] Slot $slot is idle (active_requests=0); stopping container"
+        compose stop "$container" || log "WARN: [cleaner] failed to stop $container"
+        ;;
+      ACTIVE)
+        local diag=""
+        if [[ "$oldest_ms" =~ ^[0-9]+$ && "$oldest_ms" -gt 60000 ]]; then
+          local oldest_m=$(( oldest_ms / 60000 ))
+          diag=" (active for ${oldest_m}m, streams=${streams})"
+        fi
+        log "[cleaner] Slot $slot still draining (active_requests=$count)$diag"
+        ;;
+      UNKNOWN)
+        log "[cleaner] WARN: cannot verify $slot drain state; leaving container untouched"
+        ;;
+    esac
+  done
+}
 
 show_status() {
   local strict="${1:-false}" configured_slot=unknown configured_gen=unknown observed_slot=unknown observed_gen=unknown mirror=none
@@ -886,6 +945,51 @@ show_status() {
   printf 'Blue container: %s\n' "$blue"
   printf 'Green container: %s\n' "$green"
   printf 'Traefik dynamic dir: %s\n' "$directory"
+
+  for s in blue green; do
+    local c_status
+    if [[ "$s" == blue ]]; then c_status="$blue"; else c_status="$green"; fi
+    printf '\n%s\n' "$s"
+    if [[ "$c_status" != running ]]; then
+      printf '  state: STANDBY / STOPPED\n'
+      printf '  container: %s\n' "$c_status"
+    elif [[ "$s" == "$configured_slot" ]]; then
+      printf '  state: ACTIVE\n'
+      printf '  container: running\n'
+      local s_info s_st s_cnt s_str s_old
+      s_info="$(get_slot_drain_info "$s" 2>/dev/null)" || s_info="UNKNOWN -1 -1 -1"
+      read -r s_st s_cnt s_str s_old <<< "$s_info"
+      if [[ "$s_cnt" -ge 0 ]]; then
+        printf '  active_requests: %s\n' "$s_cnt"
+      fi
+    else
+      local s_info s_st s_cnt s_str s_old
+      s_info="$(get_slot_drain_info "$s" 2>/dev/null)" || s_info="UNKNOWN -1 -1 -1"
+      read -r s_st s_cnt s_str s_old <<< "$s_info"
+      if [[ "$s_st" == IDLE ]]; then
+        printf '  state: STANDBY (idle)\n'
+        printf '  container: running\n'
+        printf '  active_requests: 0\n'
+      elif [[ "$s_st" == ACTIVE ]]; then
+        printf '  state: DRAINING\n'
+        printf '  container: running\n'
+        printf '  active_requests: %s\n' "$s_cnt"
+        if [[ "$s_old" =~ ^[0-9]+$ && "$s_old" -ge 0 ]]; then
+          local old_sec=$(( s_old / 1000 ))
+          if (( old_sec >= 60 )); then
+            printf '  oldest_active: %dm%ds\n' $(( old_sec / 60 )) $(( old_sec % 60 ))
+          else
+            printf '  oldest_active: %ds\n' "$old_sec"
+          fi
+        fi
+      else
+        printf '  state: DRAINING (unknown)\n'
+        printf '  container: running\n'
+      fi
+    fi
+  done
+  printf '\n'
+
   if [[ -z "$reason" && ( "$configured_slot" == blue || "$configured_slot" == green ) &&
         "$configured_slot" == "$observed_slot" && "$configured_gen" == "$observed_gen" &&
         "$configured_gen" != none && "$configured_gen" != unknown &&
@@ -1168,6 +1272,7 @@ pull_image() {
 
 do_deploy() {
   preflight mutation
+  cleanup_draining_slots
   local route_info current="" current_gen="" target target_state image
   if route_info="$(read_active_route_slot "$TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME")"; then
     read -r current current_gen <<< "$route_info"
@@ -1185,7 +1290,22 @@ do_deploy() {
     target_state=missing
   fi
   if [[ "$target_state" == running ]]; then
-    wait_slot_idle "$target" || die "Target slot $target still has active or unknown requests"
+    [[ "$target" != "$current" ]] || die "Target slot $target is already configured as active route"
+    local t_info t_state t_count t_streams t_oldest
+    t_info="$(get_slot_drain_info "$target")" || t_info="UNKNOWN -1 -1 -1"
+    read -r t_state t_count t_streams t_oldest <<< "$t_info"
+    case "$t_state" in
+      IDLE)
+        log "Target slot $target is idle; stopping before deployment"
+        compose stop "9router-$target" || die "Failed to stop idle target container $target"
+        ;;
+      ACTIVE)
+        die "Cannot deploy to $target: slot is still draining $t_count active request(s). Current production ${current:-unknown} remains healthy."
+        ;;
+      *)
+        die "Cannot deploy to $target: slot drain state is unknown. Current production ${current:-unknown} remains healthy."
+        ;;
+    esac
   fi
   log "Deploying $IMAGE_REF from ${current:-bootstrap} to $target"
   compose up -d headroom
@@ -1240,9 +1360,20 @@ case "$cmd" in
     IMAGE_REF="$2"
     export IMAGE_REF
     preflight mutation
+    cleanup_draining_slots
     reconcile_active_slot
     do_deploy
     show_status true
+    ;;
+  --cleanup-drains)
+    [[ $# -eq 1 ]] || die "Usage: $0 --cleanup-drains"
+    exec {DEPLOY_LOCK_FD}>"$SCRIPT_DIR/.deployment.lock"
+    if ! flock -n "$DEPLOY_LOCK_FD"; then
+      log "Another deployment holds .deployment.lock; skipping drain cleanup"
+      exit 0
+    fi
+    preflight mutation
+    cleanup_draining_slots
     ;;
   --setup-host)
     [[ $# -le 2 ]] || die "Usage: $0 --setup-host [concurrency]"
@@ -1255,7 +1386,7 @@ case "$cmd" in
     run_diagnostics
     ;;
   -*|"")
-    die "Usage: $0 <IMAGE_REF> | --release <IMAGE_REF> | --reconcile | --rollback | --status [--strict] | --preflight | --setup-host [concurrency] | --diagnostics [IMAGE_REF]"
+    die "Usage: $0 <IMAGE_REF> | --release <IMAGE_REF> | --reconcile | --rollback | --status [--strict] | --preflight | --setup-host [concurrency] | --diagnostics [IMAGE_REF] | --cleanup-drains"
     ;;
   *)
     [[ $# -eq 1 ]] || die "Usage: $0 <IMAGE_REF>"
