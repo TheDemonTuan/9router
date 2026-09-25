@@ -114,9 +114,19 @@ case "${1:-}" in
       if [[ "$slot" == blue ]]; then reported=green; else reported=blue; fi
     fi
     count=0 known=true
-    if [[ "${FAKE_UNKNOWN_DRAIN_SLOT:-}" == "$slot" ]]; then count=null; known=false; fi
-    if [[ "${FAKE_BUSY_SLOT:-}" == "$slot" ]]; then count=1; fi
-    printf '{"ok":true,"deployment_slot":"%s","instance_id":"%s-123","active_requests":%s,"active_requests_known":%s}\n' "$reported" "$hostname" "$count" "$known"
+    if [[ -f "$FAKE_STATE/${slot}_count" ]]; then
+      count="$(cat "$FAKE_STATE/${slot}_count")"
+      if [[ "$count" == "null" ]]; then count=null; known=false; fi
+    elif [[ "${FAKE_UNKNOWN_DRAIN_SLOT:-}" == "$slot" ]]; then
+      count=null; known=false
+    elif [[ "${FAKE_BUSY_SLOT:-}" == "$slot" ]]; then
+      count=1
+    fi
+    streams=0 non_stream=0 oldest=null
+    if [[ "$count" != null && "$count" -gt 0 ]]; then
+      streams=1; non_stream=$((count - 1)); oldest=87000
+    fi
+    printf '{"ok":true,"deployment_slot":"%s","instance_id":"%s-123","active_requests":%s,"active_requests_known":%s,"active_streams":%s,"active_non_stream":%s,"oldest_active_ms":%s}\n' "$reported" "$hostname" "$count" "$known" "$streams" "$non_stream" "$oldest"
     ;;
   logs) exit 0 ;;
   *) exit 1 ;;
@@ -257,7 +267,7 @@ new_case() {
   export FAKE_CURL_COUNTER="$case_dir/curl.count" FAKE_ROUTE_FILE="$case_dir/dynamic/9router.yml"
   export FAKE_LOADED_SLOT="$case_dir/loaded.slot" FAKE_LOADED_GENERATION="$case_dir/loaded.gen"
   export FAKE_SYSTEMCTL_LOG="$case_dir/systemctl.log"
-  export READY_TIMEOUT=2 DRAIN_TIMEOUT=1 DRAIN_POLL_SECONDS=1 ROUTE_TIMEOUT=8
+  export READY_TIMEOUT=2 DRAIN_TIMEOUT=1 DRAIN_POLL_SECONDS=1 ROUTE_TIMEOUT=8 FAST_DRAIN_TIMEOUT=1
   unset FAKE_CURL_MODE FAKE_CURL_SEQUENCE FAKE_RELOAD_AFTER FAKE_RELOAD_GEN_AFTER FAKE_BAD_HEALTH_SLOT FAKE_WRONG_SLOT FAKE_UNKNOWN_DRAIN_SLOT FAKE_BUSY_SLOT FAKE_MOUNT_TYPE FAKE_NETWORK FAKE_DETACH_SLOT FAKE_NESTED FAKE_TRAEFIK_RUNNING FAKE_FAIL_METADATA FAKE_SIGNAL_AFTER_WRITE FAKE_HOLD_MARKER FAKE_HOLD_RELEASE FAKE_INVENTORY_ERROR FAKE_INSPECT_ERROR FAKE_UNCACHED_IMAGE ROUTE_GENERATION FAKE_PULL_FAIL_COUNT FAKE_PULL_TIMEOUT FAKE_SYSTEMCTL_FAIL FAKE_PIDOF_FAIL PULL_TIMEOUT PULL_ATTEMPTS PULL_HEARTBEAT_INTERVAL
   printf none > "$FAKE_LOADED_SLOT"
   printf none > "$FAKE_LOADED_GENERATION"
@@ -449,19 +459,19 @@ assert_route green green
 [[ "$(cat "$FAKE_DOCKER_LOG")" == *'start 9router-green'* ]]
 [[ "$(cat "$FAKE_DOCKER_LOG")" != *'up -d --no-deps'* ]]
 
-# Unknown drain fails closed after ACK; both slots stay running, mirror tracks route.
+# Unknown drain leaves old slot untouched after ACK; deploy succeeds and mirror tracks route.
 new_case; seed blue
 export FAKE_UNKNOWN_DRAIN_SLOT=blue
-fail image-new
+run image-new
 assert_route green green
 [[ "$(cat "$FAKE_STATE/9router-blue")" == running* ]]
 
-# A running broken old slot is never stopped when drain count is unknown.
+# A running broken old slot is never stopped when drain count is unknown, but rollback succeeds.
 new_case; seed blue
 printf 'exited|sha256:green-old|fake-green\n' > "$FAKE_STATE/9router-green"
 printf green > "$case_dir/.previous-slot"
 export FAKE_UNKNOWN_DRAIN_SLOT=blue
-fail --rollback
+run --rollback
 assert_route green green
 [[ "$(cat "$FAKE_STATE/9router-blue")" == running* ]]
 [[ "$(cat "$FAKE_STATE/9router-green")" == running* ]]
@@ -729,5 +739,104 @@ export FAKE_SYSTEMCTL_FAIL=1
 export FAKE_PIDOF_FAIL=1
 fail --setup-host 4
 unset DOCKER_DAEMON_JSON FAKE_SYSTEMCTL_FAIL FAKE_PIDOF_FAIL
+
+# ==============================================================================
+# Deferred Drain and Cleaner Lifecycle Scenarios (Phase 15)
+# ==============================================================================
+
+# Scenario 1: Old slot active=0 -> cutover -> stops old slot quickly -> deploy success
+new_case; seed blue
+printf '0' > "$FAKE_STATE/blue_count"
+run image-new
+assert_route green green
+[[ "$(cat "$FAKE_STATE/9router-blue")" == exited* ]]
+[[ "$(cat "$FAKE_STATE/9router-green")" == running* ]]
+
+# Scenario 2: Old slot active=1 (SSE) -> cutover -> deploy success -> old slot remains running
+new_case; seed blue
+printf '1' > "$FAKE_STATE/blue_count"
+run image-new
+assert_route green green
+[[ "$(cat "$FAKE_STATE/9router-blue")" == running* ]]
+[[ "$(cat "$FAKE_STATE/9router-green")" == running* ]]
+
+# Scenario 3: Cleaner later sees active=0 -> stops old slot, keeps active slot untouched
+printf '0' > "$FAKE_STATE/blue_count"
+run --cleanup-drains
+assert_route green green
+[[ "$(cat "$FAKE_STATE/9router-blue")" == exited* ]]
+[[ "$(cat "$FAKE_STATE/9router-green")" == running* ]]
+
+# Scenario 4: Active requests unknown -> keep old slot running -> deploy and cleaner both succeed
+new_case; seed blue
+printf 'null' > "$FAKE_STATE/blue_count"
+run image-new
+assert_route green green
+[[ "$(cat "$FAKE_STATE/9router-blue")" == running* ]]
+run --cleanup-drains
+[[ "$(cat "$FAKE_STATE/9router-blue")" == running* ]]
+
+# Scenario 5: Rollback while old slot is draining -> cleaner does NOT stop the rolled-back slot
+new_case; seed blue
+printf '1' > "$FAKE_STATE/blue_count"
+run image-new
+assert_route green green
+[[ "$(cat "$FAKE_STATE/9router-blue")" == running* ]]
+run --rollback
+assert_route blue blue
+[[ "$(cat "$FAKE_STATE/9router-blue")" == running* ]]
+printf '0' > "$FAKE_STATE/blue_count"
+run --cleanup-drains
+assert_route blue blue
+[[ "$(cat "$FAKE_STATE/9router-blue")" == running* ]]
+
+# Scenario 6: Next deploy when target is still active/draining -> fails fast without recreating target; current stays healthy
+new_case; seed blue
+printf '1' > "$FAKE_STATE/blue_count"
+run image-new
+assert_route green green
+printf '2' > "$FAKE_STATE/blue_count"
+fail image-v3
+[[ "$output" == *"Cannot deploy to blue: slot is still draining 2 active request(s)"* ]]
+assert_route green green
+[[ "$(cat "$FAKE_STATE/9router-green")" == running* ]]
+[[ "$(cat "$FAKE_STATE/9router-blue")" == running* ]]
+
+# Scenario 7: Client disconnect -> active count drops to 0 -> cleaner stops old slot
+new_case; seed blue
+printf '1' > "$FAKE_STATE/blue_count"
+run image-new
+assert_route green green
+[[ "$(cat "$FAKE_STATE/9router-blue")" == running* ]]
+printf '0' > "$FAKE_STATE/blue_count"
+run --cleanup-drains
+[[ "$(cat "$FAKE_STATE/9router-blue")" == exited* ]]
+[[ "$(cat "$FAKE_STATE/9router-green")" == running* ]]
+
+# Scenario 8: Long-lived SSE does not block or fail workflow
+new_case; seed blue
+printf '1' > "$FAKE_STATE/blue_count"
+FAST_DRAIN_TIMEOUT=1 DRAIN_TIMEOUT=120 run image-new
+assert_route green green
+[[ "$(cat "$FAKE_STATE/9router-blue")" == running* ]]
+
+# Scenario 9: Route generation change during cleanup -> aborts container stop
+new_case; seed blue
+printf '1' > "$FAKE_STATE/blue_count"
+run image-new
+assert_route green green
+printf '0' > "$FAKE_STATE/blue_count"
+cleaner_out="$(FAKE_GEN_CHANGE_RECHECK=1 run --cleanup-drains 2>&1)"
+[[ "$cleaner_out" == *"Route changed"* ]]
+[[ "$(cat "$FAKE_STATE/9router-blue")" == running* ]]
+
+# Scenario 10: Concurrent cleaner during deployment lock exits cleanly without interfering
+new_case; seed blue
+exec 8>"$case_dir/.deployment.lock"
+flock -x 8
+cleaner_lock_out="$(run --cleanup-drains 2>&1)"
+[[ "$cleaner_lock_out" == *"Another deployment holds .deployment.lock; skipping drain cleanup"* ]]
+flock -u 8
+exec 8>&-
 
 printf 'CLI preflight, ACK, rollback, reconcile, bootstrap and drain scenarios passed\n'

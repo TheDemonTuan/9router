@@ -48,6 +48,9 @@ describe("GET /api/health", () => {
       activeRequests: [],
       activeRequestsKnown: true,
       liveActiveRequests: [{ model: "chatgpt-web/high", provider: "chatgpt-web", count: 2 }],
+      activeStreams: 1,
+      activeNonStream: 1,
+      oldestActiveMs: 42000,
     });
 
     const response = await GET();
@@ -56,6 +59,31 @@ describe("GET /api/health", () => {
     await expect(response.json()).resolves.toMatchObject({
       active_requests: 2,
       active_requests_known: true,
+      active_streams: 1,
+      active_non_stream: 1,
+      oldest_active_ms: 42000,
+    });
+  });
+
+  it("reports zeros and null oldest when idle", async () => {
+    mocks.getActiveRequests.mockResolvedValue({
+      activeRequests: [],
+      activeRequestsKnown: true,
+      liveActiveRequests: [],
+      activeStreams: 0,
+      activeNonStream: 0,
+      oldestActiveMs: null,
+    });
+
+    const response = await GET();
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      active_requests: 0,
+      active_requests_known: true,
+      active_streams: 0,
+      active_non_stream: 0,
+      oldest_active_ms: null,
     });
   });
 
@@ -68,6 +96,9 @@ describe("GET /api/health", () => {
     await expect(response.json()).resolves.toMatchObject({
       active_requests: null,
       active_requests_known: false,
+      active_streams: null,
+      active_non_stream: null,
+      oldest_active_ms: null,
     });
   });
 });
