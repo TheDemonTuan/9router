@@ -11,8 +11,8 @@ import {
 } from "open-sse/services/chatgptWebBridge.js";
 import * as log from "../utils/logger.js";
 
-// Mutex to prevent race conditions during account selection
-let selectionMutex = Promise.resolve();
+// Serialize rotation within a provider without blocking unrelated upstreams.
+const selectionMutexes = new Map();
 
 const GITHUB_MONTHLY_USAGE_LIMIT = "you've reached your additional usage limit for your plan";
 
@@ -70,16 +70,14 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
   const requiredCapabilities = options?.requiredCapabilities instanceof Set
     ? options.requiredCapabilities
     : new Set(Array.isArray(options?.requiredCapabilities) ? options.requiredCapabilities : []);
-  // Acquire mutex to prevent race conditions
-  const currentMutex = selectionMutex;
-  let resolveMutex;
-  selectionMutex = new Promise(resolve => { resolveMutex = resolve; });
+  const providerId = resolveProviderId(provider);
+  const previous = selectionMutexes.get(providerId) || Promise.resolve();
+  let release;
+  const current = new Promise(resolve => { release = resolve; });
+  selectionMutexes.set(providerId, current);
 
   try {
-    await currentMutex;
-
-    // Resolve alias to provider ID (e.g., "kc" -> "kilocode")
-    const providerId = resolveProviderId(provider);
+    await previous;
 
     // Inject a virtual connection for no-auth free providers (with optional proxy pool from settings)
     if (FREE_PROVIDERS[providerId]?.noAuth) {
@@ -277,7 +275,8 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       _connection: connection
     };
   } finally {
-    if (resolveMutex) resolveMutex();
+    release();
+    if (selectionMutexes.get(providerId) === current) selectionMutexes.delete(providerId);
   }
 }
 

@@ -237,7 +237,7 @@ function openaiToGeminiBase(model, body, stream, signature = DEFAULT_THINKING_AG
   if (body.tools && Array.isArray(body.tools) && body.tools.length > 0) {
     const functionDeclarations = [];
     const cleanToolSchema = (schema) => toolSchemaMode === "jsonSchema"
-      ? cleanToolJsonSchemaForGemini(structuredClone(schema))
+      ? cleanToolJsonSchemaForGemini(schema)
       : cleanJSONSchemaForAntigravity(structuredClone(schema));
     const declaration = (name, description, schema) => toolSchemaMode === "jsonSchema"
       ? { name: sanitizeGeminiFunctionName(name), description: description || "", parametersJsonSchema: cleanToolSchema(schema) }

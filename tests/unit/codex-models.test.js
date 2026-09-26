@@ -130,6 +130,48 @@ describe("effective Codex catalogs", () => {
 });
 
 describe("resolveCodexModels", () => {
+  it("starts live and official fetches before either body finishes", async () => {
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const calls = [];
+    const fetchImpl = vi.fn(async url => {
+      calls.push(url);
+      if (url.startsWith(CODEX_MODELS_URL)) return { ...response(null), json: () => gate };
+      return response({ models: [] });
+    });
+    const pending = resolveCodexModels({ id: "parallel", accessToken: "fake" }, { fetchImpl });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(calls).toContain(CODEX_OFFICIAL_MODELS_URL);
+    release({ models: [liveModel("gpt-6-sol")] });
+    expect((await pending).source).toBe("live");
+  });
+
+  it("bounds a stalled JSON body after headers", async () => {
+    vi.useFakeTimers();
+    try {
+      const cancel = vi.fn();
+      const fetchImpl = vi.fn(async url => url === CODEX_OFFICIAL_MODELS_URL
+        ? { ...response(null), json: () => new Promise(() => {}), body: { cancel } }
+        : response({ models: [liveModel("gpt-6-sol")] }));
+      const pending = resolveCodexModels({ id: "stalled-body", accessToken: "fake" }, { fetchImpl });
+      await vi.advanceTimersByTimeAsync(5001);
+      expect((await pending).models.map(model => model.id)).toContain("gpt-6-sol");
+      expect(cancel).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not start either catalog request after pre-abort", async () => {
+    const controller = new AbortController();
+    controller.abort(new Error("stopped"));
+    const fetchImpl = vi.fn();
+    const result = await resolveCodexModels({ id: "pre-aborted", accessToken: "fake" }, { fetchImpl, signal: controller.signal });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(result.source).toBe("static");
+  });
+
   it("uses live data, enriches from the official catalog, and caches by connection", async () => {
     const calls = [];
     const fetchImpl = vi.fn(async (url, options) => {
@@ -201,7 +243,7 @@ describe("resolveCodexModels", () => {
     const refreshed = [];
     const fetchImpl = vi.fn(async (url, options) => {
       calls.push({ url, options });
-      if (calls.length === 1) return response({}, 401);
+      if (url.startsWith(CODEX_MODELS_URL) && options.headers.Authorization === "Bearer old-token") return response({}, 401);
       if (url.startsWith(CODEX_MODELS_URL)) return response({ models: [liveModel("gpt-6-luna", [{ effort: "low" }, { effort: "max" }])] });
       return response({ models: [] });
     });
@@ -217,7 +259,7 @@ describe("resolveCodexModels", () => {
 
     expect(result.models.map((model) => model.id)).toContain("gpt-6-luna");
     expect(refreshed).toEqual([{ accessToken: "new-token", refreshToken: "rotated-refresh" }]);
-    expect(calls[1].options.headers.Authorization).toBe("Bearer new-token");
+    expect(calls.find(call => call.options.headers.Authorization === "Bearer new-token")?.url).toContain(CODEX_MODELS_URL);
     expect(calls).toHaveLength(3);
   });
 

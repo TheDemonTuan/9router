@@ -70,6 +70,72 @@ describe("Codex fast tier and capacity handling", () => {
     expect(peek.matched).toBeNull();
     await expect(new Response(peek.replacementBody).text()).resolves.toBe(text);
   });
+  it("releases reasoning before waiting for text", async () => {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode('event: response.reasoning_text.delta\ndata: {"type":"response.reasoning_text.delta","delta":"think"}\n\n'));
+      },
+    });
+    const result = await Promise.race([
+      new CodexExecutor()._peekSseTransientError(new Response(stream)),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("reasoning blocked")), 100)),
+    ]);
+    expect(result.matched).toBeNull();
+    await result.replacementBody.cancel();
+  });
+
+  it("never retries text containing capacity or an error after output", async () => {
+    const text = 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"model_at_capacity"}\n\nevent: error\ndata: {"error":{"message":"server_is_overloaded"}}\n\n';
+    const result = await new CodexExecutor()._peekSseTransientError(new Response(streamFromText(text)));
+    expect(result.matched).toBeNull();
+    expect(await new Response(result.replacementBody).text()).toBe(text);
+  });
+
+  it("ignores metadata, splits UTF-8 and CRLF, and matches only an error record", async () => {
+    const text = ': ping\r\nevent: response.created\r\ndata: {"type":"response.created","response":{"status":"in_progress"}}\r\n\r\nevent: error\r\ndata: {"error":{"code":"model_at_capacity",\r\ndata: "message":"café"}}\r\n\r\n';
+    const bytes = new TextEncoder().encode(text);
+    const split = bytes.indexOf(0xc3) + 1;
+    const stream = new ReadableStream({ start(controller) {
+      controller.enqueue(bytes.subarray(0, split));
+      controller.enqueue(bytes.subarray(split));
+      controller.close();
+    } });
+    const peek = await new CodexExecutor()._peekSseTransientError(new Response(stream));
+    expect(peek).toMatchObject({ matched: "model_at_capacity", message: "café", accountFallback: true });
+  });
+
+  it("commits an unknown event and replays a multibyte prefix beyond the byte cap", async () => {
+    const encoder = new TextEncoder();
+    const text = `: ${"é".repeat(140000)}\n\nevent: future.output\ndata: {"type":"future.output","delta":"yes"}\n\n`;
+    const bytes = encoder.encode(text);
+    const result = await new CodexExecutor()._peekSseTransientError(new Response(new ReadableStream({
+      start(controller) { controller.enqueue(bytes); controller.close(); },
+    })));
+    expect(result.matched).toBeNull();
+    expect(new Uint8Array(await new Response(result.replacementBody).arrayBuffer())).toEqual(bytes);
+  });
+
+  it("keeps metadata precommit until later content", async () => {
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode('event: response.created\ndata: {"type":"response.created"}\n\n'));
+        gate.then(() => { controller.enqueue(encoder.encode('event: response.reasoning_summary_text.delta\ndata: {"type":"response.reasoning_summary_text.delta","delta":"thought"}\n\n')); controller.close(); });
+      },
+    });
+    let settled = false;
+    const pending = new CodexExecutor()._peekSseTransientError(new Response(stream)).then(result => { settled = true; return result; });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    release();
+    const result = await pending;
+    expect(result.matched).toBeNull();
+    expect(await new Response(result.replacementBody).text()).toContain('thought');
+  });
 
   it("cancels a pending peek read on the shared deadline", async () => {
     const cancel = vi.fn();

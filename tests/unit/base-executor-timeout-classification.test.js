@@ -158,6 +158,29 @@ describe("BaseExecutor — timeout and abort classification", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
+  it("does not stall while downstream is paused", async () => {
+    const { pipeWithDisconnect } = await import("../../open-sse/utils/streamHandler.js");
+    const controller = new AbortController();
+    let errors = 0;
+    const upstream = new ReadableStream({
+      pull(streamController) { streamController.enqueue(new TextEncoder().encode("chunk")); },
+    });
+    const out = pipeWithDisconnect({ body: upstream }, new TransformStream(), {
+      signal: controller.signal,
+      isConnected: () => true,
+      handleComplete() {},
+      handleError() { errors++; },
+      handleDisconnect() {},
+      abort() { controller.abort(); },
+    }, null, 20, { heartbeatIntervalMs: 0 });
+    const reader = out.getReader();
+    expect((await reader.read()).done).toBe(false);
+    await new Promise(resolve => setTimeout(resolve, 60));
+    expect(errors).toBe(0);
+    expect(controller.signal.aborted).toBe(false);
+    await reader.cancel();
+  });
+
   it("Case D: stream stall watchdog after 200 SSE produces terminal failure, not 499", async () => {
     const { pipeWithDisconnect } = await import("../../open-sse/utils/streamHandler.js");
     const { buildAbortedResponsesTerminalBytes } = await import("../../open-sse/utils/responsesStreamHelpers.js");
@@ -204,5 +227,27 @@ describe("BaseExecutor — timeout and abort classification", () => {
     expect(text).toContain('"type":"response.failed"');
     expect(text).toContain("stream stall timeout");
     expect(text).toContain("data: [DONE]");
+  });
+  it("cancels one pending raw read and never times out after EOF", async () => {
+    const { pipeWithDisconnect } = await import("../../open-sse/utils/streamHandler.js");
+    let cancels = 0;
+    let errors = 0;
+    const abortController = new AbortController();
+    const control = {
+      signal: abortController.signal, isConnected: () => true,
+      handleComplete() {}, handleError() { errors++; }, handleDisconnect() {},
+      abort() { abortController.abort(); },
+    };
+    const stalled = pipeWithDisconnect({ body: new ReadableStream({ pull() { return new Promise(() => {}); }, cancel() { cancels++; } }) },
+      new TransformStream(), control, () => new TextEncoder().encode("terminal"), 20, { heartbeatIntervalMs: 0 });
+    expect(await new Response(stalled).text()).toContain("terminal");
+    expect(cancels).toBe(1);
+    expect(errors).toBe(1);
+
+    const completed = pipeWithDisconnect({ body: new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array([1])); controller.close(); } }) },
+      new TransformStream(), control, null, 20, { heartbeatIntervalMs: 0 });
+    await new Response(completed).arrayBuffer();
+    await new Promise(resolve => setTimeout(resolve, 40));
+    expect(errors).toBe(1);
   });
 });

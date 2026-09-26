@@ -3,6 +3,12 @@
 ## Removed
 - **Headroom**: remove compressor, sidecar, dashboard/CLI controls, and retire persisted settings on upgrade and restore.
 
+## Fixes
+- **Codex streaming**: commit on reasoning, text, or tool events; classify pre-output capacity errors by SSE record instead of matching model text, and replay the original bytes.
+- **Streaming**: time out pending upstream reads without aborting clients paused by downstream backpressure; declare no-transform/no-buffer SSE headers.
+- **Account selection / Codex catalog**: serialize rotation per provider, fetch independent model catalogs concurrently, and bound response-body parsing by the existing request deadline.
+- **Antigravity transport**: retain DNS bypass and certificate validation with a reusable TLS agent; propagate aborts, use Bun's native proxy option, and avoid duplicate JSON Schema clones.
+
 # v0.5.86 (2026-09-23)
 
 ## Features

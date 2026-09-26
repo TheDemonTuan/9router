@@ -27,7 +27,7 @@ vi.mock("@/lib/network/connectionProxy", () => ({
 }));
 vi.mock("@/shared/constants/providers.js", () => ({
   FREE_PROVIDERS: {},
-  resolveProviderId: provider => provider,
+  resolveProviderId: provider => ({ ag: "antigravity", cx: "codex" }[provider] || provider),
 }));
 vi.mock("open-sse/services/usage/google.js", () => ({ getAntigravityUsage: mocks.getAntigravityUsage }));
 vi.mock("@/sse/utils/logger.js", () => ({ debug: vi.fn(), info: vi.fn(), warn: vi.fn() }));
@@ -75,6 +75,28 @@ describe("Antigravity durable quota routing", () => {
       [`modelLockErrorCode_${MODEL}`]: 429,
     });
     expect(mocks.connections[0][`modelLock_${OTHER_MODEL}`]).toBeUndefined();
+  });
+
+  it("does not block another provider behind selection; aliases serialize", async () => {
+    vi.useRealTimers();
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    mocks.connections = [{ id: "ag-a", provider: "antigravity", isActive: true }, { id: "cx-a", provider: "codex", isActive: true }];
+    mocks.getProviderConnections.mockImplementation(async ({ provider }) => {
+      if (provider === "antigravity") await gate;
+      return mocks.connections.filter(connection => connection.provider === provider);
+    });
+    const pending = getProviderCredentials("ag");
+    const alias = getProviderCredentials("antigravity");
+    const other = getProviderCredentials("cx");
+    await expect(Promise.race([other, new Promise((_, reject) => setTimeout(() => reject(new Error("cross-provider lock")), 100))])).resolves.toMatchObject({ connectionId: "cx-a" });
+    expect(mocks.getProviderConnections.mock.calls.filter(([args]) => args?.provider === "antigravity")).toHaveLength(1);
+    release();
+    await pending;
+    await alias;
+    mocks.getProviderConnections.mockRejectedValueOnce(new Error("lookup failed"));
+    await expect(getProviderCredentials("ag")).rejects.toThrow("lookup failed");
+    await expect(getProviderCredentials("antigravity")).resolves.toMatchObject({ connectionId: "ag-a" });
   });
 
   it("selects the healthy account from persisted quota locks", async () => {

@@ -225,8 +225,8 @@ export function withWireHeartbeat(response, { clientSignal = null, format = "sse
  * Measuring stall on the transform output caused false stalls and the
  * "failed to pipe response" error in Next.
  *
- * Any upstream chunk resets the timer. If no bytes arrive for
- * STREAM_STALL_TIMEOUT_MS, abort the underlying fetch via the controller.
+ * A pending raw upstream read is subject to STREAM_STALL_TIMEOUT_MS.
+ * Downstream backpressure never starts a stall timer.
  *
  * @param {Response} providerResponse - Response from provider
  * @param {TransformStream} transformStream - Transform stream for SSE
@@ -240,62 +240,88 @@ export function pipeWithDisconnect(providerResponse, transformStream, streamCont
   let abortMessage = "upstream connection lost";
   const t0 = Date.now();
   const tag = "STREAM";
-  const clearStall = () => {
-    if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }
-  };
-  const armStall = () => {
+  const rawReader = providerResponse.body.getReader();
+  let reading = false;
+  let finished = false;
+  const clearStall = () => { clearTimeout(stallTimer); stallTimer = null; };
+  const release = () => { if (!reading) { try { rawReader.releaseLock(); } catch {} } };
+  const cleanup = () => {
+    if (finished) return;
+    finished = true;
     clearStall();
-    stallTimer = setTimeout(() => {
-      stallTimer = null;
-      abortMessage = "stream stall timeout";
-      dbg(tag, `STALL TIMEOUT ${stallTimeoutMs}ms | chunks=${chunkCount} | bytes=${totalBytes} | sinceLast=${Date.now() - lastChunkAt}ms`);
-      streamController.handleError?.(new Error("stream stall timeout"));
-      streamController.abort?.();
-    }, stallTimeoutMs);
+    streamController.signal?.removeEventListener("abort", onAbort);
+    release();
   };
-
-  // Wrap controller so every termination path clears the stall timer.
-  // Without this, abort/cancel/downstream-error paths leave the timer armed
-  // and a stale abort could fire after the request has already ended.
+  const cancelRaw = (reason) => {
+    if (finished) return;
+    cleanup();
+    try { Promise.resolve(rawReader.cancel(reason)).catch(() => {}); } catch {}
+    release();
+  };
+  const onAbort = () => cancelRaw(streamController.signal.reason);
   const wrappedController = {
     signal: streamController.signal,
     startTime: streamController.startTime,
     isConnected: () => streamController.isConnected(),
-    handleComplete: () => { dbg(tag, `complete | chunks=${chunkCount} | bytes=${totalBytes} | dur=${Date.now() - t0}ms`); clearStall(); streamController.handleComplete(); },
-    handleError: (e) => { dbg(tag, `error: ${e?.message} | chunks=${chunkCount} | bytes=${totalBytes} | dur=${Date.now() - t0}ms`); clearStall(); streamController.handleError(e); },
-    handleDisconnect: (r) => { dbg(tag, `disconnect: ${r} | chunks=${chunkCount} | bytes=${totalBytes} | dur=${Date.now() - t0}ms`); clearStall(); streamController.handleDisconnect(r); },
-    abort: () => { clearStall(); streamController.abort(); }
+    handleComplete: () => { dbg(tag, `complete | chunks=${chunkCount} | bytes=${totalBytes} | dur=${Date.now() - t0}ms`); cleanup(); streamController.handleComplete(); },
+    handleError: (e) => { dbg(tag, `error: ${e?.message} | chunks=${chunkCount} | bytes=${totalBytes} | dur=${Date.now() - t0}ms`); cleanup(); streamController.handleError(e); },
+    handleDisconnect: (r) => { dbg(tag, `disconnect: ${r} | chunks=${chunkCount} | bytes=${totalBytes} | dur=${Date.now() - t0}ms`); cancelRaw(r); streamController.handleDisconnect(r); },
+    abort: () => { cancelRaw(); streamController.abort(); }
   };
 
-  armStall();
   dbg(tag, `pipe start | stallTimeout=${stallTimeoutMs}ms`);
-
-  const upstreamTap = new TransformStream({
-    transform(chunk, controller) {
-      if (chunkCount === 0) onUpstreamFirstByte?.();
-      chunkCount++;
-      const sz = chunk?.byteLength || chunk?.length || 0;
-      totalBytes += sz;
-      const now = Date.now();
-      const gap = now - lastChunkAt;
-      lastChunkAt = now;
-      if (isDebugEnabled && (chunkCount <= 5 || chunkCount % 20 === 0 || gap > 5000)) {
-        dbg(tag, `chunk #${chunkCount} | size=${sz}B | gap=${gap}ms | total=${totalBytes}B`);
-      }
-      armStall();
-      controller.enqueue(chunk);
+  const rawBody = new ReadableStream({
+    start() {
+      if (streamController.signal?.aborted) onAbort();
+      else streamController.signal?.addEventListener("abort", onAbort, { once: true });
     },
-    flush() { dbg(tag, `upstream EOF | chunks=${chunkCount} | bytes=${totalBytes} | dur=${Date.now() - t0}ms`); clearStall(); }
+    async pull(controller) {
+      if (finished) { controller.close(); return; }
+      reading = true;
+      stallTimer = setTimeout(() => {
+        stallTimer = null;
+        if (finished) return;
+        abortMessage = "stream stall timeout";
+        dbg(tag, `STALL TIMEOUT ${stallTimeoutMs}ms | chunks=${chunkCount} | bytes=${totalBytes} | sinceLast=${Date.now() - lastChunkAt}ms`);
+        streamController.handleError?.(new Error(abortMessage));
+        streamController.abort?.();
+        cancelRaw(abortMessage);
+      }, stallTimeoutMs);
+      try {
+        const { done, value } = await rawReader.read();
+        clearStall();
+        if (finished) { controller.close(); return; }
+        if (done) {
+          dbg(tag, `upstream EOF | chunks=${chunkCount} | bytes=${totalBytes} | dur=${Date.now() - t0}ms`);
+          cleanup();
+          controller.close();
+          return;
+        }
+        if (chunkCount === 0) onUpstreamFirstByte?.();
+        chunkCount++;
+        const sz = value?.byteLength || value?.length || 0;
+        totalBytes += sz;
+        const now = Date.now();
+        const gap = now - lastChunkAt;
+        lastChunkAt = now;
+        if (isDebugEnabled && (chunkCount <= 5 || chunkCount % 20 === 0 || gap > 5000)) {
+          dbg(tag, `chunk #${chunkCount} | size=${sz}B | gap=${gap}ms | total=${totalBytes}B`);
+        }
+        controller.enqueue(value);
+      } catch (error) {
+        if (!finished) { cleanup(); controller.error(error); }
+        else controller.close();
+      } finally {
+        reading = false;
+        clearStall();
+        if (finished) release();
+      }
+    },
+    cancel: cancelRaw,
   });
-
-  const transformedBody = providerResponse.body
-    .pipeThrough(upstreamTap)
-    .pipeThrough(transformStream);
-  return createDisconnectAwareStream(
-    transformedBody,
-    wrappedController,
+  const transformedBody = rawBody.pipeThrough(transformStream);
+  return createDisconnectAwareStream(transformedBody, wrappedController,
     onAbortTerminal ? () => onAbortTerminal(abortMessage) : null,
-    { heartbeatIntervalMs, onFirstByte: onDownstreamFirstByte }
-  );
+    { heartbeatIntervalMs, onFirstByte: onDownstreamFirstByte });
 }
 

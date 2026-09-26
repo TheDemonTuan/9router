@@ -13,16 +13,11 @@ import { DEFAULT_RETRY_CONFIG, HTTP_STATUS, resolveRetryEntry } from "../config/
 import { dbg } from "../utils/debugLog.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
 import { stripCodexUnsupportedPatterns } from "../utils/codexToolSchema.js";
+import { parseOpenAIResponsesSSERecord } from "../utils/responsesStreamHelpers.js";
 
 // SSE error patterns inside 200-OK bodies. Some retry same account first; capacity rotates accounts.
 const CODEX_SSE_RETRY_PATTERNS = ["server_is_overloaded", "service_unavailable_error"];
 const CODEX_SSE_ACCOUNT_FALLBACK_PATTERNS = ["selected model is at capacity", "model_at_capacity"];
-const CODEX_SSE_USER_OUTPUT_PATTERNS = [
-  "event: response.output_text.delta",
-  "event: response.function_call_arguments.delta",
-  '"type":"response.output_text.delta"',
-  '"type":"response.function_call_arguments.delta"',
-];
 const CODEX_SSE_PEEK_BYTES = 256 * 1024;
 const CODEX_MODEL_CAPACITY_MESSAGE = "Selected model is at capacity. Please try a different model.";
 
@@ -176,44 +171,6 @@ function normalizeReasoningEffort(model, value, metadata = null) {
   return value;
 }
 
-function findNestedMessage(value, depth = 0) {
-  if (!value || depth > 6 || typeof value === "string") return null;
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = findNestedMessage(item, depth + 1);
-      if (found) return found;
-    }
-    return null;
-  }
-  if (typeof value !== "object") return null;
-  if (typeof value.message === "string" && value.message.trim()) return value.message;
-  if (typeof value.error?.message === "string" && value.error.message.trim()) return value.error.message;
-  if (typeof value.response?.error?.message === "string" && value.response.error.message.trim()) return value.response.error.message;
-  for (const child of Object.values(value)) {
-    const found = findNestedMessage(child, depth + 1);
-    if (found) return found;
-  }
-  return null;
-}
-
-function extractSseErrorMessage(text, fallback) {
-  const exact = text?.match(/Selected model is at capacity\. Please try a different model\./i)?.[0];
-  if (exact) return exact;
-
-  for (const line of String(text || "").split(/\r?\n/)) {
-    if (!line.startsWith("data:")) continue;
-    const data = line.slice(5).trim();
-    if (!data || data === "[DONE]") continue;
-    try {
-      const message = findNestedMessage(JSON.parse(data));
-      if (message) return message;
-    } catch {
-      // Ignore non-JSON SSE data lines.
-    }
-  }
-
-  return fallback || CODEX_MODEL_CAPACITY_MESSAGE;
-}
 
 function codexSseErrorResponse(status, message) {
   return new Response(JSON.stringify({
@@ -361,9 +318,55 @@ export class CodexExecutor extends BaseExecutor {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     const chunks = [];
-    let text = "";
-    let matched = null;
-    let accountFallback = false;
+    let bytes = 0;
+    let line = "";
+    let lines = [];
+    let afterCR = false;
+    let outcome = null;
+    const inspect = () => {
+      const record = parseOpenAIResponsesSSERecord(lines.join("\n"));
+      lines = [];
+      if (!record) return null;
+      if (record.done || record.malformed) return { matched: null };
+      const { type, data } = record;
+      const error = type === "error" || type === "response.failed" || (data?.response?.status === "failed" && data.response.error)
+        ? (data?.error || data?.response?.error || (type === "error" ? data : null)) : null;
+      if (error && typeof error === "object") {
+        const fields = [error.code, error.type, error.message].filter(value => typeof value === "string");
+        const lower = fields.join(" ").toLowerCase();
+        const accountHit = CODEX_SSE_ACCOUNT_FALLBACK_PATTERNS.find(pattern => lower.includes(pattern));
+        const retryHit = CODEX_SSE_RETRY_PATTERNS.find(pattern => lower.includes(pattern));
+        if (accountHit || retryHit) return {
+          matched: accountHit || retryHit,
+          message: error.message || accountHit || retryHit,
+          accountFallback: !!accountHit,
+        };
+        return { matched: null };
+      }
+      if (["response.created", "response.in_progress", "response.metadata", "codex.response.metadata"].includes(type)) return null;
+      if (["response.output_item.added", "response.output_item.done", "response.content_part.added"].includes(type)) {
+        const item = data?.item || data?.part || {};
+        if (["function_call", "custom_tool_call"].includes(item.type) && (item.name || item.call_id || item.id)) return { matched: null };
+        if (["content", "summary", "arguments", "input", "encrypted_content"].some(key => item[key] != null && (typeof item[key] !== "string" || item[key].length > 0) && (!Array.isArray(item[key]) || item[key].length))) return { matched: null };
+        return null;
+      }
+      if (type?.endsWith(".delta") && ["response.output_text", "response.reasoning_summary_text", "response.reasoning_text", "response.function_call_arguments", "response.custom_tool_call_input", "response.refusal"].some(prefix => type === `${prefix}.delta`)) {
+        return data?.delta ? { matched: null } : null;
+      }
+      return { matched: null };
+    };
+    const observe = (text) => {
+      for (const char of text) {
+        if (afterCR) { afterCR = false; if (char === "\n") continue; }
+        if (char === "\r" || char === "\n") {
+          if (line) lines.push(line);
+          else if (lines.length) outcome = inspect();
+          line = "";
+          if (char === "\r") afterCR = true;
+          if (outcome) break;
+        } else line += char;
+      }
+    };
     const cancel = (reason) => {
       try { Promise.resolve(reader.cancel(reason)).catch(() => {}); } catch {}
     };
@@ -378,25 +381,26 @@ export class CodexExecutor extends BaseExecutor {
       signal?.removeEventListener("abort", onAbort);
     };
     try {
-      while (text.length < CODEX_SSE_PEEK_BYTES) {
+      while (bytes < CODEX_SSE_PEEK_BYTES && !outcome) {
         if (preResponse?.signal.aborted || signal?.aborted) throw preResponse?.signal.aborted ? preResponse.signal.reason : signal.reason;
         const { done, value } = await (preResponse ? preResponse.run(() => reader.read()) : reader.read());
-        if (done) break;
+        if (done) {
+          observe(decoder.decode());
+          if (!outcome && line) lines.push(line);
+          if (!outcome && lines.length) outcome = inspect();
+          break;
+        }
         chunks.push(value);
-        text += decoder.decode(value, { stream: true });
-        const lowerText = text.toLowerCase();
-        const accountHit = CODEX_SSE_ACCOUNT_FALLBACK_PATTERNS.find(p => lowerText.includes(p));
-        if (accountHit) { matched = accountHit; accountFallback = true; break; }
-        const retryHit = CODEX_SSE_RETRY_PATTERNS.find(p => lowerText.includes(p));
-        if (retryHit) { matched = retryHit; break; }
-        if (CODEX_SSE_USER_OUTPUT_PATTERNS.some(p => lowerText.includes(p))) break;
+        const count = Math.min(value.byteLength, CODEX_SSE_PEEK_BYTES - bytes);
+        bytes += count;
+        observe(decoder.decode(value.subarray(0, count), { stream: true }));
       }
       if (preResponse?.signal.aborted || signal?.aborted) throw preResponse?.signal.aborted ? preResponse.signal.reason : signal.reason;
       detach();
-      if (matched) {
+      if (outcome?.matched) {
         cancel();
         reader.releaseLock();
-        return { matched, message: extractSseErrorMessage(text, matched), accountFallback, replacementBody: null };
+        return { ...outcome, replacementBody: null };
       }
       reader.releaseLock();
     } catch (error) {
@@ -408,24 +412,26 @@ export class CodexExecutor extends BaseExecutor {
 
     const upstream = response.body;
     let upstreamReader = null;
+    let index = 0;
     const replacementBody = new ReadableStream({
-      start(controller) {
-        for (const chunk of chunks) controller.enqueue(chunk);
-        upstreamReader = upstream.getReader();
-      },
-      async pull(controller) {
-        try {
-          const { done, value } = await upstreamReader.read();
+      pull(controller) {
+        if (index < chunks.length) {
+          controller.enqueue(chunks[index++]);
+          return;
+        }
+        upstreamReader ||= upstream.getReader();
+        return upstreamReader.read().then(({ done, value }) => {
           if (done) { upstreamReader.releaseLock(); controller.close(); return; }
           controller.enqueue(value);
-        } catch (error) {
+        }).catch(error => {
           try { upstreamReader.releaseLock(); } catch {}
           controller.error(error);
-        }
+        });
       },
       cancel(reason) {
-        try { Promise.resolve(upstreamReader?.cancel(reason)).catch(() => {}); } catch {}
-        try { upstreamReader?.releaseLock(); } catch {}
+        upstreamReader ||= upstream.getReader();
+        try { Promise.resolve(upstreamReader.cancel(reason)).catch(() => {}); } catch {}
+        try { upstreamReader.releaseLock(); } catch {}
       },
     });
     return { matched: null, message: null, accountFallback: false, replacementBody };

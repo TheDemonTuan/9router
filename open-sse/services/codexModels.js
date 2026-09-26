@@ -5,6 +5,7 @@ import { withCodexReviewModels } from "../providers/models/helpers.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { refreshProviderCredentials } from "./oauthCredentialManager.js";
 import { projectPublicModel } from "../providers/publicModel.js";
+import { cancelResponseBody } from "./usage/shared.js";
 
 export const CODEX_MODELS_URL = "https://chatgpt.com/backend-api/codex/models";
 export const CODEX_OFFICIAL_MODELS_URL = "https://raw.githubusercontent.com/openai/codex/main/codex-rs/models-manager/models.json";
@@ -547,12 +548,34 @@ function createRequestSignal(externalSignal) {
 }
 
 async function fetchJson(fetchImpl, url, options, proxyOptions, externalSignal) {
+  if (externalSignal?.aborted) throw externalSignal.reason || new Error("Operation aborted");
   const request = createRequestSignal(externalSignal);
   const timer = setTimeout(request.abort, CODEX_MODEL_FETCH_TIMEOUT_MS);
+  let response;
+  let abortFetch;
+  const abortPromise = new Promise((_, reject) => {
+    abortFetch = () => reject(request.signal.reason);
+  });
+  abortPromise.catch(() => {});
+  request.signal.addEventListener("abort", abortFetch, { once: true });
   try {
-    return await fetchImpl(url, { ...options, signal: request.signal }, proxyOptions || null);
+    const fetchPromise = Promise.resolve().then(() => fetchImpl(url, { ...options, signal: request.signal }, proxyOptions || null));
+    fetchPromise.then(late => { if (request.signal.aborted && late !== response) cancelResponseBody(late); }, () => {});
+    response = await Promise.race([fetchPromise, abortPromise]);
+    if (request.signal.aborted) throw request.signal.reason;
+    if (response.status === 304 || !response.ok) {
+      cancelResponseBody(response);
+      return { response, payload: null };
+    }
+    const payload = await Promise.race([response.json(), abortPromise]);
+    if (request.signal.aborted) throw request.signal.reason;
+    return { response, payload };
+  } catch (error) {
+    if (response) cancelResponseBody(response);
+    throw error;
   } finally {
     clearTimeout(timer);
+    request.signal.removeEventListener("abort", abortFetch);
     request.cleanup();
   }
 }
@@ -595,7 +618,7 @@ async function fetchLiveCatalog(connection, previous, options) {
   let retried = false;
 
   while (token) {
-    const response = await fetchJson(fetchImpl, buildCodexUrl(), {
+    const { response, payload } = await fetchJson(fetchImpl, buildCodexUrl(), {
       method: "GET",
       headers: buildLiveHeaders(current, token, etag),
       cache: "no-store",
@@ -614,7 +637,7 @@ async function fetchLiveCatalog(connection, previous, options) {
     }
     if (!response.ok) throw Object.assign(new Error(`Codex model catalog request failed (${response.status})`), { status: response.status });
 
-    const payload = await response.json();
+    if (payload == null) throw new Error("Codex model catalog returned empty JSON");
     const normalized = normalizeCodexCatalog(payload, { includeCandidates: true });
     const entry = makeCatalogEntry(normalized.models, response, Date.now());
     entry.candidateModels = normalized.candidateModels;
@@ -674,7 +697,7 @@ async function resolveOfficialCatalog(options) {
     },
     cache: "no-store",
   }, options.proxyOptions, options.signal)
-    .then(async (response) => {
+    .then(async ({ response, payload }) => {
       if (response.status === 304) {
         if (!previous) throw new Error("Codex official catalog returned 304 without cached data");
         officialCache = makeCatalogEntry(previous.models, response, now, previous);
@@ -682,7 +705,8 @@ async function resolveOfficialCatalog(options) {
         return { ...officialCache, source: "github", access: "unverified", stale: false };
       }
       if (!response.ok) throw Object.assign(new Error(`Codex official catalog request failed (${response.status})`), { status: response.status });
-      const normalized = normalizeCodexCatalog(await response.json(), { includeCandidates: true });
+      if (payload == null) throw new Error("Codex official catalog returned empty JSON");
+      const normalized = normalizeCodexCatalog(payload, { includeCandidates: true });
       officialCache = makeCatalogEntry(normalized.models, response, now);
       officialCache.candidateModels = normalized.candidateModels;
       officialFailureAt = 0;
@@ -799,13 +823,14 @@ export function mergeCodexModelLists(modelLists) {
 export async function resolveCodexModels(connection, options = {}) {
   const staticFallback = buildStaticFallback();
   const hasToken = Boolean(getAccessToken(connection));
-  let liveResult = null;
+  const [liveResult, official] = await Promise.all([
+    hasToken ? resolveLiveCatalog(connection, options) : Promise.resolve(null),
+    resolveOfficialCatalog(options),
+  ]);
   let warning = null;
 
   if (hasToken) {
-    liveResult = await resolveLiveCatalog(connection, options);
     if (liveResult) {
-      const official = await resolveOfficialCatalog(options);
       const enriched = enrichModels(liveResult.entry.models, official?.models);
       const compatible = splitCompatibleModels(enriched, liveResult.entry.candidateModels || []);
       return {
@@ -823,7 +848,6 @@ export async function resolveCodexModels(connection, options = {}) {
     const key = getCodexCacheKey(connection);
     const stale = liveLastKnownGood.get(key);
     if (stale && stale.staleAt > Date.now()) {
-      const official = await resolveOfficialCatalog(options);
       const enriched = enrichModels(stale.models, official?.models);
       const compatible = splitCompatibleModels(enriched, stale.candidateModels || []);
       return {
@@ -840,7 +864,6 @@ export async function resolveCodexModels(connection, options = {}) {
     warning = "Live Codex catalog unavailable; showing an unverified catalog.";
   }
 
-  const official = await resolveOfficialCatalog(options);
   if (official?.models?.length) {
     const compatible = splitCompatibleModels(enrichModels(official.models, staticModels()), official.candidateModels || []);
     return {

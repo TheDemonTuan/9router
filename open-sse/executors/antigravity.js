@@ -280,7 +280,7 @@ export class AntigravityExecutor extends BaseExecutor {
             name,
             ...(schema
               ? isJsonSchema
-                ? { parametersJsonSchema: cleanToolJsonSchemaForGemini(structuredClone(schema)) }
+                ? { parametersJsonSchema: cleanToolJsonSchemaForGemini(schema) }
                 : { parameters: cleanJSONSchemaForAntigravity(structuredClone(schema)) }
               : { parameters: { type: "object", properties: { reason: { type: "string", description: "Brief explanation" } }, required: ["reason"] } }),
           });

@@ -63,6 +63,7 @@ jobs:
             unit/route-adapter-lifecycle.test.js \
             unit/workflow-integrity.test.js \
             unit/codex-fast-capacity.test.js \
+            unit/codex-models.test.js \
             unit/antigravity-weekly-quota.test.js \
             unit/gemini-native-endpoint.test.js \
             unit/ollama-stream-tail.test.js \
@@ -88,6 +89,8 @@ jobs:
         run: bun tests/integration/quota-persistence-smoke.mjs
       - name: Run pre-response lifecycle smoke test
         run: bun tests/integration/pre-response-lifecycle-smoke.mjs
+      - name: Verify DNS-bypass transport on loopback
+        run: bun tests/integration/bypass-transport-smoke.mjs
       - name: Verify blue-green reconcile and drain safety
         run: bash tests/unit/blue-green-reconcile.test.sh
       - name: Run retired settings migration smoke
