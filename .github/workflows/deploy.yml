@@ -46,10 +46,10 @@ jobs:
     permissions:
       contents: read
       packages: write
-    uses: TheDemonTuan/vps-deploy/.github/workflows/build-docker.yml@c4f24cd3fcd379468611ec3596651cadef934af4
+    uses: TheDemonTuan/vps-deploy/.github/workflows/build-docker.yml@54ace90eedf6bafbc2cfce813832e05c775ed1ae
     with:
       source-sha: ${{ github.sha }}
-      platform-ref: c4f24cd3fcd379468611ec3596651cadef934af4
+      platform-ref: 54ace90eedf6bafbc2cfce813832e05c775ed1ae
       config: .deploy/app.yml
 
   deploy:
@@ -57,11 +57,11 @@ jobs:
     needs: build
     if: github.event_name == 'push' || !inputs.skip_deploy
     # Use the same 40-hex release SHA as the build caller and the installed host profile.
-    uses: TheDemonTuan/vps-deploy/.github/workflows/deploy-vps.yml@c4f24cd3fcd379468611ec3596651cadef934af4
+    uses: TheDemonTuan/vps-deploy/.github/workflows/deploy-vps.yml@54ace90eedf6bafbc2cfce813832e05c775ed1ae
     with:
       app: 9router
       component: app
       source-sha: ${{ github.sha }}
-      platform-ref: c4f24cd3fcd379468611ec3596651cadef934af4
+      platform-ref: 54ace90eedf6bafbc2cfce813832e05c775ed1ae
       config: .deploy/app.yml
       image-ref: ${{ needs.build.outputs.image-ref }}
