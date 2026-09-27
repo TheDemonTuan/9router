@@ -81,9 +81,9 @@ cd /opt/9router
 
 ## RTK sidecar riêng
 
-RTK là tối ưu tùy chọn: không có sidecar hoặc sidecar lỗi thì tool output giữ nguyên. Không mở port RTK công khai; chỉ app nối network `9router-rtk` nội bộ. Publish image ở workflow `rtk-sidecar.yml` bằng `workflow_dispatch` với `publish=true` trên nhánh mặc định, sau khi cả amd64 và arm64 smoke qua. Lấy **manifest digest** từ job summary; không dùng tag mutable.
+RTK là tối ưu tùy chọn: không có sidecar hoặc sidecar lỗi thì tool output giữ nguyên. Không mở port RTK công khai; chỉ app nối network `9router-rtk` nội bộ. Sau khi PR qua native smoke trên cả amd64/arm64 và merge vào `master`, chạy workflow `rtk-sidecar.yml` bằng `workflow_dispatch`, `publish=true`, `deploy=true`. Workflow publish manifest digest bất biến rồi bootstrap sidecar trên VPS dưới deployment lock; không đổi route app.
 
-Trước **lần đầu** deploy app có RTK, sync `docker-compose.rtk.yml` và `deploy.sh` tới host theo quy trình release rồi bootstrap:
+Nếu app workflow chạy ngay khi merge mà network chưa bootstrap, bước deploy app sẽ dừng **trước khi stop slot cũ**. Sau khi sidecar workflow thành công, chạy lại workflow app qua `workflow_dispatch` (giữ `skip_deploy=false`). Có thể thao tác trực tiếp trên host bằng các lệnh tương đương sau:
 
 ```bash
 ./deploy.sh --rtk ghcr.io/<owner>/rtk-sidecar@sha256:<manifest-digest>

@@ -19,6 +19,10 @@ on:
         type: boolean
         default: false
         description: Publish immutable multiarchitecture image (default branch only)
+      deploy:
+        type: boolean
+        default: false
+        description: Deploy published digest to VPS after both architecture gates pass
 permissions:
   contents: read
   packages: write
@@ -99,6 +103,8 @@ jobs:
     needs: native
     if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-24.04
+    outputs:
+      image_ref: ${{ steps.publish.outputs.image_ref }}
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -110,6 +116,7 @@ jobs:
           merge-multiple: true
       - uses: docker/setup-buildx-action@v4
       - name: Create immutable multiarchitecture manifest
+        id: publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -124,3 +131,53 @@ jobs:
           docker buildx imagetools create -t "${image}:${tag}" "$(cat rtk-amd64.txt)" "$(cat rtk-arm64.txt)"
           digest="$(docker buildx imagetools inspect "${image}:${tag}" --format '{{.Manifest.Digest}}')"
           echo "RTK_IMAGE=${image}@${digest}" >> "$GITHUB_STEP_SUMMARY"
+          echo "image_ref=${image}@${digest}" >> "$GITHUB_OUTPUT"
+
+  bootstrap:
+    needs: manifest
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && inputs.deploy && github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          if [ -n "$VPS_KNOWN_HOSTS" ]; then printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts; chmod 600 ~/.ssh/known_hosts; fi
+      - name: Bootstrap isolated RTK service
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/opt/9router' }}
+          IMAGE_REF: ${{ needs.manifest.outputs.image_ref }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9_./-]+$ && "$DEPLOY_PATH" != *..* ]] || exit 1
+          [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]] || exit 1
+          [[ "$GITHUB_ACTOR" =~ ^[A-Za-z0-9-]+$ ]] || exit 1
+          stage=".rtk-incoming-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+            "$VPS_USER@$VPS_HOST" "mkdir -p '$DEPLOY_PATH/$stage'"
+          scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+            docker-compose.rtk.yml deploy.sh "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/$stage/"
+          printf '%s' "$GHCR_TOKEN" | ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+            "$VPS_USER@$VPS_HOST" "docker login ghcr.io -u '$GITHUB_ACTOR' --password-stdin"
+          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+            "$VPS_USER@$VPS_HOST" "bash -se -- '$DEPLOY_PATH' '$stage' '$IMAGE_REF'" <<'REMOTE'
+          set -euo pipefail
+          cd "$1"
+          flock -n .deployment.lock bash -e -c '
+            mv -- "$1/docker-compose.rtk.yml" docker-compose.rtk.yml
+            mv -- "$1/deploy.sh" deploy.sh
+            chmod +x deploy.sh
+            rmdir -- "$1"
+          ' _ "$2"
+          ./deploy.sh --rtk "$3"
+          REMOTE
