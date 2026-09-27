@@ -138,6 +138,7 @@ try {
     }
   } finally { await rm(home, { recursive: true, force: true }); }
   const fixtureHome = await mkdtemp(join(tmpdir(), "router-rtk-fixture-"));
+  await chmod(fixtureHome, 0o755);
   try {
     const fixture = join(fixtureHome, "rtk");
     await writeFile(fixture, `#!/usr/bin/env bun
