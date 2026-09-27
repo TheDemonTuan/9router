@@ -96,6 +96,90 @@ describe("RTK process dashboard", () => {
     expect(requests).toBe(1);
   });
 
+  it("distinguishes missing results, unsupported text and unlinked calls", async () => {
+    let requests = 0;
+    await setup(() => { requests++; return output("shortened"); });
+    const raw = "x".repeat(800);
+    const absent = { input: [{ type: "message", content: "hello" }] };
+    const nonText = { input: [{ type: "function_call_output", call_id: "orphan", output: [{ type: "input_image", image_url: "synthetic" }] }] };
+    const orphan = { input: [{ type: "function_call_output", call_id: "orphan", output: raw }] };
+    for (const prepared of [absent, nonText, orphan]) {
+      const original = structuredClone(prepared);
+      await compressor.compressMessages(prepared, true);
+      expect(prepared).toEqual(original);
+    }
+    await compressor.compressMessages(body(raw), false);
+    const snapshot = state.getRtkSnapshot();
+    expect(snapshot.usage.eligibility).toMatchObject({ toolResults: 2, textLeaves: 1, resultsWithoutText: 1, noToolResultsPreparations: 1, rejected: { unlinked_call: 1 } });
+    expect(snapshot.usage.http.attempts).toBe(0);
+    expect(requests).toBe(0);
+    snapshot.usage.eligibility.rejected.unlinked_call = 900;
+    snapshot.usage.eligibility.toolResults = 900;
+    expect(state.getRtkSnapshot().usage.eligibility).toMatchObject({ toolResults: 2, rejected: { unlinked_call: 1 } });
+  });
+
+  it("classifies Responses function/custom outputs while preserving rejected payloads", async () => {
+    let requests = 0;
+    await setup(() => { requests++; return output("shortened"); });
+    const raw = "x".repeat(800);
+    const cases = [
+      { type: "function", name: "functions.bash", input: { command: "git diff" }, reason: null },
+      { type: "custom_tool", name: "Bash", input: "git diff", reason: null },
+      { type: "function", name: "functions.read", input: { path: "synthetic" }, reason: "missing_command" },
+      { type: "function", name: "functions.grep", input: { pattern: "x", path: "synthetic" }, reason: "missing_command" },
+      { type: "function", name: "Bash", input: { command: "pwd && git diff" }, reason: "unsupported_shell_syntax" },
+      { type: "function", name: "Bash", input: { command: "git diff --stat" }, reason: "unsupported_output_format" },
+      { type: "function", name: "Bash", input: { command: "cargo build" }, reason: "unsupported_mode" },
+      { type: "function", name: "Bash", input: { command: "unknown-command" }, reason: "unsupported_command" },
+      { type: "function", name: "Bash", input: { command: "rtk git diff" }, reason: "already_rtk" },
+      { type: "function", name: "Bash", input: { command: "git diff", cmd: "git status" }, reason: "invalid_command_metadata" },
+      { type: "function", name: "Bash", input: { command: "x".repeat(8193) }, reason: "metadata_limit" },
+    ];
+    for (const [index, example] of cases.entries()) {
+      const type = example.type === "custom_tool" ? "custom_tool_call" : "function_call";
+      const prepared = { input: [
+        { type, call_id: `c${index}`, name: example.name, [example.type === "custom_tool" ? "input" : "arguments"]: example.type === "custom_tool" ? example.input : JSON.stringify(example.input) },
+        { type: `${type}_output`, call_id: `c${index}`, output: raw },
+      ] };
+      await compressor.compressMessages(prepared, true);
+      expect(prepared.input[1].output).toBe(example.reason ? raw : "shortened");
+    }
+    const eligibility = state.getRtkSnapshot().usage.eligibility;
+    expect(eligibility).toMatchObject({ toolResults: cases.length, textLeaves: cases.length, resultsWithoutText: 0, rejected: {
+      missing_command: 2, unsupported_shell_syntax: 1, unsupported_output_format: 1, unsupported_mode: 1,
+      unsupported_command: 1, already_rtk: 1, invalid_command_metadata: 1, metadata_limit: 1,
+    } });
+    expect(requests).toBe(2);
+    expect(state.getRtkSnapshot().usage.http.attempts).toBe(2);
+  });
+
+  it("assigns one rejection per leaf in gate order, including duplicate calls", async () => {
+    let requests = 0;
+    await setup(() => { requests++; return output("shortened"); });
+    const raw = "x".repeat(800);
+    const samples = [
+      { content: "x".repeat(499), is_error: true, expected: "error_result" },
+      { content: "€".repeat(166), expected: "below_min_bytes" },
+      { content: "x".repeat(10_485_761), expected: "above_max_bytes" },
+      { content: raw, duplicate: true, expected: "unlinked_call" },
+    ];
+    for (const example of samples) {
+      const prepared = body(example.content);
+      if (example.is_error) prepared.messages[1].is_error = true;
+      if (example.duplicate) prepared.messages[0].tool_calls.push(call());
+      const original = structuredClone(prepared);
+      await compressor.compressMessages(prepared, true);
+      expect(prepared).toEqual(original);
+      expect(state.getRtkSnapshot().usage.eligibility.rejected[example.expected]).toBe(1);
+    }
+    const budgeted = { messages: [{ role: "assistant", tool_calls: [call()] },
+      { role: "tool", tool_call_id: "call", content: "x".repeat(10_485_000) },
+      { role: "tool", tool_call_id: "call", content: raw }] };
+    await compressor.compressMessages(budgeted, true);
+    expect(budgeted.messages[2].content).toBe(raw);
+    expect(state.getRtkSnapshot().usage.eligibility.rejected.selection_budget).toBe(1);
+    expect(requests).toBe(1);
+  });
   it("probes health, version, identity once without touching usage or circuit", async () => {
     const visited = [];
     await setup((request, input) => {

@@ -16,6 +16,12 @@ export const RTK_CONFIG = Object.freeze({
   maxSelectedBytes: 10_485_760,
 });
 
+export const RTK_REJECTIONS = Object.freeze([
+  "error_result", "below_min_bytes", "above_max_bytes", "selection_budget", "unlinked_call",
+  "invalid_command_metadata", "metadata_limit", "missing_command", "unsupported_shell_syntax",
+  "already_rtk", "unsupported_command", "unsupported_mode", "unsupported_output_format",
+]);
+
 export const RTK_FILTERS = Object.freeze([
   "cargo-test", "cargo", "pytest", "go-test", "go-build", "ctest", "tsc", "vitest",
   "grep", "rg", "find", "fd", "git-log", "git-diff", "git-status", "log", "mypy",

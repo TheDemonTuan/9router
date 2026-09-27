@@ -6,7 +6,7 @@ import { getRtkState } from "./state.js";
 import { classifyToolCall } from "./classifier.js";
 import { filterToolOutput } from "./client.js";
 
-function collect(body, visit) {
+function collect(body, visit, eligibility) {
   const shapes = [body.conversationState, body.request?.contents, body.contents, body.messages, body.input].filter(x => Array.isArray(x) ? x.length : Boolean(x));
   if (shapes.length !== 1) return false;
   const calls = new Map();
@@ -29,20 +29,31 @@ function collect(body, visit) {
     return call;
   }
   function leaf(owner, key, shape, call, skip) {
-    if (typeof owner?.[key] === "string") visit(owner, key, shape, call, skip);
+    if (typeof owner?.[key] !== "string") return 0;
+    eligibility.textLeaves++;
+    visit(owner, key, shape, call, skip);
+    return 1;
   }
   function parts(owner, key, type, shape, call, skip) {
-    if (typeof owner?.[key] === "string") leaf(owner, key, shape, call, skip);
-    else if (Array.isArray(owner?.[key])) for (const part of owner[key]) if (part?.type === type) leaf(part, "text", shape === "claude-string" ? "claude-array" : shape + "-array", call, skip);
+    if (typeof owner?.[key] === "string") return leaf(owner, key, shape, call, skip);
+    let count = 0;
+    if (Array.isArray(owner?.[key])) for (const part of owner[key]) if (part?.type === type) count += leaf(part, "text", shape === "claude-string" ? "claude-array" : shape + "-array", call, skip);
+    return count;
+  }
+  function result(leaves) {
+    eligibility.toolResults++;
+    if (!leaves) eligibility.resultsWithoutText++;
   }
   if (body.conversationState) {
     const state = body.conversationState;
     const items = [...(Array.isArray(state.history) ? state.history : []), ...(state.currentMessage ? [state.currentMessage] : [])];
     for (const item of items) {
       for (const use of item?.assistantResponseMessage?.toolUses ?? []) add(use?.toolUseId, use?.name, use?.input);
-      for (const result of item?.userInputMessage?.userInputMessageContext?.toolResults ?? []) {
-        const call = match(result?.toolUseId);
-        for (const part of result?.content ?? []) leaf(part, "text", "kiro-tool-result", call, result.status === "error" || result.is_error === true);
+      for (const itemResult of item?.userInputMessage?.userInputMessageContext?.toolResults ?? []) {
+        const call = match(itemResult?.toolUseId);
+        let leaves = 0;
+        for (const part of itemResult?.content ?? []) leaves += leaf(part, "text", "kiro-tool-result", call, itemResult.status === "error" || itemResult.is_error === true);
+        result(leaves);
       }
     }
   } else if (body.request?.contents || body.contents) {
@@ -55,8 +66,12 @@ function collect(body, visit) {
       if (!response) continue;
       const call = match(response.id, response.name, true);
       const skip = response.is_error === true || response.status === "error" || response.response?.error != null;
-      if (typeof response.response === "string") leaf(response, "response", shape, call, skip);
-      else for (const key of ["result", "output", "content"]) leaf(response.response, key, shape, call, skip);
+      if (typeof response.response === "string") result(leaf(response, "response", shape, call, skip));
+      else {
+        let leaves = 0;
+        for (const key of ["result", "output", "content"]) leaves += leaf(response.response, key, shape, call, skip);
+        result(leaves);
+      }
     }
   } else if (Array.isArray(body.messages)) {
     for (const item of body.messages) {
@@ -64,17 +79,17 @@ function collect(body, visit) {
         for (const call of item.tool_calls ?? []) add(call?.id, call?.function?.name, call?.function?.arguments);
         for (const block of Array.isArray(item.content) ? item.content : []) if (block?.type === CLAUDE_BLOCK.TOOL_USE) add(block.id, block.name, block.input);
       }
-      if (item?.role === ROLE.TOOL) parts(item, "content", OPENAI_BLOCK.TEXT, "openai-tool", match(item.tool_call_id), item.is_error === true || item.status === "error");
+      if (item?.role === ROLE.TOOL) result(parts(item, "content", OPENAI_BLOCK.TEXT, "openai-tool", match(item.tool_call_id), item.is_error === true || item.status === "error"));
       else for (const block of Array.isArray(item?.content) ? item.content : []) {
         if (block?.type !== CLAUDE_BLOCK.TOOL_RESULT) continue;
-        parts(block, "content", CLAUDE_BLOCK.TEXT, "claude-string", match(block.tool_use_id), block.is_error === true || block.status === "error");
+        result(parts(block, "content", CLAUDE_BLOCK.TEXT, "claude-string", match(block.tool_use_id), block.is_error === true || block.status === "error"));
       }
     }
   } else if (Array.isArray(body.input)) {
     for (const item of body.input) {
       if ([RESPONSES_ITEM.FUNCTION_CALL, RESPONSES_ITEM.CUSTOM_TOOL_CALL].includes(item?.type)) add(item.call_id, item.name, item.arguments ?? item.input);
       if (![RESPONSES_ITEM.FUNCTION_CALL_OUTPUT, RESPONSES_ITEM.CUSTOM_TOOL_CALL_OUTPUT].includes(item?.type)) continue;
-      parts(item, "output", RESPONSES_ITEM.INPUT_TEXT, "openai-responses-string", match(item.call_id), item.is_error === true || item.status === "error");
+      result(parts(item, "output", RESPONSES_ITEM.INPUT_TEXT, "openai-responses-string", match(item.call_id), item.is_error === true || item.status === "error"));
     }
   }
   return true;
@@ -118,24 +133,30 @@ export async function compressMessages(body, enabled, { signal, disabledReason =
     }
   };
   try {
+    const resultsBefore = usage.eligibility.toolResults;
+    const reject = rejection => { usage.eligibility.rejected[rejection]++; };
     const supported = collect(body, (owner, key, shape, call, skip) => {
       if (performance.now() >= deadline || controller.signal.aborted) return;
       const content = owner[key];
       const size = Buffer.byteLength(content);
       stats.bytesBefore += size;
       stats.bytesAfter += size;
-      if (skip || size < RTK_CONFIG.minTextBytes || size > RTK_CONFIG.maxTextBytes || selected + size > RTK_CONFIG.maxSelectedBytes) return;
-      const filter = classifyToolCall(call, content);
+      if (skip) { usage.eligibility.rejected.error_result++; return; }
+      if (size < RTK_CONFIG.minTextBytes) { usage.eligibility.rejected.below_min_bytes++; return; }
+      if (size > RTK_CONFIG.maxTextBytes) { usage.eligibility.rejected.above_max_bytes++; return; }
+      if (selected + size > RTK_CONFIG.maxSelectedBytes) { usage.eligibility.rejected.selection_budget++; return; }
+      const filter = classifyToolCall(call, content, reject);
       if (!filter) return;
       selected += size;
       jobs.push({ owner, key, content, size, shape, filter, call });
-    });
+    }, usage.eligibility);
     if (!supported) { reason = "unsupported_shape"; return null; }
+    if (usage.eligibility.toolResults === resultsBefore && performance.now() < deadline && !combined.aborted) usage.eligibility.noToolResultsPreparations++;
     let next = 0;
     async function worker() {
       while (next < jobs.length && !combined.aborted && performance.now() < deadline) {
         const job = jobs[next++];
-        if (job.call?.ambiguous) continue;
+        if (job.call?.ambiguous) { usage.eligibility.rejected.unlinked_call++; continue; }
         eligibleJobs++;
         const output = await filterToolOutput({ filter: job.filter, content: job.content, signal: combined, internalSignal: controller.signal });
         if (signal?.aborted) throw signal.reason;

@@ -12,14 +12,23 @@ const labels = {
   circuit_open: "Circuit cooldown", probe_in_flight: "Recovery probe in flight", saturated: "Request concurrency full", payload_limit: "HTTP payload too large",
   unreachable: "Sidecar unreachable", transport_error: "Transport error", bad_response: "Invalid sidecar response", busy: "Sidecar busy",
 };
+const eligibilityLabels = {
+  toolResults: "Tool result containers", textLeaves: "Supported text leaves", resultsWithoutText: "Results without supported text",
+  noToolResultsPreparations: "Preparations without tool results",
+  error_result: "Error result", below_min_bytes: "Below minimum bytes", above_max_bytes: "Above maximum bytes",
+  selection_budget: "Selection byte budget", unlinked_call: "Missing or ambiguous call metadata",
+  invalid_command_metadata: "Invalid command metadata", metadata_limit: "Command metadata too large",
+  missing_command: "Missing command", unsupported_shell_syntax: "Unsupported shell syntax", already_rtk: "Already RTK",
+  unsupported_command: "Unsupported command", unsupported_mode: "Unsupported command mode", unsupported_output_format: "Unsupported output format",
+};
 const num = value => value == null ? "—" : value.toLocaleString();
 const date = value => value ? new Date(value).toLocaleString() : "—";
 function Metric({ label, value, sub }) {
   return <Card className="p-4"><p className="text-xs text-text-muted uppercase tracking-wide">{label}</p><p className="text-xl font-semibold mt-1">{value}</p><p className="text-xs text-text-muted mt-0.5">{sub || "\u00a0"}</p></Card>;
 }
-function Breakdown({ title, values }) {
-  const entries = Object.entries(values).filter(([, count]) => count > 0);
-  return <div><h4 className="font-medium mb-2">{title}</h4>{entries.length ? <dl className="grid grid-cols-1 sm:grid-cols-2 gap-1 text-sm">{entries.map(([key, count]) => <div className="flex justify-between gap-3" key={key}><dt>{labels[key] || key}</dt><dd>{num(count)}</dd></div>)}</dl> : <p className="text-sm text-text-muted">None in this process yet</p>}</div>;
+function Breakdown({ title, values, names = labels, showZeros = false }) {
+  const entries = Object.entries(values).filter(([, count]) => showZeros || count > 0);
+  return <div><h4 className="font-medium mb-2">{title}</h4>{entries.length ? <dl className="grid grid-cols-1 sm:grid-cols-2 gap-1 text-sm">{entries.map(([key, count]) => <div className="flex justify-between gap-3" key={key}><dt>{names[key] || key}</dt><dd>{num(count)}</dd></div>)}</dl> : <p className="text-sm text-text-muted">None in this process yet</p>}</div>;
 }
 
 export default function RtkStats({ enabled }) {
@@ -116,6 +125,11 @@ export default function RtkStats({ enabled }) {
     </div>
     <p className="text-sm text-text-muted">Busy: {num(http?.busy)} · Rejected: {num(http?.rejected)} · Cancelled: {num(http?.cancelled)}. These are not successful or failed calls.</p>
     <div className="grid gap-4 md:grid-cols-2"><Breakdown title="Preparation outcomes" values={usage?.preparationReasons || {}} /><Breakdown title="Skipped before HTTP" values={usage?.skipped || {}} /></div>
+    <div aria-label="Tool output eligibility" className="space-y-2">
+      <h4 className="font-medium">Tool output eligibility</h4>
+      <p className="text-sm text-text-muted">Session counts: containers, text leaves, and preparations have different units. One result may contain multiple leaves. Each rejected leaf has at most one reason; deadlines or cancellation can leave counts incomplete. No historical requests are reconstructed.</p>
+      <div className="grid gap-4 md:grid-cols-2"><Breakdown title="Observed results and preparations" values={usage?.eligibility ? { toolResults: usage.eligibility.toolResults, textLeaves: usage.eligibility.textLeaves, resultsWithoutText: usage.eligibility.resultsWithoutText, noToolResultsPreparations: usage.eligibility.noToolResultsPreparations } : {}} names={eligibilityLabels} showZeros /><Breakdown title="Rejected text leaves" values={usage?.eligibility?.rejected || {}} names={eligibilityLabels} /></div>
+    </div>
     <div className="overflow-x-auto"><h4 className="font-medium mb-2">Applied filters</h4>{usage?.filters.length ? <table className="w-full text-sm text-left"><thead><tr><th scope="col">Filter</th><th scope="col">Outputs</th><th scope="col">Bytes saved</th><th scope="col">Estimated tokens</th></tr></thead><tbody>{usage.filters.map(row => <tr key={row.filter} className="border-t border-border"><th scope="row">{row.filter}</th><td>{num(row.appliedOutputs)}</td><td>{num(row.bytesBefore - row.bytesAfter)}</td><td>{num(row.estimatedTokensSaved)}</td></tr>)}</tbody></table> : <p className="text-sm text-text-muted">No tool output compressed in this process yet. Requires supported command metadata and text ≥{num(config?.minTextBytes)} UTF-8 bytes.</p>}</div>
     <p className="text-sm text-text-muted">Last compression: {date(usage?.lastAppliedAt)} · Last successful RTK call: {date(client?.lastSuccessAt)} · Circuit: {client?.circuit || "—"}{client?.circuit === "open" && ` until ${date(client.openUntil)}`} · Active: {num(client?.active)} · Last failure: {client?.lastFailure ? `${labels[client.lastFailure.reason] || client.lastFailure.reason} at ${date(client.lastFailure.at)}` : "—"}</p>
     <p className="text-xs text-text-muted">Current gateway process only. Session started {date(snapshot?.session.startedAt)}{snapshot?.session.slot ? ` · ${snapshot.session.slot} slot` : ""}. Resets on restart/deploy; fallback preparations may be counted again. Applied during request preparation; not proof of provider receipt, completion or billing. Estimate from text length (~4 characters/token), not provider token usage or billed savings.</p>

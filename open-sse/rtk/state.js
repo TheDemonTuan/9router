@@ -1,3 +1,4 @@
+import { RTK_REJECTIONS } from "../config/rtkConfig.js";
 import { randomUUID } from "node:crypto";
 
 const KEY = Symbol.for("9router.rtk.runtime.v1");
@@ -13,6 +14,7 @@ export function getRtkState() {
       preparations: 0, compressedPreparations: 0, appliedOutputs: 0,
       bytesBefore: 0, bytesAfter: 0, estimatedTokensSaved: 0, lastAppliedAt: null,
       preparationReasons: zero(reasons), http: zero(outcomes), skipped: zero(skips), filters: {},
+      eligibility: { toolResults: 0, textLeaves: 0, resultsWithoutText: 0, noToolResultsPreparations: 0, rejected: zero(RTK_REJECTIONS) },
     },
     client: { initialized: false, endpoint: null, endpointState: "unconfigured", dispatcher: null, active: 0, openUntil: 0, generation: 0, probe: false, warningAt: 0, lastSuccessAt: null, lastFailure: null, check: null, checkPromise: null },
   };
@@ -25,6 +27,7 @@ export function getRtkSnapshot() {
     usage: {
       ...usage, preparationReasons: { ...usage.preparationReasons }, http: { ...usage.http },
       skipped: { ...usage.skipped }, filters: Object.values(usage.filters).map(row => ({ ...row })),
+      eligibility: { ...usage.eligibility, rejected: { ...usage.eligibility.rejected } },
     },
   };
 }

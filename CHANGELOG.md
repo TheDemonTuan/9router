@@ -5,6 +5,7 @@
 - **RTK**: replace local JavaScript filters with an optional upstream `rtk pipe` HTTP sidecar; compress linked source-format tool results before translation, preserve original output on sidecar failure, and release the sidecar separately by immutable image digest.
 - **Console logs**: omit routine Responses normalization statistics; RTK logs report actual compression when a linked tool result shrinks.
 - **RTK dashboard**: show per-process compression/HTTP counters, estimated token savings, bypass reasons, and an opt-in bounded sidecar connection check; counters reset on restart and never persist tool output.
+- **RTK diagnosis**: count tool result containers, supported text leaves, and fixed rejection reasons in process memory; show eligibility breakdown without logging request contents or changing compression eligibility.
 
 ## Removed
 - **Headroom**: remove compressor, sidecar, dashboard/CLI controls, and retire persisted settings on upgrade and restore.
