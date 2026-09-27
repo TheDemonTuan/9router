@@ -40,6 +40,7 @@ const PUBLIC_PREFIXES = ["/v1", "/v1beta", "/api/v1", "/api/v1beta", "/codex", "
 
 // Always require JWT token regardless of requireLogin setting
 const ALWAYS_PROTECTED = [
+  "/api/monitor/ready",
   "/api/shutdown",
   "/api/settings/database",
   "/api/version/shutdown",
@@ -274,16 +275,8 @@ export async function proxy(request) {
     // If login not required, allow through
     if (!requireLogin) return NextResponse.next();
 
-    // Verify JWT token
-    const token = request.cookies.get("auth_token")?.value;
-    if (token) {
-      if (await verifyDashboardAuthToken(token)) {
-        return NextResponse.next();
-      } else {
-        return NextResponse.redirect(new URL("/login", request.url));
-      }
-    }
-
+    // Access JWT and dashboard session both require cryptographic verification.
+    if (await hasValidToken(request)) return NextResponse.next();
     return NextResponse.redirect(new URL("/login", request.url));
   }
 
