@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   validateApiKey: vi.fn(),
   getConsistentMachineId: vi.fn(),
   verifyDashboardAuthToken: vi.fn(),
+  verifyCloudflareAccessJwt: vi.fn(),
 }));
 
 vi.mock("next/server", () => ({
@@ -31,6 +32,10 @@ vi.mock("@/shared/utils/machineId", () => ({
 
 vi.mock("@/lib/auth/dashboardSession", () => ({
   verifyDashboardAuthToken: mocks.verifyDashboardAuthToken,
+}));
+
+vi.mock("@/lib/auth/cloudflareAccess", () => ({
+  verifyCloudflareAccessJwt: mocks.verifyCloudflareAccessJwt,
 }));
 
 const { proxy, __test__ } = await import("../../src/dashboardGuard.js");
@@ -306,6 +311,51 @@ describe("RTK dashboard API guard", () => {
       expect((await proxy(request(path, { host: "api.example.com" }))).status).toBe(404);
     });
   }
+});
+
+describe("dashboard and monitor Access guard", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    delete process.env.API_HOST;
+    mocks.getSettings.mockResolvedValue({ requireLogin: true, tunnelDashboardAccess: true });
+    mocks.verifyDashboardAuthToken.mockResolvedValue(false);
+    mocks.verifyCloudflareAccessJwt.mockResolvedValue(false);
+    mocks.getConsistentMachineId.mockResolvedValue("cli-token");
+  });
+
+  it("accepts verified Access JWT on dashboard", async () => {
+    mocks.verifyCloudflareAccessJwt.mockResolvedValue(true);
+    expect(await proxy(request("/dashboard", { "cf-access-jwt-assertion": "valid-jwt" }))).toBe(mocks.nextResponse);
+    expect(mocks.verifyCloudflareAccessJwt).toHaveBeenCalledWith("valid-jwt");
+  });
+
+  it("redirects invalid JWT instead of trusting its presence", async () => {
+    const response = await proxy(request("/dashboard", { "cf-access-jwt-assertion": "invalid-jwt" }));
+    expect(response.status).toBe(307);
+    expect(response.url.pathname).toBe("/login");
+  });
+
+  it("accepts existing signed dashboard cookie", async () => {
+    mocks.verifyDashboardAuthToken.mockResolvedValue(true);
+    const authorized = request("/dashboard");
+    authorized.cookies.get.mockImplementation((name) => name === "auth_token" ? { value: "session" } : undefined);
+    expect(await proxy(authorized)).toBe(mocks.nextResponse);
+  });
+
+  it("requires auth for readiness even with requireLogin disabled", async () => {
+    mocks.getSettings.mockResolvedValue({ requireLogin: false });
+    expect((await proxy(request("/api/monitor/ready", { host: "admin.example.com" }))).status).toBe(401);
+    mocks.verifyCloudflareAccessJwt.mockResolvedValue(true);
+    expect(await proxy(request("/api/monitor/ready", { "cf-access-jwt-assertion": "jwt" }))).toBe(mocks.nextResponse);
+  });
+
+  it("keeps readiness off the API host", async () => {
+    process.env.API_HOST = "api.example.com";
+    mocks.verifyCloudflareAccessJwt.mockResolvedValue(true);
+    expect((await proxy(request("/api/monitor/ready", {
+      host: "api.example.com", "cf-access-jwt-assertion": "jwt",
+    }))).status).toBe(404);
+  });
 });
 
 describe("dashboard guard helpers", () => {

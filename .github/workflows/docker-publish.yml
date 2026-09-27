@@ -89,6 +89,8 @@ jobs:
             unit/claude-usage-cache.test.js \
             unit/usage-cache-contract.test.js \
             unit/health-route.test.js \
+            unit/dashboard-guard.test.js \
+            unit/monitor-ready-route.test.js \
             unit/alibaba-token-plan-thinking.test.js \
             unit/alibaba-token-plan-catalog.test.js \
             unit/alibaba-token-plan-capabilities.test.js \

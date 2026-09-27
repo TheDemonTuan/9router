@@ -1,6 +1,7 @@
 # Unreleased
 
 ## Changed
+- **Monitoring**: add authenticated `/api/monitor/ready` for SQLite settings-schema availability, distinct from `/api/health` liveness; dashboard HTML exposes a dedicated monitor marker. Configure Cloudflare Access team and admin application AUD on the production host before enabling external probes.
 - **RTK**: replace local JavaScript filters with an optional upstream `rtk pipe` HTTP sidecar; compress linked source-format tool results before translation, preserve original output on sidecar failure, and release the sidecar separately by immutable image digest.
 - **Console logs**: omit routine Responses normalization statistics; RTK logs report actual compression when a linked tool result shrinks.
 - **RTK dashboard**: show per-process compression/HTTP counters, estimated token savings, bypass reasons, and an opt-in bounded sidecar connection check; counters reset on restart and never persist tool output.
@@ -9,6 +10,7 @@
 - **Headroom**: remove compressor, sidecar, dashboard/CLI controls, and retire persisted settings on upgrade and restore.
 
 ## Fixes
+- **Dashboard Access**: verify Cloudflare Access JWT for `/dashboard` alongside existing signed sessions; invalid JWT redirects to login.
 - **Codex streaming**: commit on reasoning, text, or tool events; classify pre-output capacity errors by SSE record instead of matching model text, and replay the original bytes.
 - **Streaming**: time out pending upstream reads without aborting clients paused by downstream backpressure; declare no-transform/no-buffer SSE headers.
 - **Account selection / Codex catalog**: serialize rotation per provider, fetch independent model catalogs concurrently, and bound response-body parsing by the existing request deadline.
