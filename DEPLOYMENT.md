@@ -40,7 +40,7 @@ Hệ thống deploy tự động cho **9router** được thiết kế theo chu�
 
 `TheDemonTuan/9router` dùng environment `production`, giới hạn deployment vào nhánh mặc định `master`. Chỉ environment này giữ `DEPLOY_SSH_KEY` (key riêng cho user `deploy-9router`) và `DEPLOY_KNOWN_HOSTS` (host key đã xác minh). Variables: `DEPLOY_HOST`, `DEPLOY_PORT=22`, `DEPLOY_USER=deploy-9router`. Không dùng lại `VPS_SSH_KEY`, `VPS_USER`, `VPS_HOST`, `VPS_PORT`, `DEPLOY_PATH` từ repo cũ; xóa chúng sau operator canary và trước khi bật workflow mới.
 
-Caller pin release `v1.0.4` của `TheDemonTuan/vps-deploy`, commit `54ace90eedf6bafbc2cfce813832e05c775ed1ae`, đồng nhất ở `uses: ...@<SHA>`, `platform-ref` và host profile. Giữ workflows cũ disabled trong suốt adoption/canary; chỉ bật caller mới sau khi xóa credentials cũ.
+Caller pin release của `TheDemonTuan/vps-deploy`, commit `eae631bc7d812033042f5de431f5adbe4995f526`, đồng nhất ở `uses: ...@<SHA>`, `platform-ref` và host profile. Giữ workflows cũ disabled trong suốt adoption/canary; chỉ bật caller mới sau khi xóa credentials cũ.
 
 `.deploy/app.yml` là manifest được operator đăng ký theo commit, không chứa host paths/secrets; khi đổi manifest cần operator review và đăng ký lại. Workflow `deploy.yml` chạy `.deploy/verify.sh`, reusable build xuất immutable digest sau `.deploy/smoke-image.sh`, rồi reusable deploy yêu cầu engine trên host cutover. Không gửi GitHub token hoặc shell/script ứng dụng lên host.
 
