@@ -12,14 +12,15 @@ function collect(body, visit) {
   const names = new Map();
   function add(id, name, input, byName = false) {
     if (typeof name !== "string") return;
-    const call = { name, input };
-    if (typeof id === "string" && id) {
-      if (calls.has(id)) duplicates.add(id);
+    if (id != null && (typeof id !== "string" || !id)) return;
+    const call = { name, input, id };
+    if (typeof id === "string") {
+      if (calls.has(id)) { duplicates.add(id); calls.get(id).ambiguous = true; }
       else calls.set(id, call);
     } else if (byName) names.set(name, names.has(name) ? null : call);
   }
   function match(id, name, byName = false) {
-    if (typeof id === "string" && id) return duplicates.has(id) ? null : calls.get(id);
+    if (id != null) return typeof id === "string" && id && !duplicates.has(id) ? calls.get(id) : null;
     if (!byName) return null;
     const call = names.get(name);
     names.set(name, null);
@@ -98,13 +99,14 @@ export async function compressMessages(body, enabled, { signal } = {}) {
       const filter = classifyToolCall(call, content);
       if (!filter) return;
       selected += size;
-      jobs.push({ owner, key, content, size, shape, filter });
+      jobs.push({ owner, key, content, size, shape, filter, call });
     });
     if (!supported) return null;
     let next = 0;
     async function worker() {
       while (next < jobs.length && !combined.aborted && performance.now() < deadline) {
         const job = jobs[next++];
+        if (job.call?.ambiguous) continue;
         const output = await filterToolOutput({ filter: job.filter, content: job.content, signal: combined });
         if (signal?.aborted) throw signal.reason;
         if (combined.aborted || output === null) continue;

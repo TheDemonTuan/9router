@@ -49,9 +49,13 @@ describe("upstream RTK source traversal", () => {
       { role: "tool", tool_call_id: "dup", content: input },
       { role: "tool", tool_call_id: "missing", content: input },
       { role: "tool", tool_call_id: "dup", content: input, is_error: true },
+      { role: "assistant", tool_calls: [call("late")] },
+      { role: "tool", tool_call_id: "late", content: input },
+      { role: "assistant", tool_calls: [call("late")] },
     ] };
     await compressMessages(body, true);
     expect(body.messages[1].content).toBe(input);
+    expect(body.messages[5].content).toBe(input);
     expect(requests).toBe(start);
   });
 
@@ -101,10 +105,12 @@ describe("upstream RTK source traversal", () => {
     const body = { contents: [
       { parts: [{ functionCall: { name: "Bash", args: { command: "git diff" } } }, { functionCall: { name: "Bash", args: { command: "git diff" } } }] },
       { parts: [{ functionResponse: { name: "Bash", response: { output: input } } }, { functionResponse: { id: "unknown", name: "Bash", response: { result: input } } }] },
+      { parts: [{ functionCall: { id: 7, name: "Bash", args: { command: "git diff" } } }, { functionResponse: { id: 7, name: "Bash", response: { output: input } } }] },
     ] };
     await compressMessages(body, true);
     expect(body.contents[1].parts[0].functionResponse.response.output).toBe(input);
     expect(body.contents[1].parts[1].functionResponse.response.result).toBe(input);
+    expect(body.contents[2].parts[1].functionResponse.response.output).toBe(input);
     expect(requests).toBe(start);
   });
 
