@@ -46,22 +46,30 @@ jobs:
     permissions:
       contents: read
       packages: write
-    uses: TheDemonTuan/vps-deploy/.github/workflows/build-docker.yml@594772563df2b16088c93c111bf86d43d115cf6f
+    uses: TheDemonTuan/vps-deploy/.github/workflows/build-docker.yml@868802657611b64f5a965e6aeea95fc87fb836c6
     with:
       source-sha: ${{ github.sha }}
-      platform-ref: 594772563df2b16088c93c111bf86d43d115cf6f
+      platform-ref: 868802657611b64f5a965e6aeea95fc87fb836c6
       config: .deploy/app.yml
 
   deploy:
     name: Deploy immutable digest
     needs: build
     if: github.event_name == 'push' || !inputs.skip_deploy
-    # Use the same 40-hex release SHA as the build caller and the installed host profile.
-    uses: TheDemonTuan/vps-deploy/.github/workflows/deploy-vps.yml@594772563df2b16088c93c111bf86d43d115cf6f
-    with:
-      app: 9router
-      component: app
-      source-sha: ${{ github.sha }}
-      platform-ref: 594772563df2b16088c93c111bf86d43d115cf6f
-      config: .deploy/app.yml
-      image-ref: ${{ needs.build.outputs.image-ref }}
+    runs-on: ubuntu-24.04
+    environment: production
+    timeout-minutes: 17
+    steps:
+      - uses: TheDemonTuan/vps-deploy/.github/actions/deploy@868802657611b64f5a965e6aeea95fc87fb836c6
+        with:
+          operation: deploy
+          component: app
+          source-sha: ${{ github.sha }}
+          platform-ref: 868802657611b64f5a965e6aeea95fc87fb836c6
+          config: .deploy/app.yml
+          image-ref: ${{ needs.build.outputs.image-ref }}
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ vars.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER }}
