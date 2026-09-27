@@ -136,11 +136,11 @@ jobs:
   deploy:
     needs: manifest
     if: github.event_name == 'workflow_dispatch' && inputs.publish && inputs.deploy && github.ref_name == github.event.repository.default_branch
-    uses: TheDemonTuan/vps-deploy/.github/workflows/deploy-vps.yml@ac959756491edc31c5970bba19b891547faa64fe
+    uses: TheDemonTuan/vps-deploy/.github/workflows/deploy-vps.yml@c4f24cd3fcd379468611ec3596651cadef934af4
     with:
       app: 9router
       component: rtk
       source-sha: ${{ github.sha }}
-      platform-ref: ac959756491edc31c5970bba19b891547faa64fe
+      platform-ref: c4f24cd3fcd379468611ec3596651cadef934af4
       config: .deploy/app.yml
       image-ref: ${{ needs.manifest.outputs.image_ref }}
