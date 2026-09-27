@@ -1,0 +1,30 @@
+name: VPS deployment operations
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Status, rollback to retained previous slot, or explicit recovery
+        required: true
+        type: choice
+        options: [status, rollback, reconcile]
+      component:
+        description: Component (rollback supports app only)
+        required: true
+        type: choice
+        options: [app, rtk]
+
+permissions:
+  contents: read
+
+jobs:
+  operate:
+    if: github.ref_type == 'branch' && github.ref_name == github.event.repository.default_branch && (inputs.operation != 'rollback' || inputs.component == 'app')
+    uses: TheDemonTuan/vps-deploy/.github/workflows/operate-vps.yml@54ace90eedf6bafbc2cfce813832e05c775ed1ae
+    with:
+      operation: ${{ inputs.operation }}
+      app: 9router
+      component: ${{ inputs.component }}
+      source-sha: ${{ github.sha }}
+      platform-ref: 54ace90eedf6bafbc2cfce813832e05c775ed1ae
+      config: .deploy/app.yml

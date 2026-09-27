@@ -16,16 +16,17 @@ concurrency:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
-  test:
-    name: Responses & Translator Tests
+  verify:
+    name: Application regression gates
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.2
       - name: Install runtime dependencies
@@ -33,380 +34,34 @@ jobs:
       - name: Install test dependencies
         working-directory: tests
         run: bun install --frozen-lockfile
-      - name: Run offline translator verification
-        working-directory: tests
-        run: |
-          set -euo pipefail
-          response_tests="$(find unit translator -type f -name '*responses*.test.js' ! -path '*/real/*' | sort)"
-          chatgpt_web_tests="$(find unit integration -type f -name '*chatgpt*.test.js' ! -path '*/real/*' | sort)"
-          printf 'Responses regression gate:\n%s\n' "$response_tests"
-          printf 'ChatGPT Web regression gate:\n%s\n' "$chatgpt_web_tests"
-          bun x vitest run --config vitest.config.js \
-            $response_tests \
-            $chatgpt_web_tests \
-            unit/codex-tool-normalization.test.js \
-            unit/codex-native-passthrough-thinking.test.js \
-            unit/claude-header-forwarding.test.js \
-            unit/session-manager.test.js \
-            unit/rtk-cursor-pretranslate.test.js \
-            unit/rtk.test.js \
-            unit/rtkKiro.test.js \
-            unit/force-stream-config.test.js \
-            unit/minimax-transport-target-format.test.js \
-            unit/base-executor-timeout-classification.test.js \
-            integration/zcode-concurrent-responses.test.js \
-            unit/grok-build-config.test.js \
-            unit/quota-classification.test.js \
-            unit/quota-response-contract.test.js \
-            unit/chat-quota-handler.test.js \
-            unit/antigravity-quota-routing.test.js \
-            unit/antigravity-retry-hook.test.js \
-            unit/base-executor-retry.test.js \
-            unit/chat-pre-response-budget.test.js \
-            unit/fetch-timeout-body-signal.test.js \
-            unit/route-adapter-lifecycle.test.js \
-            unit/workflow-integrity.test.js \
-            unit/codex-fast-capacity.test.js \
-            unit/codex-models.test.js \
-            unit/antigravity-weekly-quota.test.js \
-            unit/gemini-native-endpoint.test.js \
-            unit/ollama-stream-tail.test.js \
-            unit/google-usage-abort.test.js \
-            unit/claude-usage-cache.test.js \
-            unit/usage-cache-contract.test.js \
-            unit/health-route.test.js \
-            unit/dashboard-guard.test.js \
-            unit/monitor-ready-route.test.js \
-            unit/alibaba-token-plan-thinking.test.js \
-            unit/alibaba-token-plan-catalog.test.js \
-            unit/alibaba-token-plan-capabilities.test.js \
-            unit/alibaba-token-plan-models-route.test.js \
-            unit/alibaba-token-plan-provider.test.js \
-            unit/codex-v1-models.test.js \
-            translator/alibaba-token-plan-pipeline.test.js
-      - name: Run h2c and Bun disconnect regressions
-        run: |
-          node --version
-          bun --version
-          set -euo pipefail
-          node --test --test-concurrency=1 tests/unit/custom-server-h2c.test.cjs tests/unit/custom-server-h2c-concurrent.test.cjs
-          bun test tests/unit/custom-server-h2c.test.cjs tests/unit/custom-server-h2c-concurrent.test.cjs tests/unit/bun-client-disconnect.test.cjs tests/unit/bun-next-request-disconnect.test.cjs
-      - name: Run quota persistence smoke test
-        run: bun tests/integration/quota-persistence-smoke.mjs
-      - name: Run pre-response lifecycle smoke test
-        run: bun tests/integration/pre-response-lifecycle-smoke.mjs
-      - name: Verify DNS-bypass transport on loopback
-        run: bun tests/integration/bypass-transport-smoke.mjs
-      - name: Verify blue-green reconcile and drain safety
-        run: bash tests/unit/blue-green-reconcile.test.sh
-      - name: Run retired settings migration smoke
-        run: bun tests/integration/retired-settings-smoke.mjs
-      - name: Verify provider, alias, and OAuth baselines
-        working-directory: tests
-        run: |
-          node __baseline__/verify-providers.mjs
-          node __baseline__/verify-alias.mjs
-          node __baseline__/verify-oauth-urls.mjs
-      - name: Verify translator regression baseline
-        working-directory: tests
-        run: |
-          set +e
-          bun x vitest run --config vitest.config.js translator/alibaba-token-plan-pipeline.test.js --reporter=json --outputFile=translator-results.json
-          vitest_status=$?
-          set -e
-          node __baseline__/verify-no-regression.mjs translator-results.json
-          if [ "$vitest_status" -ne 0 ]; then
-            echo "Known baseline failures verified; no new translator regression."
-          fi
+      - name: Run application regression gates
+        env:
+          HOME: ${{ runner.temp }}/9router-home
+          DATA_DIR: ${{ runner.temp }}/9router-home/data
+        run: bash .deploy/verify.sh
 
   build:
-    name: Build & Push Native Image
-    timeout-minutes: 10
-    needs: test
-    runs-on: ${{ vars.BUILD_RUNNER || 'ubuntu-24.04-arm' }}
-    outputs:
-      image_ref: ${{ steps.meta.outputs.image_ref }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Resolve image metadata
-        id: meta
-        env:
-          OWNER: ${{ github.repository_owner }}
-        run: |
-          owner_lc="$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')"
-          image="ghcr.io/${owner_lc}/9router"
-          tag="sha-${{ github.sha }}"
-          echo "image_ref=${image}:${tag}" >> "$GITHUB_OUTPUT"
-          echo "image=${image}" >> "$GITHUB_OUTPUT"
-          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: |
-            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}
-            ${{ steps.meta.outputs.image }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=min,ignore-error=true
-          platforms: ${{ vars.DEPLOY_PLATFORM || 'linux/arm64' }}
-          provenance: false
-          sbom: false
-
-      - name: Inspect image size and layers
-        env:
-          IMAGE_REF: ${{ steps.meta.outputs.image_ref }}
-        run: |
-          docker buildx imagetools inspect \
-            --raw "$IMAGE_REF" > /tmp/image-manifest.json
-
-          if jq -e '.manifests' /tmp/image-manifest.json >/dev/null 2>&1; then
-            platform_digest="$(jq -r '.manifests[0].digest' /tmp/image-manifest.json)"
-            image_base="${IMAGE_REF%%:*}"
-            docker buildx imagetools inspect \
-              --raw "${image_base}@${platform_digest}" > /tmp/image-manifest.json
-          fi
-
-          echo "=== Image Summary ==="
-          jq '
-            [.layers[].size] |
-            {
-              layers: length,
-              compressed_bytes: add,
-              compressed_mib: (((add / 1024 / 1024) * 100 | floor) / 100)
-            }
-          ' /tmp/image-manifest.json
-
-          echo "=== Layer Breakdown ==="
-          jq -r '
-            .layers[] |
-            "\(.digest)  \(((.size / 1024 / 1024) * 100 | floor) / 100) MiB"
-          ' /tmp/image-manifest.json
-
-      - name: Runtime smoke test image
-        env:
-          IMAGE_REF: ${{ steps.meta.outputs.image_ref }}
-        run: |
-          set -euo pipefail
-          echo "Pulling freshly built image for runtime smoke test..."
-          docker pull "$IMAGE_REF"
-
-          cid="$(docker run -d \
-            -e DATA_DIR=/tmp/9router-smoke \
-            -e DEPLOY_SLOT=blue \
-            "$IMAGE_REF")"
-
-          echo "Container ID: $cid"
-          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
-
-          echo "Waiting for health check (max 30s)..."
-          healthy=false
-          for i in $(seq 1 30); do
-            if docker exec "$cid" wget -qO- http://127.0.0.1:20128/api/health 2>/dev/null | grep -q '"ok":true'; then
-              healthy=true
-              echo "Health check passed in ${i}s."
-              break
-            fi
-            sleep 1
-          done
-
-          if [ "$healthy" != "true" ]; then
-            echo "Health check failed!"
-            docker logs "$cid"
-            exit 1
-          fi
-          docker exec "$cid" bun -e '
-          const assert = require("node:assert/strict");
-          const response = await fetch("http://127.0.0.1:20128/api/health");
-          assert.equal(response.status, 200);
-          assert.equal(response.headers.get("cache-control"), "no-store");
-          const health = await response.json();
-          assert.equal(health.ok, true);
-          assert.equal(health.deployment_slot, "blue");
-          '
-
-          echo "Running native h2c image smoke..."
-          docker exec "$cid" bun -e '
-          const assert = require("node:assert/strict");
-          const http = require("node:http");
-          const HTTP2_SETTINGS = "AAEAAEAAAAIAAAAAAAMAAAAAAAQBAAAAAAUAAEAAAAYABgAA";
-          const headersFor = (body) => ({
-            Connection: "keep-alive, Upgrade, HTTP2-Settings",
-            Upgrade: "h2c",
-            "HTTP2-Settings": HTTP2_SETTINGS,
-            "Content-Type": "application/json",
-            "Content-Length": Buffer.byteLength(body),
-          });
-          function post(agent, body, expectedStatus, expectedMessage) {
-            return new Promise((resolve, reject) => {
-              let settled = false;
-              const finish = (error) => {
-                if (settled) return;
-                settled = true;
-                if (error) reject(error);
-                else resolve();
-              };
-              const request = http.request({
-                host: "127.0.0.1",
-                port: 20128,
-                path: "/v1/chat/completions",
-                method: "POST",
-                agent,
-                headers: headersFor(body),
-              }, (response) => {
-                const chunks = [];
-                response.on("aborted", () => finish(new Error("response aborted")));
-                response.on("error", finish);
-                response.on("data", (chunk) => chunks.push(chunk));
-                response.on("end", () => {
-                  try {
-                    assert.equal(response.statusCode, expectedStatus);
-                    assert.equal(response.headers.upgrade, undefined);
-                    const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-                    assert.equal(parsed.error?.message, expectedMessage);
-                    finish();
-                  } catch (error) {
-                    finish(error);
-                  }
-                });
-              });
-              request.setTimeout(5_000, () => request.destroy(new Error("request timed out")));
-              request.on("upgrade", (_response, socket) => {
-                socket.destroy();
-                finish(new Error("unexpected HTTP upgrade"));
-              });
-              request.on("error", finish);
-              request.end(body);
-            });
-          }
-          async function chain(agent, prefix) {
-            for (let index = 0; index < 3; index += 1) {
-              const body = JSON.stringify({
-                model: "cx/gpt-5.6-luna",
-                messages: [{ role: "user", content: `${prefix}-${index}` }],
-                stream: false,
-              });
-              await post(agent, body, 401, "Missing API key");
-            }
-          }
-          const agents = [
-            new http.Agent({ keepAlive: true, maxSockets: 1 }),
-            new http.Agent({ keepAlive: true, maxSockets: 1 }),
-          ];
-          try {
-            await Promise.all([chain(agents[0], "smoke-a"), chain(agents[1], "smoke-b")]);
-            await post(agents[0], "{", 400, "Invalid JSON body");
-          } finally {
-            for (const agent of agents) agent.destroy();
-          }
-          '
-          echo "Native h2c image smoke passed."
-
-          echo "Waiting 12s for initial background token refresh tick..."
-          sleep 12
-
-          logs="$(docker logs "$cid" 2>&1)"
-          printf '%s\n' "$logs"
-
-          if printf '%s\n' "$logs" | grep -E "Cannot find package|ERR_MODULE_NOT_FOUND|MODULE_NOT_FOUND|BG_TOKEN_REFRESH.*Tick failed"; then
-            echo "Runtime smoke test failed: detected missing package or background refresh tick failure!"
-            exit 1
-          fi
-
-          echo "Runtime smoke test passed cleanly."
+    name: Build and smoke immutable image
+    needs: verify
+    permissions:
+      contents: read
+      packages: write
+    uses: TheDemonTuan/vps-deploy/.github/workflows/build-docker.yml@54ace90eedf6bafbc2cfce813832e05c775ed1ae
+    with:
+      source-sha: ${{ github.sha }}
+      platform-ref: 54ace90eedf6bafbc2cfce813832e05c775ed1ae
+      config: .deploy/app.yml
 
   deploy:
-    name: Deploy to VPS (Blue/Green)
-    timeout-minutes: 15
+    name: Deploy immutable digest
     needs: build
     if: github.event_name == 'push' || !inputs.skip_deploy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Configure SSH
-        env:
-          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
-          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
-        run: |
-          set -euo pipefail
-          mkdir -p ~/.ssh
-          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          if [ -n "$VPS_KNOWN_HOSTS" ]; then
-            printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts
-            chmod 600 ~/.ssh/known_hosts
-          fi
-
-      - name: Sync compose and deploy scripts to VPS
-        env:
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_USER: ${{ secrets.VPS_USER }}
-          VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/opt/9router' }}
-        run: |
-          set -euo pipefail
-          [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9_./-]+$ && "$DEPLOY_PATH" != *..* ]] || { echo 'Invalid DEPLOY_PATH' >&2; exit 1; }
-          stage=".incoming-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" \
-            -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
-            -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o TCPKeepAlive=yes \
-            "$VPS_USER@$VPS_HOST" "mkdir -p '$DEPLOY_PATH/$stage'"
-          scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" \
-            -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
-            -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o TCPKeepAlive=yes \
-            docker-compose.prod.yml docker-compose.chatgpt-web.yml docker-compose.rtk.yml deploy.sh \
-            "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/$stage/"
-          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" \
-            -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
-            -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o TCPKeepAlive=yes \
-            "$VPS_USER@$VPS_HOST" "bash -se -- '$DEPLOY_PATH' '$stage'" <<'REMOTE'
-          set -euo pipefail
-          cd "$1"
-          flock -n .deployment.lock bash -e -c '
-            mv -- "$1/docker-compose.prod.yml" docker-compose.prod.yml
-            mv -- "$1/docker-compose.chatgpt-web.yml" docker-compose.chatgpt-web.yml
-            mv -- "$1/docker-compose.rtk.yml" docker-compose.rtk.yml
-            mv -- "$1/deploy.sh" deploy.sh
-            chmod +x deploy.sh
-            rmdir -- "$1"
-          ' _ "$2"
-          REMOTE
-
-      - name: Execute Blue/Green Cutover on VPS
-        env:
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_USER: ${{ secrets.VPS_USER }}
-          VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/opt/9router' }}
-          IMAGE_REF: ${{ needs.build.outputs.image_ref }}
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9_./-]+$ && "$DEPLOY_PATH" != *..* ]] || { echo 'Invalid DEPLOY_PATH' >&2; exit 1; }
-          [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+:sha-[0-9a-f]{40}$ ]] || { echo 'Invalid IMAGE_REF' >&2; exit 1; }
-          [[ "$GITHUB_ACTOR" =~ ^[A-Za-z0-9-]+$ ]] || { echo 'Invalid actor' >&2; exit 1; }
-          printf '%s' "$GHCR_TOKEN" | ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" \
-            -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
-            -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o TCPKeepAlive=yes \
-            "$VPS_USER@$VPS_HOST" "docker login ghcr.io -u '$GITHUB_ACTOR' --password-stdin"
-          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" \
-            -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
-            -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o TCPKeepAlive=yes \
-            "$VPS_USER@$VPS_HOST" "bash -se -- '$DEPLOY_PATH' '$IMAGE_REF'" <<'REMOTE'
-          set -euo pipefail
-          cd "$1"
-          ./deploy.sh --release "$2"
-          REMOTE
+    # Use the same 40-hex release SHA as the build caller and the installed host profile.
+    uses: TheDemonTuan/vps-deploy/.github/workflows/deploy-vps.yml@54ace90eedf6bafbc2cfce813832e05c775ed1ae
+    with:
+      app: 9router
+      component: app
+      source-sha: ${{ github.sha }}
+      platform-ref: 54ace90eedf6bafbc2cfce813832e05c775ed1ae
+      config: .deploy/app.yml
+      image-ref: ${{ needs.build.outputs.image-ref }}
