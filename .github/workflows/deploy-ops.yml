@@ -20,11 +20,11 @@ permissions:
 jobs:
   operate:
     if: github.ref_type == 'branch' && github.ref_name == github.event.repository.default_branch && (inputs.operation != 'rollback' || inputs.component == 'app')
-    uses: TheDemonTuan/vps-deploy/.github/workflows/operate-vps.yml@54ace90eedf6bafbc2cfce813832e05c775ed1ae
+    uses: TheDemonTuan/vps-deploy/.github/workflows/operate-vps.yml@eae631bc7d812033042f5de431f5adbe4995f526
     with:
       operation: ${{ inputs.operation }}
       app: 9router
       component: ${{ inputs.component }}
       source-sha: ${{ github.sha }}
-      platform-ref: 54ace90eedf6bafbc2cfce813832e05c775ed1ae
+      platform-ref: eae631bc7d812033042f5de431f5adbe4995f526
       config: .deploy/app.yml
