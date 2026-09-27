@@ -216,7 +216,10 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     ? AbortSignal.any([preResponse.signal, clientSignal])
     : preResponse?.signal || clientSignal;
   if (rtkSignal?.aborted) throw rtkSignal.reason;
-  const rtkStats = await compressMessages(sourceBody, tokenSaverEnabled && rtkEnabled, { signal: rtkSignal });
+  const rtkStats = await compressMessages(sourceBody, tokenSaverEnabled && rtkEnabled, {
+    signal: rtkSignal,
+    disabledReason: !rtkEnabled ? "disabled" : clientTokenSaverOptOut ? "opted_out" : strictStructuredOutput ? "structured_output" : "native_passthrough",
+  });
   if (rtkSignal?.aborted) throw rtkSignal.reason;
   const rtkLine = formatRtkLog(rtkStats);
   if (rtkLine) console.log(rtkLine);

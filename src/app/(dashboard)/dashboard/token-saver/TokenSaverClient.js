@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { Card, Button, Input, Modal, Toggle } from "@/shared/components";
 import { getCurrentLocale, onLocaleChange } from "@/i18n/runtime";
+import RtkStats from "./RtkStats";
 import {
   WENYAN_LOCALES,
   CAVEMAN_LEVELS,
@@ -11,6 +12,8 @@ import {
 
 export default function TokenSaverClient() {
   const [rtkEnabled, setRtkEnabledState] = useState(true);
+  const [rtkSaving, setRtkSaving] = useState(false);
+  const [rtkError, setRtkError] = useState("");
   const [cavemanEnabled, setCavemanEnabled] = useState(false);
   const [cavemanLevel, setCavemanLevel] = useState("full");
   const [ponytailEnabled, setPonytailEnabled] = useState(false);
@@ -62,15 +65,20 @@ export default function TokenSaverClient() {
   }, [isWenyanLocale, cavemanLevel]);
 
   const handleRtkEnabled = async (value) => {
+    setRtkSaving(true);
+    setRtkError("");
     try {
       const res = await fetch("/api/settings", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ rtkEnabled: value }),
       });
-      if (res.ok) setRtkEnabledState(value);
-    } catch (error) {
-      console.log("Error updating rtkEnabled:", error);
+      if (!res.ok) throw Error("RTK setting could not be saved.");
+      setRtkEnabledState(value);
+    } catch {
+      setRtkError("RTK setting could not be saved. Please retry.");
+    } finally {
+      setRtkSaving(false);
     }
   };
 
@@ -218,8 +226,12 @@ export default function TokenSaverClient() {
           <Toggle
             checked={rtkEnabled}
             onChange={() => handleRtkEnabled(!rtkEnabled)}
+            label="RTK enabled"
+            disabled={rtkSaving}
           />
         </div>
+        {rtkError && <p role="alert" className="text-sm text-warning">{rtkError}</p>}
+        <RtkStats enabled={rtkEnabled} />
         <div className="flex items-center justify-between pt-4 border-t border-border gap-4 flex-wrap">
           <div className="min-w-0 flex-1">
             <p className="font-medium">

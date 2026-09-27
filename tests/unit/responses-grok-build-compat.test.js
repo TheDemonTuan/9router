@@ -117,20 +117,6 @@ describe("Grok Build Responses compatibility", () => {
     expect(grokContract(await text(compatibleTransform(reasoningOnly))).empty).toBe(true);
   });
 
-  it("reports content-free compatibility diagnostics", async () => {
-    const log = vi.spyOn(console, "info").mockImplementation(() => {});
-    const input = sse([
-      { data: { type: "response.output_item.done", output_index: 0, item: { type: "reasoning", summary: [{ type: "summary_text", text: "never log this" }] } } },
-      { data: { type: "response.completed", response: { id: "resp_log", status: "completed", output: [] } } },
-    ]);
-    await text(compatibleTransform(input));
-    const lines = log.mock.calls.map(([line]) => String(line));
-    expect(lines.find(line => line.startsWith("[RESP]"))).toMatch(/events=2 .*doneItems=1 .*terminalOutputBefore=0 .*terminalOutputAfter=1/);
-    expect(lines.find(line => line.startsWith("[RESP_EMPTY]"))).toMatch(/reasoningItems=1/);
-    expect(lines.join("\n")).not.toContain("never log this");
-    log.mockRestore();
-  });
-
   it("uses identical recovery for forced non-streaming JSON", async () => {
     const input = sse([
       { data: { type: "response.output_text.delta", output_index: 0, delta: "json text" } },

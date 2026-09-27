@@ -1,6 +1,8 @@
 import { ROLE } from "../translator/schema/roles.js";
 import { OPENAI_BLOCK, CLAUDE_BLOCK, RESPONSES_ITEM } from "../translator/schema/blocks.js";
-import { RTK_CONFIG } from "../config/rtkConfig.js";
+import { RTK_CONFIG, RTK_FILTERS } from "../config/rtkConfig.js";
+import { estimateOutputTokens } from "../utils/usageTracking.js";
+import { getRtkState } from "./state.js";
 import { classifyToolCall } from "./classifier.js";
 import { filterToolOutput } from "./client.js";
 
@@ -78,9 +80,15 @@ function collect(body, visit) {
   return true;
 }
 
-export async function compressMessages(body, enabled, { signal } = {}) {
-  if (!enabled || !body || typeof body !== "object") return null;
-  if (signal?.aborted) throw signal.reason;
+export async function compressMessages(body, enabled, { signal, disabledReason = "disabled" } = {}) {
+  const usage = getRtkState().usage;
+  usage.preparations++;
+  if (!enabled) {
+    usage.preparationReasons[["opted_out", "structured_output", "native_passthrough"].includes(disabledReason) ? disabledReason : "disabled"]++;
+    return null;
+  }
+  if (!body || typeof body !== "object") { usage.preparationReasons.unsupported_shape++; return null; }
+  if (signal?.aborted) { usage.preparationReasons.cancelled++; throw signal.reason; }
   const deadline = performance.now() + RTK_CONFIG.requestMs;
   const controller = new AbortController();
   const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
@@ -88,6 +96,27 @@ export async function compressMessages(body, enabled, { signal } = {}) {
   const stats = { bytesBefore: 0, bytesAfter: 0, hits: [] };
   const jobs = [];
   let selected = 0;
+  let eligibleJobs = 0;
+  let reason;
+  const commit = () => {
+    usage.preparationReasons[reason ?? (stats.hits.length ? "compressed" : eligibleJobs ? "no_change" : "no_eligible_output")]++;
+    if (!stats.hits.length) return;
+    usage.compressedPreparations++;
+    usage.appliedOutputs += stats.hits.length;
+    usage.lastAppliedAt = new Date().toISOString();
+    for (const hit of stats.hits) {
+      usage.bytesBefore += hit.bytesBefore;
+      usage.bytesAfter += hit.bytesAfter;
+      usage.estimatedTokensSaved += hit.estimatedTokensSaved;
+      if (RTK_FILTERS.includes(hit.filter)) {
+        const row = usage.filters[hit.filter] ??= { filter: hit.filter, appliedOutputs: 0, bytesBefore: 0, bytesAfter: 0, estimatedTokensSaved: 0 };
+        row.appliedOutputs++;
+        row.bytesBefore += hit.bytesBefore;
+        row.bytesAfter += hit.bytesAfter;
+        row.estimatedTokensSaved += hit.estimatedTokensSaved;
+      }
+    }
+  };
   try {
     const supported = collect(body, (owner, key, shape, call, skip) => {
       if (performance.now() >= deadline || controller.signal.aborted) return;
@@ -101,29 +130,34 @@ export async function compressMessages(body, enabled, { signal } = {}) {
       selected += size;
       jobs.push({ owner, key, content, size, shape, filter, call });
     });
-    if (!supported) return null;
+    if (!supported) { reason = "unsupported_shape"; return null; }
     let next = 0;
     async function worker() {
       while (next < jobs.length && !combined.aborted && performance.now() < deadline) {
         const job = jobs[next++];
         if (job.call?.ambiguous) continue;
-        const output = await filterToolOutput({ filter: job.filter, content: job.content, signal: combined });
+        eligibleJobs++;
+        const output = await filterToolOutput({ filter: job.filter, content: job.content, signal: combined, internalSignal: controller.signal });
         if (signal?.aborted) throw signal.reason;
         if (combined.aborted || output === null) continue;
         const size = Buffer.byteLength(output);
         job.owner[job.key] = output;
         stats.bytesAfter -= job.size - size;
-        stats.hits.push({ shape: job.shape, filter: job.filter, saved: job.size - size });
+        stats.hits.push({ shape: job.shape, filter: job.filter, saved: job.size - size, bytesBefore: job.size, bytesAfter: size, estimatedTokensSaved: Math.max(0, estimateOutputTokens(job.content.length) - estimateOutputTokens(output.length)) });
       }
     }
     await Promise.all(Array.from({ length: Math.min(RTK_CONFIG.perRequestConcurrency, jobs.length) }, worker));
     if (signal?.aborted) throw signal.reason;
     return stats;
   } catch (err) {
-    if (signal?.aborted) throw signal.reason;
-    if (controller.signal.aborted) return stats;
+    if (signal?.aborted) { reason = "cancelled"; throw signal.reason; }
+    if (controller.signal.aborted) { reason = "timeout"; return stats; }
+    reason = "failed";
     throw err;
   } finally {
+    if (signal?.aborted) usage.preparationReasons.cancelled++;
+    else if (reason === "failed") usage.preparationReasons.failed++;
+    else { if (controller.signal.aborted) reason = "timeout"; commit(); }
     clearTimeout(timer);
     controller.abort(Object.assign(new Error("RTK finished"), { code: "RTK_TIMEOUT" }));
   }

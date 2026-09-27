@@ -59,7 +59,6 @@ export function buildTransformStream({ provider, sourceFormat, targetFormat, res
       finalized = true;
       const snapshot = accumulator.snapshot();
       const diagnostics = accumulator.diagnostics();
-      console.info(`[RESP] client=${responsesClientDialect} provider=${provider} source=${sourceFormat} providerDialect=${responsesProviderDialect} mode=normalize events=${diagnostics.events} doneItems=${diagnostics.doneItems} textChars=${diagnostics.textChars} toolCalls=${diagnostics.toolCalls} terminalOutputBefore=${diagnostics.terminalOutputBefore} terminalOutputAfter=${diagnostics.terminalOutputAfter} status=${snapshot.status}`);
       if (!diagnostics.textChars && !diagnostics.toolCalls) console.info(`[RESP_EMPTY] client=${responsesClientDialect} provider=${provider} textChars=0 doneItems=${diagnostics.doneItems} toolCalls=0 reasoningItems=${diagnostics.reasoningItems}`);
       onStreamComplete?.({ content, thinking: "" }, snapshot.usage, ttftAt, { status: snapshot.status, successful: snapshot.status === "completed" });
     };

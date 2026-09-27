@@ -114,6 +114,15 @@ describe("upstream RTK source traversal", () => {
     expect(requests).toBe(start);
   });
 
+  it("propagates original caller abort instead of failing open", async () => {
+    const controller = new AbortController();
+    const reason = Object.assign(new Error("client canceled"), { code: "CLIENT_ABORT" });
+    const body = { messages: [{ role: "assistant", tool_calls: [call()] }, { role: "tool", tool_call_id: "call_1", content: "HANG_" + "x".repeat(600) }] };
+    setTimeout(() => controller.abort(reason), 30);
+    await expect(compressMessages(body, true, { signal: controller.signal })).rejects.toBe(reason);
+    expect(body.messages[1].content).toMatch(/^HANG_/);
+  });
+
   it("skips cooldown without HTTP, probes once, and does not break on 503", async () => {
     const clock = vi.spyOn(Date, "now");
     let now = 100_000;
@@ -143,15 +152,6 @@ describe("upstream RTK source traversal", () => {
     expect(body.messages.slice(1).map(x => x.content)).toEqual([raw, raw, raw]);
     await new Promise(resolve => setTimeout(resolve, 20));
     expect(body.messages.slice(1).map(x => x.content)).toEqual([raw, raw, raw]);
-  });
-
-  it("propagates original caller abort instead of failing open", async () => {
-    const controller = new AbortController();
-    const reason = Object.assign(new Error("client canceled"), { code: "CLIENT_ABORT" });
-    const body = { messages: [{ role: "assistant", tool_calls: [call()] }, { role: "tool", tool_call_id: "call_1", content: "HANG_" + "x".repeat(600) }] };
-    setTimeout(() => controller.abort(reason), 30);
-    await expect(compressMessages(body, true, { signal: controller.signal })).rejects.toBe(reason);
-    expect(body.messages[1].content).toMatch(/^HANG_/);
   });
 
   it("never classifies unknown commands or unsound modes", () => {

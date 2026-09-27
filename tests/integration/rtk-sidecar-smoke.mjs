@@ -30,6 +30,8 @@ if (process.argv.includes("--wrapper-faults")) {
 if (process.argv.includes("--gateway")) {
   await import("../translator/registerAll.js");
   const { handleChatCore } = await import("../../open-sse/handlers/chatCore.js");
+  const { getRtkSnapshot } = await import("../../open-sse/rtk/state.js");
+  const before = getRtkSnapshot();
   const captured = [];
   const provider = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
     const incoming = await request.json();
@@ -74,6 +76,16 @@ if (process.argv.includes("--gateway")) {
     const events = await streamedResult.response.text();
     assert(events.includes("ok") && events.includes("[DONE]"));
     assert.equal(streamed.messages[1].content, diff);
+    const after = getRtkSnapshot();
+    const applied = process.argv.includes("--outage") ? 0 : 3;
+    assert.equal(after.usage.appliedOutputs - before.usage.appliedOutputs, applied);
+    assert.equal(after.usage.compressedPreparations - before.usage.compressedPreparations, applied);
+    assert.equal(after.usage.http.attempts - before.usage.http.attempts, process.argv.includes("--outage") ? 1 : 3);
+    assert.equal(after.usage.http.failed - before.usage.http.failed, process.argv.includes("--outage") ? 1 : 0);
+    assert.equal(after.usage.skipped.circuit_open - before.usage.skipped.circuit_open, process.argv.includes("--outage") ? 2 : 0);
+    const forwarded = [captured[0].messages[1].content, tool.content, captured[2].messages[1].content];
+    assert.equal(after.usage.bytesBefore - before.usage.bytesBefore, applied * Buffer.byteLength(diff));
+    assert.equal(after.usage.bytesAfter - before.usage.bytesAfter, process.argv.includes("--outage") ? 0 : forwarded.reduce((total, text) => total + Buffer.byteLength(text), 0));
     console.log(process.argv.includes("--outage") ? "RTK outage passthrough passed" : "RTK gateway smoke passed");
   } finally { provider.stop(true); }
   process.exit(0);

@@ -287,6 +287,27 @@ describe("dashboard guard local-only access", () => {
   });
 });
 
+describe("RTK dashboard API guard", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.getSettings.mockResolvedValue({ requireLogin: true });
+    mocks.verifyDashboardAuthToken.mockResolvedValue(false);
+    delete process.env.API_HOST;
+  });
+
+  for (const path of ["/api/rtk/status", "/api/rtk/check"]) {
+    it(`${path} requires dashboard auth and stays off API_HOST`, async () => {
+      expect((await proxy(request(path, { host: "dashboard.example.com" }))).status).toBe(401);
+      mocks.verifyDashboardAuthToken.mockResolvedValue(true);
+      const authorized = request(path, { host: "dashboard.example.com" });
+      authorized.cookies.get.mockReturnValue({ value: "test-session" });
+      expect(await proxy(authorized)).toBe(mocks.nextResponse);
+      process.env.API_HOST = "api.example.com";
+      expect((await proxy(request(path, { host: "api.example.com" }))).status).toBe(404);
+    });
+  }
+});
+
 describe("dashboard guard helpers", () => {
   it("extracts bearer API keys before x-api-key", () => {
     const apiRequest = request("/v1/chat/completions", {
