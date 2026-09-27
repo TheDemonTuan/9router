@@ -5,6 +5,10 @@ import { mkdtemp, rm, writeFile, chmod, access, readdir } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+const diff = "diff --git a/src/a.txt b/src/a.txt\nindex 1234567..89abcde 100644\n--- a/src/a.txt\n+++ b/src/a.txt\n@@ -1,80 +1,80 @@\n"
+  + Array.from({ length: 39 }, (_, i) => ` context ${String(i + 1).padStart(3, "0")}\n`).join("")
+  + "-OLD_VALUE\n+NEW_VALUE\n"
+  + Array.from({ length: 40 }, (_, i) => ` context ${String(i + 41).padStart(3, "0")}\n`).join("");
 if (process.argv.includes("--wrapper-faults")) {
   const { startRtkServer } = await import("../../sidecars/rtk/server.mjs");
   const server = await startRtkServer({ hostname: "127.0.0.1", port: 0, binaryPath: "/fixtures/rtk" });
@@ -31,6 +35,19 @@ if (process.argv.includes("--gateway")) {
   await import("../translator/registerAll.js");
   const { handleChatCore } = await import("../../open-sse/handlers/chatCore.js");
   const { getRtkSnapshot } = await import("../../open-sse/rtk/state.js");
+  const outage = process.argv.includes("--outage");
+  let expected = diff;
+  if (!outage) {
+    assert(process.env.RTK_URL, "RTK_URL required for healthy gateway smoke");
+    const response = await fetch(`${process.env.RTK_URL}/filter`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ filter: "git-diff", content: diff }) });
+    assert.equal(response.status, 200);
+    const result = await response.json();
+    assert.equal(result.protocolVersion, 1);
+    expected = result.content;
+    assert.equal(typeof expected, "string");
+    assert(Buffer.byteLength(expected) < Buffer.byteLength(diff));
+    for (const anchor of ["src/a.txt", "OLD_VALUE", "NEW_VALUE"]) assert(expected.includes(anchor));
+  }
   const before = getRtkSnapshot();
   const captured = [];
   const provider = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
@@ -43,50 +60,50 @@ if (process.argv.includes("--gateway")) {
     const message = { id: "chatcmpl-smoke", object: "chat.completion", model: "rtk-smoke", choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }] };
     return Response.json(message);
   } });
-  const diff = "diff --git a/a b/a\n" + "+synthetic change\n".repeat(100);
-  const body = { model: "rtk-smoke", stream: false, messages: [
-    { role: "assistant", tool_calls: [{ id: "smoke-call", type: "function", function: { name: "Bash", arguments: '{"command":"git diff"}' } }] },
-    { role: "tool", tool_call_id: "smoke-call", content: diff },
-  ] };
-  try {
-    const result = await handleChatCore({ body, modelInfo: { provider: "openai-compatible-chat-rtk-smoke", model: "rtk-smoke" }, credentials: { apiKey: "test-key", providerSpecificData: { baseUrl: `http://127.0.0.1:${provider.port}/v1`, apiType: "chat" } }, rtkEnabled: true });
+  const body = (command, name = "Bash", id = "smoke-call") => ({ model: "rtk-smoke", stream: false, messages: [
+    { role: "assistant", tool_calls: [{ id, type: "function", function: { name, arguments: JSON.stringify({ command }) } }] },
+    { role: "tool", tool_call_id: id, content: diff },
+  ] });
+  const options = { modelInfo: { provider: "openai-compatible-chat-rtk-smoke", model: "rtk-smoke" }, credentials: { apiKey: "test-key", providerSpecificData: { baseUrl: `http://127.0.0.1:${provider.port}/v1`, apiType: "chat" } }, rtkEnabled: true };
+  const run = async (requestBody, id, sourceFormatOverride) => {
+    const original = structuredClone(requestBody);
+    const result = await handleChatCore({ body: requestBody, ...options, ...(sourceFormatOverride ? { sourceFormatOverride } : {}) });
     assert.equal(result.response.status, 200);
-    assert((await result.response.text()).includes("ok"));
-    assert.equal(body.messages[1].content, diff);
-    assert.equal(captured.length, 1);
-    assert.equal(captured[0].messages[1].tool_call_id, "smoke-call");
-    if (process.argv.includes("--outage")) assert.equal(captured[0].messages[1].content, diff);
-    else assert(Buffer.byteLength(captured[0].messages[1].content) < Buffer.byteLength(diff));
+    const text = await result.response.text();
+    assert(text.includes("ok"));
+    if (requestBody.stream) assert(text.includes("[DONE]"));
+    assert.deepEqual(requestBody, original);
+    const forwarded = captured.at(-1).messages.find(message => message.role === "tool" && message.tool_call_id === id);
+    assert(forwarded, `tool ${id} forwarded with original ID`);
+    assert.equal(forwarded.content, expected);
+    return forwarded.content;
+  };
+  try {
+    const forwarded = [];
+    forwarded.push(await run(body("git diff"), "smoke-call"));
     const claude = { model: "rtk-smoke", stream: false, messages: [
       { role: "user", content: "hello" },
       { role: "assistant", content: [{ type: "tool_use", id: "claude-call", name: "Bash", input: { command: "git diff" } }] },
       { role: "user", content: [{ type: "tool_result", tool_use_id: "claude-call", content: diff }] },
     ] };
-    const claudeResult = await handleChatCore({ body: claude, sourceFormatOverride: "claude", modelInfo: { provider: "openai-compatible-chat-rtk-smoke", model: "rtk-smoke" }, credentials: { apiKey: "test-key", providerSpecificData: { baseUrl: `http://127.0.0.1:${provider.port}/v1`, apiType: "chat" } }, rtkEnabled: true });
-    assert.equal(claudeResult.response.status, 200);
-    assert((await claudeResult.response.text()).includes("ok"));
-    const tool = captured[1].messages.find(message => message.role === "tool");
-    assert.equal(tool.tool_call_id, "claude-call");
-    if (process.argv.includes("--outage")) assert.equal(tool.content, diff);
-    else assert(Buffer.byteLength(tool.content) < Buffer.byteLength(diff));
-    assert.equal(claude.messages[2].content[0].content, diff);
-    const streamed = structuredClone(body);
+    forwarded.push(await run(claude, "claude-call", "claude"));
+    const streamed = body("git diff");
     streamed.stream = true;
-    const streamedResult = await handleChatCore({ body: streamed, modelInfo: { provider: "openai-compatible-chat-rtk-smoke", model: "rtk-smoke" }, credentials: { apiKey: "test-key", providerSpecificData: { baseUrl: `http://127.0.0.1:${provider.port}/v1`, apiType: "chat" } }, rtkEnabled: true });
-    const events = await streamedResult.response.text();
-    assert(events.includes("ok") && events.includes("[DONE]"));
-    assert.equal(streamed.messages[1].content, diff);
+    forwarded.push(await run(streamed, "smoke-call"));
+    forwarded.push(await run(body("git -C '/repo (test)' diff", "functions.bash", "quoted-call"), "quoted-call"));
+    claude.messages[1].content[0].input.command = "cd /repo && git diff";
+    forwarded.push(await run(claude, "claude-call", "claude"));
+    assert.equal(captured.length, 5);
     const after = getRtkSnapshot();
-    const applied = process.argv.includes("--outage") ? 0 : 3;
+    const applied = outage ? 0 : 5;
     assert.equal(after.usage.appliedOutputs - before.usage.appliedOutputs, applied);
     assert.equal(after.usage.compressedPreparations - before.usage.compressedPreparations, applied);
-    assert.equal(after.usage.http.attempts - before.usage.http.attempts, process.argv.includes("--outage") ? 1 : 3);
-    assert.equal(after.usage.http.failed - before.usage.http.failed, process.argv.includes("--outage") ? 1 : 0);
-    assert.equal(after.usage.skipped.circuit_open - before.usage.skipped.circuit_open, process.argv.includes("--outage") ? 2 : 0);
-    const forwarded = [captured[0].messages[1].content, tool.content, captured[2].messages[1].content];
+    assert.equal(after.usage.http.attempts - before.usage.http.attempts, outage ? 1 : 5);
+    assert.equal(after.usage.http.failed - before.usage.http.failed, outage ? 1 : 0);
+    assert.equal(after.usage.skipped.circuit_open - before.usage.skipped.circuit_open, outage ? 4 : 0);
     assert.equal(after.usage.bytesBefore - before.usage.bytesBefore, applied * Buffer.byteLength(diff));
-    assert.equal(after.usage.bytesAfter - before.usage.bytesAfter, process.argv.includes("--outage") ? 0 : forwarded.reduce((total, text) => total + Buffer.byteLength(text), 0));
-    console.log(process.argv.includes("--outage") ? "RTK outage passthrough passed" : "RTK gateway smoke passed");
+    assert.equal(after.usage.bytesAfter - before.usage.bytesAfter, outage ? 0 : forwarded.reduce((total, text) => total + Buffer.byteLength(text), 0));
+    console.log(outage ? "RTK outage passthrough passed" : `RTK gateway smoke passed: ${Buffer.byteLength(diff)} -> ${Buffer.byteLength(expected)} bytes per result`);
   } finally { provider.stop(true); }
   process.exit(0);
 }
@@ -120,15 +137,19 @@ try {
   assert.equal(version.protocolVersion, 1);
   assert.equal(version.rtkVersion, "0.50.0");
   assert.equal(version.wrapperRevision, 1);
-  for (const filter of ["grep", null]) {
+  for (const [filter, content] of [["grep", input], [null, input], ["git-diff", diff]]) {
     const args = ["exec", "-i", "-e", "RTK_TELEMETRY_DISABLED=1", "-e", "RTK_RECALL=0", "-e", "RTK_TEE=0", name, "/usr/local/bin/rtk", "pipe", ...(filter ? ["--filter", filter] : [])];
-    const expected = spawnSync("docker", args, { input, encoding: "utf8", timeout: 5000 });
+    const expected = spawnSync("docker", args, { input: content, encoding: "utf8", timeout: 5000 });
     assert.equal(expected.status, 0);
-    const response = await fetch(`${url}/filter`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ filter, content: input }) });
+    const response = await fetch(`${url}/filter`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ filter, content }) });
     assert.equal(response.status, 200);
     const data = await response.json();
     assert.equal(data.content, expected.stdout);
-    if (filter === "grep") { assert(data.content.includes("KEEP_1")); assert(Buffer.byteLength(data.content) < Buffer.byteLength(input)); }
+    if (filter === "grep") { assert(data.content.includes("KEEP_1")); assert(Buffer.byteLength(data.content) < Buffer.byteLength(content)); }
+    if (filter === "git-diff") {
+      for (const anchor of ["src/a.txt", "OLD_VALUE", "NEW_VALUE"]) assert(data.content.includes(anchor));
+      assert(Buffer.byteLength(data.content) < Buffer.byteLength(content));
+    }
   }
   const unknown = "UNKNOWN_BLOB_" + "a".repeat(600);
   const unknownResponse = await fetch(`${url}/filter`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ content: unknown }) });

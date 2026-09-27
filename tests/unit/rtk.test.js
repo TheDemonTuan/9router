@@ -176,4 +176,45 @@ describe("upstream RTK source traversal", () => {
     expect(classify("sqlfluff lint --format=json .", "[]")).toBe("sqlfluff-lint");
     expect(classify("sqlfluff lint --format=json .", "not-json")).toBeNull();
   });
+  it("classifies literal shell metacharacters and a single safe cd prefix", () => {
+    const grepOutput = "src/a.ts:12:retained\n".repeat(30);
+    const cases = [
+      ["rg -n 'foo|bar' src", "grep", grepOutput],
+      ["rg -n '(foo|bar);$`&' src", "grep", grepOutput],
+      ['rg -n "foo|bar;()&" src', "grep", grepOutput],
+      ["git -C '/repo (test)' diff", "git-diff"],
+      ["git -C '/repo&&name' diff", "git-diff"],
+      [String.raw`git -C "C:\repo" diff`, "git-diff"],
+      ["/usr/bin/git diff", "git-diff"],
+      ["cd /repo && git diff", "git-diff"],
+      ["cd -- './repo (test)' && git diff", "git-diff"],
+      ["cd ./repo && rg -n 'foo|bar' src", "grep", grepOutput],
+      ["cd ../repo && git diff", "git-diff"],
+    ];
+    for (const [command, filter, output = input] of cases) {
+      const reasons = [];
+      expect(classifyToolCall({ name: "functions.bash", input: { command } }, output, reason => reasons.push(reason)), command).toBe(filter);
+      expect(reasons, command).toEqual([]);
+    }
+    expect(classifyToolCall({ name: "exec_command", input: { cmd: "cd /repo && git diff" } }, input)).toBe("git-diff");
+    expect(classifyToolCall({ name: "read_file", input: { command: "cd /repo && git diff" } }, input)).toBeNull();
+  });
+
+  it("leaves ambiguous shell syntax and stdout-producing chains raw", () => {
+    const commands = [
+      "git diff 'unterminated", 'git -C "unterminated diff', "git diff $(pwd)", "git diff `pwd`",
+      'git -C "$HOME" diff', 'git -C "`pwd`" diff', "git diff\\ foo", "git diff\\'x'",
+      "git diff\\\\x", "git diff\\;cat", "git diff\\", "git diff\ncat", "git diff\r",
+      "git diff || cat", "git diff | cat", "git diff > out", "git diff # comment", "git diff; cat",
+      "cd repo && git diff", "cd - && git diff", "cd && git diff", "cd /repo extra && git diff",
+      "pwd && git diff", "git status && git diff", "cd /repo && git diff && git status",
+      "cd /repo; git diff", "cd /repo && git diff | cat", "pushd /repo && git diff",
+      "cd /repo &&", "&& git diff",
+    ];
+    for (const command of commands) {
+      const reasons = [];
+      expect(classifyToolCall({ name: "Bash", input: { command } }, input, reason => reasons.push(reason)), command).toBeNull();
+      expect(reasons, command).toHaveLength(1);
+    }
+  });
 });

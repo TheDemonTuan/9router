@@ -124,10 +124,13 @@ describe("RTK process dashboard", () => {
     const raw = "x".repeat(800);
     const cases = [
       { type: "function", name: "functions.bash", input: { command: "git diff" }, reason: null },
+      { type: "function", name: "functions.bash", input: { command: "cd /repo && git diff" }, reason: null },
       { type: "custom_tool", name: "Bash", input: "git diff", reason: null },
+      { type: "custom_tool", name: "Bash", input: "git -C '/repo (test)' diff", reason: null },
       { type: "function", name: "functions.read", input: { path: "synthetic" }, reason: "missing_command" },
       { type: "function", name: "functions.grep", input: { pattern: "x", path: "synthetic" }, reason: "missing_command" },
       { type: "function", name: "Bash", input: { command: "pwd && git diff" }, reason: "unsupported_shell_syntax" },
+      { type: "function", name: "Bash", input: { command: "git status && git diff" }, reason: "unsupported_shell_syntax" },
       { type: "function", name: "Bash", input: { command: "git diff --stat" }, reason: "unsupported_output_format" },
       { type: "function", name: "Bash", input: { command: "cargo build" }, reason: "unsupported_mode" },
       { type: "function", name: "Bash", input: { command: "unknown-command" }, reason: "unsupported_command" },
@@ -146,11 +149,11 @@ describe("RTK process dashboard", () => {
     }
     const eligibility = state.getRtkSnapshot().usage.eligibility;
     expect(eligibility).toMatchObject({ toolResults: cases.length, textLeaves: cases.length, resultsWithoutText: 0, rejected: {
-      missing_command: 2, unsupported_shell_syntax: 1, unsupported_output_format: 1, unsupported_mode: 1,
+      missing_command: 2, unsupported_shell_syntax: 2, unsupported_output_format: 1, unsupported_mode: 1,
       unsupported_command: 1, already_rtk: 1, invalid_command_metadata: 1, metadata_limit: 1,
     } });
-    expect(requests).toBe(2);
-    expect(state.getRtkSnapshot().usage.http.attempts).toBe(2);
+    expect(requests).toBe(4);
+    expect(state.getRtkSnapshot().usage.http.attempts).toBe(4);
   });
 
   it("assigns one rejection per leaf in gate order, including duplicate calls", async () => {

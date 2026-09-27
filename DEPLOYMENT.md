@@ -83,6 +83,8 @@ cd /opt/9router
 
 RTK là tối ưu tùy chọn: không có sidecar hoặc sidecar lỗi thì tool output giữ nguyên. Không mở port RTK công khai; chỉ app nối network `9router-rtk` nội bộ. Sau khi PR qua native smoke trên cả amd64/arm64 và merge vào `master`, chạy workflow `rtk-sidecar.yml` bằng `workflow_dispatch`, `publish=true`, `deploy=true`. Workflow publish manifest digest bất biến rồi bootstrap sidecar trên VPS dưới deployment lock; không đổi route app.
 
+Classifier RTK nhận metachar literal trong dấu nháy và một prefix `cd /path &&`, `cd ./path &&`, `cd ../path &&` (có thể dùng `cd -- PATH`) trước command được hỗ trợ. Không chạy lại command; chỉ gửi output đã có đến filter. Pipe, redirect, expansion, nhiều command sinh output, tool thiếu command và output không rõ định dạng giữ nguyên. HTTP thành công không đồng nghĩa đã nén: kết quả rỗng hoặc không nhỏ hơn vẫn giữ nguyên.
+
 Nếu app workflow chạy ngay khi merge mà network chưa bootstrap, bước deploy app sẽ dừng **trước khi stop slot cũ**. Sau khi sidecar workflow thành công, chạy lại workflow app qua `workflow_dispatch` (giữ `skip_deploy=false`). Có thể thao tác trực tiếp trên host bằng các lệnh tương đương sau:
 
 ```bash

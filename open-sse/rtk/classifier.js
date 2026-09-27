@@ -7,23 +7,37 @@ const fdFlags = new Set(["--hidden", "--no-ignore", "--absolute-path", "--full-p
 const fdValues = new Set(["-e", "--extension", "-t", "--type", "-d", "--max-depth"]);
 
 function tokenize(command) {
-  if (/[\0\r\n;|&<>`$()]/.test(command)) return null;
-  const argv = [];
+  const segments = [], argv = [];
   let word = "", quote = "", started = false;
-  for (const char of command) {
-    if (char === "'" || char === '"') {
-      if (quote === char) quote = "";
-      else if (!quote) quote = char;
+  const flush = () => { if (started) argv.push(word); word = ""; started = false; };
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i];
+    if (/[\0\r\n]/.test(char)) return null;
+    if (quote === "'") {
+      if (char === "'") quote = "";
       else word += char;
-      started = true;
-    } else if (/\s/.test(char) && !quote) {
-      if (started) argv.push(word);
-      word = ""; started = false;
-    } else { word += char; started = true; }
+    } else {
+      if (char === "\\" && (/[\s'"\\;|&<>`$()]/.test(command[i + 1] ?? "") || i + 1 === command.length)) return null;
+      if (quote === '"') {
+        if (char === '"') quote = "";
+        else if (char === "$" || char === "`") return null;
+        else word += char;
+      } else if (char === "'" || char === '"') { quote = char; started = true; }
+      else if (char === "&" && command[i + 1] === "&" && segments.length === 0) {
+        flush();
+        if (!argv.length) return null;
+        segments.push(argv.splice(0));
+        i++;
+      } else if (/[;|&<>`$()]/.test(char) || (char === "#" && !started)) return null;
+      else if (/\s/.test(char)) flush();
+      else { word += char; started = true; }
+    }
   }
   if (quote) return null;
-  if (started) argv.push(word);
-  return argv;
+  flush();
+  if (!argv.length) return null;
+  segments.push(argv);
+  return segments;
 }
 
 function options(argv, flags, values, combined = "") {
@@ -76,8 +90,14 @@ export function classifyToolCall(call, content, onReject) {
   const command = input.command ?? input.cmd;
   if (typeof command !== "string") return reject(onReject, "missing_command");
   if (Buffer.byteLength(command) > 8192) return reject(onReject, "metadata_limit");
-  let argv = tokenize(command);
-  if (!argv?.length) return reject(onReject, "unsupported_shell_syntax");
+  const segments = tokenize(command);
+  if (!segments) return reject(onReject, "unsupported_shell_syntax");
+  if (segments.length === 2) {
+    const cd = segments[0];
+    const path = cd[1] === "--" ? cd[2] : cd[1];
+    if (!shellTools.has(tool) || cd[0] !== "cd" || cd.length !== (cd[1] === "--" ? 3 : 2) || !/^(\/|\.\.?\/)/.test(path ?? "")) return reject(onReject, "unsupported_shell_syntax");
+  }
+  let argv = segments.at(-1);
   const base = token => token.replaceAll("\\", "/").split("/").at(-1).replace(/\.exe$/i, "").toLowerCase();
   let executable = base(argv[0]);
   if (executable === "rtk") return reject(onReject, "already_rtk");
