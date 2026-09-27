@@ -1,4 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
+import { createServer } from "node:http";
 
 const { executeMock } = vi.hoisted(() => ({
   executeMock: vi.fn(),
@@ -32,6 +33,19 @@ vi.mock("@/lib/usageDb.js", () => ({
   appendRequestLog: vi.fn(async () => {}),
   saveRequestDetail: vi.fn(async () => {}),
 }));
+
+const sidecar = createServer(async (request, response) => {
+  const chunks = [];
+  for await (const chunk of request) chunks.push(chunk);
+  const { filter } = JSON.parse(Buffer.concat(chunks).toString());
+  expect(filter).toBe("git-diff");
+  response.setHeader("content-type", "application/json");
+  response.end(JSON.stringify({ protocolVersion: 1, content: "compressed diff" }));
+});
+await new Promise(resolve => sidecar.listen(0, "127.0.0.1", resolve));
+process.env.RTK_URL = `http://127.0.0.1:${sidecar.address().port}`;
+afterAll(() => new Promise(resolve => sidecar.close(resolve)));
+await import("../translator/registerAll.js");
 
 const { handleChatCore } = await import("../../open-sse/handlers/chatCore.js");
 
@@ -96,10 +110,10 @@ describe("token savers on Cursor (pre-translate RTK)", () => {
 
     expect(dispatched.messages.some((m) => m.role === "tool")).toBe(false);
     expect(blob).toContain("<tool_result>");
-    expect(blob).toContain("lines truncated");
+    expect(blob).toContain("compressed diff");
     expect(blob).not.toContain("UNIQUE_PADDING_150");
     expect(blob).toContain("lazy senior developer");
-    expect(blob).toMatch(/Respond like a caveman|drop filler|ACTIVE EVERY RESPONSE/i);
+    expect(blob).toContain("hi");
     expect(input.messages[3].content).toBe(diff);
     expect(input.messages[0].content).toBe("hi");
     expect(global.fetch).not.toHaveBeenCalled();

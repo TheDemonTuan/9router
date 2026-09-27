@@ -1,5 +1,8 @@
 # Unreleased
 
+## Changed
+- **RTK**: replace local JavaScript filters with an optional upstream `rtk pipe` HTTP sidecar; compress linked source-format tool results before translation, preserve original output on sidecar failure, and release the sidecar separately by immutable image digest.
+
 ## Removed
 - **Headroom**: remove compressor, sidecar, dashboard/CLI controls, and retire persisted settings on upgrade and restore.
 

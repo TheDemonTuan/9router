@@ -49,6 +49,10 @@ jobs:
             unit/claude-header-forwarding.test.js \
             unit/session-manager.test.js \
             unit/rtk-cursor-pretranslate.test.js \
+            unit/rtk.test.js \
+            unit/rtkKiro.test.js \
+            unit/force-stream-config.test.js \
+            unit/minimax-transport-target-format.test.js \
             unit/base-executor-timeout-classification.test.js \
             integration/zcode-concurrent-responses.test.js \
             unit/grok-build-config.test.js \
@@ -361,7 +365,7 @@ jobs:
           scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" \
             -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
             -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o TCPKeepAlive=yes \
-            docker-compose.prod.yml docker-compose.chatgpt-web.yml deploy.sh \
+            docker-compose.prod.yml docker-compose.chatgpt-web.yml docker-compose.rtk.yml deploy.sh \
             "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/$stage/"
           ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" \
             -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
@@ -372,6 +376,7 @@ jobs:
           flock -n .deployment.lock bash -e -c '
             mv -- "$1/docker-compose.prod.yml" docker-compose.prod.yml
             mv -- "$1/docker-compose.chatgpt-web.yml" docker-compose.chatgpt-web.yml
+            mv -- "$1/docker-compose.rtk.yml" docker-compose.rtk.yml
             mv -- "$1/deploy.sh" deploy.sh
             chmod +x deploy.sh
             rmdir -- "$1"

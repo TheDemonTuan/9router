@@ -64,6 +64,10 @@ jobs:
             unit/claude-header-forwarding.test.js \
             unit/session-manager.test.js \
             unit/rtk-cursor-pretranslate.test.js \
+            unit/rtk.test.js \
+            unit/rtkKiro.test.js \
+            unit/force-stream-config.test.js \
+            unit/minimax-transport-target-format.test.js \
             unit/base-executor-timeout-classification.test.js \
             integration/zcode-concurrent-responses.test.js \
             unit/grok-build-config.test.js \

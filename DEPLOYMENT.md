@@ -79,6 +79,19 @@ cd /opt/9router
 
 ---
 
+## RTK sidecar riêng
+
+RTK là tối ưu tùy chọn: không có sidecar hoặc sidecar lỗi thì tool output giữ nguyên. Không mở port RTK công khai; chỉ app nối network `9router-rtk` nội bộ. Sau khi PR qua native smoke trên cả amd64/arm64 và merge vào `master`, chạy workflow `rtk-sidecar.yml` bằng `workflow_dispatch`, `publish=true`, `deploy=true`. Workflow publish manifest digest bất biến rồi bootstrap sidecar trên VPS dưới deployment lock; không đổi route app.
+
+Nếu app workflow chạy ngay khi merge mà network chưa bootstrap, bước deploy app sẽ dừng **trước khi stop slot cũ**. Sau khi sidecar workflow thành công, chạy lại workflow app qua `workflow_dispatch` (giữ `skip_deploy=false`). Có thể thao tác trực tiếp trên host bằng các lệnh tương đương sau:
+
+```bash
+./deploy.sh --rtk ghcr.io/<owner>/rtk-sidecar@sha256:<manifest-digest>
+./deploy.sh --release ghcr.io/<owner>/9router:<app-image-ref>
+```
+
+`--rtk` chỉ pull/thay sidecar; không đổi route hoặc restart app. Lỗi nâng cấp khôi phục image ID cũ; metadata `.rtk-image` chỉ ghi sau health/version/filter thành công. App deploy kiểm network nội bộ thuộc project sidecar trước khi dừng slot idle; rollback/status không phụ thuộc RTK. App chạy Bun local không Docker: chỉ cấu hình `RTK_URL=http://127.0.0.1:8080` khi đã tự chạy sidecar. Single-app Compose dùng đồng thời `docker-compose.yml` và `docker-compose.rtk-app.yml`; base riêng không cần RTK.
+
 ## 5. Route Generation ACK & Zero-Downtime Verification
 
 Để đảm bảo tính nhất quán tuyệt đối và loại bỏ hoàn toàn race condition trong quá trình cutover giữa các slot Blue/Green (đặc biệt khi Traefik file watcher reload chậm hoặc trả cache response cũ), hệ thống sử dụng cơ chế **Route Generation ACK**:

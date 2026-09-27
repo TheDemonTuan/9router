@@ -1,0 +1,187 @@
+name: RTK sidecar
+on:
+  pull_request:
+    paths:
+      - sidecars/rtk/**
+      - open-sse/config/rtkConfig.js
+      - open-sse/rtk/**
+      - open-sse/handlers/chatCore.js
+      - tests/unit/rtk*.test.js
+      - tests/unit/blue-green-reconcile.test.sh
+      - deploy.sh
+      - docker-compose.prod.yml
+      - tests/integration/rtk-sidecar-smoke.mjs
+      - docker-compose.rtk.yml
+      - .github/workflows/rtk-sidecar.yml
+  workflow_dispatch:
+    inputs:
+      publish:
+        type: boolean
+        default: false
+        description: Publish immutable multiarchitecture image (default branch only)
+      deploy:
+        type: boolean
+        default: false
+        description: Deploy published digest to VPS after both architecture gates pass
+permissions:
+  contents: read
+  packages: write
+concurrency:
+  group: rtk-sidecar-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+      - run: bun install --frozen-lockfile --cwd tests
+      - name: Run RTK and request regressions
+        working-directory: tests
+        run: bun x vitest run --config vitest.config.js unit/rtk.test.js unit/rtkKiro.test.js unit/rtk-cursor-pretranslate.test.js unit/force-stream-config.test.js unit/minimax-transport-target-format.test.js
+      - name: Verify blue-green lifecycle
+        run: bash tests/unit/blue-green-reconcile.test.sh
+      - name: Verify production RTK network contract
+        run: |
+          RTK_IMAGE=ghcr.io/example/rtk-sidecar@sha256:$(printf '%064d' 1) docker compose -f docker-compose.rtk.yml config --format json |
+            bun -e 'const c=JSON.parse(await Bun.stdin.text());if(c.networks.rtk.internal!==true || c.services.rtk.ports || Object.keys(c.services.rtk.networks).length!==1)process.exit(1)'
+      - name: Build gateway
+        run: |
+          mkdir -p "$RUNNER_TEMP/rtk-home"
+          HOME="$RUNNER_TEMP/rtk-home" DATA_DIR="$RUNNER_TEMP/rtk-home" bun run build
+
+  native:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: Install gateway dependencies for HTTP smoke
+        run: bun install --frozen-lockfile
+      - uses: docker/setup-buildx-action@v4
+      - name: Build and exercise native image
+        run: |
+          set -euo pipefail
+          version="$(bun -p "JSON.parse(require('fs').readFileSync('sidecars/rtk/upstream.json')).version")"
+          revision="$(bun -p "JSON.parse(require('fs').readFileSync('sidecars/rtk/upstream.json')).revision")"
+          docker buildx build --load --platform linux/${{ matrix.arch }} -f sidecars/rtk/Dockerfile -t "rtk-check:${version}-r${revision}" .
+          bun tests/integration/rtk-sidecar-smoke.mjs --image "rtk-check:${version}-r${revision}"
+      - name: Publish native digest after smoke
+        if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref_name == github.event.repository.default_branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          owner="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/${owner}/rtk-sidecar"
+          version="$(bun -p "JSON.parse(require('fs').readFileSync('sidecars/rtk/upstream.json')).version")"
+          revision="$(bun -p "JSON.parse(require('fs').readFileSync('sidecars/rtk/upstream.json')).revision")"
+          tag="${version}-r${revision}"
+          echo "$GH_TOKEN" | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+          if docker manifest inspect "${image}:${tag}" >/dev/null 2>&1; then echo 'Tag exists; increase manifest revision' >&2; exit 1; fi
+          if docker manifest inspect "${image}:${tag}-${{ matrix.arch }}" >/dev/null 2>&1; then echo 'Architecture tag exists; increase manifest revision' >&2; exit 1; fi
+          docker tag "rtk-check:${tag}" "${image}:${tag}-${{ matrix.arch }}"
+          docker push "${image}:${tag}-${{ matrix.arch }}"
+          digest="$(docker image inspect --format '{{index .RepoDigests 0}}' "${image}:${tag}-${{ matrix.arch }}")"
+          echo "${digest}" > "rtk-${{ matrix.arch }}.txt"
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref_name == github.event.repository.default_branch
+        with:
+          name: rtk-${{ matrix.arch }}
+          path: rtk-${{ matrix.arch }}.txt
+  manifest:
+    needs: native
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-24.04
+    outputs:
+      image_ref: ${{ steps.publish.outputs.image_ref }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rtk-*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v4
+      - name: Create immutable multiarchitecture manifest
+        id: publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          owner="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/${owner}/rtk-sidecar"
+          version="$(bun -p "JSON.parse(require('fs').readFileSync('sidecars/rtk/upstream.json')).version")"
+          revision="$(bun -p "JSON.parse(require('fs').readFileSync('sidecars/rtk/upstream.json')).revision")"
+          tag="${version}-r${revision}"
+          echo "$GH_TOKEN" | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+          if docker manifest inspect "${image}:${tag}" >/dev/null 2>&1; then echo 'Tag exists; increase manifest revision' >&2; exit 1; fi
+          docker buildx imagetools create -t "${image}:${tag}" "$(cat rtk-amd64.txt)" "$(cat rtk-arm64.txt)"
+          digest="$(docker buildx imagetools inspect "${image}:${tag}" --format '{{.Manifest.Digest}}')"
+          echo "RTK_IMAGE=${image}@${digest}" >> "$GITHUB_STEP_SUMMARY"
+          echo "image_ref=${image}@${digest}" >> "$GITHUB_OUTPUT"
+
+  bootstrap:
+    needs: manifest
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && inputs.deploy && github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          if [ -n "$VPS_KNOWN_HOSTS" ]; then printf '%s\n' "$VPS_KNOWN_HOSTS" > ~/.ssh/known_hosts; chmod 600 ~/.ssh/known_hosts; fi
+      - name: Bootstrap isolated RTK service
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT || '22' }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/opt/9router' }}
+          IMAGE_REF: ${{ needs.manifest.outputs.image_ref }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ "$DEPLOY_PATH" =~ ^/[A-Za-z0-9_./-]+$ && "$DEPLOY_PATH" != *..* ]] || exit 1
+          [[ "$IMAGE_REF" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]] || exit 1
+          [[ "$GITHUB_ACTOR" =~ ^[A-Za-z0-9-]+$ ]] || exit 1
+          stage=".rtk-incoming-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+            "$VPS_USER@$VPS_HOST" "mkdir -p '$DEPLOY_PATH/$stage'"
+          scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+            docker-compose.rtk.yml deploy.sh "$VPS_USER@$VPS_HOST:$DEPLOY_PATH/$stage/"
+          printf '%s' "$GHCR_TOKEN" | ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+            "$VPS_USER@$VPS_HOST" "docker login ghcr.io -u '$GITHUB_ACTOR' --password-stdin"
+          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+            "$VPS_USER@$VPS_HOST" "bash -se -- '$DEPLOY_PATH' '$stage' '$IMAGE_REF'" <<'REMOTE'
+          set -euo pipefail
+          cd "$1"
+          flock -n .deployment.lock bash -e -c '
+            mv -- "$1/docker-compose.rtk.yml" docker-compose.rtk.yml
+            mv -- "$1/deploy.sh" deploy.sh
+            chmod +x deploy.sh
+            rmdir -- "$1"
+          ' _ "$2"
+          ./deploy.sh --rtk "$3"
+          REMOTE

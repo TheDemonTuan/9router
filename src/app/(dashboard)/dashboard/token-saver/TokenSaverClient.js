@@ -212,7 +212,7 @@ export default function TokenSaverClient() {
               </a>
             </p>
             <p className="text-sm text-text-muted">
-              git/grep/ls/tree/logs → 60-90% fewer input tokens
+              Compress supported tool output with the upstream RTK sidecar. If unavailable, original output is preserved.
             </p>
           </div>
           <Toggle

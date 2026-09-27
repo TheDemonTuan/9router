@@ -1,0 +1,11 @@
+services:
+  9router:
+    environment:
+      RTK_URL: ${RTK_URL-http://rtk:8080}
+    networks:
+      - default
+      - rtk
+networks:
+  rtk:
+    external: true
+    name: ${RTK_NETWORK:-9router-rtk}
