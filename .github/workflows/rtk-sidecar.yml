@@ -45,6 +45,10 @@ jobs:
         run: bun x vitest run --config vitest.config.js unit/rtk.test.js unit/rtkKiro.test.js unit/rtk-cursor-pretranslate.test.js unit/force-stream-config.test.js unit/minimax-transport-target-format.test.js
       - name: Verify blue-green lifecycle
         run: bash tests/unit/blue-green-reconcile.test.sh
+      - name: Verify production RTK network contract
+        run: |
+          RTK_IMAGE=ghcr.io/example/rtk-sidecar@sha256:$(printf '%064d' 1) docker compose -f docker-compose.rtk.yml config --format json |
+            bun -e 'const c=JSON.parse(await Bun.stdin.text());if(c.networks.rtk.internal!==true || c.services.rtk.ports || Object.keys(c.services.rtk.networks).length!==1)process.exit(1)'
       - name: Build gateway
         run: |
           mkdir -p "$RUNNER_TEMP/rtk-home"

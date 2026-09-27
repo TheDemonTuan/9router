@@ -91,9 +91,12 @@ const docker = (...args) => {
 };
 const input = Array.from({ length: 50 }, (_, i) => `src/a.ts:${i + 1}:KEEP_${i + 1} ${"padding ".repeat(12)}`).join("\n") + "\n";
 try {
-  docker("network", "create", "--internal", network);
+  // ponytail: Docker suppresses published ports on internal networks; smoke binds localhost, production Compose stays internal-only.
+  docker("network", "create", network);
   docker("run", "-d", "--name", name, "--network", network, "--read-only", "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m", "-p", "127.0.0.1::8080", image);
-  const port = Number(docker("port", name, "8080/tcp").split(":").at(-1));
+  const binding = docker("port", name, "8080/tcp");
+  assert.match(binding, /^127\.0\.0\.1:[0-9]+$/);
+  const port = Number(binding.split(":").at(-1));
   const url = `http://127.0.0.1:${port}`;
   let health;
   for (let attempt = 0; attempt < 30; attempt++) {
