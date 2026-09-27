@@ -136,11 +136,20 @@ jobs:
   deploy:
     needs: manifest
     if: github.event_name == 'workflow_dispatch' && inputs.publish && inputs.deploy && github.ref_name == github.event.repository.default_branch
-    uses: TheDemonTuan/vps-deploy/.github/workflows/deploy-vps.yml@594772563df2b16088c93c111bf86d43d115cf6f
-    with:
-      app: 9router
-      component: rtk
-      source-sha: ${{ github.sha }}
-      platform-ref: 594772563df2b16088c93c111bf86d43d115cf6f
-      config: .deploy/app.yml
-      image-ref: ${{ needs.manifest.outputs.image_ref }}
+    runs-on: ubuntu-24.04
+    environment: production
+    timeout-minutes: 17
+    steps:
+      - uses: TheDemonTuan/vps-deploy/.github/actions/deploy@868802657611b64f5a965e6aeea95fc87fb836c6
+        with:
+          operation: deploy
+          component: rtk
+          source-sha: ${{ github.sha }}
+          platform-ref: 868802657611b64f5a965e6aeea95fc87fb836c6
+          config: .deploy/app.yml
+          image-ref: ${{ needs.manifest.outputs.image_ref }}
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ vars.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER }}

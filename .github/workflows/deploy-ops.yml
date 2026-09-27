@@ -18,22 +18,21 @@ permissions:
   contents: read
 
 jobs:
-  credential-probe:
-    runs-on: ubuntu-24.04
-    environment: production
-    steps:
-      - name: Verify environment credential exists
-        env:
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-        run: test -n "$DEPLOY_SSH_KEY"
-
   operate:
     if: github.ref_type == 'branch' && github.ref_name == github.event.repository.default_branch && (inputs.operation != 'rollback' || inputs.component == 'app')
-    uses: TheDemonTuan/vps-deploy/.github/workflows/operate-vps.yml@594772563df2b16088c93c111bf86d43d115cf6f
-    with:
-      operation: ${{ inputs.operation }}
-      app: 9router
-      component: ${{ inputs.component }}
-      source-sha: ${{ github.sha }}
-      platform-ref: 594772563df2b16088c93c111bf86d43d115cf6f
-      config: .deploy/app.yml
+    runs-on: ubuntu-24.04
+    environment: production
+    timeout-minutes: 17
+    steps:
+      - uses: TheDemonTuan/vps-deploy/.github/actions/deploy@868802657611b64f5a965e6aeea95fc87fb836c6
+        with:
+          operation: ${{ inputs.operation }}
+          component: ${{ inputs.component }}
+          source-sha: ${{ github.sha }}
+          platform-ref: 868802657611b64f5a965e6aeea95fc87fb836c6
+          config: .deploy/app.yml
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ vars.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER }}
