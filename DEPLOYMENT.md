@@ -68,7 +68,7 @@ Operator trên VPS sau adoption có thể kiểm tra bằng:
 sudo -n /opt/vps-deploy/current/bin/deployctl status --app 9router --strict
 ```
 
-Chỉ `complete` và strict status khớp route generation/slot/digest mới chứng minh cutover; slot cũ đang drain có thể vẫn chạy sau khi request hoàn tất. Rollback chỉ dùng previous image/container còn được giữ và không đảo SQLite migration. Không chạy `deploy.sh` legacy hoặc sửa trực tiếp `9router.yml` sau adoption.
+Chỉ `complete` và strict status khớp route generation/slot/digest mới chứng minh cutover; slot cũ đang drain có thể vẫn chạy sau khi request hoàn tất. Rollback chỉ dùng previous image/container còn được giữ và không đảo SQLite migration. Không sửa trực tiếp `9router.yml` sau adoption.
 
 ---
 
