@@ -45,12 +45,18 @@ case "${1:-}" in
       '{{.State.Status}}') printf '%s\n' "$state" ;;
       '{{.Config.Hostname}}') printf '%s\n' "$hostname" ;;
       '{{.Image}}') printf '%s\n' "$image" ;;
+      '{{.Config.Image}}') printf '%s\n' "$image" ;;
       '{{json .NetworkSettings.Networks}}')
         if [[ "${FAKE_DETACH_SLOT:-}" == "${2:-}" ]]; then printf '{}\n'; else printf '{"%s":{}}\n' "${EDGE_NETWORK:-edge-9router}"; fi
         ;;
     esac
     ;;
   network)
+    if [[ "${2:-}" == inspect && "${3:-}" == "${RTK_NETWORK:-9router-rtk}" ]]; then
+      [[ "${FAKE_RTK_NETWORK:-}" != missing || -f "$FAKE_STATE/rtk-network" ]] || exit 1
+      printf '{"Internal":%s,"Driver":"bridge","Labels":{"com.docker.compose.project":"%s","com.docker.compose.network":"rtk"}}\n' "${FAKE_RTK_INTERNAL:-true}" "${RTK_PROJECT:-9router-rtk}"
+      exit 0
+    fi
     [[ "${FAKE_NETWORK:-}" != missing ]] || exit 1
     if [[ "${FAKE_NETWORK:-}" != detached ]]; then printf 'edge-traefik\n'; fi
     for file in "$FAKE_STATE"/9router-*; do
@@ -63,15 +69,18 @@ case "${1:-}" in
     [[ "${2:-}" == version ]] && exit 0
     if [[ "$*" == *' up '* ]]; then
       name="${!#}"
+      if [[ "$name" == rtk ]]; then printf 'running|%s|rtk\n' "$RTK_IMAGE" > "$FAKE_STATE/rtk"; touch "$FAKE_STATE/rtk-network"; exit 0; fi
       [[ "$name" == 9router-blue || "$name" == 9router-green ]] || exit 1
       if [[ "$name" == 9router-* ]]; then
         printf 'running|sha256:%s-new|fake-%s\n' "${name#9router-}" "${name#9router-}" > "$FAKE_STATE/$name"
       fi
     elif [[ "$*" == *' stop '* ]]; then
       name="${!#}"
+      if [[ "$name" == rtk ]]; then IFS='|' read -r state image hostname < "$FAKE_STATE/rtk"; printf 'exited|%s|%s\n' "$image" "$hostname" > "$FAKE_STATE/rtk"; exit 0; fi
       IFS='|' read -r state image hostname < "$FAKE_STATE/$name"
       printf 'exited|%s|%s\n' "$image" "$hostname" > "$FAKE_STATE/$name"
     elif [[ "$*" == *' pull '* ]]; then
+      if [[ "${!#}" == rtk && "${FAKE_RTK_PULL_FAIL:-}" == 1 ]]; then exit 1; fi
       if [[ "${FAKE_PULL_TIMEOUT:-}" == 1 ]]; then
         sleep 5
         exit 0
@@ -87,6 +96,8 @@ case "${1:-}" in
         fi
       fi
       exit 0
+    elif [[ "$*" == *' ps '* && "${!#}" == rtk ]]; then
+      [[ ! -f "$FAKE_STATE/rtk" ]] || printf 'rtk\n'
     fi
     ;;
   image)
@@ -104,6 +115,7 @@ case "${1:-}" in
     name="$2"
     IFS='|' read -r state image hostname < "$FAKE_STATE/$name"
     [[ "$state" == running ]] || exit 1
+    if [[ "$name" == rtk ]]; then [[ "${FAKE_RTK_UNHEALTHY:-}" != 1 ]]; exit; fi
     slot="${name#9router-}"
     if [[ "${FAKE_BAD_HEALTH_SLOT:-}" == "$slot" ]]; then printf '{invalid'; exit 0; fi
     reported="$slot"
@@ -257,6 +269,7 @@ new_case() {
   case_dir="$(mktemp -d "$tmp/case.XXXXXXXX")"
   mkdir -p "$case_dir/dynamic" "$case_dir/state"
   cp "$repo_root/deploy.sh" "$case_dir/deploy.sh"
+  cp "$repo_root/docker-compose.rtk.yml" "$case_dir/docker-compose.rtk.yml"
   chmod +x "$case_dir/deploy.sh"
   export PATH="$tmp/bin:$PATH" API_HOST=9router-api.example.test
   export TRAEFIK_DYNAMIC_DIR="$case_dir/dynamic" FAKE_MOUNT_SOURCE="$case_dir/dynamic"
@@ -266,6 +279,7 @@ new_case() {
   export FAKE_SYSTEMCTL_LOG="$case_dir/systemctl.log"
   export READY_TIMEOUT=2 DRAIN_TIMEOUT=1 DRAIN_POLL_SECONDS=1 ROUTE_TIMEOUT=8 FAST_DRAIN_TIMEOUT=1
   unset FAKE_CURL_MODE FAKE_CURL_SEQUENCE FAKE_RELOAD_AFTER FAKE_RELOAD_GEN_AFTER FAKE_BAD_HEALTH_SLOT FAKE_WRONG_SLOT FAKE_UNKNOWN_DRAIN_SLOT FAKE_BUSY_SLOT FAKE_MOUNT_TYPE FAKE_NETWORK FAKE_DETACH_SLOT FAKE_NESTED FAKE_TRAEFIK_RUNNING FAKE_FAIL_METADATA FAKE_SIGNAL_AFTER_WRITE FAKE_HOLD_MARKER FAKE_HOLD_RELEASE FAKE_INVENTORY_ERROR FAKE_INSPECT_ERROR FAKE_UNCACHED_IMAGE ROUTE_GENERATION FAKE_PULL_FAIL_COUNT FAKE_PULL_TIMEOUT FAKE_SYSTEMCTL_FAIL FAKE_PIDOF_FAIL PULL_TIMEOUT PULL_ATTEMPTS PULL_HEARTBEAT_INTERVAL
+  unset FAKE_RTK_NETWORK FAKE_RTK_INTERNAL FAKE_RTK_UNHEALTHY FAKE_RTK_PULL_FAIL
   printf none > "$FAKE_LOADED_SLOT"
   printf none > "$FAKE_LOADED_GENERATION"
 }
@@ -828,5 +842,35 @@ cleaner_lock_out="$(run --cleanup-drains 2>&1)"
 [[ "$cleaner_lock_out" == *"Another deployment holds .deployment.lock; skipping drain cleanup"* ]]
 flock -u 8
 exec 8>&-
+
+rtk_old="ghcr.io/example/rtk-sidecar@sha256:$(printf '%064d' 1)"
+rtk_new="ghcr.io/example/rtk-sidecar@sha256:$(printf '%064d' 2)"
+
+new_case; seed blue
+FAKE_RTK_NETWORK=missing run --rtk "$rtk_old"
+[[ "$(cat "$case_dir/.rtk-image")" == "$rtk_old" ]]
+assert_route blue blue
+before="$(wc -l < "$FAKE_DOCKER_LOG")"
+run --rtk "$rtk_old"
+[[ "$(wc -l < "$FAKE_DOCKER_LOG")" -gt "$before" ]]
+[[ "$(cat "$FAKE_STATE/rtk")" == "running|$rtk_old|rtk" ]]
+FAKE_RTK_PULL_FAIL=1 fail --rtk "$rtk_new"
+[[ "$(cat "$FAKE_STATE/rtk")" == "running|$rtk_old|rtk" ]]
+[[ "$(cat "$case_dir/.rtk-image")" == "$rtk_old" ]]
+FAKE_RTK_UNHEALTHY=1 fail --rtk "$rtk_new"
+[[ "$(cat "$FAKE_STATE/rtk")" == "running|$rtk_old|rtk" ]]
+assert_route blue blue
+run image-new
+assert_route green green
+FAKE_RTK_UNHEALTHY=1 run --rollback
+assert_route blue blue
+
+new_case; seed blue
+FAKE_RTK_NETWORK=missing fail image-new
+[[ "$output" == *"RTK network missing"* ]]
+[[ ! -f "$FAKE_STATE/9router-green" ]]
+FAKE_RTK_INTERNAL=false fail image-new
+[[ "$output" == *"conflicting ownership"* ]]
+[[ ! -f "$FAKE_STATE/9router-green" ]]
 
 printf 'CLI preflight, ACK, rollback, reconcile, bootstrap and drain scenarios passed\n'

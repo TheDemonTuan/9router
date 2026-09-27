@@ -37,6 +37,7 @@ yarn-error.log*
 .env*
 !.env.example
 !.env.production.example
+/.rtk-image
 
 # vercel
 .vercel

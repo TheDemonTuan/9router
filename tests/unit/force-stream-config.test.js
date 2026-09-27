@@ -67,7 +67,7 @@ vi.mock("../../open-sse/rtk/ponytail.js", () => ({
 }));
 
 vi.mock("../../open-sse/rtk/index.js", () => ({
-  compressMessages: vi.fn(() => null),
+  compressMessages: vi.fn(async () => null),
   formatRtkLog: vi.fn(() => ""),
 }));
 

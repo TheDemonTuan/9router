@@ -1247,6 +1247,7 @@ pull_image() {
 
 do_deploy() {
   preflight mutation
+  check_rtk_network
   cleanup_draining_slots
   local route_info current="" current_gen="" target target_state image
   if route_info="$(read_active_route_slot "$TRAEFIK_DYNAMIC_DIR/$TRAEFIK_CONFIG_NAME")"; then
@@ -1303,11 +1304,80 @@ acquire_deployment_lock() {
   flock -n "$DEPLOY_LOCK_FD" || die "Another deployment holds .deployment.lock"
 }
 
+RTK_NETWORK="${RTK_NETWORK:-9router-rtk}"
+RTK_PROJECT="${RTK_PROJECT:-9router-rtk}"
+rtk_compose() { docker compose -p "$RTK_PROJECT" -f "$SCRIPT_DIR/docker-compose.rtk.yml" "$@"; }
+
+check_rtk_network() {
+  local details
+  details="$(docker network inspect "$RTK_NETWORK" --format '{{json .}}' 2>/dev/null)" || die "RTK network missing: $RTK_NETWORK; bootstrap with ./deploy.sh --rtk <digest-image-ref>"
+  python3 - "$details" "$RTK_PROJECT" <<'PY' || die "RTK network has conflicting ownership or is not internal bridge: $RTK_NETWORK"
+import json, sys
+net = json.loads(sys.argv[1])
+labels = net.get('Labels') or {}
+assert net.get('Internal') is True and net.get('Driver') == 'bridge'
+assert labels.get('com.docker.compose.project') == sys.argv[2]
+assert labels.get('com.docker.compose.network') == 'rtk'
+PY
+}
+
+rtk_healthy() {
+  local container="$1" remaining
+  for ((remaining=30; remaining>0; remaining--)); do
+    if docker exec "$container" bun -e 'const h=await fetch("http://127.0.0.1:8080/health"); const v=await fetch("http://127.0.0.1:8080/version"); if(!h.ok || !(await h.json()).ok || !v.ok || (await v.json()).protocolVersion!==1)process.exit(1)' >/dev/null 2>&1 &&
+       docker exec "$container" bun -e 'const content=Array.from({length:50},(_,i)=>`src/a.ts:${i+1}:KEEP_${i+1} ${"padding ".repeat(12)}`).join("\n"); const r=await fetch("http://127.0.0.1:8080/filter",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({content,filter:"grep"})}); const data=await r.json(); if(!r.ok || data.protocolVersion!==1 || !data.content.includes("KEEP_1") || Buffer.byteLength(data.content)>=Buffer.byteLength(content))process.exit(1)' >/dev/null 2>&1; then return 0; fi
+    sleep 1
+  done
+  return 1
+}
+
+do_deploy_rtk() {
+  local image_ref="$1" container="" previous_id="" previous_ref="" current_ref="" temp
+  [[ "$(uname -s)" == Linux ]] || die "RTK deploy requires Linux Bash"
+  for tool in docker python3 flock; do command -v "$tool" >/dev/null || die "Missing $tool"; done
+  docker compose version >/dev/null || die "Docker Compose unavailable"
+  [[ "$image_ref" =~ ^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]] || die "RTK_IMAGE must be a GHCR digest reference"
+  export RTK_IMAGE="$image_ref"
+  if docker network inspect "$RTK_NETWORK" >/dev/null 2>&1; then check_rtk_network; fi
+  container="$(rtk_compose ps -a -q rtk)"
+  if [[ -n "$container" ]]; then
+    previous_id="$(docker inspect "$container" --format '{{.Image}}')"
+    previous_ref="$(docker inspect "$container" --format '{{.Config.Image}}')"
+    current_ref="$previous_ref"
+  fi
+  if [[ "$current_ref" == "$image_ref" ]] && rtk_healthy "$container"; then log "RTK already healthy: $image_ref"; return; fi
+  RTK_IMAGE="$image_ref" rtk_compose pull rtk || die "RTK image pull failed; existing sidecar untouched"
+  if ! RTK_IMAGE="$image_ref" rtk_compose up -d --no-deps --pull never rtk; then log "RTK start failed"; else
+    check_rtk_network
+    container="$(rtk_compose ps -q rtk)"
+    if [[ -n "$container" ]] && rtk_healthy "$container"; then
+      temp="$(mktemp "$SCRIPT_DIR/.rtk-image.XXXXXX")"
+      printf '%s\n' "$image_ref" > "$temp"
+      mv -- "$temp" "$SCRIPT_DIR/.rtk-image"
+      log "RTK upgraded: $image_ref"
+      return
+    fi
+  fi
+  if [[ -n "$previous_id" ]]; then
+    RTK_IMAGE="$previous_id" rtk_compose up -d --no-deps --pull never rtk || die "RTK rollback failed; app route unchanged"
+    container="$(rtk_compose ps -q rtk)"
+    [[ -n "$container" ]] && rtk_healthy "$container" || die "RTK rollback unhealthy; app route unchanged"
+  else
+    RTK_IMAGE="$image_ref" rtk_compose stop rtk || true
+  fi
+  die "RTK upgrade failed; app route unchanged"
+}
+
 # ------------------------------------------------------------------------------
 # Main Dispatcher
 # ------------------------------------------------------------------------------
 cmd="${1:-}"
 case "$cmd" in
+  --rtk)
+    [[ $# -eq 2 ]] || die "Usage: $0 --rtk <digest-image-ref>"
+    acquire_deployment_lock
+    do_deploy_rtk "$2"
+    ;;
   --preflight)
     [[ $# -eq 1 ]] || die "Usage: $0 --preflight"
     preflight
@@ -1332,6 +1402,7 @@ case "$cmd" in
     IMAGE_REF="$2"
     export IMAGE_REF
     preflight mutation
+    check_rtk_network
     cleanup_draining_slots
     reconcile_active_slot
     do_deploy

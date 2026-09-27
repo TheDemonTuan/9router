@@ -18,11 +18,13 @@ services:
       API_HOST: ${API_HOST:-9router-api.tuannguyenviet.site}
       CLOUDFLARE_ACCESS_TEAM_NAME: ${CLOUDFLARE_ACCESS_TEAM_NAME:-}
       CLOUDFLARE_ACCESS_AUD: ${CLOUDFLARE_ACCESS_AUD:-}
+      RTK_URL: ${RTK_URL-http://rtk:8080}
     volumes:
       - 9router-data:/app/data
     networks:
       - edge
       - internal
+      - rtk
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:20128/api/health || exit 1"]
       interval: 5s
@@ -59,11 +61,13 @@ services:
       API_HOST: ${API_HOST:-9router-api.tuannguyenviet.site}
       CLOUDFLARE_ACCESS_TEAM_NAME: ${CLOUDFLARE_ACCESS_TEAM_NAME:-}
       CLOUDFLARE_ACCESS_AUD: ${CLOUDFLARE_ACCESS_AUD:-}
+      RTK_URL: ${RTK_URL-http://rtk:8080}
     volumes:
       - 9router-data:/app/data
     networks:
       - edge
       - internal
+      - rtk
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:20128/api/health || exit 1"]
       interval: 5s
@@ -87,6 +91,9 @@ networks:
     name: ${EDGE_NETWORK:-edge-9router}
   internal:
     driver: bridge
+  rtk:
+    external: true
+    name: ${RTK_NETWORK:-9router-rtk}
 
 volumes:
   9router-data:

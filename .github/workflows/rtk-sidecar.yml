@@ -1,0 +1,126 @@
+name: RTK sidecar
+on:
+  pull_request:
+    paths:
+      - sidecars/rtk/**
+      - open-sse/config/rtkConfig.js
+      - open-sse/rtk/**
+      - open-sse/handlers/chatCore.js
+      - tests/unit/rtk*.test.js
+      - tests/unit/blue-green-reconcile.test.sh
+      - deploy.sh
+      - docker-compose.prod.yml
+      - tests/integration/rtk-sidecar-smoke.mjs
+      - docker-compose.rtk.yml
+      - .github/workflows/rtk-sidecar.yml
+  workflow_dispatch:
+    inputs:
+      publish:
+        type: boolean
+        default: false
+        description: Publish immutable multiarchitecture image (default branch only)
+permissions:
+  contents: read
+  packages: write
+concurrency:
+  group: rtk-sidecar-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+      - run: bun install --frozen-lockfile --cwd tests
+      - name: Run RTK and request regressions
+        working-directory: tests
+        run: bun x vitest run --config vitest.config.js unit/rtk.test.js unit/rtkKiro.test.js unit/rtk-cursor-pretranslate.test.js unit/force-stream-config.test.js unit/minimax-transport-target-format.test.js
+      - name: Verify blue-green lifecycle
+        run: bash tests/unit/blue-green-reconcile.test.sh
+      - name: Build gateway
+        run: |
+          mkdir -p "$RUNNER_TEMP/rtk-home"
+          HOME="$RUNNER_TEMP/rtk-home" DATA_DIR="$RUNNER_TEMP/rtk-home" bun run build
+
+  native:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: Install gateway dependencies for HTTP smoke
+        run: bun install --frozen-lockfile
+      - uses: docker/setup-buildx-action@v4
+      - name: Build and exercise native image
+        run: |
+          set -euo pipefail
+          version="$(bun -p "JSON.parse(require('fs').readFileSync('sidecars/rtk/upstream.json')).version")"
+          revision="$(bun -p "JSON.parse(require('fs').readFileSync('sidecars/rtk/upstream.json')).revision")"
+          docker buildx build --load --platform linux/${{ matrix.arch }} -f sidecars/rtk/Dockerfile -t "rtk-check:${version}-r${revision}" .
+          bun tests/integration/rtk-sidecar-smoke.mjs --image "rtk-check:${version}-r${revision}"
+      - name: Publish native digest after smoke
+        if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref_name == github.event.repository.default_branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          owner="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/${owner}/rtk-sidecar"
+          version="$(bun -p "JSON.parse(require('fs').readFileSync('sidecars/rtk/upstream.json')).version")"
+          revision="$(bun -p "JSON.parse(require('fs').readFileSync('sidecars/rtk/upstream.json')).revision")"
+          tag="${version}-r${revision}"
+          echo "$GH_TOKEN" | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+          if docker manifest inspect "${image}:${tag}" >/dev/null 2>&1; then echo 'Tag exists; increase manifest revision' >&2; exit 1; fi
+          if docker manifest inspect "${image}:${tag}-${{ matrix.arch }}" >/dev/null 2>&1; then echo 'Architecture tag exists; increase manifest revision' >&2; exit 1; fi
+          docker tag "rtk-check:${tag}" "${image}:${tag}-${{ matrix.arch }}"
+          docker push "${image}:${tag}-${{ matrix.arch }}"
+          digest="$(docker image inspect --format '{{index .RepoDigests 0}}' "${image}:${tag}-${{ matrix.arch }}")"
+          echo "${digest}" > "rtk-${{ matrix.arch }}.txt"
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref_name == github.event.repository.default_branch
+        with:
+          name: rtk-${{ matrix.arch }}
+          path: rtk-${{ matrix.arch }}.txt
+  manifest:
+    needs: native
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rtk-*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v4
+      - name: Create immutable multiarchitecture manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          owner="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/${owner}/rtk-sidecar"
+          version="$(bun -p "JSON.parse(require('fs').readFileSync('sidecars/rtk/upstream.json')).version")"
+          revision="$(bun -p "JSON.parse(require('fs').readFileSync('sidecars/rtk/upstream.json')).revision")"
+          tag="${version}-r${revision}"
+          echo "$GH_TOKEN" | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+          if docker manifest inspect "${image}:${tag}" >/dev/null 2>&1; then echo 'Tag exists; increase manifest revision' >&2; exit 1; fi
+          docker buildx imagetools create -t "${image}:${tag}" "$(cat rtk-amd64.txt)" "$(cat rtk-arm64.txt)"
+          digest="$(docker buildx imagetools inspect "${image}:${tag}" --format '{{.Manifest.Digest}}')"
+          echo "RTK_IMAGE=${image}@${digest}" >> "$GITHUB_STEP_SUMMARY"

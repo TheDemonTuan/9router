@@ -211,15 +211,15 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   const tokenSaverEnabled = !clientTokenSaverOptOut && !strictStructuredOutput && !nativePassthrough;
 
-  // Cursor's translator rewrites tool_result into user text, so RTK must run on
-  // the source body before translation. Every other pair translates the tool
-  // shapes 1:1 — keep the post-translate pass there so those providers are
-  // untouched (and a retry never re-compresses an already-compressed body).
-  const preTranslateRtk = provider === "cursor"
-    ? compressMessages(sourceBody, tokenSaverEnabled && rtkEnabled)
-    : null;
-  const preTranslateRtkLine = formatRtkLog(preTranslateRtk);
-  if (preTranslateRtkLine) console.log(preTranslateRtkLine);
+  // Compress source-format tool results once; translators may flatten their metadata.
+  const rtkSignal = preResponse?.signal && clientSignal && preResponse.signal !== clientSignal
+    ? AbortSignal.any([preResponse.signal, clientSignal])
+    : preResponse?.signal || clientSignal;
+  if (rtkSignal?.aborted) throw rtkSignal.reason;
+  const rtkStats = await compressMessages(sourceBody, tokenSaverEnabled && rtkEnabled, { signal: rtkSignal });
+  if (rtkSignal?.aborted) throw rtkSignal.reason;
+  const rtkLine = formatRtkLog(rtkStats);
+  if (rtkLine) console.log(rtkLine);
 
   const reqLogger = await createRequestLogger(sourceFormat, targetFormat, model, {
     redactPayloads: provider === "chatgpt-web",
@@ -364,10 +364,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   }
 
 
-  // RTK: compress tool_result content. Skipped when already done pre-translate.
-  const rtkStats = preTranslateRtk || compressMessages(translatedBody, tokenSaverEnabled && rtkEnabled);
-  const rtkLine = formatRtkLog(rtkStats);
-  if (rtkLine) console.log(rtkLine);
+  // RTK already processed the caller-owned source clone before translation.
 
   // Token-saver flags accumulator for the single "⚙" log line below.
   const xf = [];
