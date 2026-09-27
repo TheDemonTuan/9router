@@ -140,12 +140,12 @@ jobs:
     environment: production
     timeout-minutes: 17
     steps:
-      - uses: TheDemonTuan/vps-deploy/.github/actions/deploy@868802657611b64f5a965e6aeea95fc87fb836c6
+      - uses: TheDemonTuan/vps-deploy/.github/actions/deploy@3703d57b4e4c666152a1ce9eaee2f7e0c4a7fa46
         with:
           operation: deploy
           component: rtk
           source-sha: ${{ github.sha }}
-          platform-ref: 868802657611b64f5a965e6aeea95fc87fb836c6
+          platform-ref: 3703d57b4e4c666152a1ce9eaee2f7e0c4a7fa46
           config: .deploy/app.yml
           image-ref: ${{ needs.manifest.outputs.image_ref }}
         env:

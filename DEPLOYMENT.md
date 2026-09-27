@@ -40,7 +40,7 @@ Hệ thống deploy tự động cho **9router** được thiết kế theo chu�
 
 `TheDemonTuan/9router` dùng environment `production`, giới hạn deployment vào nhánh mặc định `master`. Chỉ environment này giữ `DEPLOY_SSH_KEY` (key riêng cho user `deploy-9router`); public host key ED25519 được pin trong composite action của platform, không lấy từ secret. Variables: `DEPLOY_HOST`, `DEPLOY_PORT=22`, `DEPLOY_USER=deploy-9router`. Key chỉ được đọc trong job caller có `environment: production`: GitHub không truyền environment secret vào job của reusable workflow. Không dùng lại `VPS_SSH_KEY`, `VPS_USER`, `VPS_HOST`, `VPS_PORT`, `DEPLOY_PATH` từ repo cũ; xóa chúng sau operator canary và trước khi bật workflow mới.
 
-Caller pin release của `TheDemonTuan/vps-deploy`, commit `868802657611b64f5a965e6aeea95fc87fb836c6`, đồng nhất ở `uses: ...@<SHA>`, `platform-ref` và host profile. Giữ workflows cũ disabled trong suốt adoption/canary; chỉ bật caller mới sau khi xóa credentials cũ.
+Caller pin release của `TheDemonTuan/vps-deploy`, commit `3703d57b4e4c666152a1ce9eaee2f7e0c4a7fa46`, đồng nhất ở `uses: ...@<SHA>`, `platform-ref` và host profile. Giữ workflows cũ disabled trong suốt adoption/canary; chỉ bật caller mới sau khi xóa credentials cũ.
 
 `.deploy/app.yml` là manifest được operator đăng ký theo commit, không chứa host paths/secrets; khi đổi manifest cần operator review và đăng ký lại. Workflow `deploy.yml` chạy `.deploy/verify.sh`, reusable build xuất immutable digest sau `.deploy/smoke-image.sh`, rồi job deployment có environment `production` gọi composite action platform để yêu cầu engine trên host cutover. Không gửi GitHub token hoặc shell/script ứng dụng lên host.
 
