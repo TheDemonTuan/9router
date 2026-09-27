@@ -86,7 +86,7 @@ const name = `rtk-smoke-${randomUUID().slice(0, 12)}`;
 const network = `${name}-net`;
 const docker = (...args) => {
   const result = spawnSync("docker", args, { encoding: "utf8", timeout: 45_000 });
-  if (result.status !== 0) throw Error(`docker ${args[0]} failed: ${result.stderr?.slice(0, 300)}`);
+  if (result.status !== 0) throw Error(`docker ${args[0]} failed: ${result.stderr?.slice(0, 4000)}`);
   return result.stdout.trim();
 };
 const input = Array.from({ length: 50 }, (_, i) => `src/a.ts:${i + 1}:KEEP_${i + 1} ${"padding ".repeat(12)}`).join("\n") + "\n";
