@@ -30,10 +30,10 @@ jobs:
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.release_tag || github.ref_name }}
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.2
       - name: Install runtime dependencies
@@ -52,13 +52,13 @@ jobs:
         working-directory: tests
         run: |
           set -euo pipefail
-          response_tests="$(find unit translator -type f -name '*responses*.test.js' ! -path '*/real/*' | sort)"
-          chatgpt_web_tests="$(find unit integration -type f -name '*chatgpt*.test.js' ! -path '*/real/*' | sort)"
-          printf 'Responses regression gate:\n%s\n' "$response_tests"
-          printf 'ChatGPT Web regression gate:\n%s\n' "$chatgpt_web_tests"
+          mapfile -t response_tests < <(find unit translator -type f -name '*responses*.test.js' ! -path '*/real/*' | sort)
+          mapfile -t chatgpt_web_tests < <(find unit integration -type f -name '*chatgpt*.test.js' ! -path '*/real/*' | sort)
+          printf 'Responses regression gate:\n'; printf '%s\n' "${response_tests[@]}"
+          printf 'ChatGPT Web regression gate:\n'; printf '%s\n' "${chatgpt_web_tests[@]}"
           bun x vitest run --config vitest.config.js \
-            $response_tests \
-            $chatgpt_web_tests \
+            "${response_tests[@]}" \
+            "${chatgpt_web_tests[@]}" \
             unit/codex-tool-normalization.test.js \
             unit/codex-native-passthrough-thinking.test.js \
             unit/claude-header-forwarding.test.js \
@@ -80,7 +80,6 @@ jobs:
             unit/chat-pre-response-budget.test.js \
             unit/fetch-timeout-body-signal.test.js \
             unit/route-adapter-lifecycle.test.js \
-            unit/workflow-integrity.test.js \
             unit/codex-fast-capacity.test.js \
             unit/antigravity-weekly-quota.test.js \
             unit/gemini-native-endpoint.test.js \
@@ -113,8 +112,6 @@ jobs:
         run: bun tests/integration/quota-persistence-smoke.mjs
       - name: Run pre-response lifecycle smoke test
         run: bun tests/integration/pre-response-lifecycle-smoke.mjs
-      - name: Verify blue-green reconcile and drain safety
-        run: bash tests/unit/blue-green-reconcile.test.sh
       - name: Run retired settings migration smoke
         run: bun tests/integration/retired-settings-smoke.mjs
 
@@ -135,7 +132,7 @@ jobs:
 
     steps:
       - name: Check out release tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ inputs.release_tag || github.ref_name }}
           fetch-depth: 1
@@ -237,14 +234,14 @@ jobs:
 
     steps:
       - name: Check out release source at validated commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.prepare.outputs.commit }}
           path: source
           fetch-depth: 1
 
       - name: Check out publishing Dockerfile
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.workflow_sha }}
           path: workflow
@@ -252,10 +249,10 @@ jobs:
             Dockerfile
           fetch-depth: 1
 
-      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -263,7 +260,7 @@ jobs:
 
       - name: Build and push platform image by digest
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: source
           file: workflow/Dockerfile
@@ -325,7 +322,7 @@ jobs:
           printf '%s\n' "$IMAGE_DIGEST" > "$RUNNER_TEMP/digests/${{ matrix.suffix }}.txt"
 
       - name: Upload image digest
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: digests-${{ matrix.suffix }}
           path: ${{ runner.temp }}/digests/${{ matrix.suffix }}.txt
@@ -346,17 +343,17 @@ jobs:
 
     steps:
       - name: Download platform digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: digests-*
           path: ${{ runner.temp }}/digests
           merge-multiple: true
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -432,14 +429,14 @@ jobs:
           exit 1
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
           images: |
             ${{ env.GHCR_IMAGE }}
@@ -449,7 +446,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           push: true

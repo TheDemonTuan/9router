@@ -36,17 +36,13 @@ Hệ thống deploy tự động cho **9router** được thiết kế theo chu�
 
 ---
 
-## 2. GitHub Secrets (Đã được cấu hình tự động)
+## 2. GitHub production environment
 
-| Secret Name | Giá trị |
-|---|---|
-| `VPS_HOST` | `134.185.89.192` |
-| `VPS_USER` | `opc` |
-| `VPS_SSH_KEY` | Private SSH Key (ed25519) |
-| `VPS_PORT` | `22` |
-| `DEPLOY_PATH` | `/opt/9router` |
+`TheDemonTuan/9router` dùng environment `production`, giới hạn deployment vào nhánh mặc định `master`. Chỉ environment này giữ `DEPLOY_SSH_KEY` (key riêng cho user `deploy-9router`) và `DEPLOY_KNOWN_HOSTS` (host key đã xác minh). Variables: `DEPLOY_HOST`, `DEPLOY_PORT=22`, `DEPLOY_USER=deploy-9router`. Không dùng lại `VPS_SSH_KEY`, `VPS_USER`, `VPS_HOST`, `VPS_PORT`, `DEPLOY_PATH` từ repo cũ; xóa chúng sau operator canary và trước khi bật workflow mới.
 
----
+Caller pin release `v1.0.0` của `TheDemonTuan/vps-deploy`, commit `1fb951241624860d9a142589be0439f570bef171`, đồng nhất ở `uses: ...@<SHA>`, `platform-ref` và host profile. Giữ workflows cũ disabled trong suốt adoption/canary; chỉ bật caller mới sau khi xóa credentials cũ.
+
+`.deploy/app.yml` là manifest được operator đăng ký theo commit, không chứa host paths/secrets; khi đổi manifest cần operator review và đăng ký lại. Workflow `deploy.yml` chạy `.deploy/verify.sh`, reusable build xuất immutable digest sau `.deploy/smoke-image.sh`, rồi reusable deploy yêu cầu engine trên host cutover. Không gửi GitHub token hoặc shell/script ứng dụng lên host.
 
 ## 3. Cấu hình Cloudflare Tunnel (Thực hiện trên Cloudflare Zero Trust)
 
@@ -62,44 +58,34 @@ Truy cập Cloudflare Zero Trust -> **Networks** -> **Tunnels** (Tunnel đang k�
 
 ---
 
-## 4. Vận hành một chạm trên VPS
+## 4. Vận hành có kiểm soát
+
+Workflow `.github/workflows/deploy-ops.yml` có ba thao tác: `status`, `rollback` (chỉ `app`), `reconcile` (`app` hoặc `rtk`). Mọi thao tác đi qua environment `production`, key restricted và forced command; không nhập tùy ý tag, slot, shell hay đường dẫn trên host. Nếu request bị ngắt SSH, kiểm tra lại status theo cùng request ID thay vì deploy lại với ID mới. `reconcile` là thao tác operator sau sự cố; không có scheduled auto-failover.
+
+Operator trên VPS sau adoption có thể kiểm tra bằng:
 
 ```bash
-cd /opt/9router
-
-# Kiểm tra trạng thái hiện tại
-./deploy.sh --status
-
-# Rollback slot cũ ngay lập tức nếu cần
-./deploy.sh --rollback
-
-# Cập nhật hoặc deploy thủ công
-./deploy.sh ghcr.io/<owner>/9router:<tag>
+sudo -n /opt/vps-deploy/current/bin/deployctl status --app 9router --strict
 ```
+
+Chỉ `complete` và strict status khớp route generation/slot/digest mới chứng minh cutover; slot cũ đang drain có thể vẫn chạy sau khi request hoàn tất. Rollback chỉ dùng previous image/container còn được giữ và không đảo SQLite migration. Không chạy `deploy.sh` legacy hoặc sửa trực tiếp `9router.yml` sau adoption.
 
 ---
 
 ## RTK sidecar riêng
 
-RTK là tối ưu tùy chọn: không có sidecar hoặc sidecar lỗi thì tool output giữ nguyên. Không mở port RTK công khai; chỉ app nối network `9router-rtk` nội bộ. Sau khi PR qua native smoke trên cả amd64/arm64 và merge vào `master`, chạy workflow `rtk-sidecar.yml` bằng `workflow_dispatch`, `publish=true`, `deploy=true`. Workflow publish manifest digest bất biến rồi bootstrap sidecar trên VPS dưới deployment lock; không đổi route app.
+RTK là tối ưu tùy chọn: không có sidecar hoặc sidecar lỗi thì tool output giữ nguyên. Không mở port RTK công khai; chỉ app nối network `9router-rtk` nội bộ. Sau khi PR qua native smoke trên cả amd64/arm64 và merge vào `master`, chạy `rtk-sidecar.yml` bằng `workflow_dispatch`, `publish=true`, `deploy=true`. Workflow publish manifest digest bất biến rồi yêu cầu central deploy qua restricted SSH; RTK không đổi route app. Nếu chưa publish thì không deploy. App chạy Bun local không Docker: chỉ cấu hình `RTK_URL=http://127.0.0.1:8080` khi đã tự chạy sidecar. Single-app Compose dùng `docker-compose.yml` với `docker-compose.rtk-app.yml`; production Compose sidecar nằm trong profile central `TheDemonTuan/vps-deploy/apps/9router/docker-compose.rtk.yml`, không copy vào app checkout.
 
 Classifier RTK nhận metachar literal trong dấu nháy và một prefix `cd /path &&`, `cd ./path &&`, `cd ../path &&` (có thể dùng `cd -- PATH`) trước command được hỗ trợ. Không chạy lại command; chỉ gửi output đã có đến filter. Pipe, redirect, expansion, nhiều command sinh output, tool thiếu command và output không rõ định dạng giữ nguyên. HTTP thành công không đồng nghĩa đã nén: kết quả rỗng hoặc không nhỏ hơn vẫn giữ nguyên.
 
-Nếu app workflow chạy ngay khi merge mà network chưa bootstrap, bước deploy app sẽ dừng **trước khi stop slot cũ**. Sau khi sidecar workflow thành công, chạy lại workflow app qua `workflow_dispatch` (giữ `skip_deploy=false`). Có thể thao tác trực tiếp trên host bằng các lệnh tương đương sau:
-
-```bash
-./deploy.sh --rtk ghcr.io/<owner>/rtk-sidecar@sha256:<manifest-digest>
-./deploy.sh --release ghcr.io/<owner>/9router:<app-image-ref>
-```
-
-`--rtk` chỉ pull/thay sidecar; không đổi route hoặc restart app. Lỗi nâng cấp khôi phục image ID cũ; metadata `.rtk-image` chỉ ghi sau health/version/filter thành công. App deploy kiểm network nội bộ thuộc project sidecar trước khi dừng slot idle; rollback/status không phụ thuộc RTK. App chạy Bun local không Docker: chỉ cấu hình `RTK_URL=http://127.0.0.1:8080` khi đã tự chạy sidecar. Single-app Compose dùng đồng thời `docker-compose.yml` và `docker-compose.rtk-app.yml`; base riêng không cần RTK.
+Host profile giữ network sidecar tách biệt. App deploy kiểm network nội bộ trước cutover; rollback/status không phụ thuộc RTK. Trường hợp request đang `recovery_required`, không chạy legacy deployment hoặc stop container thủ công: operator kiểm state và dùng `reconcile`.
 
 ## 5. Route Generation ACK & Zero-Downtime Verification
 
-Để đảm bảo tính nhất quán tuyệt đối và loại bỏ hoàn toàn race condition trong quá trình cutover giữa các slot Blue/Green (đặc biệt khi Traefik file watcher reload chậm hoặc trả cache response cũ), hệ thống sử dụng cơ chế **Route Generation ACK**:
+Route Generation ACK xác nhận Traefik đã nạp route 9router; lock publisher chỉ bảo vệ các ứng dụng cùng tham gia. Deployment ACB/Messenger chưa dùng lock này, nên không khẳng định loại bỏ mọi race trên shared edge:
 
 ### Cơ chế hoạt động
-1. **Generation Token:** Mỗi lần render cấu hình Traefik dynamic (`9router.yml`), `deploy.sh` sinh một generation token ngẫu nhiên 32 ký tự hex (`uuid.uuid4().hex`).
+1. **Generation Token:** Publisher trung tâm render `9router.yml`, sinh generation ngẫu nhiên 32 ký tự hex (`uuid.uuid4().hex`).
 2. **Traefik Middleware `9router-route-generation`:**
    Cấu hình dynamic khai báo middleware:
    ```yaml
@@ -117,11 +103,7 @@ Nếu app workflow chạy ngay khi merge mà network chưa bootstrap, bước de
      - Response header `X-9Router-Route-Generation` chứa token generation trùng khớp.
      - Header chống cache (`Age`, `CF-Cache-Status` không được là cache hit/stale).
    - Hàm `wait_route_slot` bắt buộc phải quan sát được **2 lần probe liên tiếp** khớp cả slot đích và generation token mới thì mới coi cutover thành công.
-4. **Giám sát trạng thái (`--status` & `--status --strict`):**
-   Lệnh `./deploy.sh --status` hiển thị chi tiết:
-   - `Configured route slot` & `Configured route generation` (từ file YAML trên đĩa).
-   - `Observed Traefik slot` & `Observed Traefik generation` (từ public HTTP probe trực tiếp qua Traefik).
-   - Strict mode (`--status --strict`) yêu cầu cả slot và generation phải khớp hoàn toàn giữa cấu hình trên đĩa và phản hồi thực tế của Traefik mới trả về exit code 0 (`Route state: HEALTHY`).
+4. **Giám sát trạng thái:** `deployctl status --app 9router --strict` yêu cầu route trên đĩa, phản hồi public và image/slot thực khớp state; exit code khác 0 khi chưa nhất quán. Workflow ops `status` cung cấp thông tin không chứa secrets.
 
 ---
 
@@ -129,36 +111,12 @@ Nếu app workflow chạy ngay khi merge mà network chưa bootstrap, bước de
 
 Traefik Edge Ingress (`edge-traefik`) và các container ứng dụng 9router (`9router-blue`, `9router-green`) giao tiếp qua Docker bridge network dùng chung mang tên `edge-9router`. Nếu container `edge-traefik` bị mất kết nối vào network này, Traefik sẽ không thể phân giải hostname container và trả về lỗi `502 Bad Gateway`.
 
-### Các bước kiểm tra và xử lý sự cố mạng
+Kiểm tra read-only trước khi can thiệp vào hạ tầng dùng chung:
 
-#### 1. Kiểm tra mạng `edge-9router` tồn tại
-```bash
-docker network inspect edge-9router >/dev/null 2>&1 || docker network create edge-9router
-```
-
-#### 2. Kiểm tra container `edge-traefik` đã kết nối vào `edge-9router`
-```bash
-docker inspect edge-traefik --format '{{json .NetworkSettings.Networks.edge_9router}}'
-```
-*Kết quả mong đợi:* Trả về JSON object cấu hình IP (không phải `null`).
-
-#### 3. Kết nối lại `edge-traefik` vào network nếu bị ngắt kết nối
-```bash
-docker network connect edge-9router edge-traefik 2>/dev/null || true
-```
-
-#### 4. Liệt kê toàn bộ container đang gắn vào `edge-9router`
 ```bash
 docker network inspect edge-9router --format '{{range .Containers}}{{println .Name}}{{end}}'
+docker inspect edge-traefik --format '{{json .NetworkSettings.Networks}}'
+sudo -n /opt/vps-deploy/current/bin/deployctl status --app 9router --strict
 ```
-*Kết quả mong đợi:* Phải hiển thị `edge-traefik` cùng với container slot active (`9router-blue` hoặc `9router-green`).
 
-#### 5. Chạy preflight validation của 9router
-```bash
-./deploy.sh --preflight
-```
-*Preflight script sẽ tự động kiểm tra:*
-- Container `edge-traefik` đang chạy.
-- `edge-traefik` được gắn vào network `edge-9router`.
-- Container slot active được gắn vào network `edge-9router`.
-- File dynamic route hợp lệ, không có xung đột token `9router-route-generation` hay `9router-service` với các file cấu hình khác trong Traefik dynamic directory.
+Kết quả mong đợi có `edge-traefik` và container slot active. Engine kiểm tra mount dynamic, network, middleware và route namespace dưới lock trước publish. Nếu mất kết nối hoặc trả `502`, dừng cutover, điều tra nguyên nhân; không tự tạo lại network hay nối shared `edge-traefik` bằng lệnh bỏ qua lỗi.
