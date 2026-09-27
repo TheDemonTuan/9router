@@ -24,12 +24,12 @@ jobs:
     environment: production
     timeout-minutes: 17
     steps:
-      - uses: TheDemonTuan/vps-deploy/.github/actions/deploy@868802657611b64f5a965e6aeea95fc87fb836c6
+      - uses: TheDemonTuan/vps-deploy/.github/actions/deploy@3703d57b4e4c666152a1ce9eaee2f7e0c4a7fa46
         with:
           operation: ${{ inputs.operation }}
           component: ${{ inputs.component }}
           source-sha: ${{ github.sha }}
-          platform-ref: 868802657611b64f5a965e6aeea95fc87fb836c6
+          platform-ref: 3703d57b4e4c666152a1ce9eaee2f7e0c4a7fa46
           config: .deploy/app.yml
         env:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
