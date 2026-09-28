@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
 import { createServer } from "node:http";
-
+import { CAVEMAN_PROMPTS } from "../../open-sse/rtk/cavemanPrompts.js";
+import { PONYTAIL_PROMPTS } from "../../open-sse/rtk/ponytailPrompt.js";
 const { executeMock } = vi.hoisted(() => ({
   executeMock: vi.fn(),
 }));
@@ -113,6 +114,8 @@ describe("token savers on Cursor (pre-translate RTK)", () => {
     expect(blob).toContain("compressed diff");
     expect(blob).not.toContain("UNIQUE_PADDING_150");
     expect(blob).toContain("hi");
+    expect(blob).toContain(CAVEMAN_PROMPTS.full);
+    expect(blob).toContain(PONYTAIL_PROMPTS.full);
     expect(input.messages[3].content).toBe(diff);
     expect(input.messages[0].content).toBe("hi");
     expect(global.fetch).not.toHaveBeenCalled();
@@ -139,6 +142,8 @@ describe("token savers on Cursor (pre-translate RTK)", () => {
       expect(wireText).toContain(diff);
       expect(wireText).toContain("call_keep");
       expect(wireText).toContain("original system");
+      expect(wireText).not.toContain(CAVEMAN_PROMPTS.full);
+      expect(wireText).not.toContain(PONYTAIL_PROMPTS.full);
       expect(body.messages[2].content).toBe(diff);
       expect(global.fetch).not.toHaveBeenCalled();
     });

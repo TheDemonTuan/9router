@@ -3,7 +3,7 @@
   
   # 9Router - FREE AI Router & Token Saver
   
-  **Never stop coding. Save 20-40% tokens with RTK + auto-fallback to FREE & cheap AI models.**
+  **Never stop coding. Cut tool output tokens with RTK + auto-fallback to FREE & cheap AI models.**
   
   **Connect All AI Code Tools (Claude Code, Cursor, Antigravity, Copilot, Codex, Gemini, OpenCode, Cline, OpenClaw...) to 40+ AI Providers & 100+ Models.**
   
@@ -35,7 +35,7 @@
 
 **9Router solves this:**
 
-- ✅ **RTK Token Saver** - Auto-compress tool_result content, save 20-40% tokens per request
+- ✅ **RTK Token Saver** - Auto-compress eligible tool outputs via upstream RTK sidecar; savings vary by workload
 - ✅ **Maximize subscriptions** - Track quota, use every bit before reset
 - ✅ **Auto fallback** - Subscription → Cheap → Free, zero downtime
 - ✅ **Multi-account** - Round-robin between accounts per provider
@@ -66,7 +66,7 @@
        │   ↓ budget limit
        └─→ [Tier 3: FREE] Kiro, OpenCode Free, Vertex ($300 credits)
 
-Result: Never stop coding, minimal cost + 20-40% token savings via RTK
+Result: Never stop coding, minimal cost + tool output token savings via RTK
 ```
 
 ---
@@ -535,7 +535,7 @@ a third party under a provider named "Self-hosted".
 
 | Feature                                                                           | What It Does                                                                             | Why It Matters                                    |
 | --------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------- |
-| 🚀 **RTK Token Saver** ([RTK](https://github.com/rtk-ai/rtk) ⭐40K)               | Compress tool outputs (`git diff`, `grep`, `ls`, `tree`...) before sending to LLM        | Save **20-40% input tokens** per request          |
+| 🚀 **RTK Token Saver** ([RTK](https://github.com/rtk-ai/rtk) ⭐40K)               | Compress eligible tool outputs (`git diff`, `grep`, `ls`, `tree`...) via upstream sidecar | Compress tool outputs; savings vary by workload |
 | 🪨 **Caveman Mode** ([Caveman](https://github.com/JuliusBrussee/caveman) ⭐52K)   | Inject caveman-speak prompt → LLM replies terse, technical substance preserved           | Shorter chat replies; net savings depend on workload |
 | 🐴 **Ponytail** ([Ponytail](https://github.com/DietrichGebert/ponytail))          | Inject "lazy senior dev" prompt → understand first, reuse code, then smallest complete diff | Minimal complete changes, less boilerplate        |
 | 🎯 **Smart 3-Tier Fallback**                                                      | Auto-route: Subscription → Cheap → Free                                                  | Never stop coding, zero downtime                  |
@@ -688,7 +688,7 @@ Seamless translation between formats:
 
 | Tier                | Provider              | Cost         | Quota Reset      | Best For                                |
 | ------------------- | --------------------- | ------------ | ---------------- | --------------------------------------- |
-| **🚀 TOKEN SAVER**  | **RTK (built-in)**    | **FREE**     | Always on        | **Save 20-40% tokens on EVERY request** |
+| **🚀 TOKEN SAVER**  | **RTK Sidecar**       | **FREE**     | Optional         | **Compresses eligible tool outputs; savings vary by workload** |
 | **💳 SUBSCRIPTION** | Claude Code (Pro/Max) | $20-200/mo   | 5h + weekly      | Already subscribed                      |
 |                     | Codex (Plus/Pro)      | $20-200/mo   | 5h + weekly      | OpenAI users                            |
 |                     | GitHub Copilot        | $10-19/mo    | Monthly          | GitHub users                            |
@@ -700,7 +700,7 @@ Seamless translation between formats:
  |                     | OpenCode Free         | $0           | Varies*          | No auth, auto-fetch models (list changes over time) |
  |                     | Vertex AI             | $300 credits | New GCP accounts | Gemini 3 Pro + DeepSeek + GLM-5 (use Vertex AI Studio endpoint for free credits) |
 
-**💡 Pro Tip:** RTK + Kiro AI + OpenCode Free combo = **$0 cost + 20-40% token savings**!
+**💡 Pro Tip:** RTK + Kiro AI + OpenCode Free combo = **$0 cost + compressed tool outputs**!
 
 ---
 
@@ -772,7 +772,7 @@ Combo: "free-forever"
   3. oc/<auto>                 (OpenCode Free, no auth)
 
 Monthly cost: $0
-Quality: Production-ready models + RTK saves 20-40% tokens
+Quality: Production-ready models + RTK tool output compression
 ```
 
 ### Case 3: "I need 24/7 coding, no interruptions"
@@ -1107,7 +1107,7 @@ Models:
   2. kr/glm-5 (GLM-5 free via Kiro)
   3. vertex/gemini-3.1-pro-preview ($300 free credits)
 
-Cost: $0 forever (+ 20-40% token savings via RTK)!
+Cost: $0 forever (+ tool output compression via RTK)!
 ```
 
 </details>
@@ -1412,7 +1412,7 @@ Notes:
 
 **High costs**
 
-- Enable RTK in Dashboard → Endpoint settings (default ON, saves 20-40% tokens)
+- Enable RTK in Dashboard → Endpoint settings (default ON, compresses eligible tool outputs)
 - Check usage stats in Dashboard
 - Switch primary model to GLM/MiniMax
 - Use free tier (Kiro, OpenCode Free, Vertex) for non-critical tasks
@@ -1501,7 +1501,7 @@ Thanks to all contributors who helped make 9Router better!
 Built on the shoulders of giants:
 
 - **[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)** — original Go implementation that inspired this JavaScript port.
-- **[RTK](https://github.com/rtk-ai/rtk)** ![Stars](https://img.shields.io/github/stars/rtk-ai/rtk?style=flat&color=yellow) — Rust token-saver. 9Router ports its compression pipeline to JS → **−20-40% input tokens** on every request.
+- **[RTK](https://github.com/rtk-ai/rtk)** ![Stars](https://img.shields.io/github/stars/rtk-ai/rtk?style=flat&color=yellow) — Rust token-saver. 9Router uses the upstream RTK sidecar to compress eligible tool outputs. Savings vary by workload and tool output.
 - **[Caveman](https://github.com/JuliusBrussee/caveman)** ![Stars](https://img.shields.io/github/stars/JuliusBrussee/caveman?style=flat&color=yellow) by **[@JuliusBrussee](https://github.com/JuliusBrussee)** — viral _"why use many token when few token do trick"_. 9Router adapts its prompt → shorter chat replies; net savings depend on workload.
 - **[Ponytail](https://github.com/DietrichGebert/ponytail)** ![Stars](https://img.shields.io/github/stars/DietrichGebert/ponytail?style=flat&color=yellow) by **[@DietrichGebert](https://github.com/DietrichGebert)** — _"lazy senior dev"_ skill. 9Router injects its comprehension-first, YAGNI ladder → **minimal complete changes, less code, shorter diffs**.
 

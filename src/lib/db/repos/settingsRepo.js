@@ -2,7 +2,7 @@ import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
 import { stripRetiredSettings } from "../helpers/retiredSettings.js";
 import { normalizeCavemanLevel } from "open-sse/rtk/cavemanPrompts.js";
-
+import { normalizePonytailLevel } from "open-sse/rtk/ponytailPrompt.js";
 const DEFAULT_MITM_ROUTER_BASE = "http://localhost:20128";
 
 const DEFAULT_SETTINGS = {
@@ -83,7 +83,8 @@ export function mergeWithDefaults(raw) {
       }
     }
   }
-  merged.cavemanLevel = normalizeCavemanLevel(merged.cavemanLevel);
+  merged.cavemanLevel = normalizeCavemanLevel(merged.cavemanLevel, DEFAULT_SETTINGS.cavemanLevel);
+  merged.ponytailLevel = normalizePonytailLevel(merged.ponytailLevel, DEFAULT_SETTINGS.ponytailLevel);
   if (merged.capacityAdapter && typeof merged.capacityAdapter === "object") {
     for (const capKey of Object.keys(merged.capacityAdapter)) {
       const entry = merged.capacityAdapter[capKey];
@@ -111,7 +112,10 @@ export async function updateSettings(updates) {
     const current = row ? parseJson(row.data, {}) : {};
     next = stripRetiredSettings({ ...current, ...updates });
     if (Object.hasOwn(next, "cavemanLevel")) {
-      next.cavemanLevel = normalizeCavemanLevel(next.cavemanLevel);
+      next.cavemanLevel = normalizeCavemanLevel(next.cavemanLevel, DEFAULT_SETTINGS.cavemanLevel);
+    }
+    if (Object.hasOwn(next, "ponytailLevel")) {
+      next.ponytailLevel = normalizePonytailLevel(next.ponytailLevel, DEFAULT_SETTINGS.ponytailLevel);
     }
     db.run(
       `INSERT INTO settings(id, data) VALUES(1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data`,

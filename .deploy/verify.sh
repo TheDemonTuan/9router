@@ -50,6 +50,8 @@ mkdir -p "$HOME" "$DATA_DIR"
     unit/alibaba-token-plan-models-route.test.js \
     unit/alibaba-token-plan-provider.test.js \
     unit/codex-v1-models.test.js \
+    unit/system-inject.test.js \
+    unit/token-saver-policy.test.js \
     translator/alibaba-token-plan-pipeline.test.js
 )
 node --version
@@ -60,6 +62,7 @@ bun tests/integration/quota-persistence-smoke.mjs
 bun tests/integration/pre-response-lifecycle-smoke.mjs
 bun tests/integration/bypass-transport-smoke.mjs
 bun tests/integration/retired-settings-smoke.mjs
+bun tests/integration/token-saver-settings-smoke.mjs
 (
   cd tests
   node __baseline__/verify-providers.mjs

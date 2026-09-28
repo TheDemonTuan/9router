@@ -4,7 +4,8 @@ import { applyOutboundProxyEnv } from "@/lib/network/outboundProxy";
 import { resetComboRotation } from "open-sse/services/combo.js";
 import bcrypt from "bcryptjs";
 import { getInitialPassword, isUnsafeProductionInitialPassword } from "@/lib/auth/passwordPolicy.js";
-
+import { isValidCavemanLevel } from "open-sse/rtk/cavemanPrompts.js";
+import { isValidPonytailLevel } from "open-sse/rtk/ponytailPrompt.js";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
@@ -83,6 +84,18 @@ export async function PATCH(request) {
     if (Object.prototype.hasOwnProperty.call(body, "oidcClientSecret")) {
       if (!body.oidcClientSecret || !String(body.oidcClientSecret).trim()) {
         delete body.oidcClientSecret;
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(body, "cavemanLevel")) {
+      if (!isValidCavemanLevel(body.cavemanLevel)) {
+        return NextResponse.json({ error: "Invalid cavemanLevel" }, { status: 400 });
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(body, "ponytailLevel")) {
+      if (!isValidPonytailLevel(body.ponytailLevel)) {
+        return NextResponse.json({ error: "Invalid ponytailLevel" }, { status: 400 });
       }
     }
 

@@ -32,17 +32,18 @@ export default function TokenSaverClient() {
   const [pxpipeActionLoading, setPxpipeActionLoading] = useState(false);
   const [pxpipeActionError, setPxpipeActionError] = useState("");
   const [locale, setLocale] = useState(() => getCurrentLocale());
-
+  const [showWenyan, setShowWenyan] = useState(false);
 
   useEffect(() => {
     return onLocaleChange(() => setLocale(getCurrentLocale()));
   }, []);
 
   const isWenyanLocale = WENYAN_LOCALES.includes(locale);
-  const visibleCavemanLevels = isWenyanLocale
+  const isSelectedWenyan = CAVEMAN_LEVELS.some((lvl) => lvl.id === cavemanLevel && lvl.wenyan);
+  const showAllCavemanLevels = isWenyanLocale || isSelectedWenyan || showWenyan;
+  const visibleCavemanLevels = showAllCavemanLevels
     ? CAVEMAN_LEVELS
     : CAVEMAN_LEVELS.filter((lvl) => !lvl.wenyan);
-
   const patchSetting = async (patch) => {
     try {
       await fetch("/api/settings", {
@@ -55,14 +56,6 @@ export default function TokenSaverClient() {
     }
   };
 
-  useEffect(() => {
-    const current = CAVEMAN_LEVELS.find((lvl) => lvl.id === cavemanLevel);
-    if (current?.wenyan && !isWenyanLocale) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setCavemanLevel("ultra");
-      patchSetting({ cavemanLevel: "ultra" });
-    }
-  }, [isWenyanLocale, cavemanLevel]);
 
   const handleRtkEnabled = async (value) => {
     setRtkSaving(true);
@@ -267,6 +260,26 @@ export default function TokenSaverClient() {
                       {lvl.label}
                     </button>
                   ))}
+                  {!showAllCavemanLevels && (
+                    <button
+                      type="button"
+                      onClick={() => setShowWenyan(true)}
+                      className="px-2 py-1.5 rounded text-xs font-medium border border-dashed border-border text-text-muted hover:text-text hover:bg-surface-2 transition-colors"
+                      title="Show Classical Chinese (Wenyan) levels"
+                    >
+                      + 文言
+                    </button>
+                  )}
+                  {showWenyan && !isWenyanLocale && !isSelectedWenyan && (
+                    <button
+                      type="button"
+                      onClick={() => setShowWenyan(false)}
+                      className="px-1.5 py-1.5 rounded text-xs text-text-muted hover:text-text"
+                      title="Hide Wenyan levels"
+                    >
+                      ×
+                    </button>
+                  )}
                 </div>
                 <p className="text-xs text-primary">
                   {

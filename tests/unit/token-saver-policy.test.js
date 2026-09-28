@@ -30,6 +30,7 @@ vi.mock("@/lib/usageDb.js", () => ({
   trackPendingRequest: vi.fn(),
   appendRequestLog: vi.fn(async () => {}),
   saveRequestDetail: vi.fn(async () => {}),
+  saveRequestUsage: vi.fn(async () => {}),
 }));
 
 vi.mock("../../open-sse/handlers/chatCore/sseToJsonHandler.js", () => ({
@@ -47,19 +48,36 @@ beforeEach(() => {
 
   executeMock.mockImplementation((params) => {
     lastDispatchedBody = structuredClone(params.body);
+    const isClaude = params.body && Array.isArray(params.body.messages) && params.body.system !== undefined;
+    const jsonBody = isClaude
+      ? {
+          id: "msg_test",
+          type: "message",
+          role: "assistant",
+          model: "claude-test",
+          content: [{ type: "text", text: "ok" }],
+          stop_reason: "end_turn",
+          usage: { input_tokens: 10, output_tokens: 2 },
+        }
+      : {
+          id: "chatcmpl-test",
+          object: "chat.completion",
+          created: 1234567890,
+          model: "test-model",
+          choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
+        };
     return {
-      ok: true,
-      status: 200,
-      json: async () => ({
-        id: "chatcmpl-test",
-        object: "chat.completion",
-        created: 1234567890,
-        model: "test-model",
-        choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
-        usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
-      }),
-      text: async () => JSON.stringify({ ok: true }),
-      headers: new Headers({ "content-type": "application/json" }),
+      response: new Response(
+        JSON.stringify(jsonBody),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }
+      ),
+      url: "https://example.test/v1/chat/completions",
+      headers: {},
+      transformedBody: params.body,
     };
   });
 
@@ -82,7 +100,7 @@ async function runCore({
   endpoint = "/v1/chat/completions",
 }) {
   const callerBodyBefore = structuredClone(body);
-  await handleChatCore({
+  const result = await handleChatCore({
     body,
     modelInfo,
     credentials,
@@ -104,7 +122,8 @@ async function runCore({
       },
     },
   });
-  return { dispatched: lastDispatchedBody, callerBodyBefore };
+  expect(result?.success).toBe(true);
+  return { result, dispatched: lastDispatchedBody, callerBodyBefore };
 }
 
 describe("token saver router policy across dispatch boundaries", () => {
@@ -438,5 +457,93 @@ describe("token saver router policy across dispatch boundaries", () => {
     expect(dispatched.system[0].text).toBe("base");
     expect(dispatched.system[0].cache_control.type).toBe("ephemeral");
     expect(body).toEqual(callerBodyBefore);
+  });
+
+  it("injects token savers on Cursor provider", async () => {
+    const body = {
+      model: "cu/default",
+      stream: false,
+      messages: [
+        { role: "system", content: "base" },
+        { role: "user", content: "hello" },
+      ],
+    };
+    const { dispatched } = await runCore({
+      body,
+      modelInfo: { provider: "cursor", model: "default" },
+      cavemanEnabled: true,
+      cavemanLevel: "full",
+      ponytailEnabled: true,
+      ponytailLevel: "full",
+    });
+    const blob = JSON.stringify(dispatched.messages);
+    expect(blob).toContain(CAVEMAN_PROMPTS.full);
+    expect(blob).toContain(PONYTAIL_PROMPTS.full);
+  });
+
+  it("injects token savers on Gemini provider", async () => {
+    const body = {
+      model: "gemini-2.5-flash",
+      stream: false,
+      messages: [
+        { role: "system", content: "base" },
+        { role: "user", content: "hello" },
+      ],
+    };
+    const { dispatched } = await runCore({
+      body,
+      modelInfo: { provider: "gemini", model: "gemini-2.5-flash" },
+      cavemanEnabled: true,
+      cavemanLevel: "full",
+      ponytailEnabled: true,
+      ponytailLevel: "full",
+    });
+    const blob = JSON.stringify(dispatched.systemInstruction || dispatched);
+    expect(blob).toContain(CAVEMAN_PROMPTS.full);
+    expect(blob).toContain(PONYTAIL_PROMPTS.full);
+  });
+
+  it("injects token savers on Antigravity provider", async () => {
+    const body = {
+      model: "gemini-2.5-flash",
+      stream: false,
+      messages: [
+        { role: "system", content: "base" },
+        { role: "user", content: "hello" },
+      ],
+    };
+    const { dispatched } = await runCore({
+      body,
+      modelInfo: { provider: "antigravity", model: "gemini-2.5-flash" },
+      cavemanEnabled: true,
+      cavemanLevel: "full",
+      ponytailEnabled: true,
+      ponytailLevel: "full",
+    });
+    const blob = JSON.stringify(dispatched.request?.systemInstruction || dispatched);
+    expect(blob).toContain(CAVEMAN_PROMPTS.full);
+    expect(blob).toContain(PONYTAIL_PROMPTS.full);
+  });
+
+  it("injects token savers on Kiro provider", async () => {
+    const body = {
+      model: "kr/claude-sonnet-4.6",
+      stream: false,
+      messages: [
+        { role: "system", content: "base" },
+        { role: "user", content: "hello" },
+      ],
+    };
+    const { dispatched } = await runCore({
+      body,
+      modelInfo: { provider: "kiro", model: "claude-sonnet-4.6" },
+      cavemanEnabled: true,
+      cavemanLevel: "full",
+      ponytailEnabled: true,
+      ponytailLevel: "full",
+    });
+    const blob = JSON.stringify(dispatched.conversationState || dispatched);
+    expect(blob).toContain(CAVEMAN_PROMPTS.full);
+    expect(blob).toContain(PONYTAIL_PROMPTS.full);
   });
 });

@@ -9,9 +9,20 @@ export const CAVEMAN_LEVELS = {
   WENYAN: "wenyan",
   WENYAN_ULTRA: "wenyan-ultra",
 };
+const VALID_CAVEMAN_LEVELS = new Set(Object.values(CAVEMAN_LEVELS));
 
-export function normalizeCavemanLevel(level) {
-  return level === "wenyan-full" ? CAVEMAN_LEVELS.WENYAN : level;
+export function isValidCavemanLevel(level) {
+  if (typeof level !== "string") return false;
+  const normalized = level.trim().toLowerCase();
+  return normalized === "wenyan-full" || VALID_CAVEMAN_LEVELS.has(normalized);
+}
+
+export function normalizeCavemanLevel(level, fallback = null) {
+  if (typeof level !== "string") return fallback;
+  const normalized = level.trim().toLowerCase();
+  if (normalized === "wenyan-full") return CAVEMAN_LEVELS.WENYAN;
+  if (VALID_CAVEMAN_LEVELS.has(normalized)) return normalized;
+  return fallback;
 }
 
 const SHARED_RULES = [

@@ -36,8 +36,8 @@ if (!process.argv.includes("--child")) {
   const { getSettings, updateSettings, mergeWithDefaults } = await import("../../src/lib/db/repos/settingsRepo.js");
   const { injectCaveman } = await import("../../open-sse/rtk/caveman.js");
   const { injectPonytail } = await import("../../open-sse/rtk/ponytail.js");
-  const { CAVEMAN_PROMPTS, CAVEMAN_LEVELS, normalizeCavemanLevel } = await import("../../open-sse/rtk/cavemanPrompts.js");
-  const { PONYTAIL_PROMPTS, PONYTAIL_LEVELS } = await import("../../open-sse/rtk/ponytailPrompt.js");
+  const { CAVEMAN_PROMPTS, CAVEMAN_LEVELS, normalizeCavemanLevel, isValidCavemanLevel } = await import("../../open-sse/rtk/cavemanPrompts.js");
+  const { PONYTAIL_PROMPTS, PONYTAIL_LEVELS, normalizePonytailLevel, isValidPonytailLevel } = await import("../../open-sse/rtk/ponytailPrompt.js");
   const { FORMATS } = await import("../../open-sse/translator/formats.js");
 
   try {
@@ -88,16 +88,32 @@ if (!process.argv.includes("--child")) {
     const missingLevelSettings = await getSettings();
     assert.equal(missingLevelSettings.cavemanLevel, "full", "missing level gets default full");
 
-    await updateSettings({ cavemanLevel: "not-a-level" });
+    await updateSettings({ cavemanLevel: "not-a-level", ponytailLevel: "not-a-level" });
     const rowUnknown = JSON.parse(dbReopened.get("SELECT data FROM settings WHERE id = 1").data);
-    assert.equal(rowUnknown.cavemanLevel, "not-a-level", "unknown level round-trip preserved");
+    assert.equal(rowUnknown.cavemanLevel, "full", "unknown cavemanLevel must normalize to default full");
+    assert.equal(rowUnknown.ponytailLevel, "full", "unknown ponytailLevel must normalize to default full");
     const unknownSettings = await getSettings();
-    assert.equal(unknownSettings.cavemanLevel, "not-a-level");
+    assert.equal(unknownSettings.cavemanLevel, "full");
+    assert.equal(unknownSettings.ponytailLevel, "full");
 
-    assert.equal(normalizeCavemanLevel(undefined), undefined);
+    assert.equal(isValidCavemanLevel("wenyan-full"), true);
+    assert.equal(isValidCavemanLevel("wenyan"), true);
+    assert.equal(isValidCavemanLevel("not-a-level"), false);
+    assert.equal(isValidPonytailLevel("full"), true);
+    assert.equal(isValidPonytailLevel("not-a-level"), false);
+
+    assert.equal(normalizeCavemanLevel(undefined), null);
     assert.equal(normalizeCavemanLevel(null), null);
-    assert.equal(normalizeCavemanLevel("WENYAN-FULL"), "WENYAN-FULL");
+    assert.equal(normalizeCavemanLevel("WENYAN-FULL"), "wenyan");
     assert.equal(normalizeCavemanLevel("wenyan-full"), "wenyan");
+    assert.equal(normalizeCavemanLevel("not-a-level"), null);
+    assert.equal(normalizeCavemanLevel("not-a-level", "full"), "full");
+
+    assert.equal(normalizePonytailLevel(undefined), null);
+    assert.equal(normalizePonytailLevel(null), null);
+    assert.equal(normalizePonytailLevel("ULTRA"), "ultra");
+    assert.equal(normalizePonytailLevel("not-a-level"), null);
+    assert.equal(normalizePonytailLevel("not-a-level", "full"), "full");
 
     // 5. Injections: alias vs canonical yield identical bodies and SEP segments
     const bodyCanonical = { messages: [{ role: "system", content: "base" }, { role: "user", content: "hello" }] };
@@ -129,6 +145,32 @@ if (!process.argv.includes("--child")) {
       assert.ok(bytes <= 2100, `Ponytail prompt ${lvl} exceeds 2100 bytes (${bytes})`);
       console.log(`Ponytail ${lvl}: ${bytes} bytes`);
     }
+
+    // 7. Route validation: PATCH /api/settings rejects invalid levels with 400
+    const { PATCH } = await import("../../src/app/api/settings/route.js");
+    const badCavemanRes = await PATCH(new Request("http://localhost/api/settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cavemanLevel: "not-a-level" }),
+    }));
+    assert.equal(badCavemanRes.status, 400);
+
+    const badPonytailRes = await PATCH(new Request("http://localhost/api/settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ponytailLevel: "not-a-level" }),
+    }));
+    assert.equal(badPonytailRes.status, 400);
+
+    const goodRes = await PATCH(new Request("http://localhost/api/settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cavemanLevel: "wenyan-full", ponytailLevel: "ultra" }),
+    }));
+    assert.equal(goodRes.status, 200);
+    const goodData = await goodRes.json();
+    assert.equal(goodData.cavemanLevel, "wenyan");
+    assert.equal(goodData.ponytailLevel, "ultra");
 
     console.log("PASS token saver alias, settings persistence, injection boundaries");
   } finally {

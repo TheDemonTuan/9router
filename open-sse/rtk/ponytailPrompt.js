@@ -7,6 +7,21 @@ export const PONYTAIL_LEVELS = {
   ULTRA: "ultra",
 };
 
+const VALID_PONYTAIL_LEVELS = new Set(Object.values(PONYTAIL_LEVELS));
+
+export function isValidPonytailLevel(level) {
+  if (typeof level !== "string") return false;
+  const normalized = level.trim().toLowerCase();
+  return VALID_PONYTAIL_LEVELS.has(normalized);
+}
+
+export function normalizePonytailLevel(level, fallback = null) {
+  if (typeof level !== "string") return fallback;
+  const normalized = level.trim().toLowerCase();
+  if (VALID_PONYTAIL_LEVELS.has(normalized)) return normalized;
+  return fallback;
+}
+
 const SHARED_PERSONA = "You are a lazy senior developer. Lazy means efficient, not careless. The best code is the code never written.";
 
 const SHARED_RULES = [
