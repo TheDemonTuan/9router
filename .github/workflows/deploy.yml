@@ -60,13 +60,11 @@ jobs:
     permissions:
       contents: read
       packages: write
-    uses: TheDemonTuan/vps-deploy/.github/workflows/build-docker.yml@d260d3bcb2a9395dd48e3eb8aace940173108dd3
+    uses: TheDemonTuan/vps-deploy/.github/workflows/build-docker.yml@630272ccb6c4377748e4b153d1784586ff8c6602
     with:
-      app: 9router
       source-sha: ${{ github.sha }}
-      platform-ref: d260d3bcb2a9395dd48e3eb8aace940173108dd3
+      platform-ref: 630272ccb6c4377748e4b153d1784586ff8c6602
       config: .deploy/app.yml
-
   security-image:
     name: Trivy immutable image gate
     needs: build
@@ -92,14 +90,12 @@ jobs:
     environment: production
     timeout-minutes: 17
     steps:
-      - uses: TheDemonTuan/vps-deploy/.github/actions/deploy@d260d3bcb2a9395dd48e3eb8aace940173108dd3
+      - uses: TheDemonTuan/vps-deploy/.github/actions/deploy@630272ccb6c4377748e4b153d1784586ff8c6602
         with:
-          app: 9router
-          host: oracle-main
           operation: deploy
           component: app
           source-sha: ${{ github.sha }}
-          platform-ref: d260d3bcb2a9395dd48e3eb8aace940173108dd3
+          platform-ref: 630272ccb6c4377748e4b153d1784586ff8c6602
           config: .deploy/app.yml
           image-ref: ${{ needs.build.outputs.image-ref }}
         env:
