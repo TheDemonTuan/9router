@@ -82,7 +82,8 @@ export function getThinkingLevels(provider, model, metadata = null) {
   if (provider === "codex") {
     const catalogLevels = getCatalogThinkingLevels(metadata);
     if (catalogLevels) return catalogLevels;
-    const registryModel = CODEX_REGISTRY.models?.find((entry) => entry.id === model);
+    const baseId = String(model || "").replace(/\([^()]+\)\s*$/, "");
+    const registryModel = CODEX_REGISTRY.models?.find((entry) => entry.id === baseId);
     if (Array.isArray(registryModel?.supportedReasoningLevels)) return registryModel.supportedReasoningLevels;
   }
   if (provider === "kiro" && resolveKiroEffortPath(model) === null) return null;

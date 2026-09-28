@@ -535,8 +535,6 @@ export class CodexExecutor extends BaseExecutor {
       body.tools = null;
       body.tool_choice ||= "auto";
       body.parallel_tool_calls = false;
-    } else {
-      delete body.parallel_tool_calls;
     }
 
     // Extract thinking level from model name suffix

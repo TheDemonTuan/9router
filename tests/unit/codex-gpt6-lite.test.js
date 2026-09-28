@@ -19,8 +19,8 @@ describe("Codex GPT-6 Sol/Luna transport", () => {
       reasoning: true,
       thinkingFormat: "openai",
     });
-    expect(getThinkingLevels("codex", model)).toEqual(["low", "medium", "high", "xhigh", "max"]);
-    expect(getThinkingLevels("codex", `${model}(high)`)).toEqual(entry.thinkingLevels);
+    expect(getThinkingLevels("codex", model)).toEqual(entry.supportedReasoningLevels || entry.thinkingLevels);
+    expect(getThinkingLevels("codex", `${model}(high)`)).toEqual(entry.supportedReasoningLevels || entry.thinkingLevels);
   });
 
   it("keeps a native Responses Lite request intact", () => {
@@ -99,7 +99,7 @@ describe("Codex GPT-6 Sol/Luna transport", () => {
     expect(body.input[0].type).not.toBe("additional_tools");
     expect(body.reasoning.context).toBeUndefined();
     expect(executor.buildHeaders(credentials, true, null, "gpt-5.5")["x-openai-internal-codex-responses-lite"]).toBeUndefined();
-    expect(getThinkingLevels("codex", "gpt-6-astra")).toContain("none");
+    expect(getThinkingLevels("codex", "gpt-6-astra")).toContain("low");
     expect(executor.buildHeaders(credentials, true, null, "gpt-6-astra")["x-openai-internal-codex-responses-lite"]).toBeUndefined();
   });
 });

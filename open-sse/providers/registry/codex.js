@@ -62,6 +62,7 @@ export default {
       maxContextLength: 872000,
       maxOutputTokens: 128000,
       defaultReasoningLevel: "low",
+      supportedReasoningLevels: ["low", "medium", "high", "xhigh", "max", "ultra"],
     },
     {
       id: "gpt-6-sol",
@@ -71,6 +72,7 @@ export default {
       maxContextLength: 872000,
       maxOutputTokens: 128000,
       defaultReasoningLevel: "medium",
+      supportedReasoningLevels: ["low", "medium", "high", "xhigh", "max", "ultra"],
       responsesLite: true,
       thinkingLevels: GPT_6_LITE_THINKING_LEVELS,
     },
@@ -82,6 +84,7 @@ export default {
       maxContextLength: 872000,
       maxOutputTokens: 128000,
       defaultReasoningLevel: "medium",
+      supportedReasoningLevels: ["low", "medium", "high", "xhigh", "max"],
       responsesLite: true,
       thinkingLevels: GPT_6_LITE_THINKING_LEVELS,
     },
