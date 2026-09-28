@@ -147,12 +147,16 @@ export function openaiToOpenAIResponsesResponse(chunk, state) {
     }
 
     if (content) {
+      // The answer starts, so thinking is over. Upstreams that send reasoning via
+      // reasoning_content never emit "</think>", so close it here rather than at finish.
+      closeReasoning(state, emit);
       emitTextContent(state, emit, idx, content);
     }
   }
 
   // Handle tool_calls (empty array is truthy; require a real call)
   if (delta.tool_calls && delta.tool_calls.length) {
+    closeReasoning(state, emit);
     closeMessage(state, emit, idx);
     for (const tc of delta.tool_calls) {
       emitToolCall(state, emit, tc);
@@ -234,13 +238,14 @@ function closeReasoning(state, emit) {
       status: "completed",
       summary: [{ type: RESPONSES_ITEM.SUMMARY_TEXT, text: state.reasoningBuf }]
     };
-    state.outputItems.set(state.reasoningIndex, item);
 
     emit("response.output_item.done", {
       type: "response.output_item.done",
       output_index: state.reasoningIndex,
       item
     });
+
+    recordCompletedOutputItem(state, state.reasoningIndex, item);
   }
 }
 
@@ -319,13 +324,14 @@ function closeMessage(state, emit, idx) {
       content: [{ type: RESPONSES_ITEM.OUTPUT_TEXT, annotations: [], logprobs: [], text: fullText }],
       role: ROLE.ASSISTANT
     };
-    state.outputItems.set(outIdx, item);
 
     emit("response.output_item.done", {
       type: "response.output_item.done",
-      output_index: outIdx,
+      output_index: parseInt(idx),
       item
     });
+
+    recordCompletedOutputItem(state, parseInt(idx), item);
   }
 }
 
@@ -436,17 +442,42 @@ function closeToolCall(state, emit, idx) {
       call_id: callId,
       name: state.funcNames[idx] || ""
     };
-    state.outputItems.set(outIdx, item);
 
     emit("response.output_item.done", {
       type: "response.output_item.done",
-      output_index: outIdx,
+      output_index: parseInt(idx),
       item
     });
+
+    recordCompletedOutputItem(state, parseInt(idx), item);
 
     state.funcItemDone[idx] = true;
     state.funcArgsDone[idx] = true;
   }
+}
+
+// response.completed carries the finished Response object, so response.output has
+// to repeat the items already delivered in response.output_item.done. Clients that
+// build their final result from the terminal event (GitHub Copilot CLI, the OpenAI
+// SDK "final response" helpers) otherwise treat the turn as empty even though the
+// text was streamed - see issue #4307.
+//
+// Keyed by output_index so a repeated close overwrites rather than duplicating the
+// item, and ordered by output_index so response.output matches the order the items
+// were emitted in. Lazily created because stream.js can hand us a state it built
+// itself rather than one from initState().
+function recordCompletedOutputItem(state, outputIndex, item) {
+  state.completedOutputItems ??= new Map();
+  const index = Number.isInteger(outputIndex) ? outputIndex : Number.parseInt(outputIndex, 10) || 0;
+  state.completedOutputItems.set(index, item);
+}
+
+function collectCompletedOutputItems(state) {
+  const recorded = state.completedOutputItems;
+  if (!(recorded instanceof Map) || recorded.size === 0) return [];
+  return [...recorded.entries()]
+    .sort((left, right) => left[0] - right[0])
+    .map(([, item]) => item);
 }
 
 function sendCompleted(state, emit) {
@@ -456,8 +487,10 @@ function sendCompleted(state, emit) {
       type: "response.completed",
       response: buildResponseSnapshot(state, {
         status: "completed",
-        output: buildOutputArray(state.outputItems),
-        usage: state.usage
+        background: false,
+        error: null,
+        output: collectCompletedOutputItems(state),
+        ...(state.responsesUsage ? { usage: state.responsesUsage } : (state.usage ? { usage: state.usage } : {}))
       })
     });
   }

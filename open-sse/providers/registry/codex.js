@@ -3,6 +3,7 @@ import { CODEX_CLIENT_VERSION } from "../../config/codexClient.js";
 // Codex CLI version seen by OpenAI's backend. Keep the value in codexClient.js
 // so model discovery and request identity cannot drift apart.
 const CODEX_CLI_VERSION = CODEX_CLIENT_VERSION;
+const GPT_6_LITE_THINKING_LEVELS = ["low", "medium", "high", "xhigh", "max"];
 
 export default {
   id: "codex",
@@ -43,6 +44,7 @@ export default {
     headers: {
       originator: "codex_cli_rs",
       "User-Agent": `codex_cli_rs/${CODEX_CLI_VERSION}`,
+      version: CODEX_CLI_VERSION,
     },
     usage: {
       url: "https://chatgpt.com/backend-api/wham/usage",
@@ -60,7 +62,6 @@ export default {
       maxContextLength: 872000,
       maxOutputTokens: 128000,
       defaultReasoningLevel: "low",
-      supportedReasoningLevels: ["low", "medium", "high", "xhigh", "max", "ultra"],
     },
     {
       id: "gpt-6-sol",
@@ -70,7 +71,8 @@ export default {
       maxContextLength: 872000,
       maxOutputTokens: 128000,
       defaultReasoningLevel: "medium",
-      supportedReasoningLevels: ["low", "medium", "high", "xhigh", "max", "ultra"],
+      responsesLite: true,
+      thinkingLevels: GPT_6_LITE_THINKING_LEVELS,
     },
     {
       id: "gpt-6-luna",
@@ -80,7 +82,8 @@ export default {
       maxContextLength: 872000,
       maxOutputTokens: 128000,
       defaultReasoningLevel: "medium",
-      supportedReasoningLevels: ["low", "medium", "high", "xhigh", "max"],
+      responsesLite: true,
+      thinkingLevels: GPT_6_LITE_THINKING_LEVELS,
     },
     { id: "gpt-5.6-sol", name: "GPT 5.6 Sol" },
     { id: "gpt-5.6-terra", name: "GPT 5.6 Terra" },

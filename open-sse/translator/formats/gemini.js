@@ -558,8 +558,8 @@ export function cleanLegacyResponseSchemaOrFallback(schema) {
   }
 }
 
-// Merge adjacent same-role messages, strip empty parts, ensure valid generation bounds.
-export function normalizeGeminiContents(contents, { requireTrailingUser = false } = {}) {
+// Merge adjacent same-role messages, strip empty parts, ensure initial and terminal user turns
+export function normalizeGeminiContents(contents, { requireTrailingUser = true } = {}) {
   const out = [];
   for (const c of contents || []) {
     if (!c?.role || !Array.isArray(c.parts)) continue;
@@ -569,8 +569,26 @@ export function normalizeGeminiContents(contents, { requireTrailingUser = false 
     if (last?.role === c.role) last.parts.push(...parts);
     else out.push({ ...c, parts: [...parts] });
   }
-  if (out.length > 0 && out[0].role !== "user") out.unshift({ role: "user", parts: [{ text: "..." }] });
-  if (requireTrailingUser && out.at(-1)?.role === "model") out.push({ role: "user", parts: [{ text: "" }] });
+  if (out.length > 0 && out[0].role !== "user") {
+    out.unshift({ role: "user", parts: [{ text: "..." }] });
+  }
+  if (requireTrailingUser && out.length > 0 && out.at(-1).role === "model") {
+    const fnCalls = (out.at(-1).parts || []).filter(p => p && p.functionCall);
+    if (fnCalls.length > 0) {
+      const responses = fnCalls.map(p => {
+        const call = p.functionCall || {};
+        const fr = {
+          name: call.name || "tool",
+          response: { result: "Continue." }
+        };
+        if (call.id) fr.id = call.id;
+        return { functionResponse: fr };
+      });
+      out.push({ role: "user", parts: responses });
+    } else {
+      out.push({ role: "user", parts: [{ text: "Continue." }] });
+    }
+  }
   return out;
 }
 

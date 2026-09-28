@@ -27,12 +27,13 @@ export function buildErrorBody(statusCode, message) {
  * @param {string} message - Error message
  * @returns {Response} HTTP Response object
  */
-export function errorResponse(statusCode, message) {
+export function errorResponse(statusCode, message, extraHeaders = null) {
   return new Response(JSON.stringify(buildErrorBody(statusCode, message)), {
     status: statusCode,
     headers: {
       "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*"
+      "Access-Control-Allow-Origin": "*",
+      ...extraHeaders
     }
   });
 }
@@ -146,13 +147,24 @@ export async function parseUpstreamError(response, executor = null) {
  * @param {number} [resetsAtMs] - Optional precise cooldown expiry (ms epoch) for provider-specific quota errors
  * @returns {{ success: false, status: number, error: string, response: Response, resetsAtMs?: number }}
  */
-export function createErrorResult(statusCode, message, resetsAtMs, classification = {}) {
+export function createErrorResult(statusCode, message, resetsAtMs, classificationOrHeaders = {}) {
+  const isClassification = classificationOrHeaders && (
+    "errorClass" in classificationOrHeaders ||
+    "retryable" in classificationOrHeaders ||
+    "resolvedModel" in classificationOrHeaders ||
+    "extraHeaders" in classificationOrHeaders
+  );
+  const classification = isClassification ? classificationOrHeaders : {};
+  const extraHeaders = isClassification
+    ? classification.extraHeaders
+    : (classificationOrHeaders || null);
+
   const headers = {
     ...(typeof classification.retryable === "boolean" ? { "x-should-retry": String(classification.retryable) } : {}),
     ...(resetsAtMs ? { "x-9router-retry-at": new Date(resetsAtMs).toISOString() } : {}),
     ...(classification.resolvedModel ? { "x-9router-resolved-model": classification.resolvedModel } : {}),
   };
-  const response = errorResponse(statusCode, message);
+  const response = errorResponse(statusCode, message, extraHeaders);
   for (const [name, value] of Object.entries(headers)) response.headers.set(name, value);
   return {
     success: false,
@@ -174,19 +186,20 @@ export function createErrorResult(statusCode, message, resetsAtMs, classificatio
  * @param {string} retryAfterHuman - Human-readable retry info e.g. "reset after 30s"
  * @returns {Response}
  */
-export function unavailableResponse(statusCode, message, retryAfter, retryAfterHuman) {
+export function unavailableResponse(statusCode, message, retryAfter, retryAfterHuman, extraHeaders = null) {
   const retryAtMs = Date.parse(retryAfter);
   const retryAfterSec = Number.isFinite(retryAtMs)
     ? Math.max(Math.ceil((retryAtMs - Date.now()) / 1000), 1)
-    : null;
+    : (typeof retryAfter === "number" && retryAfter > 0 ? Math.ceil(retryAfter) : null);
   const msg = retryAfterHuman ? `${message} (${retryAfterHuman})` : message;
   return new Response(
     JSON.stringify({ error: { message: msg } }),
     {
       status: statusCode,
       headers: {
+        ...extraHeaders,
         "Content-Type": "application/json",
-        ...(retryAfterSec ? { "Retry-After": String(retryAfterSec) } : {})
+        ...(retryAfterSec ? { "retry-after": String(retryAfterSec) } : {})
       }
     }
   );
@@ -199,7 +212,7 @@ export function unavailableResponse(statusCode, message, retryAfter, retryAfterH
  * @param {string} retryAfterHuman - Human-readable retry info
  * @returns {Response}
  */
-export function quotaExhaustedResponse(message, retryAfter, retryAfterHuman) {
+export function quotaExhaustedResponse(message, retryAfter, retryAfterHuman, extraHeaders = null) {
   const retryAtMs = Date.parse(retryAfter);
   const hasRetryAt = Number.isFinite(retryAtMs);
   const resetsAt = hasRetryAt ? Math.floor(retryAtMs / 1000) : null;
@@ -218,6 +231,7 @@ export function quotaExhaustedResponse(message, retryAfter, retryAfterHuman) {
     {
       status: 429,
       headers: {
+        ...extraHeaders,
         "Content-Type": "application/json",
         "Access-Control-Allow-Origin": "*",
         "Cache-Control": "no-store",
@@ -232,17 +246,17 @@ export function quotaExhaustedResponse(message, retryAfter, retryAfterHuman) {
 /**
  * Map classified credential exhaustion to its client-facing response.
  */
-export function credentialUnavailableResponse(statusCode, message, credentials) {
+export function credentialUnavailableResponse(statusCode, message, credentials, extraHeaders = null) {
   if (credentials?.unavailabilityReason === "quota_exhausted") {
-    return quotaExhaustedResponse(message, credentials.retryAfter, credentials.retryAfterHuman);
+    return quotaExhaustedResponse(message, credentials.retryAfter, credentials.retryAfterHuman, extraHeaders);
   }
   if (credentials?.unavailabilityReason === "auth_failed") {
     const authStatus = statusCode === 401 || statusCode === 403
       ? statusCode
       : (Number(credentials.lastErrorCode) === 403 ? 403 : 401);
-    return errorResponse(authStatus, message);
+    return errorResponse(authStatus, message, extraHeaders);
   }
-  return unavailableResponse(statusCode, message, credentials?.retryAfter, credentials?.retryAfterHuman);
+  return unavailableResponse(statusCode, message, credentials?.retryAfter, credentials?.retryAfterHuman, extraHeaders);
 }
 
 /**

@@ -15,7 +15,8 @@ import { createDeadlineError } from "open-sse/utils/preResponseBudget.js";
 import { createRouteContext } from "open-sse/utils/modelRoute.js";
 import { getTransform as getPxpipeTransform } from "@/lib/pxpipe/loader.js";
 import { appendPxpipeEvent } from "@/lib/pxpipe/events.js";
-import { credentialUnavailableResponse, errorResponse } from "open-sse/utils/error.js";
+import { credentialUnavailableResponse, errorResponse, unavailableResponse } from "open-sse/utils/error.js";
+import { upstreamResponseHeaders } from "open-sse/utils/upstreamHeaders.js";
 import { handleComboChat, handleFusionChat, detectRequiredCapabilities } from "open-sse/services/combo.js";
 import { augmentModelsWithCapacityAdapter, withCapacityAdapterStripping, getActiveAdapterStrategy } from "open-sse/services/capacityAdapter.js";
 import { handleBypassRequest } from "open-sse/utils/bypassHandler.js";
@@ -392,6 +393,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   let lastError = null;
   let lastStatus = null;
   const codexCapabilityReasons = new Set();
+  let lastHeaders = null;
 
   while (true) {
     if (preResponse && (preResponse.remainingMs() <= 0 || preResponse.signal?.aborted)) {
@@ -423,7 +425,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         const errorMsg = lastError || credentials.lastError || "Unavailable";
         const status = HTTP_STATUS.SERVICE_UNAVAILABLE;
         log.warn("CHAT", `[${provider}/${model}] ${errorMsg} (${credentials.retryAfterHuman})`);
-        return credentialUnavailableResponse(status, `[${provider}/${model}] ${errorMsg}`, credentials);
+        return credentialUnavailableResponse(status, `[${provider}/${model}] ${errorMsg}`, credentials, lastHeaders);
       }
       if (excludeConnectionIds.size === 0) {
         log.warn("AUTH", `No active credentials for provider: ${provider}`);
@@ -438,9 +440,9 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
             ? HTTP_STATUS.BAD_REQUEST
             : HTTP_STATUS.NOT_FOUND;
         const suffix = codexCapabilityReasons.has("effort") ? " (unsupported reasoning effort)" : "";
-        return errorResponse(status, `No Codex account supports ${model}${suffix}`);
+        return errorResponse(status, `No Codex account supports ${model}${suffix}`, lastHeaders);
       }
-      return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable");
+      return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable", lastHeaders);
     }
 
     // Account selection shown in the unified "▶" line (acc:...)
@@ -623,6 +625,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       excludeConnectionIds.add(credentials.connectionId);
       lastError = result.error;
       lastStatus = result.status;
+      lastHeaders = upstreamResponseHeaders(result.response?.headers);
       continue;
     }
 

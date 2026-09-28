@@ -11,6 +11,7 @@ import { buildRequestDetail, extractRequestConfig, saveUsageStats, formatDoneLin
 import { appendRequestLog, saveRequestDetail, trackPendingRequest } from "@/lib/usageDb.js";
 import { SSE_HEADERS_CORS as SSE_HEADERS } from "../../utils/sseConstants.js";
 import { extractUsage, mergeUsage } from "../../utils/usageTracking.js";
+import { upstreamResponseHeaders } from "../../utils/upstreamHeaders.js";
 
 const NATIVE_RESPONSES_HEADER_NAMES = [
   "openai-model", "x-request-id", "x-reasoning-included", "x-codex-turn-state",
@@ -22,6 +23,10 @@ export function buildNativeResponsesHeaders(upstreamHeaders) {
   const headers = new Headers(SSE_HEADERS);
   for (const name of NATIVE_RESPONSES_HEADER_NAMES) {
     const value = upstreamHeaders?.get?.(name);
+    if (value) headers.set(name, value);
+  }
+  const extra = upstreamResponseHeaders(upstreamHeaders);
+  for (const [name, value] of Object.entries(extra)) {
     if (value) headers.set(name, value);
   }
   return headers;
@@ -270,7 +275,9 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
   return {
     success: true,
     response: new Response(transformedBody, {
-      headers: isResponsesPassthrough ? buildNativeResponsesHeaders(providerResponse.headers) : SSE_HEADERS,
+      headers: isResponsesPassthrough
+        ? buildNativeResponsesHeaders(providerResponse.headers)
+        : { ...SSE_HEADERS, ...upstreamResponseHeaders(providerResponse.headers) },
     })
   };
 }
