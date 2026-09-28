@@ -1,0 +1,4 @@
+# 9router Trivy ignore specification
+# Add CVE IDs or vulnerability paths here with an explicit expiration or review date.
+# Format:
+# CVE-YYYY-XXXXX
