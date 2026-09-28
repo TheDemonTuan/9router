@@ -331,8 +331,8 @@ URL ค่าเริ่มต้น:
 | ฟีเจอร์ | ทำอะไร | ทำไมถึงสำคัญ |
 |---------|--------------|----------------|
 | 🚀 **RTK Token Saver** ([RTK](https://github.com/rtk-ai/rtk) ⭐40K) | บีบอัดผลลัพธ์จากเครื่องมือ (`git diff`, `grep`, `ls`, `tree`...) ก่อนส่งให้ LLM | ประหยัด **โทเค็น input 20-40%** ต่อคำขอ |
-| 🪨 **Caveman Mode** ([Caveman](https://github.com/JuliusBrussee/caveman) ⭐52K) | ฉีด caveman-speak prompt → LLM ตอบสั้นกระชับ เนื้อหาทางเทคนิคยังครบถ้วน | ประหยัด **โทเค็น output สูงสุด 65%** |
-| 🐴 **Ponytail** ([Ponytail](https://github.com/DietrichGebert/ponytail)) | ฉีด prompt "lazy senior dev" → LLM เขียนโค้ดน้อยที่สุด YAGNI-first (Lite/Full/Ultra) | **โทเค็น output น้อยลง, ไม่ต้อง refactor มาก** |
+| 🪨 **Caveman Mode** ([Caveman](https://github.com/JuliusBrussee/caveman) ⭐52K) | ฉีด caveman-speak prompt → LLM ตอบสั้นกระชับ เนื้อหาทางเทคนิคยังครบถ้วน | คำตอบแชทที่สั้นลง; การประหยัดสุทธิขึ้นอยู่กับเวิร์กโหลด |
+| 🐴 **Ponytail** ([Ponytail](https://github.com/DietrichGebert/ponytail)) | ฉีด prompt "lazy senior dev" → เข้าใจก่อน นำโค้ดเดิมมาใช้ซ้ำ แล้วทำ diff ที่เล็กที่สุดและสมบูรณ์ | การเปลี่ยนแปลงที่สมบูรณ์และน้อยที่สุด, ลดโค้ดส่วนเกิน |
 | 🎯 **Smart 3-Tier Fallback** | เลือกเส้นทางอัตโนมัติ: สมาชิก → ถูก → ฟรี | ไม่ต้องหยุดเขียนโค้ด, ไม่มีเวลาหยุดทำงาน |
 | 📊 **ติดตามโควตาแบบ Real-Time** | นับโทเค็นแบบ live + นับถอยหลังรีเซ็ต | เพิ่มประสิทธิภาพมูลค่าสมาชิก |
 | 🔄 **แปลงรูปแบบ** | OpenAI ↔ Claude ↔ Gemini ↔ Cursor ↔ Kiro ↔ Vertex | ใช้ได้กับเครื่องมือ CLI ทุกประเภท |
@@ -364,18 +364,20 @@ URL ค่าเริ่มต้น:
 
 ### 🐴 Ponytail (Lazy Senior Dev)
 
-Ponytail ฉีด prompt *"lazy senior dev"* เข้าไปในทุกคำขอ ทำให้ LLM เขียนโค้ดน้อยที่สุดแบบ YAGNI-first — ลบมากกว่าเพิ่ม, stdlib มากกว่า dep ใหม่, one-liner มากกว่า abstraction
+Ponytail ฉีด system prompt *"lazy senior dev"* เมื่อเปิดใช้งานในคำขอแชทที่มีสิทธิ์ โดยปรับทิศทางของ LLM ไปสู่การทำความเข้าใจก่อน นำโค้ดเดิมกลับมาใช้ใหม่ และทำการเปลี่ยนแปลงที่สมบูรณ์และน้อยที่สุด — ลบมากกว่าเพิ่ม, stdlib มากกว่า dep ใหม่, one-liner มากกว่า abstraction ดัดแปลงจากแกนพฤติกรรมของ [DietrichGebert/ponytail](https://github.com/DietrichGebert/ponytail) ([v4.10.0](https://github.com/DietrichGebert/ponytail/blob/1d95ff7d39de12d87014ea40d4e22201bddc501b/skills/ponytail/SKILL.md))
 
-- **Lite** — สร้างตามที่ขอ, บอกชื่อทางเลือกที่ lazy กว่า
-- **Full** — บังคับ YAGNI ladder: stdlib → native → existing deps → one-liner → minimal code
-- **Ultra** — YAGNI extremist: ลบก่อน, ส่ง one-liner, ตั้งคำถามกับ requirement ที่เหลือในคำตอบเดียวกัน
+- **Lite** — สร้างตามที่ขอ, บอกชื่อทางเลือกที่เรียบง่ายกว่าในหนึ่งบรรทัด
+- **Full** — ทำความเข้าใจและนำโค้ดกลับมาใช้ใหม่ก่อน จากนั้นบังคับ YAGNI ladder: stdlib → native → existing deps → one-liner → minimal code
+- **Ultra** — ปฏิเสธส่วนขยายที่คาดเดา ลบก่อน ไม่ลดขอบเขตที่ผู้ใช้ร้องขอเด็ดขาด
 
 ```
 ไม่ใช้ Ponytail: โค้ดเยอะ, abstraction เยอะ, "เผื่อไว้" scaffolding
-ใช้ Ponytail:    diff สั้นที่สุดที่ทำงานได้, ไม่เพิ่ม abstraction ที่ไม่ได้ขอ, โทเค็นน้อยลง
+ใช้ Ponytail:    diff สั้นที่สุดที่ทำงานได้, ไม่เพิ่ม abstraction ที่ไม่ได้ขอ, การเปลี่ยนแปลงที่สมบูรณ์และน้อยที่สุด
 ```
 
-ไม่มีวันแลก: input validation, error handling ที่ป้องกัน data loss, security, accessibility หรือสิ่งที่ขอมาอย่างชัดเจน เปิดใช้งานใน แดชบอร์ด → Endpoint → Ponytail ใช้คู่กับ Caveman (ความกระชับ output) และ RTK (การบีบอัด input) ได้
+ไม่มีวันแลก: การตรวจสอบความถูกต้องที่ขอบเขตความเชื่อถือ, error handling ที่ป้องกัน data loss, security, accessibility หรือพฤติกรรมที่ขอมาอย่างชัดเจน รายงาน แผนการ และคำอธิบายที่ร้องขอจะได้รับรายละเอียดอย่างครบถ้วน เปิดใช้งานใน แดชบอร์ด → `/dashboard/token-saver` → Ponytail ใช้คู่กับ Caveman (ความกระชับ output) และ RTK (การบีบอัด output เครื่องมือ) ได้
+
+> **หมายเหตุเกี่ยวกับ Token Savers:** Caveman ให้คำแนะนำรูปแบบข้อความเพื่อให้คำตอบกระชับ ส่วน Ponytail ให้คำแนะนำด้านการเขียนโค้ดและ diff ขั้นต่ำ ทั้งสองอย่างเพิ่ม prompt overhead ให้กับ input tokens การประหยัดสุทธิขึ้นอยู่กับเวิร์กโหลด Native passthrough, structured output และ `X-9Router-Token-Saver: off` จะข้ามการฉีด prompt RTK เป็น sidecar แยกต่างหากที่บีบอัด tool outputs ก่อนส่งขึ้น upstream ดู [Honest Numbers](https://github.com/JuliusBrussee/caveman/blob/8b0c1d3699b8d83e87fe4605b378da20c41555e0/docs/HONEST-NUMBERS.md), [Caveman skill v2.7.0](https://github.com/JuliusBrussee/caveman/blob/8b0c1d3699b8d83e87fe4605b378da20c41555e0/skills/caveman/SKILL.md) และ [Ponytail skill v4.10.0](https://github.com/DietrichGebert/ponytail/blob/1d95ff7d39de12d87014ea40d4e22201bddc501b/skills/ponytail/SKILL.md)
 
 ### 🎯 Smart 3-Tier Fallback
 

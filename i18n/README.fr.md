@@ -434,8 +434,8 @@ URL par défaut :
 | Fonctionnalité                                                                         | Ce qu'elle fait                                                                                      | Pourquoi c'est important                                  |
 | -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
 | 🚀 **Économiseur de tokens RTK** ([RTK](https://github.com/rtk-ai/rtk) ⭐40K)           | Compresse les sorties des outils (`git diff`, `grep`, `ls`, `tree`...) avant de les envoyer au LLM    | Économise **20 à 40 % de tokens d'entrée** par requête    |
-| 🪨 **Mode cavernicole** ([Caveman](https://github.com/JuliusBrussee/caveman) ⭐52K)     | Injecte un prompt en langage cavernicole → le LLM répond de manière concise, le contenu technique est conservé | Économise **jusqu'à 65 % de tokens de sortie** |
-| 🐴 **Ponytail** ([Ponytail](https://github.com/DietrichGebert/ponytail))                | Injecte un prompt de "dev sénior fainéant" → le LLM écrit un code minimal, YAGNI d'abord (Lite/Full/Ultra) | **Moins de tokens de sortie, moins de refactorisation** |
+| 🪨 **Mode cavernicole** ([Caveman](https://github.com/JuliusBrussee/caveman) ⭐52K)     | Injecte un prompt en langage cavernicole → le LLM répond de manière concise, le contenu technique est conservé | Réponses de chat plus courtes ; l'économie nette dépend de la charge de travail |
+| 🐴 **Ponytail** ([Ponytail](https://github.com/DietrichGebert/ponytail))                | Injecte un prompt de "dev sénior fainéant" → comprendre d'abord, réutiliser le code, puis le plus petit diff complet | Changements complets minimaux, moins de code boilerplate |
 | 🎯 **Repli intelligent à 3 niveaux**                                                    | Routage automatique : Abonnement → Bon marché → Gratuit                                              | N'arrêtez jamais de coder, zéro temps d'arrêt             |
 | 📊 **Suivi de quota en temps réel**                                                     | Compteur de tokens en direct + compte à rebours de réinitialisation                                   | Maximisez la valeur de votre abonnement                   |
 | 🔄 **Traduction de formats**                                                            | OpenAI ↔ Claude ↔ Gemini ↔ Cursor ↔ Kiro ↔ Vertex                                                   | Fonctionne avec n'importe quel outil CLI                  |
@@ -467,18 +467,20 @@ Avec RTK :   28K tokens envoyés au LLM   (40 % économisés · même contexte �
 
 ### 🐴 Ponytail (Dev sénior fainéant)
 
-Ponytail injecte un prompt système de _"dev sénior fainéant"_ dans chaque requête, orientant le LLM vers un code minimal et YAGNI d'abord — la suppression plutôt que l'ajout, la bibliothèque standard plutôt que de nouvelles dépendances, une ligne plutôt que des abstractions. Adapté de [DietrichGebert/ponytail](https://github.com/DietrichGebert/ponytail).
+Ponytail injecte un prompt système de _"dev sénior fainéant"_ lorsqu'il est activé sur des requêtes éligibles, orientant le LLM vers la compréhension d'abord, la réutilisation du code existant et des changements complets minimaux — la suppression plutôt que l'ajout, la bibliothèque standard plutôt que de nouvelles dépendances, une ligne plutôt que des abstractions. Adapté du noyau de comportement de [DietrichGebert/ponytail](https://github.com/DietrichGebert/ponytail) ([v4.10.0](https://github.com/DietrichGebert/ponytail/blob/1d95ff7d39de12d87014ea40d4e22201bddc501b/skills/ponytail/SKILL.md)).
 
-- **Lite** — Construisez ce qui est demandé, nommez l'alternative plus fainéante.
-- **Full** — Hiérarchie YAGNI appliquée : stdlib → natif → dépendances existantes → une ligne → code minimal.
-- **Ultra** — Extrémiste du YAGNI : suppression d'abord, livrez la solution d'une ligne, remettez en question le reste de l'exigence dans la même réponse.
+- **Lite** — Construisez la solution demandée, nommez une alternative plus simple en une ligne.
+- **Full** — Compréhension et réutilisation du code d'abord, puis appliquez la hiérarchie : stdlib → natif → dépendances existantes → une ligne → code minimal.
+- **Ultra** — Rejetez les ajouts spéculatifs ; suppression d'abord ; ne réduisez jamais la portée demandée.
 
 ```
 Sans Ponytail : code verbeux, abstractions superflues, échafaudage "au cas où"
-Avec Ponytail :    diff fonctionnel le plus court, aucune abstraction non demandée, moins de tokens
+Avec Ponytail :    diff fonctionnel le plus court, aucune abstraction non demandée, changements complets minimaux
 ```
 
-Ne sacrifie jamais : la validation des entrées, la gestion des erreurs qui évite la perte de données, la sécurité, l'accessibilité ni rien d'explicitement demandé. Activez-le dans Tableau de bord → Endpoint → Ponytail. Se cumule avec Caveman (concision de sortie) et RTK (compression d'entrée).
+Ne sacrifie jamais : la validation aux frontières de confiance, la gestion des erreurs qui évite la perte de données, la sécurité, l'accessibilité ni aucun comportement explicitement demandé. Les rapports, plans, guides pas à pas et explications demandés reçoivent tous les détails nécessaires. Activez-le dans Tableau de bord → `/dashboard/token-saver` → Ponytail. Se cumule avec Caveman (concision de sortie) et RTK (compression des sorties d'outils).
+
+> **Note sur les économiseurs de tokens :** Caveman fournit des instructions de style de sortie pour encourager des réponses concises ; Ponytail fournit des instructions de codage et de diffs minimaux. Les deux ajoutent une surcharge de prompt aux tokens d'entrée. L'économie nette dépend de la charge de travail. Le relais natif, la sortie structurée et `X-9Router-Token-Saver: off` ignorent l'injection. RTK est un sidecar indépendant compressant les sorties d'outils avant l'envoi. Consultez [Honest Numbers](https://github.com/JuliusBrussee/caveman/blob/8b0c1d3699b8d83e87fe4605b378da20c41555e0/docs/HONEST-NUMBERS.md), [la compétence Caveman v2.7.0](https://github.com/JuliusBrussee/caveman/blob/8b0c1d3699b8d83e87fe4605b378da20c41555e0/skills/caveman/SKILL.md) et [la compétence Ponytail v4.10.0](https://github.com/DietrichGebert/ponytail/blob/1d95ff7d39de12d87014ea40d4e22201bddc501b/skills/ponytail/SKILL.md).
 
 ### 🎯 Repli intelligent à 3 niveaux
 
@@ -1396,8 +1398,8 @@ Construit sur les épaules de géants :
 
 - **[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)** — implémentation originale en Go qui a inspiré ce port JavaScript.
 - **[RTK](https://github.com/rtk-ai/rtk)** ![Stars](https://img.shields.io/github/stars/rtk-ai/rtk?style=flat&color=yellow) — économiseur de tokens en Rust. 9Router porte son pipeline de compression en JS → **−20 à 40 % de tokens d'entrée** sur chaque requête.
-- **[Caveman](https://github.com/JuliusBrussee/caveman)** ![Stars](https://img.shields.io/github/stars/JuliusBrussee/caveman?style=flat&color=yellow) par **[@JuliusBrussee](https://github.com/JuliusBrussee)** — viral _"why use many token when few token do trick"_. 9Router adapte son prompt → **−65 % de tokens de sortie**.
-- **[Ponytail](https://github.com/DietrichGebert/ponytail)** ![Stars](https://img.shields.io/github/stars/DietrichGebert/ponytail?style=flat&color=yellow) par **[@DietrichGebert](https://github.com/DietrichGebert)** — compétence de _"dev sénior fainéant"_. 9Router injecte sa hiérarchie YAGNI-d'abord → **moins de tokens, moins de code, des diffs plus courts**.
+- **[Caveman](https://github.com/JuliusBrussee/caveman)** ![Stars](https://img.shields.io/github/stars/JuliusBrussee/caveman?style=flat&color=yellow) par **[@JuliusBrussee](https://github.com/JuliusBrussee)** — viral _"why use many token when few token do trick"_. 9Router adapte son prompt → réponses de chat plus courtes ; l'économie nette dépend de la charge de travail.
+- **[Ponytail](https://github.com/DietrichGebert/ponytail)** ![Stars](https://img.shields.io/github/stars/DietrichGebert/ponytail?style=flat&color=yellow) par **[@DietrichGebert](https://github.com/DietrichGebert)** — compétence de _"dev sénior fainéant"_. 9Router injecte sa hiérarchie de compréhension d'abord et YAGNI → **changements complets minimaux, moins de code, diffs plus courts**.
 
 Un immense merci à ces auteurs — sans leur travail, les fonctionnalités d'économie de tokens de 9Router n'existeraient pas. Mettez-leur une ⭐ sur GitHub !
 

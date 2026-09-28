@@ -536,8 +536,8 @@ a third party under a provider named "Self-hosted".
 | Feature                                                                           | What It Does                                                                             | Why It Matters                                    |
 | --------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------- |
 | 🚀 **RTK Token Saver** ([RTK](https://github.com/rtk-ai/rtk) ⭐40K)               | Compress tool outputs (`git diff`, `grep`, `ls`, `tree`...) before sending to LLM        | Save **20-40% input tokens** per request          |
-| 🪨 **Caveman Mode** ([Caveman](https://github.com/JuliusBrussee/caveman) ⭐52K)   | Inject caveman-speak prompt → LLM replies terse, technical substance preserved           | Save **up to 65% output tokens**                  |
-| 🐴 **Ponytail** ([Ponytail](https://github.com/DietrichGebert/ponytail))          | Inject "lazy senior dev" prompt → LLM writes minimal, YAGNI-first code (Lite/Full/Ultra) | **Fewer output tokens, less refactoring**         |
+| 🪨 **Caveman Mode** ([Caveman](https://github.com/JuliusBrussee/caveman) ⭐52K)   | Inject caveman-speak prompt → LLM replies terse, technical substance preserved           | Shorter chat replies; net savings depend on workload |
+| 🐴 **Ponytail** ([Ponytail](https://github.com/DietrichGebert/ponytail))          | Inject "lazy senior dev" prompt → understand first, reuse code, then smallest complete diff | Minimal complete changes, less boilerplate        |
 | 🎯 **Smart 3-Tier Fallback**                                                      | Auto-route: Subscription → Cheap → Free                                                  | Never stop coding, zero downtime                  |
 | 📊 **Real-Time Quota Tracking**                                                   | Live token count + reset countdown                                                       | Maximize subscription value                       |
 | 🔄 **Format Translation**                                                         | OpenAI ↔ Claude ↔ Gemini ↔ Cursor ↔ Kiro ↔ Vertex                                        | Works with any CLI tool                           |
@@ -571,18 +571,20 @@ With RTK:    28K tokens sent to LLM   (40% saved · same context · same answer)
 
 ### 🐴 Ponytail (Lazy Senior Dev)
 
-Ponytail injects a _"lazy senior dev"_ system prompt into every request, biasing the LLM toward minimal, YAGNI-first code — deletion over addition, stdlib over new deps, one-liners over abstractions. Adapted from [DietrichGebert/ponytail](https://github.com/DietrichGebert/ponytail).
+Ponytail injects a _"lazy senior dev"_ system prompt when enabled on eligible chat requests, biasing the LLM toward comprehension first, codebase reuse, and minimal complete changes — deletion over addition, stdlib over new deps, one-liners over abstractions. Adapted from the behavior kernel of [DietrichGebert/ponytail](https://github.com/DietrichGebert/ponytail) ([v4.10.0](https://github.com/DietrichGebert/ponytail/blob/1d95ff7d39de12d87014ea40d4e22201bddc501b/skills/ponytail/SKILL.md)).
 
-- **Lite** — Build what's asked, name the lazier alternative.
-- **Full** — YAGNI ladder enforced: stdlib → native → existing deps → one-liner → minimal code.
-- **Ultra** — YAGNI extremist: deletion first, ship the one-liner, challenge the rest of the requirement in the same response.
+- **Lite** — Build requested solution, name a simpler alternative in one line.
+- **Full** — Comprehension + codebase reuse first, then enforce ladder: stdlib → native → existing deps → one-liner → minimal code.
+- **Ultra** — Reject speculative extras; deletion first; never reduce requested scope.
 
 ```
 Without Ponytail: verbose code, extra abstractions, "just in case" scaffolding
-With Ponytail:    shortest working diff, no unrequested abstractions, fewer tokens
+With Ponytail:    shortest working diff, no unrequested abstractions, minimal complete changes
 ```
 
-Never trades away: input validation, error handling that prevents data loss, security, accessibility, or anything explicitly requested. Enable in Dashboard → Endpoint → Ponytail. Stacks with Caveman (output terseness) and RTK (input compression).
+Never trades away: trust-boundary validation, error handling that prevents data loss, security, accessibility, or explicitly requested behavior. Requested reports, plans, walkthroughs, and explanations receive full detail. Enable in Dashboard → `/dashboard/token-saver` → Ponytail. Stacks with Caveman (output terseness) and RTK (tool output compression).
+
+> **Note on Token Savers:** Caveman provides output-style instructions to encourage concise replies; Ponytail provides coding/minimal-diff instructions. Both add prompt overhead to input tokens. Net token savings depend on workload. Native passthrough, structured output, and `X-9Router-Token-Saver: off` bypass injection. RTK is an independent sidecar compressing tool outputs before upstream dispatch. See [Honest Numbers](https://github.com/JuliusBrussee/caveman/blob/8b0c1d3699b8d83e87fe4605b378da20c41555e0/docs/HONEST-NUMBERS.md), [Caveman skill v2.7.0](https://github.com/JuliusBrussee/caveman/blob/8b0c1d3699b8d83e87fe4605b378da20c41555e0/skills/caveman/SKILL.md), and [Ponytail skill v4.10.0](https://github.com/DietrichGebert/ponytail/blob/1d95ff7d39de12d87014ea40d4e22201bddc501b/skills/ponytail/SKILL.md).
 
 ### 🎯 Smart 3-Tier Fallback
 
@@ -1500,8 +1502,8 @@ Built on the shoulders of giants:
 
 - **[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)** — original Go implementation that inspired this JavaScript port.
 - **[RTK](https://github.com/rtk-ai/rtk)** ![Stars](https://img.shields.io/github/stars/rtk-ai/rtk?style=flat&color=yellow) — Rust token-saver. 9Router ports its compression pipeline to JS → **−20-40% input tokens** on every request.
-- **[Caveman](https://github.com/JuliusBrussee/caveman)** ![Stars](https://img.shields.io/github/stars/JuliusBrussee/caveman?style=flat&color=yellow) by **[@JuliusBrussee](https://github.com/JuliusBrussee)** — viral _"why use many token when few token do trick"_. 9Router adapts its prompt → **−65% output tokens**.
-- **[Ponytail](https://github.com/DietrichGebert/ponytail)** ![Stars](https://img.shields.io/github/stars/DietrichGebert/ponytail?style=flat&color=yellow) by **[@DietrichGebert](https://github.com/DietrichGebert)** — _"lazy senior dev"_ skill. 9Router injects its YAGNI-first ladder → **fewer tokens, less code, shorter diffs**.
+- **[Caveman](https://github.com/JuliusBrussee/caveman)** ![Stars](https://img.shields.io/github/stars/JuliusBrussee/caveman?style=flat&color=yellow) by **[@JuliusBrussee](https://github.com/JuliusBrussee)** — viral _"why use many token when few token do trick"_. 9Router adapts its prompt → shorter chat replies; net savings depend on workload.
+- **[Ponytail](https://github.com/DietrichGebert/ponytail)** ![Stars](https://img.shields.io/github/stars/DietrichGebert/ponytail?style=flat&color=yellow) by **[@DietrichGebert](https://github.com/DietrichGebert)** — _"lazy senior dev"_ skill. 9Router injects its comprehension-first, YAGNI ladder → **minimal complete changes, less code, shorter diffs**.
 
 Huge thanks to these authors — without their work, 9Router's token-saving features wouldn't exist. ⭐ them on GitHub!
 

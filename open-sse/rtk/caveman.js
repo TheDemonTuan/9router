@@ -2,8 +2,8 @@
 // of the final request body, just before it is dispatched to the provider executor.
 
 import { injectSystemPrompt } from "./systemInject.js";
-import { CAVEMAN_PROMPTS } from "./cavemanPrompts.js";
+import { CAVEMAN_PROMPTS, normalizeCavemanLevel } from "./cavemanPrompts.js";
 
 export function injectCaveman(body, format, level) {
-  injectSystemPrompt(body, format, CAVEMAN_PROMPTS[level]);
+  injectSystemPrompt(body, format, CAVEMAN_PROMPTS[normalizeCavemanLevel(level)]);
 }

@@ -235,7 +235,7 @@ export default function TokenSaverClient() {
         <div className="flex items-center justify-between pt-4 border-t border-border gap-4 flex-wrap">
           <div className="min-w-0 flex-1">
             <p className="font-medium">
-              Compress LLM output{" "}
+              Shorter chat responses{" "}
               <a
                 href="https://github.com/JuliusBrussee/caveman"
                 target="_blank"
@@ -246,7 +246,7 @@ export default function TokenSaverClient() {
               </a>
             </p>
             <p className="text-sm text-text-muted">
-              Terse-style system prompt → ~65% fewer output tokens (up to 87%)
+              Encourages shorter chat replies; adds prompt overhead. Net savings depend on workload.
             </p>
           </div>
           <div className="flex items-center gap-3 shrink-0">
@@ -296,8 +296,7 @@ export default function TokenSaverClient() {
               </a>
             </p>
             <p className="text-sm text-text-muted">
-              Bias the model toward minimal code: YAGNI, reuse stdlib,
-              deletion over addition
+              Understand first, reuse existing code, then make the smallest complete change.
             </p>
           </div>
           <div className="flex items-center gap-3 shrink-0">
@@ -333,6 +332,9 @@ export default function TokenSaverClient() {
             />
           </div>
         </div>
+        <p className="text-xs text-text-muted pt-3 mt-3 border-t border-border">
+          Style instructions apply only to eligible requests. Native passthrough, structured output and token-saver opt-out skip injection.
+        </p>
         {/* PXPIPE hidden from UI — experimental, not exposed to users yet */}
         {false && (
         <div className="flex items-center justify-between pt-4 mt-4 border-t border-border gap-4 flex-wrap">

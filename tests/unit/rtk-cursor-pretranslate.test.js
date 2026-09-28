@@ -112,7 +112,6 @@ describe("token savers on Cursor (pre-translate RTK)", () => {
     expect(blob).toContain("<tool_result>");
     expect(blob).toContain("compressed diff");
     expect(blob).not.toContain("UNIQUE_PADDING_150");
-    expect(blob).toContain("lazy senior developer");
     expect(blob).toContain("hi");
     expect(input.messages[3].content).toBe(diff);
     expect(input.messages[0].content).toBe("hi");
@@ -140,7 +139,6 @@ describe("token savers on Cursor (pre-translate RTK)", () => {
       expect(wireText).toContain(diff);
       expect(wireText).toContain("call_keep");
       expect(wireText).toContain("original system");
-      expect(wireText).not.toContain("lazy senior developer");
       expect(body.messages[2].content).toBe(diff);
       expect(global.fetch).not.toHaveBeenCalled();
     });

@@ -461,13 +461,34 @@ describe("system-inject fail-open", () => {
     expect(() => injectPonytail(body, FORMATS.OPENAI, "full")).not.toThrow();
   });
 
-  it("different caveman and ponytail prompts both apply", () => {
+  it("different caveman and ponytail prompts both apply and remain idempotent across re-injection", () => {
     const body = { messages: [{ role: ROLE.SYSTEM, content: "base" }] };
     injectCaveman(body, FORMATS.OPENAI, "full");
-    const afterCaveman = body.messages[0].content;
-    expect(afterCaveman).toContain(CAVEMAN_PROMPTS.full.slice(0, 30));
     injectPonytail(body, FORMATS.OPENAI, "full");
-    expect(body.messages[0].content).toContain(PONYTAIL_PROMPTS.full.slice(0, 30));
-    expect(body.messages[0].content).toContain(afterCaveman);
+    injectCaveman(body, FORMATS.OPENAI, "full");
+    injectPonytail(body, FORMATS.OPENAI, "full");
+
+    const segments = body.messages[0].content.split(SEP);
+    expect(segments).toEqual(["base", CAVEMAN_PROMPTS.full, PONYTAIL_PROMPTS.full]);
+  });
+
+  it("wenyan-full alias produces identical body to canonical wenyan and remains idempotent across alias/canonical", () => {
+    const bodyCanonical = { messages: [{ role: ROLE.SYSTEM, content: "base" }] };
+    const bodyAlias = { messages: [{ role: ROLE.SYSTEM, content: "base" }] };
+
+    injectCaveman(bodyCanonical, FORMATS.OPENAI, "wenyan");
+    injectCaveman(bodyAlias, FORMATS.OPENAI, "wenyan-full");
+
+    expect(bodyAlias).toEqual(bodyCanonical);
+    expect(bodyAlias.messages[0].content.split(SEP)).toEqual(["base", CAVEMAN_PROMPTS.wenyan]);
+
+    injectCaveman(bodyAlias, FORMATS.OPENAI, "wenyan");
+    expect(bodyAlias.messages[0].content.split(SEP)).toEqual(["base", CAVEMAN_PROMPTS.wenyan]);
+  });
+
+  it("unknown caveman level does not mutate body", () => {
+    const body = { messages: [{ role: ROLE.SYSTEM, content: "base" }] };
+    injectCaveman(body, FORMATS.OPENAI, "not-a-level");
+    expect(body.messages[0].content).toBe("base");
   });
 });

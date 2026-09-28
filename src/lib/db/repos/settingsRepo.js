@@ -1,6 +1,7 @@
 import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
 import { stripRetiredSettings } from "../helpers/retiredSettings.js";
+import { normalizeCavemanLevel } from "open-sse/rtk/cavemanPrompts.js";
 
 const DEFAULT_MITM_ROUTER_BASE = "http://localhost:20128";
 
@@ -82,6 +83,7 @@ export function mergeWithDefaults(raw) {
       }
     }
   }
+  merged.cavemanLevel = normalizeCavemanLevel(merged.cavemanLevel);
   if (merged.capacityAdapter && typeof merged.capacityAdapter === "object") {
     for (const capKey of Object.keys(merged.capacityAdapter)) {
       const entry = merged.capacityAdapter[capKey];
@@ -108,6 +110,9 @@ export async function updateSettings(updates) {
     const row = db.get(`SELECT data FROM settings WHERE id = 1`);
     const current = row ? parseJson(row.data, {}) : {};
     next = stripRetiredSettings({ ...current, ...updates });
+    if (Object.hasOwn(next, "cavemanLevel")) {
+      next.cavemanLevel = normalizeCavemanLevel(next.cavemanLevel);
+    }
     db.run(
       `INSERT INTO settings(id, data) VALUES(1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data`,
       [stringifyJson(next)],
