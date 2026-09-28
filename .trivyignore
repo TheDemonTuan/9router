@@ -1,4 +1,5 @@
 # 9router Trivy ignore specification
-# Add CVE IDs or vulnerability paths here with an explicit expiration or review date.
-# Format:
-# CVE-YYYY-XXXXX
+# Container drops root privileges via su-exec bun in /entrypoint.sh
+DS-0002
+# Health check is managed by Traefik dynamic router and platform health probes
+DS-0026
