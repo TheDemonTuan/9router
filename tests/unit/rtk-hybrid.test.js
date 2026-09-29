@@ -42,9 +42,24 @@ describe("hybrid RTK preserves output contracts", () => {
     expect(requests).toBe(start);
     expect(classifyToolCall(shell("git log --patch"), log)).toBeNull();
     expect(classifyToolCall(shell("git log --oneline"), log)).toBeNull();
-    expect(filterLocalOutput("git-log", log.replace("Author:", "Merge: aaa bbb\nAuthor:"))).toBeNull();
+    const decorated = log.replace("commit 0000000000000000000000000000000000000001", "commit 0000000000000000000000000000000000000001 (HEAD -> master, origin/master)");
+    const decoratedResult = filterLocalOutput("git-log", decorated);
+    expect(decoratedResult).toContain("(HEAD -> master, origin/master)");
+    expect(decoratedResult).toContain("KEEP_COMMIT_1");
+    const merged = log.replace("commit 0000000000000000000000000000000000000002\nAuthor:", "commit 0000000000000000000000000000000000000002\nMerge: 1111111 2222222\nAuthor:");
+    const mergedResult = filterLocalOutput("git-log", merged);
+    expect(mergedResult).toContain("Merge: 1111111 2222222");
+    expect(mergedResult).toContain("KEEP_COMMIT_2");
   });
 
+  it("rejects bare filenames in cwd that lack directory prefixes to group", async () => {
+    const bareFiles = Array.from({ length: 60 }, (_, i) => `file_${i + 1}.js`).join("\n") + "\n";
+    // Bare filenames without slashes cannot be grouped into [dir] blocks,
+    // so formatting them would add bytes instead of saving tokens.
+    expect(classifyToolCall({ name: "functions.glob", input: { path: "*" } }, bareFiles)).toBeNull();
+    const prose = "The quick brown fox jumps over the lazy dog.\n".repeat(20);
+    expect(classifyToolCall({ name: "functions.glob", input: { path: "*" } }, prose)).toBeNull();
+  });
   it("keeps all matches and paths when Rust pipe would truncate, including native tools", async () => {
     const start = requests;
     for (const [name, input, text, markers] of [

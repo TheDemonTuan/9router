@@ -45,23 +45,34 @@ function search(text) {
 
 function paths(text) {
   if (!isPathOutput(text)) return null;
+  // Grouping saves bytes by stripping repeated directory prefixes. If there
+  // are no slashes to group, prepending [cwd] only adds bytes and is rejected.
   return group(text, /^(.*\/)([^\r\n]+)$/, "[dir]");
 }
 
 function gitLog(text) {
   const lines = text.replace(/\r?\n$/, "").split(/\r?\n/);
-  const starts = lines.flatMap((line, index) => /^commit [0-9a-f]{40,64}$/.test(line) ? [index] : []);
+  const starts = lines.flatMap((line, index) => /^commit [0-9a-f]{40,64}(?: \(.*\))?$/.test(line) ? [index] : []);
   if (!starts.length || starts[0] !== 0) return null;
   const output = [];
   for (let i = 0; i < starts.length; i++) {
     const block = lines.slice(starts[i], starts[i + 1] ?? lines.length);
-    if (!/^Author: /.test(block[1]) || !/^Date:\s+/.test(block[2]) || block[3] !== "" ||
-        block.slice(4).some(line => line !== "" && !line.startsWith("    "))) return null;
-    const author = block[1];
-    const date = block[2];
-    const message = block.slice(4).filter(Boolean).map(line => line.slice(4));
+    let lineIdx = 1;
+    let mergeLine = null;
+    if (/^Merge: (?:[0-9a-f]{7,64} ){1,}[0-9a-f]{7,64}$/.test(block[lineIdx] ?? "")) {
+      mergeLine = block[lineIdx++];
+    }
+    const author = block[lineIdx++];
+    const date = block[lineIdx++];
+    if (!author || !/^Author: /.test(author) || !date || !/^Date:\s+/.test(date) || block[lineIdx] !== "") return null;
+    const rawBody = block.slice(lineIdx + 1);
+    if (rawBody.some(line => line !== "" && !line.startsWith("    "))) return null;
+    const message = rawBody.filter(Boolean).map(line => line.slice(4));
     if (!message.length) return null;
-    output.push(`${block[0]}\n${author}\n${date}\n  ${message[0]}`);
+    const headers = [block[0]];
+    if (mergeLine) headers.push(mergeLine);
+    headers.push(author, date);
+    output.push(`${headers.join("\n")}\n  ${message[0]}`);
     for (const line of message.slice(1, 4)) output.push(`  ${line}`);
     if (message.length > 4) output.push(`  [+${message.length - 4} message lines omitted]`);
   }

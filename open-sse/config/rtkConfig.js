@@ -22,14 +22,24 @@ export const RTK_REJECTIONS = Object.freeze([
   "already_rtk", "unsupported_command", "unsupported_mode", "unsupported_output_format",
 ]);
 
-export const RTK_FILTERS = Object.freeze([
+export const RTK_PIPE_FILTERS = Object.freeze([
   "cargo-test", "cargo", "pytest", "go-test", "go-build", "ctest", "tsc", "vitest",
   "grep", "rg", "find", "fd", "git-log", "git-diff", "git-status", "log", "mypy",
   "ruff-check", "ruff-format", "sqlfluff-lint", "prettier", "phpunit", "pest",
   "paratest", "php-test", "ecs", "phpstan", "pint",
 ]);
 
+export const RTK_FILTERS = RTK_PIPE_FILTERS;
+
 export const RTK_LOCAL_FILTERS = Object.freeze([
   "local:git-log", "local:grep", "local:find", "local:test", "local:cargo-build",
   "local:docker-ps", "local:docker-logs", "local:listing",
+]);
+
+// Filters that 9router classifier actually routes to (distinguishing pipe vs local engine)
+export const RTK_ROUTABLE_FILTERS = Object.freeze([
+  ...RTK_LOCAL_FILTERS,
+  "cargo-test", "pytest", "go-test", "go-build", "ctest", "tsc", "vitest",
+  "grep", "git-diff", "git-status", "mypy", "ruff-check", "ruff-format",
+  "sqlfluff-lint", "prettier", "phpunit", "pest", "paratest", "ecs", "phpstan", "pint",
 ]);

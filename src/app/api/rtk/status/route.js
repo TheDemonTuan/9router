@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSettings } from "@/lib/db/index.js";
-import { RTK_CONFIG, RTK_FILTERS, RTK_LOCAL_FILTERS } from "open-sse/config/rtkConfig.js";
+import { RTK_CONFIG, RTK_PIPE_FILTERS, RTK_LOCAL_FILTERS, RTK_ROUTABLE_FILTERS } from "open-sse/config/rtkConfig.js";
 import { getRtkSnapshot } from "open-sse/rtk/state.js";
 import { getRtkClientStatus } from "open-sse/rtk/client.js";
 
@@ -15,7 +15,7 @@ export async function GET() {
     return NextResponse.json({ ...getRtkSnapshot(), config: {
       enabled: settings.rtkEnabled !== false, endpointState: client.endpointState,
       minTextBytes: RTK_CONFIG.minTextBytes, maxTextBytes: RTK_CONFIG.maxTextBytes, requestMs: RTK_CONFIG.requestMs,
-      sidecarFilters: RTK_FILTERS, localFilters: RTK_LOCAL_FILTERS,
+      pipeFilters: RTK_PIPE_FILTERS, sidecarFilters: RTK_PIPE_FILTERS, localFilters: RTK_LOCAL_FILTERS, routableFilters: RTK_ROUTABLE_FILTERS,
     }, client }, { headers });
   } catch {
     return NextResponse.json({ error: "rtk_status_unavailable" }, { status: 500, headers });

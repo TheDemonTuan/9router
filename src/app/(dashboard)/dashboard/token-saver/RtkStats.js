@@ -125,6 +125,7 @@ export default function RtkStats({ enabled }) {
     </div>
     <p className="text-sm text-text-muted">Busy: {num(http?.busy)} · Rejected: {num(http?.rejected)} · Cancelled: {num(http?.cancelled)}. These are not successful or failed calls.</p>
     <p className="text-sm text-text-muted">Local filter attempts: {num(usage?.local?.attempts)} · Applied: {num(usage?.local?.applied)} · Sidecar fallbacks applied: {num(usage?.local?.fallbacks)}. Sidecar calls and local attempts are different units.</p>
+    {Boolean(config?.routableFilters?.length) && <p className="text-xs text-text-muted">Available from upstream Rust pipe: {num(config?.pipeFilters?.length || config?.sidecarFilters?.length)} · Routed by 9router: {num(config?.routableFilters?.length)} · Local guarded filters: {num(config?.localFilters?.length)}.</p>}
     <div className="grid gap-4 md:grid-cols-2"><Breakdown title="Preparation outcomes" values={usage?.preparationReasons || {}} /><Breakdown title="Skipped before HTTP" values={usage?.skipped || {}} /></div>
     <div aria-label="Tool output eligibility" className="space-y-2">
       <h4 className="font-medium">Tool output eligibility</h4>
