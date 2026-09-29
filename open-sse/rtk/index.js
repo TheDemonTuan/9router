@@ -2,7 +2,7 @@ import { ROLE } from "../translator/schema/roles.js";
 import { OPENAI_BLOCK, CLAUDE_BLOCK, RESPONSES_ITEM } from "../translator/schema/blocks.js";
 import { RTK_CONFIG, RTK_FILTERS, RTK_LOCAL_FILTERS } from "../config/rtkConfig.js";
 import { estimateOutputTokens } from "../utils/usageTracking.js";
-import { getRtkState, recordRtkRejection, recordRtkFilterOutcome, maybeLogRtkDiagnostics } from "./state.js";
+import { getRtkState, recordRtkRejection, recordRtkFilterOutcome } from "./state.js";
 import { classifyToolCall, getRtkToolFamily } from "./classifier.js";
 import { filterToolOutput } from "./client.js";
 import { filterLocalOutput } from "./local.js";
@@ -340,7 +340,6 @@ export async function compressMessages(body, enabled, { signal, disabledReason =
     else { if (controller.signal.aborted) reason = "timeout"; commit(); }
     clearTimeout(timer);
     controller.abort(Object.assign(new Error("RTK finished"), { code: "RTK_TIMEOUT" }));
-    maybeLogRtkDiagnostics();
   }
 }
 

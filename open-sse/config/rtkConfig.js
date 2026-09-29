@@ -15,8 +15,6 @@ export const RTK_CONFIG = Object.freeze({
   sidecarConcurrency: 4,
   maxSelectedBytes: 10_485_760,
   diagnosticMaxRows: 128,
-  diagnosticLogMs: 60_000,
-  diagnosticLogRows: 10,
 });
 
 export const RTK_REJECTIONS = Object.freeze([

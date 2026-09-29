@@ -382,89 +382,46 @@ describe("RTK process dashboard", () => {
 
   it("preserves privacy: sentinels never appear in diagnostics, irrelevant tools are omitted, and dictionary bounds overflow", async () => {
     await setup(() => output("x".repeat(100)));
-    const logs = [];
-    const consoleSpy = vi.spyOn(console, "log").mockImplementation(msg => { if (typeof msg === "string" && msg.startsWith("[RTK diagnostics]")) logs.push(msg); });
-    try {
-      const sentinel = "SECRET_SENTINEL_XYZ_999";
-      const secretBody = {
-        messages: [
-          { role: "assistant", tool_calls: [{ id: "c_sec", type: "function", function: { name: "Bash", arguments: JSON.stringify({ command: `git log --${sentinel}`, path: `/${sentinel}/file.js`, error: sentinel }) } }] },
-          { role: "tool", tool_call_id: "c_sec", content: `sensitive output with ${sentinel}\n`.repeat(25) },
-        ],
-      };
-      await compressor.compressMessages(secretBody, true);
-      const snap = state.getRtkSnapshot();
-      const serialized = JSON.stringify(snap.diagnostics);
-      expect(serialized).not.toContain(sentinel);
-      expect(logs.some(l => l.includes(sentinel))).toBe(false);
+    const sentinel = "SECRET_SENTINEL_XYZ_999";
+    const secretBody = {
+      messages: [
+        { role: "assistant", tool_calls: [{ id: "c_sec", type: "function", function: { name: "Bash", arguments: JSON.stringify({ command: `git log --${sentinel}`, path: `/${sentinel}/file.js`, error: sentinel }) } }] },
+        { role: "tool", tool_call_id: "c_sec", content: `sensitive output with ${sentinel}\n`.repeat(25) },
+      ],
+    };
+    await compressor.compressMessages(secretBody, true);
+    const snap = state.getRtkSnapshot();
+    const serialized = JSON.stringify(snap.diagnostics);
+    expect(serialized).not.toContain(sentinel);
 
-      // Irrelevant tool families (read, other) are not recorded in rejections
-      const otherBody = {
-        messages: [
-          { role: "assistant", tool_calls: [{ id: "c_other", type: "function", function: { name: "custom_irrelevant_tool", arguments: JSON.stringify({ arg: "test" }) } }] },
-          { role: "tool", tool_call_id: "c_other", content: "some file or other output\n".repeat(25) },
-        ],
-      };
-      await compressor.compressMessages(otherBody, true);
-      const snap2 = state.getRtkSnapshot();
-      expect(snap2.diagnostics.rejections.some(r => r.toolFamily === "other")).toBe(false);
-      expect(snap2.diagnostics.rejections.some(r => r.toolFamily === "read")).toBe(false);
+    // Irrelevant tool families (read, other) are not recorded in rejections
+    const otherBody = {
+      messages: [
+        { role: "assistant", tool_calls: [{ id: "c_other", type: "function", function: { name: "custom_irrelevant_tool", arguments: JSON.stringify({ arg: "test" }) } }] },
+        { role: "tool", tool_call_id: "c_other", content: "some file or other output\n".repeat(25) },
+      ],
+    };
+    await compressor.compressMessages(otherBody, true);
+    const snap2 = state.getRtkSnapshot();
+    expect(snap2.diagnostics.rejections.some(r => r.toolFamily === "other")).toBe(false);
+    expect(snap2.diagnostics.rejections.some(r => r.toolFamily === "read")).toBe(false);
 
-      // Bound dictionary: overflow increments beyond 128 rows for tracked families
-      const families = ["shell", "grep", "glob"];
-      const details = ["none", "no_command", "native_metadata_missing", "native_output_mismatch", "serialized_metadata_limit", "command_length_limit"];
-      let combinations = 0;
-      for (const fam of families) {
-        for (const det of details) {
-          for (const reason of ["error_result", "cache_marker", "below_min_bytes", "above_max_bytes", "selection_budget", "unsupported_shell_syntax", "unsupported_command", "unsupported_mode"]) {
-            state.recordRtkRejection(fam, reason, det, 100);
-            combinations++;
-          }
+    // Bound dictionary: overflow increments beyond 128 rows for tracked families
+    const families = ["shell", "grep", "glob"];
+    const details = ["none", "no_command", "native_metadata_missing", "native_output_mismatch", "serialized_metadata_limit", "command_length_limit"];
+    let combinations = 0;
+    for (const fam of families) {
+      for (const det of details) {
+        for (const reason of ["error_result", "cache_marker", "below_min_bytes", "above_max_bytes", "selection_budget", "unsupported_shell_syntax", "unsupported_command", "unsupported_mode"]) {
+          state.recordRtkRejection(fam, reason, det, 100);
+          combinations++;
         }
       }
-      expect(combinations).toBeGreaterThan(128);
-      const snapAfter = state.getRtkSnapshot();
-      expect(snapAfter.diagnostics.rejections.length).toBeLessThanOrEqual(128);
-      expect(snapAfter.diagnostics.overflow.rejections).toBeGreaterThan(0);
-    } finally {
-      consoleSpy.mockRestore();
     }
+    expect(combinations).toBeGreaterThan(128);
+    const snapAfter = state.getRtkSnapshot();
+    expect(snapAfter.diagnostics.rejections.length).toBeLessThanOrEqual(128);
+    expect(snapAfter.diagnostics.overflow.rejections).toBeGreaterThan(0);
   });
 
-  it("throttles diagnostics log to 60s window and captures cumulative counts", async () => {
-    await setup(() => output("x".repeat(100)));
-    const logs = [];
-    const consoleSpy = vi.spyOn(console, "log").mockImplementation(msg => { if (typeof msg === "string" && msg.startsWith("[RTK diagnostics]")) logs.push(msg); });
-    let mockTime = 1000;
-    const perfSpy = vi.spyOn(performance, "now").mockImplementation(() => mockTime);
-    try {
-      const raw = "x".repeat(1000);
-      // 1st preparation: emits log immediately
-      await compressor.compressMessages(body(raw), true);
-      expect(logs.length).toBe(1);
-      const firstPayload = JSON.parse(logs[0].replace("[RTK diagnostics] ", ""));
-      expect(firstPayload.preparations).toBe(1);
-
-      // 2nd preparation at +10s: throttled, no new log
-      mockTime += 10_000;
-      await compressor.compressMessages(body(raw), true);
-      expect(logs.length).toBe(1);
-
-      // 3rd preparation at +65s: emits log with cumulative counts
-      mockTime += 55_000;
-      await compressor.compressMessages(body(raw), true);
-      expect(logs.length).toBe(2);
-      const secondPayload = JSON.parse(logs[1].replace("[RTK diagnostics] ", ""));
-      expect(secondPayload.preparations).toBe(3);
-
-      // RTK disabled does not emit diagnostics log
-      const countBefore = logs.length;
-      mockTime += 70_000;
-      await compressor.compressMessages(body(raw), false);
-      expect(logs.length).toBe(countBefore);
-    } finally {
-      perfSpy.mockRestore();
-      consoleSpy.mockRestore();
-    }
-  });
 });

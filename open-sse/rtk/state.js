@@ -62,7 +62,6 @@ export function getRtkState() {
     },
     client: { initialized: false, endpoint: null, endpointState: "unconfigured", dispatcher: null, active: 0, openUntil: 0, generation: 0, probe: false, warningAt: 0, lastSuccessAt: null, lastFailure: null, check: null, checkPromise: null },
   };
-  state.diagnosticsLastLogAt ??= null;
   state.usage.diagnostics ??= {
     rejections: {},
     filters: {},
@@ -143,40 +142,4 @@ export function recordRtkFilterOutcome(toolFamily, filter, engine, fallback, out
     inputBytes: safeIn,
     outputBytes: safeOut,
   };
-}
-
-export function maybeLogRtkDiagnostics() {
-  const state = getRtkState();
-  const now = performance.now();
-  if (state.diagnosticsLastLogAt !== null && now - state.diagnosticsLastLogAt < RTK_CONFIG.diagnosticLogMs) return;
-  state.diagnosticsLastLogAt = now;
-  try {
-    const snapshot = getRtkSnapshot();
-    const topRejections = snapshot.diagnostics.rejections.slice(0, RTK_CONFIG.diagnosticLogRows);
-    const topFilters = snapshot.diagnostics.filters.slice(0, RTK_CONFIG.diagnosticLogRows);
-    const payload = {
-      session: snapshot.session,
-      preparations: snapshot.usage.preparations,
-      appliedOutputs: snapshot.usage.appliedOutputs,
-      http: {
-        attempts: snapshot.usage.http.attempts,
-        succeeded: snapshot.usage.http.succeeded,
-        unchanged: snapshot.usage.http.unchanged,
-        failed: snapshot.usage.http.failed,
-      },
-      local: {
-        attempts: snapshot.usage.local.attempts,
-        applied: snapshot.usage.local.applied,
-        fallbacks: snapshot.usage.local.fallbacks,
-      },
-      rejections: topRejections,
-      filters: topFilters,
-      omittedRows: {
-        rejections: Math.max(0, snapshot.diagnostics.rejections.length - topRejections.length),
-        filters: Math.max(0, snapshot.diagnostics.filters.length - topFilters.length),
-      },
-      overflow: { ...snapshot.diagnostics.overflow },
-    };
-    console.log(`[RTK diagnostics] ${JSON.stringify(payload)}`);
-  } catch {}
 }
