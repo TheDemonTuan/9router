@@ -17,7 +17,7 @@ export const RTK_CONFIG = Object.freeze({
 });
 
 export const RTK_REJECTIONS = Object.freeze([
-  "error_result", "below_min_bytes", "above_max_bytes", "selection_budget", "unlinked_call",
+  "error_result", "cache_marker", "below_min_bytes", "above_max_bytes", "selection_budget", "unlinked_call",
   "invalid_command_metadata", "metadata_limit", "missing_command", "unsupported_shell_syntax",
   "already_rtk", "unsupported_command", "unsupported_mode", "unsupported_output_format",
 ]);
@@ -27,4 +27,9 @@ export const RTK_FILTERS = Object.freeze([
   "grep", "rg", "find", "fd", "git-log", "git-diff", "git-status", "log", "mypy",
   "ruff-check", "ruff-format", "sqlfluff-lint", "prettier", "phpunit", "pest",
   "paratest", "php-test", "ecs", "phpstan", "pint",
+]);
+
+export const RTK_LOCAL_FILTERS = Object.freeze([
+  "local:git-log", "local:grep", "local:find", "local:test", "local:cargo-build",
+  "local:docker-ps", "local:docker-logs", "local:listing",
 ]);

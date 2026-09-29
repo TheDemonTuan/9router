@@ -35,7 +35,7 @@
 
 **9Router solves this:**
 
-- ✅ **RTK Token Saver** - Auto-compress eligible tool outputs via upstream RTK sidecar; savings vary by workload
+- ✅ **RTK Token Saver** - Compress eligible command output with upstream Rust RTK and guarded local filters; savings vary by workload
 - ✅ **Maximize subscriptions** - Track quota, use every bit before reset
 - ✅ **Auto fallback** - Subscription → Cheap → Free, zero downtime
 - ✅ **Multi-account** - Round-robin between accounts per provider
@@ -556,18 +556,14 @@ Set `X-9Router-Token-Saver: off` to bypass all token savers for one chat request
 
 ### 🚀 RTK Token Saver
 
-Tool outputs (`git diff`, `grep`, `find`, `ls`, `tree`, log dumps...) often eat 30-50% of your prompt budget. RTK detects them and applies smart, lossless compression **before** the request hits the LLM:
+9Router compresses eligible tool-result text **before** translating a request to the provider format. The hybrid uses the [upstream RTK 0.50.0 pipe](https://github.com/rtk-ai/rtk/releases/tag/v0.50.0) for supported stdout contracts and in-process filters inspired by [OmniRoute's command-aware RTK design](https://github.com/diegosouzapw/OmniRoute/blob/f4e99a7a85624684a7166cae6bebead48c29085f/docs/compression/RTK_COMPRESSION.md) for formats the Rust pipe cannot safely handle. The engines are different implementations, **not interchangeable filter catalogs**.
 
-- **Filters:** `git-diff`, `git-status`, `grep`, `find`, `ls`, `tree`, `dedup-log`, `smart-truncate`, `read-numbered`, `search-list`
-- **Auto-detect:** No config needed — RTK peeks the first 1KB of each `tool_result` and picks the right filter.
-- **Safe by design:** If a filter fails, throws, or makes output bigger, RTK silently keeps the original text. Errors never break your request.
-- **Universal:** Works across all formats (OpenAI, Claude, Gemini, Cursor, Kiro, OpenAI Responses) because it runs **before** any format translation.
-- **Default ON:** Toggle anytime in Dashboard → Endpoint settings.
-
-```
-Without RTK: 47K tokens sent to LLM
-With RTK:    28K tokens sent to LLM   (40% saved · same context · same answer)
-```
+- **Rust sidecar:** Pinned pipe filters for supported commands such as `git diff`, `git status`, `pytest`, `cargo test`, `go test -json`, `tsc`, and JSON-formatted lint output. Set `RTK_URL` to use it.
+- **Local filters (no sidecar required):** Default-format `git log` (retains every commit header and subject, annotates omitted body lines); large `rg`/`grep` results and path lists (retains every match/path); passing test detail summaries, successful `cargo build` progress, `docker ps` table padding, repeated `docker logs`, and terminal color from `ls`/`tree`.
+- **Eligibility:** A linked tool call, recognized command/output shape, and at least 500 UTF-8 bytes are required. Native `grep`/`glob` only qualify when their text has an exact search/path-list contract; file reads, shell pipelines, unknown commands, error results, prompt-cache-marked blocks, and unrecognized formats remain raw.
+- **Failure policy:** If the sidecar is unavailable, local fallback is attempted only for compatible `grep` or `git-status` text. Larger output, unsupported modes, timeouts and client cancellation do not trigger a lossy generic filter. Passing test detail lines and long commit bodies may be summarized; **RTK is not lossless**.
+- **Metrics:** Dashboard → Token Saver reports sidecar HTTP attempts separately from local attempts and applied hits. Counters are per gateway process and may count the same historical tool result across requests. Reported token savings are estimates, not provider billing data.
+- **Control:** Enabled by the RTK toggle; `X-9Router-Token-Saver: off` disables it per request. The local filters work without `RTK_URL`; Rust filters require a running sidecar.
 
 ### 🐴 Ponytail (Lazy Senior Dev)
 
@@ -584,7 +580,7 @@ With Ponytail:    shortest working diff, no unrequested abstractions, minimal co
 
 Never trades away: trust-boundary validation, error handling that prevents data loss, security, accessibility, or explicitly requested behavior. Requested reports, plans, walkthroughs, and explanations receive full detail. Enable in Dashboard → `/dashboard/token-saver` → Ponytail. Stacks with Caveman (output terseness) and RTK (tool output compression).
 
-> **Note on Token Savers:** Caveman provides output-style instructions to encourage concise replies; Ponytail provides coding/minimal-diff instructions. Both add prompt overhead to input tokens. Net token savings depend on workload. Native passthrough, structured output, and `X-9Router-Token-Saver: off` bypass injection. RTK is an independent sidecar compressing tool outputs before upstream dispatch. See [Honest Numbers](https://github.com/JuliusBrussee/caveman/blob/8b0c1d3699b8d83e87fe4605b378da20c41555e0/docs/HONEST-NUMBERS.md), [Caveman skill v2.7.0](https://github.com/JuliusBrussee/caveman/blob/8b0c1d3699b8d83e87fe4605b378da20c41555e0/skills/caveman/SKILL.md), and [Ponytail skill v4.10.0](https://github.com/DietrichGebert/ponytail/blob/1d95ff7d39de12d87014ea40d4e22201bddc501b/skills/ponytail/SKILL.md).
+> **Note on Token Savers:** Caveman provides output-style instructions to encourage concise replies; Ponytail provides coding/minimal-diff instructions. Both add prompt overhead to input tokens. Net token savings depend on workload. Native passthrough, structured output, and `X-9Router-Token-Saver: off` bypass injection. Hybrid RTK compresses eligible tool output locally or through the optional Rust sidecar before upstream dispatch. See [Honest Numbers](https://github.com/JuliusBrussee/caveman/blob/8b0c1d3699b8d83e87fe4605b378da20c41555e0/docs/HONEST-NUMBERS.md), [Caveman skill v2.7.0](https://github.com/JuliusBrussee/caveman/blob/8b0c1d3699b8d83e87fe4605b378da20c41555e0/skills/caveman/SKILL.md), and [Ponytail skill v4.10.0](https://github.com/DietrichGebert/ponytail/blob/1d95ff7d39de12d87014ea40d4e22201bddc501b/skills/ponytail/SKILL.md).
 
 ### 🎯 Smart 3-Tier Fallback
 
@@ -688,7 +684,7 @@ Seamless translation between formats:
 
 | Tier                | Provider              | Cost         | Quota Reset      | Best For                                |
 | ------------------- | --------------------- | ------------ | ---------------- | --------------------------------------- |
-| **🚀 TOKEN SAVER**  | **RTK Sidecar**       | **FREE**     | Optional         | **Compresses eligible tool outputs; savings vary by workload** |
+| **🚀 TOKEN SAVER**  | **Hybrid RTK**       | **FREE**     | Optional         | **Compresses eligible tool outputs; savings vary by workload** |
 | **💳 SUBSCRIPTION** | Claude Code (Pro/Max) | $20-200/mo   | 5h + weekly      | Already subscribed                      |
 |                     | Codex (Plus/Pro)      | $20-200/mo   | 5h + weekly      | OpenAI users                            |
 |                     | GitHub Copilot        | $10-19/mo    | Monthly          | GitHub users                            |
@@ -1501,7 +1497,8 @@ Thanks to all contributors who helped make 9Router better!
 Built on the shoulders of giants:
 
 - **[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)** — original Go implementation that inspired this JavaScript port.
-- **[RTK](https://github.com/rtk-ai/rtk)** ![Stars](https://img.shields.io/github/stars/rtk-ai/rtk?style=flat&color=yellow) — Rust token-saver. 9Router uses the upstream RTK sidecar to compress eligible tool outputs. Savings vary by workload and tool output.
+- **[RTK](https://github.com/rtk-ai/rtk)** ![Stars](https://img.shields.io/github/stars/rtk-ai/rtk?style=flat&color=yellow) — Rust token-saver, used as an optional pinned sidecar for supported pipe filters. Savings vary by workload and tool output.
+- **[OmniRoute](https://github.com/diegosouzapw/OmniRoute)** — command-aware in-process filter architecture inspired the guarded local companion; the Rust RTK and OmniRoute catalogs have different contracts.
 - **[Caveman](https://github.com/JuliusBrussee/caveman)** ![Stars](https://img.shields.io/github/stars/JuliusBrussee/caveman?style=flat&color=yellow) by **[@JuliusBrussee](https://github.com/JuliusBrussee)** — viral _"why use many token when few token do trick"_. 9Router adapts its prompt → shorter chat replies; net savings depend on workload.
 - **[Ponytail](https://github.com/DietrichGebert/ponytail)** ![Stars](https://img.shields.io/github/stars/DietrichGebert/ponytail?style=flat&color=yellow) by **[@DietrichGebert](https://github.com/DietrichGebert)** — _"lazy senior dev"_ skill. 9Router injects its comprehension-first, YAGNI ladder → **minimal complete changes, less code, shorter diffs**.
 

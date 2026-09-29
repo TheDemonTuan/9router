@@ -213,7 +213,7 @@ export default function TokenSaverClient() {
               </a>
             </p>
             <p className="text-sm text-text-muted">
-              Compress supported tool output with the upstream RTK sidecar. If unavailable, original output is preserved.
+              Compress recognized tool output with local filters and the optional upstream Rust RTK sidecar. Unsupported formats remain unchanged.
             </p>
           </div>
           <Toggle

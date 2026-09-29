@@ -1,10 +1,11 @@
 import { ROLE } from "../translator/schema/roles.js";
 import { OPENAI_BLOCK, CLAUDE_BLOCK, RESPONSES_ITEM } from "../translator/schema/blocks.js";
-import { RTK_CONFIG, RTK_FILTERS } from "../config/rtkConfig.js";
+import { RTK_CONFIG, RTK_FILTERS, RTK_LOCAL_FILTERS } from "../config/rtkConfig.js";
 import { estimateOutputTokens } from "../utils/usageTracking.js";
 import { getRtkState } from "./state.js";
 import { classifyToolCall } from "./classifier.js";
 import { filterToolOutput } from "./client.js";
+import { filterLocalOutput } from "./local.js";
 
 function collect(body, visit, eligibility) {
   const shapes = [body.conversationState, body.request?.contents, body.contents, body.messages, body.input].filter(x => Array.isArray(x) ? x.length : Boolean(x));
@@ -31,13 +32,14 @@ function collect(body, visit, eligibility) {
   function leaf(owner, key, shape, call, skip) {
     if (typeof owner?.[key] !== "string") return 0;
     eligibility.textLeaves++;
-    visit(owner, key, shape, call, skip);
+    visit(owner, key, shape, call, skip || owner.cache_control != null && "cache_marker");
     return 1;
   }
   function parts(owner, key, type, shape, call, skip) {
-    if (typeof owner?.[key] === "string") return leaf(owner, key, shape, call, skip);
+    const reason = skip || owner?.cache_control != null && "cache_marker";
+    if (typeof owner?.[key] === "string") return leaf(owner, key, shape, call, reason);
     let count = 0;
-    if (Array.isArray(owner?.[key])) for (const part of owner[key]) if (part?.type === type) count += leaf(part, "text", shape === "claude-string" ? "claude-array" : shape + "-array", call, skip);
+    if (Array.isArray(owner?.[key])) for (const part of owner[key]) if (part?.type === type) count += leaf(part, "text", shape === "claude-string" ? "claude-array" : shape + "-array", call, reason);
     return count;
   }
   function result(leaves) {
@@ -52,7 +54,7 @@ function collect(body, visit, eligibility) {
       for (const itemResult of item?.userInputMessage?.userInputMessageContext?.toolResults ?? []) {
         const call = match(itemResult?.toolUseId);
         let leaves = 0;
-        for (const part of itemResult?.content ?? []) leaves += leaf(part, "text", "kiro-tool-result", call, itemResult.status === "error" || itemResult.is_error === true);
+        for (const part of itemResult?.content ?? []) leaves += leaf(part, "text", "kiro-tool-result", call, itemResult.status === "error" || itemResult.is_error === true || itemResult.cache_control != null && "cache_marker");
         result(leaves);
       }
     }
@@ -65,7 +67,7 @@ function collect(body, visit, eligibility) {
       const response = part?.functionResponse;
       if (!response) continue;
       const call = match(response.id, response.name, true);
-      const skip = response.is_error === true || response.status === "error" || response.response?.error != null;
+      const skip = response.is_error === true || response.status === "error" || response.response?.error != null || part.cache_control != null && "cache_marker";
       if (typeof response.response === "string") result(leaf(response, "response", shape, call, skip));
       else {
         let leaves = 0;
@@ -123,9 +125,10 @@ export async function compressMessages(body, enabled, { signal, disabledReason =
       usage.bytesBefore += hit.bytesBefore;
       usage.bytesAfter += hit.bytesAfter;
       usage.estimatedTokensSaved += hit.estimatedTokensSaved;
-      if (RTK_FILTERS.includes(hit.filter)) {
-        const row = usage.filters[hit.filter] ??= { filter: hit.filter, appliedOutputs: 0, bytesBefore: 0, bytesAfter: 0, estimatedTokensSaved: 0 };
+      if (RTK_FILTERS.includes(hit.filter) || RTK_LOCAL_FILTERS.includes(hit.filter)) {
+        const row = usage.filters[hit.filter] ??= { filter: hit.filter, appliedOutputs: 0, bytesBefore: 0, bytesAfter: 0, estimatedTokensSaved: 0, engines: { sidecar: 0, local: 0 } };
         row.appliedOutputs++;
+        row.engines[hit.engine]++;
         row.bytesBefore += hit.bytesBefore;
         row.bytesAfter += hit.bytesAfter;
         row.estimatedTokensSaved += hit.estimatedTokensSaved;
@@ -141,7 +144,7 @@ export async function compressMessages(body, enabled, { signal, disabledReason =
       const size = Buffer.byteLength(content);
       stats.bytesBefore += size;
       stats.bytesAfter += size;
-      if (skip) { usage.eligibility.rejected.error_result++; return; }
+      if (skip) { usage.eligibility.rejected[skip === "cache_marker" ? "cache_marker" : "error_result"]++; return; }
       if (size < RTK_CONFIG.minTextBytes) { usage.eligibility.rejected.below_min_bytes++; return; }
       if (size > RTK_CONFIG.maxTextBytes) { usage.eligibility.rejected.above_max_bytes++; return; }
       if (selected + size > RTK_CONFIG.maxSelectedBytes) { usage.eligibility.rejected.selection_budget++; return; }
@@ -158,13 +161,30 @@ export async function compressMessages(body, enabled, { signal, disabledReason =
         const job = jobs[next++];
         if (job.call?.ambiguous) { usage.eligibility.rejected.unlinked_call++; continue; }
         eligibleJobs++;
-        const output = await filterToolOutput({ filter: job.filter, content: job.content, signal: combined, internalSignal: controller.signal });
+        const local = job.filter.startsWith("local:");
+        let output;
+        let engine = "sidecar";
+        if (local) {
+          usage.local.attempts++;
+          output = filterLocalOutput(job.filter.slice(6), job.content);
+        } else {
+          output = await filterToolOutput({ filter: job.filter, content: job.content, signal: combined, internalSignal: controller.signal });
+          if (output === null && !combined.aborted && ["grep", "git-status"].includes(job.filter)) {
+            usage.local.attempts++;
+            output = filterLocalOutput(job.filter, job.content);
+            if (output !== null) engine = "local";
+          }
+        }
         if (signal?.aborted) throw signal.reason;
+        if (performance.now() >= deadline && !controller.signal.aborted) controller.abort(Object.assign(new Error("RTK timeout"), { code: "RTK_TIMEOUT" }));
         if (combined.aborted || output === null) continue;
         const size = Buffer.byteLength(output);
+        if (!size || size >= job.size) continue;
         job.owner[job.key] = output;
+        if (local || engine === "local") usage.local.applied++;
+        if (engine === "local" && !local) usage.local.fallbacks++;
         stats.bytesAfter -= job.size - size;
-        stats.hits.push({ shape: job.shape, filter: job.filter, saved: job.size - size, bytesBefore: job.size, bytesAfter: size, estimatedTokensSaved: Math.max(0, estimateOutputTokens(job.content.length) - estimateOutputTokens(output.length)) });
+        stats.hits.push({ shape: job.shape, filter: job.filter, engine: local ? "local" : engine, saved: job.size - size, bytesBefore: job.size, bytesAfter: size, estimatedTokensSaved: Math.max(0, estimateOutputTokens(job.content.length) - estimateOutputTokens(output.length)) });
       }
     }
     await Promise.all(Array.from({ length: Math.min(RTK_CONFIG.perRequestConcurrency, jobs.length) }, worker));

@@ -15,7 +15,7 @@ const labels = {
 const eligibilityLabels = {
   toolResults: "Tool result containers", textLeaves: "Supported text leaves", resultsWithoutText: "Results without supported text",
   noToolResultsPreparations: "Preparations without tool results",
-  error_result: "Error result", below_min_bytes: "Below minimum bytes", above_max_bytes: "Above maximum bytes",
+  error_result: "Error result", cache_marker: "Prompt-cache breakpoint", below_min_bytes: "Below minimum bytes", above_max_bytes: "Above maximum bytes",
   selection_budget: "Selection byte budget", unlinked_call: "Missing or ambiguous call metadata",
   invalid_command_metadata: "Invalid command metadata", metadata_limit: "Command metadata too large",
   missing_command: "Missing command", unsupported_shell_syntax: "Unsupported shell syntax", already_rtk: "Already RTK",
@@ -113,10 +113,10 @@ export default function RtkStats({ enabled }) {
     </div>
     {error && <p role="alert" className="text-sm text-warning">{error}</p>}
     {newSession && <p className="text-sm text-warning" role="status">Gateway process restarted; session counters reset.</p>}
-    {endpoint !== "configured" && <p className="text-sm text-text-muted">Set RTK_URL on the server, then restart. Docker: <code>http://rtk:8080</code>; Bun local: <code>http://127.0.0.1:8080</code> (only with a running sidecar). No URL is changed here.</p>}
+    {endpoint !== "configured" && <p className="text-sm text-text-muted">The local filters remain available. For Rust pipe filters set RTK_URL on the server, then restart. Docker: <code>http://rtk:8080</code>; Bun local: <code>http://127.0.0.1:8080</code> (only with a running sidecar).</p>}
     <p className="text-sm text-text-muted" aria-live="polite">{checkResult ? <>{checkResult.status === "passed" ? "Check passed" : `Check failed: ${labels[checkResult.reason] || "Sidecar unavailable"}`} · {date(checkResult.checkedAt)}{checkResult.status === "passed" && ` · RTK ${checkResult.rtkVersion}, wrapper ${checkResult.wrapperRevision}`}</> : "No connection check yet"}. Check uses synthetic text; usage below counts real request preparation only.</p>
     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-      <Metric label="RTK calls" value={num(http?.attempts)} sub={`Active: ${num(client?.active)} · average completed: ${average}`} />
+      <Metric label="Sidecar calls" value={num(http?.attempts)} sub={`Active: ${num(client?.active)} · average completed: ${average}`} />
       <Metric label="Processed successfully" value={num(http?.succeeded)} sub={`Unchanged: ${num(http?.unchanged)}`} />
       <Metric label="Outputs compressed" value={num(usage?.appliedOutputs)} sub={`${num(usage?.compressedPreparations)} / ${num(usage?.preparations)} preparations`} />
       <Metric label="Bytes saved" value={num(saved)} sub={`${num(usage?.bytesBefore)} before · ${num(usage?.bytesAfter)} after · ${percentage}`} />
@@ -124,13 +124,14 @@ export default function RtkStats({ enabled }) {
       <Metric label="Failed calls" value={num(http?.failed)} sub={`Timed out: ${num(http?.timedOut)}`} />
     </div>
     <p className="text-sm text-text-muted">Busy: {num(http?.busy)} · Rejected: {num(http?.rejected)} · Cancelled: {num(http?.cancelled)}. These are not successful or failed calls.</p>
+    <p className="text-sm text-text-muted">Local filter attempts: {num(usage?.local?.attempts)} · Applied: {num(usage?.local?.applied)} · Sidecar fallbacks applied: {num(usage?.local?.fallbacks)}. Sidecar calls and local attempts are different units.</p>
     <div className="grid gap-4 md:grid-cols-2"><Breakdown title="Preparation outcomes" values={usage?.preparationReasons || {}} /><Breakdown title="Skipped before HTTP" values={usage?.skipped || {}} /></div>
     <div aria-label="Tool output eligibility" className="space-y-2">
       <h4 className="font-medium">Tool output eligibility</h4>
       <p className="text-sm text-text-muted">Session counts: containers, text leaves, and preparations have different units. One result may contain multiple leaves. Each rejected leaf has at most one reason; deadlines or cancellation can leave counts incomplete. No historical requests are reconstructed.</p>
       <div className="grid gap-4 md:grid-cols-2"><Breakdown title="Observed results and preparations" values={usage?.eligibility ? { toolResults: usage.eligibility.toolResults, textLeaves: usage.eligibility.textLeaves, resultsWithoutText: usage.eligibility.resultsWithoutText, noToolResultsPreparations: usage.eligibility.noToolResultsPreparations } : {}} names={eligibilityLabels} showZeros /><Breakdown title="Rejected text leaves" values={usage?.eligibility?.rejected || {}} names={eligibilityLabels} /></div>
     </div>
-    <div className="overflow-x-auto"><h4 className="font-medium mb-2">Applied filters</h4>{usage?.filters.length ? <table className="w-full text-sm text-left"><thead><tr><th scope="col">Filter</th><th scope="col">Outputs</th><th scope="col">Bytes saved</th><th scope="col">Estimated tokens</th></tr></thead><tbody>{usage.filters.map(row => <tr key={row.filter} className="border-t border-border"><th scope="row">{row.filter}</th><td>{num(row.appliedOutputs)}</td><td>{num(row.bytesBefore - row.bytesAfter)}</td><td>{num(row.estimatedTokensSaved)}</td></tr>)}</tbody></table> : <p className="text-sm text-text-muted">No tool output compressed in this process yet. Requires supported command metadata and text ≥{num(config?.minTextBytes)} UTF-8 bytes.</p>}</div>
+    <div className="overflow-x-auto"><h4 className="font-medium mb-2">Applied filters</h4>{usage?.filters.length ? <table className="w-full text-sm text-left"><thead><tr><th scope="col">Filter</th><th scope="col">Rust / local</th><th scope="col">Outputs</th><th scope="col">Bytes saved</th><th scope="col">Estimated tokens</th></tr></thead><tbody>{usage.filters.map(row => <tr key={row.filter} className="border-t border-border"><th scope="row">{row.filter}</th><td>{num(row.engines?.sidecar)} / {num(row.engines?.local)}</td><td>{num(row.appliedOutputs)}</td><td>{num(row.bytesBefore - row.bytesAfter)}</td><td>{num(row.estimatedTokensSaved)}</td></tr>)}</tbody></table> : <p className="text-sm text-text-muted">No tool output compressed in this process yet. Requires linked tool metadata and text ≥{num(config?.minTextBytes)} UTF-8 bytes.</p>}</div>
     <p className="text-sm text-text-muted">Last compression: {date(usage?.lastAppliedAt)} · Last successful RTK call: {date(client?.lastSuccessAt)} · Circuit: {client?.circuit || "—"}{client?.circuit === "open" && ` until ${date(client.openUntil)}`} · Active: {num(client?.active)} · Last failure: {client?.lastFailure ? `${labels[client.lastFailure.reason] || client.lastFailure.reason} at ${date(client.lastFailure.at)}` : "—"}</p>
     <p className="text-xs text-text-muted">Current gateway process only. Session started {date(snapshot?.session.startedAt)}{snapshot?.session.slot ? ` · ${snapshot.session.slot} slot` : ""}. Resets on restart/deploy; fallback preparations may be counted again. Applied during request preparation; not proof of provider receipt, completion or billing. Estimate from text length (~4 characters/token), not provider token usage or billed savings.</p>
   </section>;

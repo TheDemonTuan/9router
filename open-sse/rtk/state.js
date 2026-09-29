@@ -13,7 +13,7 @@ export function getRtkState() {
     usage: {
       preparations: 0, compressedPreparations: 0, appliedOutputs: 0,
       bytesBefore: 0, bytesAfter: 0, estimatedTokensSaved: 0, lastAppliedAt: null,
-      preparationReasons: zero(reasons), http: zero(outcomes), skipped: zero(skips), filters: {},
+      preparationReasons: zero(reasons), http: zero(outcomes), local: { attempts: 0, applied: 0, fallbacks: 0 }, skipped: zero(skips), filters: {},
       eligibility: { toolResults: 0, textLeaves: 0, resultsWithoutText: 0, noToolResultsPreparations: 0, rejected: zero(RTK_REJECTIONS) },
     },
     client: { initialized: false, endpoint: null, endpointState: "unconfigured", dispatcher: null, active: 0, openUntil: 0, generation: 0, probe: false, warningAt: 0, lastSuccessAt: null, lastFailure: null, check: null, checkPromise: null },
@@ -25,8 +25,8 @@ export function getRtkSnapshot() {
   return {
     session: { ...session },
     usage: {
-      ...usage, preparationReasons: { ...usage.preparationReasons }, http: { ...usage.http },
-      skipped: { ...usage.skipped }, filters: Object.values(usage.filters).map(row => ({ ...row })),
+      ...usage, preparationReasons: { ...usage.preparationReasons }, http: { ...usage.http }, local: { ...usage.local },
+      skipped: { ...usage.skipped }, filters: Object.values(usage.filters).map(row => ({ ...row, engines: { ...row.engines } })),
       eligibility: { ...usage.eligibility, rejected: { ...usage.eligibility.rejected } },
     },
   };

@@ -132,7 +132,7 @@ describe("RTK process dashboard", () => {
       { type: "function", name: "Bash", input: { command: "pwd && git diff" }, reason: "unsupported_shell_syntax" },
       { type: "function", name: "Bash", input: { command: "git status && git diff" }, reason: "unsupported_shell_syntax" },
       { type: "function", name: "Bash", input: { command: "git diff --stat" }, reason: "unsupported_output_format" },
-      { type: "function", name: "Bash", input: { command: "cargo build" }, reason: "unsupported_mode" },
+      { type: "function", name: "Bash", input: { command: "cargo clippy" }, reason: "unsupported_mode" },
       { type: "function", name: "Bash", input: { command: "unknown-command" }, reason: "unsupported_command" },
       { type: "function", name: "Bash", input: { command: "rtk git diff" }, reason: "already_rtk" },
       { type: "function", name: "Bash", input: { command: "git diff", cmd: "git status" }, reason: "invalid_command_metadata" },

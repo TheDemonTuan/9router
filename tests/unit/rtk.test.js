@@ -155,18 +155,18 @@ describe("upstream RTK source traversal", () => {
   });
 
   it("never classifies unknown commands or unsound modes", () => {
-    for (const command of ["git log", "git log --oneline", "rg -n --stats x", "rg -n -C 3 x", "find . -ls", "fd --format x", "git diff | cat", "git diff; cat", "git diff 'unterminated", "git diff " + "x".repeat(8192)]) {
+    for (const command of ["git log --oneline", "rg -n --stats x", "rg -n -C 3 x", "find . -ls", "fd --format x", "git diff | cat", "git diff; cat", "git diff 'unterminated", "git diff " + "x".repeat(8192)]) {
       expect(classifyToolCall({ name: "Bash", input: { command } }, input)).toBeNull();
     }
     expect(classifyToolCall({ name: "Bash", input: { command: 'git -C "path with spaces" diff' } }, input)).toBe("git-diff");
     expect(classifyToolCall({ name: "read_file", input: { path: "git diff" } }, input)).toBeNull();
     expect(classifyToolCall({ name: "Bash", input: { command: "go test ./..." } }, input)).toBeNull();
     const classify = (command, text) => classifyToolCall({ name: "Bash", input: { command } }, text);
-    const grepOutput = "src/a.ts:12:retained\n".repeat(30);
+    const grepOutput = "src/a.ts:12:retained\n".repeat(5);
     expect(classify("rg -n retained src", grepOutput)).toBe("grep");
     for (const command of ["rg -n --stats retained", "rg -n -C 3 retained"]) expect(classify(command, grepOutput)).toBeNull();
     expect(classify("rg -n retained", "\u001b[31m" + grepOutput)).toBeNull();
-    expect(classify("find . -name '*.ts' -print", "./src/a.ts\n".repeat(30))).toBe("find");
+    expect(classify("find . -name '*.ts' -print", "./src/a.ts\n".repeat(30))).toBe("local:find");
     expect(classify("find . -ls", "./src/a.ts\n".repeat(30))).toBeNull();
     expect(classify("go test -json ./...", '{"Action":"pass"}\n')).toBe("go-test");
     expect(classify("go test ./...", '{"Action":"pass"}\n')).toBeNull();
@@ -177,7 +177,7 @@ describe("upstream RTK source traversal", () => {
     expect(classify("sqlfluff lint --format=json .", "not-json")).toBeNull();
   });
   it("classifies literal shell metacharacters and a single safe cd prefix", () => {
-    const grepOutput = "src/a.ts:12:retained\n".repeat(30);
+    const grepOutput = "src/a.ts:12:retained\n".repeat(5);
     const cases = [
       ["rg -n 'foo|bar' src", "grep", grepOutput],
       ["rg -n '(foo|bar);$`&' src", "grep", grepOutput],
