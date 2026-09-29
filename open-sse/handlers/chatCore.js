@@ -36,6 +36,12 @@ import { defaultClaudeToolType, shouldDefaultClaudeToolType } from "../translato
 import { resolveSessionId } from "../utils/sessionManager.js";
 import { createRouteContext, formatRoute } from "../utils/modelRoute.js";
 import { bindResponseBody } from "../utils/responseLifecycle.js";
+import { normalizeSessionDedupMode, TOKEN_SAVER_CONFIG } from "../config/tokenSaverConfig.js";
+import { inspectSource } from "../token-saver/sourceWalker.js";
+import { detectCacheFence } from "../token-saver/cacheFence.js";
+import { planSessionDedup, commitSessionDedup } from "../token-saver/sessionDedup.js";
+import { measureCleanupOpportunities } from "../token-saver/safeCleanup.js";
+import { recordTokenSaverPreparation } from "../token-saver/state.js";
 
 /**
  * Core chat handler - shared between SSE and Worker
@@ -64,7 +70,7 @@ export function stripContinuityFields(body) {
   return body;
 }
 
-export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, clientSignal, preResponse = null, routeContext: inputRouteContext = null, routeReason = "direct", effectiveModel = null }) {
+export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, sessionDedupMode = "shadow", cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, clientSignal, preResponse = null, routeContext: inputRouteContext = null, routeReason = "direct", effectiveModel = null }) {
   const { provider, model } = modelInfo;
   const requestStartTime = Date.now();
   // Stable per-session color so all lines of one CLI conversation share a tag
@@ -171,9 +177,13 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   // Structured output is a protocol contract; prompt/content mutations are unsafe.
   const strictStructuredOutput =
-    body.text?.format?.type === "json_schema"
-    || body.response_format?.type === "json_schema"
-    || body.response_format?.type === "json_object";
+    ["json_schema", "json_object"].includes(body.text?.format?.type)
+    || ["json_schema", "json_object"].includes(body.response_format?.type)
+    || body.generationConfig?.responseMimeType === "application/json"
+    || body.request?.generationConfig?.responseMimeType === "application/json"
+    || body.generationConfig?.responseSchema != null || body.generationConfig?.responseJsonSchema != null
+    || body.request?.generationConfig?.responseSchema != null || body.request?.generationConfig?.responseJsonSchema != null
+    || body.output_config?.format?.type === "json_schema";
 
   // Deep clone body for source transformations to prevent mutating caller's original object
   let sourceBody;
@@ -217,15 +227,63 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     ? AbortSignal.any([preResponse.signal, clientSignal])
     : preResponse?.signal || clientSignal;
   if (rtkSignal?.aborted) throw rtkSignal.reason;
-  const rtkStats = await compressMessages(sourceBody, tokenSaverEnabled && rtkEnabled, {
+  const dedupMode = normalizeSessionDedupMode(sessionDedupMode);
+  let sourceIndex = null;
+  let fence = null;
+  let dedupPlan = null;
+  let cleanupShadow = null;
+  let dedupCommit = null;
+  let saverReason = null;
+  let saverElapsedMs = 0;
+  const saverStarted = performance.now();
+  let reqLogger, clientTool, responsesClientDialect, responsesProviderDialect;
+  let translatedBody, responseSchemaValidation, toolNameMap, customToolNames, pxpipeSummary;
+  try {
+  const indexStarted = performance.now();
+  if (tokenSaverEnabled) {
+    sourceIndex = inspectSource(sourceBody, sourceFormat);
+    fence = detectCacheFence(sourceBody, sourceIndex);
+    if (sourceIndex.supported && fence.reason !== "opaque_state") {
+      try {
+        dedupPlan = planSessionDedup(sourceIndex, { mode: dedupMode, fence, signal: rtkSignal });
+        if (dedupMode !== "off") cleanupShadow = measureCleanupOpportunities(sourceIndex, {
+          remainingScanBytes: Math.max(0, TOKEN_SAVER_CONFIG.maxScanBytes - dedupPlan.stats.scannedBytes),
+        });
+      } catch (error) {
+        if (rtkSignal?.aborted) throw rtkSignal.reason;
+        dedupPlan = null;
+        cleanupShadow = null;
+        saverReason = "failed";
+      }
+    }
+  }
+  saverElapsedMs += performance.now() - indexStarted;
+  const protectedLeaves = new WeakMap();
+  if (sourceIndex?.supported) {
+    for (const segment of sourceIndex.textSegments) {
+      if (segment.protectedReason || segment.resultIndex != null && sourceIndex.results[segment.resultIndex].cacheProtected) {
+        const keys = protectedLeaves.get(segment.owner) ?? new Map();
+        keys.set(segment.key, "cache_fence");
+        protectedLeaves.set(segment.owner, keys);
+      }
+    }
+    for (const result of sourceIndex.results) if (result.cacheProtected && result.text === null) {
+      for (const segment of sourceIndex.textSegments) if (segment.resultIndex != null && sourceIndex.results[segment.resultIndex] === result) {
+        const keys = protectedLeaves.get(segment.owner) ?? new Map();
+        keys.set(segment.key, "cache_fence"); protectedLeaves.set(segment.owner, keys);
+      }
+    }
+  }
+  const rtkStats = await compressMessages(sourceBody, tokenSaverEnabled && rtkEnabled && sourceIndex?.supported && fence?.reason !== "opaque_state", {
     signal: rtkSignal,
-    disabledReason: !rtkEnabled ? "disabled" : clientTokenSaverOptOut ? "opted_out" : strictStructuredOutput ? "structured_output" : "native_passthrough",
+    disabledReason: !rtkEnabled ? "disabled" : clientTokenSaverOptOut ? "opted_out" : strictStructuredOutput ? "structured_output" : nativePassthrough ? "native_passthrough" : "unsupported_shape",
+    getProtectionReason: (owner, key) => protectedLeaves.get(owner)?.get(key) || dedupPlan?.protection.get(owner)?.get(key) || null,
   });
   if (rtkSignal?.aborted) throw rtkSignal.reason;
   const rtkLine = formatRtkLog(rtkStats);
   if (rtkLine) console.log(rtkLine);
 
-  const reqLogger = await createRequestLogger(sourceFormat, targetFormat, model, {
+  reqLogger = await createRequestLogger(sourceFormat, targetFormat, model, {
     redactPayloads: provider === "chatgpt-web",
   });
   if (clientRawRequest) reqLogger.logClientRawRequest(clientRawRequest.endpoint, clientRawRequest.body, clientRawRequest.headers);
@@ -234,10 +292,10 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   // Native passthrough: CLI tool and provider are the same ecosystem
   // Skip all translation/normalization — only model and Bearer are swapped
-  const clientTool = detectedClientTool;
+  clientTool = detectedClientTool;
   const passthrough = nativePassthrough;
-  const responsesClientDialect = getResponsesDialect(clientTool);
-  const responsesProviderDialect = getResponsesDialect(null, provider);
+  responsesClientDialect = getResponsesDialect(clientTool);
+  responsesProviderDialect = getResponsesDialect(null, provider);
 
   // Expose raw client headers to translators/executors for session-id resolution
   if (credentials) credentials.rawHeaders = clientRawRequest?.headers || {};
@@ -263,10 +321,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     }
   }
 
-  let translatedBody;
-  let responseSchemaValidation;
-  let toolNameMap;
-  let customToolNames;
+  // Translation may return early; preparation telemetry still records the attempt.
   if (passthrough) {
     log?.debug?.("PASSTHROUGH", `${clientTool} → ${provider} | native lossless`);
     translatedBody = { ...sourceBody, model: wireModel };
@@ -374,22 +429,36 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const xf = [];
 
   if (rtkStats?.hits?.length) xf.push(`RTK:${rtkStats.hits.length}`);
+  dedupCommit = { appliedResults: 0, bytesSaved: 0, estimatedTokensSaved: 0, retainedReferences: 0, skipReason: null };
+  const commitStarted = performance.now();
+  if (dedupPlan?.mode === "on") {
+    try {
+      dedupCommit = commitSessionDedup(translatedBody, {
+        sourceFormat, finalFormat, sourceIndex, plan: dedupPlan, toolNameMap, customToolNames, signal: rtkSignal,
+      });
+    } catch (error) {
+      if (rtkSignal?.aborted) throw rtkSignal.reason;
+      dedupCommit.skipReason = "failed";
+    }
+  }
+  saverElapsedMs += performance.now() - commitStarted;
+  if (dedupCommit.appliedResults) xf.push(`DEDUP:${dedupCommit.appliedResults}`);
 
   // Caveman: inject terse-style system prompt
-  if (tokenSaverEnabled && cavemanEnabled && cavemanLevel) {
+  if (tokenSaverEnabled && !fence?.blockPromptInjection && cavemanEnabled && cavemanLevel) {
     injectCaveman(translatedBody, finalFormat, cavemanLevel);
     xf.push(`CAVEMAN:${cavemanLevel}`);
   }
 
   // Ponytail: inject lazy-senior-dev system prompt
-  if (tokenSaverEnabled && ponytailEnabled && ponytailLevel) {
+  if (tokenSaverEnabled && !fence?.blockPromptInjection && ponytailEnabled && ponytailLevel) {
     injectPonytail(translatedBody, finalFormat, ponytailLevel);
     xf.push(`PONYTAIL:${ponytailLevel}`);
   }
 
   // PXPIPE: image bulky context (Claude-format bodies only), last saver before dispatch
-  let pxpipeSummary = null;
-  if (pxpipeEnabled && tokenSaverEnabled && !strictStructuredOutput) {
+  pxpipeSummary = null;
+  if (pxpipeEnabled && tokenSaverEnabled && !strictStructuredOutput && !fence?.blockPromptInjection && !dedupCommit.retainedReferences) {
     const pxpipeResult = await compressWithPxpipe(translatedBody, {
       enabled: true, format: finalFormat, model: upstreamModel,
       minChars: pxpipeMinChars, timeoutMs: pxpipeTimeoutMs, transform: pxpipeTransform,
@@ -399,12 +468,28 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     if (pxpipeSummary?.applied) xf.push(`PXPIPE:${pxpipeSummary.imageCount}img`);
     try { onPxpipeEvent?.({ provider, model, ...pxpipeSummary }); } catch { /* stats must not break requests */ }
   }
+  else if (pxpipeEnabled && tokenSaverEnabled && (fence?.blockPromptInjection || dedupCommit.retainedReferences)) {
+    pxpipeSummary = { applied: false, reason: fence?.reason || "dedup_reference" };
+    try { onPxpipeEvent?.({ provider, model, ...pxpipeSummary }); } catch { /* stats must not break requests */ }
+  }
 
   if (xf.length && log?.line) log.line(reqTag, "⚙", xf.join(" · "));
 
   // Pin cache breakpoints to the final body — every saver above can reshape
   // system/tools/messages, and a stale anchor costs a full prefix rewrite.
   if (passthrough && clientTool === "claude") anchorClaudeCache(translatedBody);
+  } catch (error) {
+    saverReason = rtkSignal?.aborted ? "cancelled" : "failed";
+    throw error;
+  } finally {
+    try {
+      recordTokenSaverPreparation({ mode: dedupMode, stats: dedupPlan?.stats, cleanup: cleanupShadow,
+        commit: dedupCommit, elapsedMs: saverElapsedMs || performance.now() - saverStarted,
+        reason: saverReason || (!tokenSaverEnabled ? clientTokenSaverOptOut ? "opted_out" : strictStructuredOutput ? "structured_output" : "native_passthrough"
+          : !sourceIndex?.supported ? sourceIndex?.blockedReason : fence?.reason === "opaque_state" ? "opaque_state" : null),
+      });
+    } catch { /* metrics must not break requests */ }
+  }
 
   const executor = getExecutor(provider);
   const isStream = Boolean(stream);

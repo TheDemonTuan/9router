@@ -39,6 +39,7 @@ if (!process.argv.includes("--child")) {
   const { CAVEMAN_PROMPTS, CAVEMAN_LEVELS, normalizeCavemanLevel, isValidCavemanLevel } = await import("../../open-sse/rtk/cavemanPrompts.js");
   const { PONYTAIL_PROMPTS, PONYTAIL_LEVELS, normalizePonytailLevel, isValidPonytailLevel } = await import("../../open-sse/rtk/ponytailPrompt.js");
   const { FORMATS } = await import("../../open-sse/translator/formats.js");
+  const { isValidSessionDedupMode, normalizeSessionDedupMode } = await import("../../open-sse/config/tokenSaverConfig.js");
 
   try {
     // 1. Fresh DB via adapter and seed synthetic settings row with wenyan-full alias
@@ -72,7 +73,7 @@ if (!process.argv.includes("--child")) {
     assert.equal(rowAfterUpdate2.cavemanLevel, "wenyan");
 
     resetAdapterForTest();
-    const dbReopened = await getAdapter();
+    let dbReopened = await getAdapter();
     const reloaded = await getSettings();
     assert.equal(reloaded.cavemanLevel, "wenyan");
 
@@ -87,6 +88,18 @@ if (!process.argv.includes("--child")) {
     assert.equal(rowMissingLevel.cavemanLevel, undefined, "raw row without cavemanLevel must not gain cavemanLevel on unrelated update");
     const missingLevelSettings = await getSettings();
     assert.equal(missingLevelSettings.cavemanLevel, "full", "missing level gets default full");
+    assert.equal(missingLevelSettings.sessionDedupMode, "shadow");
+    assert.equal(rowMissingLevel.sessionDedupMode, undefined);
+    assert.equal(mergeWithDefaults({ sessionDedupMode: "invalid" }).sessionDedupMode, "shadow");
+    assert.equal(mergeWithDefaults({ sessionDedupMode: null }).sessionDedupMode, "shadow");
+    for (const mode of ["off", "shadow", "on"]) {
+      assert.equal(isValidSessionDedupMode(mode), true);
+      assert.equal((await updateSettings({ sessionDedupMode: mode })).sessionDedupMode, mode);
+      resetAdapterForTest();
+      dbReopened = await getAdapter();
+      assert.equal((await getSettings()).sessionDedupMode, mode);
+    }
+    assert.equal(normalizeSessionDedupMode(true), "shadow");
 
     await updateSettings({ cavemanLevel: "not-a-level", ponytailLevel: "not-a-level" });
     const rowUnknown = JSON.parse(dbReopened.get("SELECT data FROM settings WHERE id = 1").data);
@@ -161,6 +174,21 @@ if (!process.argv.includes("--child")) {
       body: JSON.stringify({ ponytailLevel: "not-a-level" }),
     }));
     assert.equal(badPonytailRes.status, 400);
+    const rawModeBefore = (await import("../../src/lib/db/repos/settingsRepo.js")).exportSettings;
+    for (const invalid of [null, true, "SHADOW", "unknown"]) {
+      const rawBefore = JSON.stringify(await rawModeBefore());
+      const response = await PATCH(new Request("http://localhost/api/settings", {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionDedupMode: invalid }),
+      }));
+      assert.equal(response.status, 400);
+      assert.deepEqual(await response.json(), { error: "Invalid sessionDedupMode" });
+      assert.equal(JSON.stringify(await rawModeBefore()), rawBefore);
+    }
+    const status = await (await import("../../src/app/api/token-saver/status/route.js")).GET();
+    assert.equal(status.status, 200);
+    assert.equal(status.headers.get("cache-control"), "no-store");
+    assert.equal((await status.json()).config.sessionDedupMode, "on");
 
     const goodRes = await PATCH(new Request("http://localhost/api/settings", {
       method: "PATCH",

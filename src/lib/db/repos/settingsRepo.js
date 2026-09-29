@@ -3,6 +3,7 @@ import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
 import { stripRetiredSettings } from "../helpers/retiredSettings.js";
 import { normalizeCavemanLevel } from "open-sse/rtk/cavemanPrompts.js";
 import { normalizePonytailLevel } from "open-sse/rtk/ponytailPrompt.js";
+import { normalizeSessionDedupMode } from "open-sse/config/tokenSaverConfig.js";
 const DEFAULT_MITM_ROUTER_BASE = "http://localhost:20128";
 
 const DEFAULT_SETTINGS = {
@@ -51,6 +52,7 @@ const DEFAULT_SETTINGS = {
   mitmRouterBaseUrl: DEFAULT_MITM_ROUTER_BASE,
   dnsToolEnabled: {},
   rtkEnabled: true,
+  sessionDedupMode: "shadow",
   cavemanEnabled: false,
   cavemanLevel: "full",
   ponytailEnabled: false,
@@ -85,6 +87,7 @@ export function mergeWithDefaults(raw) {
   }
   merged.cavemanLevel = normalizeCavemanLevel(merged.cavemanLevel, DEFAULT_SETTINGS.cavemanLevel);
   merged.ponytailLevel = normalizePonytailLevel(merged.ponytailLevel, DEFAULT_SETTINGS.ponytailLevel);
+  merged.sessionDedupMode = normalizeSessionDedupMode(merged.sessionDedupMode);
   if (merged.capacityAdapter && typeof merged.capacityAdapter === "object") {
     for (const capKey of Object.keys(merged.capacityAdapter)) {
       const entry = merged.capacityAdapter[capKey];
@@ -116,6 +119,9 @@ export async function updateSettings(updates) {
     }
     if (Object.hasOwn(next, "ponytailLevel")) {
       next.ponytailLevel = normalizePonytailLevel(next.ponytailLevel, DEFAULT_SETTINGS.ponytailLevel);
+    }
+    if (Object.hasOwn(next, "sessionDedupMode")) {
+      next.sessionDedupMode = normalizeSessionDedupMode(next.sessionDedupMode);
     }
     db.run(
       `INSERT INTO settings(id, data) VALUES(1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data`,

@@ -15,7 +15,7 @@ const labels = {
 const eligibilityLabels = {
   toolResults: "Tool result containers", textLeaves: "Supported text leaves", resultsWithoutText: "Results without supported text",
   noToolResultsPreparations: "Preparations without tool results",
-  error_result: "Error result", cache_marker: "Prompt-cache breakpoint", below_min_bytes: "Below minimum bytes", above_max_bytes: "Above maximum bytes",
+  error_result: "Error result", cache_marker: "Prompt-cache breakpoint", cache_fence: "Cached prefix", dedup_anchor: "Dedup canonical result", dedup_candidate: "Dedup candidate", dedup_marker: "Existing dedup marker", below_min_bytes: "Below minimum bytes", above_max_bytes: "Above maximum bytes",
   selection_budget: "Selection byte budget", unlinked_call: "Missing or ambiguous call metadata",
   invalid_command_metadata: "Invalid command metadata", metadata_limit: "Command metadata too large",
   missing_command: "Missing command", unsupported_shell_syntax: "Unsupported shell syntax", already_rtk: "Already RTK",

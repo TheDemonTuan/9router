@@ -97,7 +97,7 @@ function collect(body, visit, eligibility) {
   return true;
 }
 
-export async function compressMessages(body, enabled, { signal, disabledReason = "disabled" } = {}) {
+export async function compressMessages(body, enabled, { signal, disabledReason = "disabled", getProtectionReason } = {}) {
   const usage = getRtkState().usage;
   usage.preparations++;
   if (!enabled) {
@@ -139,6 +139,11 @@ export async function compressMessages(body, enabled, { signal, disabledReason =
     const resultsBefore = usage.eligibility.toolResults;
     const supported = collect(body, (owner, key, shape, call, skip) => {
       if (performance.now() >= deadline || controller.signal.aborted) return;
+      const protection = getProtectionReason?.(owner, key);
+      if (protection) {
+        usage.eligibility.rejected[protection]++;
+        return;
+      }
       const content = owner[key];
       const size = Buffer.byteLength(content);
       stats.bytesBefore += size;

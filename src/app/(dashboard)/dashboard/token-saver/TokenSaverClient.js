@@ -4,6 +4,8 @@ import { useState, useEffect, useCallback } from "react";
 import { Card, Button, Input, Modal, Toggle } from "@/shared/components";
 import { getCurrentLocale, onLocaleChange } from "@/i18n/runtime";
 import RtkStats from "./RtkStats";
+import SessionDedupStats from "./SessionDedupStats";
+import { isValidSessionDedupMode } from "open-sse/config/tokenSaverConfig.js";
 import {
   WENYAN_LOCALES,
   CAVEMAN_LEVELS,
@@ -14,6 +16,9 @@ export default function TokenSaverClient() {
   const [rtkEnabled, setRtkEnabledState] = useState(true);
   const [rtkSaving, setRtkSaving] = useState(false);
   const [rtkError, setRtkError] = useState("");
+  const [sessionDedupMode, setSessionDedupMode] = useState(null);
+  const [sessionDedupSaving, setSessionDedupSaving] = useState(false);
+  const [sessionDedupError, setSessionDedupError] = useState("");
   const [cavemanEnabled, setCavemanEnabled] = useState(false);
   const [cavemanLevel, setCavemanLevel] = useState("full");
   const [ponytailEnabled, setPonytailEnabled] = useState(false);
@@ -75,6 +80,23 @@ export default function TokenSaverClient() {
     }
   };
 
+  const handleSessionDedupMode = async (mode) => {
+    if (sessionDedupSaving || sessionDedupMode === null) return;
+    setSessionDedupSaving(true);
+    setSessionDedupError("");
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionDedupMode: mode }),
+      });
+      if (!res.ok) throw Error("Setting unavailable");
+      setSessionDedupMode(mode);
+    } catch {
+      setSessionDedupError("Session Dedup setting could not be saved. Please retry.");
+    } finally {
+      setSessionDedupSaving(false);
+    }
+  };
   const handleCavemanEnabled = (value) => {
     setCavemanEnabled(value);
     patchSetting({ cavemanEnabled: value });
@@ -156,6 +178,7 @@ export default function TokenSaverClient() {
         if (res.ok) {
           const data = await res.json();
           setRtkEnabledState(data.rtkEnabled !== false);
+          setSessionDedupMode(isValidSessionDedupMode(data.sessionDedupMode) ? data.sessionDedupMode : "shadow");
           setCavemanEnabled(!!data.cavemanEnabled);
           setCavemanLevel(data.cavemanLevel || "full");
           setPonytailEnabled(!!data.ponytailEnabled);
@@ -164,8 +187,12 @@ export default function TokenSaverClient() {
           if (typeof data.pxpipeMinChars === "number") setPxpipeMinChars(data.pxpipeMinChars);
           // PRD: run the PXPIPE health check automatically when the page opens
           refreshPxpipeStatus().then(runPxpipeHealth);
+        } else {
+          setSessionDedupError("Session Dedup settings unavailable. Reload to retry.");
         }
-      } catch {}
+      } catch {
+        setSessionDedupError("Session Dedup settings unavailable. Reload to retry.");
+      }
     };
     loadSettings();
   }, [refreshPxpipeStatus, runPxpipeHealth]);
@@ -225,6 +252,26 @@ export default function TokenSaverClient() {
         </div>
         {rtkError && <p role="alert" className="text-sm text-warning">{rtkError}</p>}
         <RtkStats enabled={rtkEnabled} />
+        <div className="flex flex-col items-start sm:flex-row sm:items-center justify-between pt-4 pb-4 border-b border-border gap-4">
+          <div className="min-w-0 flex-1">
+            <p className="font-medium">Session Dedup <span className="text-xs text-text-muted">{sessionDedupMode === "shadow" ? "Shadow — measuring only; tool results are not deduplicated." : sessionDedupMode === "on" ? "On" : sessionDedupMode === "off" ? "Off" : "Loading…"}</span></p>
+            <p className="text-sm text-text-muted">Exact repeated historical tool results. Current and previous two user turns and explicit cached prefixes are protected.</p>
+          </div>
+          <Toggle checked={sessionDedupMode !== null && sessionDedupMode !== "off"} onChange={(enabled) => handleSessionDedupMode(enabled ? "on" : "off")}
+            label="Session Dedup active" disabled={sessionDedupSaving || sessionDedupMode === null} className="shrink-0" />
+        </div>
+        {sessionDedupError && <p role="alert" className="text-sm text-warning">{sessionDedupError}</p>}
+        {sessionDedupMode === "on" && <p className="text-sm text-warning">Historical rewrites can reduce implicit prompt-cache reuse. Saved bytes are not billed-token or cost savings.</p>}
+        <details className="pt-3 pb-4 border-b border-border">
+          <summary className="cursor-pointer text-sm font-medium">Advanced Session Dedup mode</summary>
+          <label className="flex flex-col gap-1 mt-2 text-sm" htmlFor="session-dedup-mode">Mode
+            <select id="session-dedup-mode" value={sessionDedupMode ?? "shadow"} onChange={event => handleSessionDedupMode(event.target.value)}
+              disabled={sessionDedupSaving || sessionDedupMode === null} className="bg-surface border border-border rounded px-3 py-2 max-w-xs">
+              <option value="off">Off</option><option value="shadow">Shadow</option><option value="on">On</option>
+            </select>
+          </label>
+        </details>
+        <SessionDedupStats mode={sessionDedupMode} />
         <div className="flex items-center justify-between pt-4 border-t border-border gap-4 flex-wrap">
           <div className="min-w-0 flex-1">
             <p className="font-medium">
