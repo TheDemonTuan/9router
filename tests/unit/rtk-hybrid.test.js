@@ -192,7 +192,7 @@ describe("hybrid RTK preserves output contracts", () => {
     const mismatchRow = snap2.diagnostics.rejections.find(r => r.toolFamily === "grep" && r.detail === "native_output_mismatch");
     expect(mismatchRow).toBeDefined();
 
-    // Native read > 500 B
+    // Native read > 500 B is omitted from diagnostics rejections to avoid cluttering stats
     const readContent = "export const fixture = true;\n".repeat(30);
     const readBody = {
       messages: [
@@ -203,8 +203,8 @@ describe("hybrid RTK preserves output contracts", () => {
     await compressMessages(readBody, true);
     expect(readBody.messages[1].content).toBe(readContent);
     const snap3 = (await import("../../open-sse/rtk/state.js")).getRtkSnapshot();
-    const readRow = snap3.diagnostics.rejections.find(r => r.toolFamily === "read" && r.reason === "missing_command" && r.detail === "no_command");
-    expect(readRow).toBeDefined();
+    const readRow = snap3.diagnostics.rejections.find(r => r.toolFamily === "read");
+    expect(readRow).toBeUndefined();
 
     // Native grep missing path
     const missingPathBody = {

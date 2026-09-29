@@ -51,6 +51,9 @@ export const RTK_TOOL_FAMILIES = Object.freeze([
   "shell", "grep", "glob", "read", "edit", "write", "other", "unlinked",
 ]);
 
+export const RTK_TRACKED_FAMILIES = Object.freeze([
+  "shell", "grep", "glob",
+]);
 export const RTK_DIAGNOSTIC_DETAILS = Object.freeze([
   "none", "no_command", "native_metadata_missing", "native_output_mismatch",
   "serialized_metadata_limit", "command_length_limit",

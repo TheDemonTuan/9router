@@ -176,7 +176,7 @@ export default function RtkStats({ enabled }) {
     <div aria-label="RTK diagnostics" className="space-y-4">
       <h4 className="font-medium">RTK diagnostics</h4>
       <p className="text-sm text-text-muted">
-        Diagnostic counters are privacy-safe and bounded: no command strings, arguments, file paths, or tool payloads are stored. Counts reflect historical traversals across turns and may include repeated observations. Filter attempts represent individual evaluation steps, not unique outputs. Applied outputs represent preparation mutations before translation, not provider delivery.
+        Diagnostic counters are privacy-safe and bounded: only RTK-relevant tool families (Shell, Grep, Glob) are tracked in rejections to focus on command syntax, format, and size limits rather than routine file operations (Read, Edit, Write). Filter attempts represent individual evaluation steps, not unique outputs. Applied outputs represent preparation mutations before translation, not provider delivery.
       </p>
       {!(snapshot?.diagnostics ?? usage?.diagnostics) ? (
         <p className="text-sm text-text-muted">Diagnostics unavailable in this process</p>

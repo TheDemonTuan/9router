@@ -4,6 +4,7 @@ import {
   RTK_PIPE_FILTERS,
   RTK_LOCAL_FILTERS,
   RTK_TOOL_FAMILIES,
+  RTK_TRACKED_FAMILIES,
   RTK_DIAGNOSTIC_DETAILS,
   RTK_DIAGNOSTIC_OUTCOMES,
 } from "../config/rtkConfig.js";
@@ -19,6 +20,7 @@ const validRejections = new Set(RTK_REJECTIONS);
 const validDetails = new Set(RTK_DIAGNOSTIC_DETAILS);
 const validFilters = new Set([...RTK_PIPE_FILTERS, ...RTK_LOCAL_FILTERS]);
 const validOutcomes = new Set(RTK_DIAGNOSTIC_OUTCOMES);
+const trackedFamilies = new Set(RTK_TRACKED_FAMILIES);
 
 function toSafeInt(val) {
   if (typeof val !== "number" || !Number.isFinite(val) || val <= 0) return 0;
@@ -84,6 +86,7 @@ export function getRtkSnapshot() {
 }
 
 export function recordRtkRejection(toolFamily, reason, detail, inputBytes) {
+  if (!trackedFamilies.has(toolFamily)) return;
   const diagnostics = getRtkState().usage.diagnostics;
   const safeFamily = validFamilies.has(toolFamily) ? toolFamily : "other";
   const safeReason = validRejections.has(reason) ? reason : "unknown";
