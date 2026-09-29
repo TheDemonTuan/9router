@@ -18,7 +18,7 @@ export const RTK_CONFIG = Object.freeze({
 });
 
 export const RTK_REJECTIONS = Object.freeze([
-  "error_result", "cache_marker", "below_min_bytes", "above_max_bytes", "selection_budget", "unlinked_call",
+  "error_result", "cache_marker", "cache_fence", "dedup_anchor", "dedup_candidate", "dedup_marker", "below_min_bytes", "above_max_bytes", "selection_budget", "unlinked_call",
   "invalid_command_metadata", "metadata_limit", "missing_command", "unsupported_shell_syntax",
   "already_rtk", "unsupported_command", "unsupported_mode", "unsupported_output_format",
 ]);

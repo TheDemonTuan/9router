@@ -6,6 +6,7 @@ import bcrypt from "bcryptjs";
 import { getInitialPassword, isUnsafeProductionInitialPassword } from "@/lib/auth/passwordPolicy.js";
 import { isValidCavemanLevel } from "open-sse/rtk/cavemanPrompts.js";
 import { isValidPonytailLevel } from "open-sse/rtk/ponytailPrompt.js";
+import { isValidSessionDedupMode } from "open-sse/config/tokenSaverConfig.js";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
@@ -97,6 +98,9 @@ export async function PATCH(request) {
       if (!isValidPonytailLevel(body.ponytailLevel)) {
         return NextResponse.json({ error: "Invalid ponytailLevel" }, { status: 400 });
       }
+    }
+    if (Object.hasOwn(body, "sessionDedupMode") && !isValidSessionDedupMode(body.sessionDedupMode)) {
+      return NextResponse.json({ error: "Invalid sessionDedupMode" }, { status: 400 });
     }
 
     const settings = await updateSettings(body);
