@@ -31,7 +31,8 @@ RUN mkdir -p /app/data && chown -R bun:bun /app && \
   mkdir -p /app/data-home && chown bun:bun /app/data-home && \
   ln -sf /app/data-home /root/.9router 2>/dev/null || true
 # Fix permissions at runtime (handles mounted volumes)
-RUN apk add --no-cache su-exec && \
+RUN apk upgrade --no-cache && \
+  apk add --no-cache su-exec && \
   printf '#!/bin/sh\nchown -R bun:bun /app/data /app/data-home 2>/dev/null\nexec su-exec bun "$@"\n' > /entrypoint.sh && \
   chmod +x /entrypoint.sh
 

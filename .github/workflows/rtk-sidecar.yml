@@ -133,8 +133,27 @@ jobs:
           echo "RTK_IMAGE=${image}@${digest}" >> "$GITHUB_STEP_SUMMARY"
           echo "image_ref=${image}@${digest}" >> "$GITHUB_OUTPUT"
 
-  deploy:
+  security-image-arm64:
+    name: Trivy RTK ARM64 image gate
     needs: manifest
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref_name == github.event.repository.default_branch
+    permissions:
+      contents: read
+      packages: read
+    uses: TheDemonTuan/vps-deploy/.github/workflows/security-trivy.yml@30cc9192f22c5d4e4d43935164b6e2455d8365b4
+    with:
+      app: 9router
+      source-sha: ${{ github.sha }}
+      platform-ref: 30cc9192f22c5d4e4d43935164b6e2455d8365b4
+      config: .deploy/app.yml
+      scan-mode: image
+      image-ref: ${{ needs.manifest.outputs.image_ref }}
+      platform: linux/arm64
+
+  deploy:
+    needs:
+      - manifest
+      - security-image-arm64
     if: github.event_name == 'workflow_dispatch' && inputs.publish && inputs.deploy && github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-24.04
     environment: production

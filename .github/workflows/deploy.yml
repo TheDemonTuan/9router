@@ -42,44 +42,47 @@ jobs:
 
   security-source:
     name: Trivy source security gate
-    needs: verify
     permissions:
       contents: read
       packages: read
-    uses: TheDemonTuan/vps-deploy/.github/workflows/security-trivy.yml@d260d3bcb2a9395dd48e3eb8aace940173108dd3
+    uses: TheDemonTuan/vps-deploy/.github/workflows/security-trivy.yml@30cc9192f22c5d4e4d43935164b6e2455d8365b4
     with:
       app: 9router
       source-sha: ${{ github.sha }}
-      platform-ref: d260d3bcb2a9395dd48e3eb8aace940173108dd3
+      platform-ref: 30cc9192f22c5d4e4d43935164b6e2455d8365b4
       config: .deploy/app.yml
       scan-mode: source
 
   build:
     name: Build and smoke immutable image
-    needs: security-source
+    needs:
+      - verify
+      - security-source
     permissions:
       contents: read
       packages: write
-    uses: TheDemonTuan/vps-deploy/.github/workflows/build-docker.yml@630272ccb6c4377748e4b153d1784586ff8c6602
+    uses: TheDemonTuan/vps-deploy/.github/workflows/build-docker.yml@30cc9192f22c5d4e4d43935164b6e2455d8365b4
     with:
+      app: 9router
       source-sha: ${{ github.sha }}
-      platform-ref: 630272ccb6c4377748e4b153d1784586ff8c6602
+      platform-ref: 30cc9192f22c5d4e4d43935164b6e2455d8365b4
       config: .deploy/app.yml
+
   security-image:
     name: Trivy immutable image gate
     needs: build
     permissions:
       contents: read
       packages: read
-    uses: TheDemonTuan/vps-deploy/.github/workflows/security-trivy.yml@d260d3bcb2a9395dd48e3eb8aace940173108dd3
+    uses: TheDemonTuan/vps-deploy/.github/workflows/security-trivy.yml@30cc9192f22c5d4e4d43935164b6e2455d8365b4
     with:
       app: 9router
       source-sha: ${{ github.sha }}
-      platform-ref: d260d3bcb2a9395dd48e3eb8aace940173108dd3
+      platform-ref: 30cc9192f22c5d4e4d43935164b6e2455d8365b4
       config: .deploy/app.yml
       scan-mode: image
       image-ref: ${{ needs.build.outputs.image-ref }}
-
+      platform: linux/arm64
   deploy:
     name: Deploy immutable digest
     needs:

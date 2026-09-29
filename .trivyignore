@@ -1,5 +1,0 @@
-# 9router Trivy ignore specification
-# Container drops root privileges via su-exec bun in /entrypoint.sh
-DS-0002
-# Health check is managed by Traefik dynamic router and platform health probes
-DS-0026

@@ -1,0 +1,14 @@
+misconfigurations:
+  - id: AVD-DS-0002
+    paths:
+      - Dockerfile
+    statement: >
+      Entrypoint starts privileged only to repair mounted volume ownership,
+      then execs the application through su-exec as bun.
+
+  - id: AVD-DS-0026
+    paths:
+      - Dockerfile
+    statement: >
+      Runtime health is enforced by Compose and the vps-deploy
+      direct/public health probes.
