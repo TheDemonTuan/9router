@@ -18,6 +18,8 @@ mkdir -p "$HOME" "$DATA_DIR"
     unit/session-manager.test.js \
     unit/rtk-cursor-pretranslate.test.js \
     unit/rtk.test.js \
+    unit/rtk-dashboard.test.js \
+    unit/rtk-hybrid.test.js \
     unit/rtkKiro.test.js \
     unit/force-stream-config.test.js \
     unit/minimax-transport-target-format.test.js \

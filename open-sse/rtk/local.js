@@ -90,7 +90,7 @@ function testSummary(text) {
     if (/^\s*(?:✓|✔|√|PASS)\s+.+/.test(line) && !/^PASS\s+.+/.test(line)) { omitted++; return false; }
     return true;
   });
-  if (!omitted) return null;
+  if (!omitted) return text;
   output.push(`[${omitted} passing test lines omitted]`);
   return output.join("\n");
 }
@@ -104,7 +104,7 @@ function cargoBuild(text) {
     if (/^\s*(?:Compiling|Checking|Building)\s+\S+/.test(line)) { compiled++; return false; }
     return true;
   });
-  if (!compiled) return null;
+  if (!compiled) return text;
   output.unshift(`[${compiled} crates compiled or checked]`);
   return output.join("\n");
 }
@@ -140,9 +140,10 @@ function repeatedLogs(text) {
 function listing(text) {
   // Never collapse tree indentation or path characters. SGR only encodes
   // terminal color; all file names and directory boundaries remain intact.
-  return text.includes("\u001b[") && !text.includes("\u001b]")
+  if (text.includes("\u001b]")) return null;
+  return text.includes("\u001b[")
     ? text.replace(/\u001b\[[0-9;]*m/g, "")
-    : null;
+    : text;
 }
 
 function status(text) {
@@ -161,13 +162,37 @@ const formatters = {
   "git-status": status,
 };
 
-export function filterLocalOutput(filter, content) {
-  const format = formatters[filter];
-  if (!format || !content.isWellFormed() || content.includes("\0")) return null;
-  try {
-    const output = format(content);
-    return output && Buffer.byteLength(output) < Buffer.byteLength(content) ? output : null;
-  } catch {
+export function filterLocalOutput(filter, content, onOutcome) {
+  if (typeof content !== "string" || !content.isWellFormed() || content.includes("\0")) {
+    onOutcome?.("invalid_text", 0);
     return null;
   }
+  const format = formatters[filter];
+  if (!format) {
+    onOutcome?.("format_not_accepted", 0);
+    return null;
+  }
+  let output;
+  try {
+    output = format(content);
+  } catch {
+    onOutcome?.("failed", 0);
+    return null;
+  }
+  if (output === null || output === undefined) {
+    onOutcome?.("format_not_accepted", 0);
+    return null;
+  }
+  if (output === "") {
+    onOutcome?.("empty_output", 0);
+    return null;
+  }
+  const inputBytes = Buffer.byteLength(content);
+  const outputBytes = Buffer.byteLength(output);
+  if (outputBytes >= inputBytes) {
+    onOutcome?.("not_smaller", outputBytes);
+    return null;
+  }
+  onOutcome?.("candidate", outputBytes);
+  return output;
 }

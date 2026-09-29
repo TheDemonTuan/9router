@@ -44,24 +44,29 @@ export function getRtkClientStatus() {
   };
 }
 
-export async function filterToolOutput({ filter = null, content, signal, internalSignal } = {}) {
+export async function filterToolOutput({ filter = null, content, signal, internalSignal, onOutcome } = {}) {
   if (signal?.aborted) throw signal.reason;
   const client = state();
   const usage = getRtkState().usage;
   const target = endpoint();
-  if (!target) { usage.skipped[client.endpointState === "invalid" ? "invalid_url" : "unconfigured"]++; return null; }
-  if (!valid(content)) { usage.skipped.invalid_text++; return null; }
+  if (!target) {
+    const key = client.endpointState === "invalid" ? "invalid_url" : "unconfigured";
+    usage.skipped[key]++;
+    onOutcome?.(`skip_${key}`, 0);
+    return null;
+  }
+  if (!valid(content)) { usage.skipped.invalid_text++; onOutcome?.("skip_invalid_text", 0); return null; }
   const bytesIn = Buffer.byteLength(content);
-  if (bytesIn < cfg.minTextBytes || bytesIn > cfg.maxTextBytes) { usage.skipped.size_limit++; return null; }
+  if (bytesIn < cfg.minTextBytes || bytesIn > cfg.maxTextBytes) { usage.skipped.size_limit++; onOutcome?.("skip_size_limit", 0); return null; }
   const now = Date.now();
-  if (client.openUntil && now < client.openUntil) { usage.skipped.circuit_open++; return null; }
-  if (client.probe) { usage.skipped.probe_in_flight++; return null; }
-  if (client.active >= cfg.gatewayConcurrency) { usage.skipped.saturated++; return null; }
+  if (client.openUntil && now < client.openUntil) { usage.skipped.circuit_open++; onOutcome?.("skip_circuit_open", 0); return null; }
+  if (client.probe) { usage.skipped.probe_in_flight++; onOutcome?.("skip_probe_in_flight", 0); return null; }
+  if (client.active >= cfg.gatewayConcurrency) { usage.skipped.saturated++; onOutcome?.("skip_saturated", 0); return null; }
   const isProbe = Boolean(client.openUntil);
   if (isProbe) client.probe = true;
   const myGeneration = client.generation;
   const payload = JSON.stringify({ content, filter });
-  if (Buffer.byteLength(payload) > cfg.maxHttpBytes) { if (isProbe) client.probe = false; usage.skipped.payload_limit++; return null; }
+  if (Buffer.byteLength(payload) > cfg.maxHttpBytes) { if (isProbe) client.probe = false; usage.skipped.payload_limit++; onOutcome?.("skip_payload_limit", 0); return null; }
   client.dispatcher ??= new Agent({ connections: cfg.gatewayConcurrency, pipelining: 1, connect: { timeout: cfg.connectMs } });
   client.active++;
   usage.http.attempts++;
@@ -70,7 +75,9 @@ export async function filterToolOutput({ filter = null, content, signal, interna
   try {
     response = await request(new URL("/filter", target), { method: "POST", dispatcher: client.dispatcher, maxRedirections: 0, headers: { "content-type": "application/json" }, body: payload, signal, headersTimeout: cfg.requestMs, bodyTimeout: cfg.requestMs });
     if (response.statusCode === 503 || response.statusCode === 400 || response.statusCode === 413) {
-      usage.http[response.statusCode === 503 ? "busy" : "rejected"]++;
+      const outcome = response.statusCode === 503 ? "busy" : "rejected";
+      usage.http[outcome]++;
+      onOutcome?.(outcome, 0);
       if (response.statusCode !== 503 && now - client.warningAt > cfg.cooldownMs) { client.warningAt = now; console.warn(`[RTK] sidecar rejected request: ${response.statusCode}`); }
       return null;
     }
@@ -89,13 +96,16 @@ export async function filterToolOutput({ filter = null, content, signal, interna
     client.lastSuccessAt = new Date().toISOString();
     usage.http.succeeded++;
     const bytesOut = Buffer.byteLength(data.content);
-    if (!bytesOut || bytesOut >= bytesIn) { usage.http.unchanged++; return null; }
+    if (!bytesOut) { usage.http.unchanged++; onOutcome?.("empty_output", 0); return null; }
+    if (bytesOut >= bytesIn) { usage.http.unchanged++; onOutcome?.("not_smaller", bytesOut); return null; }
+    onOutcome?.("candidate", bytesOut);
     return data.content;
   } catch (err) {
-    if (signal?.aborted && !internalSignal?.aborted) { usage.http.cancelled++; throw signal.reason; }
+    if (signal?.aborted && !internalSignal?.aborted) { usage.http.cancelled++; onOutcome?.("cancelled", 0); throw signal.reason; }
     const reason = internalSignal?.aborted || /(?:_TIMEOUT$|^ETIMEDOUT$)/.test(err?.code ?? "") ? "timeout" : err?.code === "BAD_RESPONSE" || err instanceof SyntaxError ? "bad_response" : "transport_error";
     usage.http.failed++;
-    if (reason === "timeout") usage.http.timedOut++;
+    if (reason === "timeout") { usage.http.timedOut++; onOutcome?.("timeout", 0); }
+    else { onOutcome?.("failed", 0); }
     fail(client, reason);
     return null;
   } finally {

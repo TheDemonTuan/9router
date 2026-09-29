@@ -2,8 +2,8 @@ import { ROLE } from "../translator/schema/roles.js";
 import { OPENAI_BLOCK, CLAUDE_BLOCK, RESPONSES_ITEM } from "../translator/schema/blocks.js";
 import { RTK_CONFIG, RTK_FILTERS, RTK_LOCAL_FILTERS } from "../config/rtkConfig.js";
 import { estimateOutputTokens } from "../utils/usageTracking.js";
-import { getRtkState } from "./state.js";
-import { classifyToolCall } from "./classifier.js";
+import { getRtkState, recordRtkRejection, recordRtkFilterOutcome, maybeLogRtkDiagnostics } from "./state.js";
+import { classifyToolCall, getRtkToolFamily } from "./classifier.js";
 import { filterToolOutput } from "./client.js";
 import { filterLocalOutput } from "./local.js";
 
@@ -137,21 +137,41 @@ export async function compressMessages(body, enabled, { signal, disabledReason =
   };
   try {
     const resultsBefore = usage.eligibility.toolResults;
-    const reject = rejection => { usage.eligibility.rejected[rejection]++; };
     const supported = collect(body, (owner, key, shape, call, skip) => {
       if (performance.now() >= deadline || controller.signal.aborted) return;
       const content = owner[key];
       const size = Buffer.byteLength(content);
       stats.bytesBefore += size;
       stats.bytesAfter += size;
-      if (skip) { usage.eligibility.rejected[skip === "cache_marker" ? "cache_marker" : "error_result"]++; return; }
-      if (size < RTK_CONFIG.minTextBytes) { usage.eligibility.rejected.below_min_bytes++; return; }
-      if (size > RTK_CONFIG.maxTextBytes) { usage.eligibility.rejected.above_max_bytes++; return; }
-      if (selected + size > RTK_CONFIG.maxSelectedBytes) { usage.eligibility.rejected.selection_budget++; return; }
-      const filter = classifyToolCall(call, content, reject);
+      const toolFamily = getRtkToolFamily(call);
+      if (skip) {
+        const skipRejection = skip === "cache_marker" ? "cache_marker" : "error_result";
+        usage.eligibility.rejected[skipRejection]++;
+        recordRtkRejection(toolFamily, skipRejection, "none", size);
+        return;
+      }
+      if (size < RTK_CONFIG.minTextBytes) {
+        usage.eligibility.rejected.below_min_bytes++;
+        recordRtkRejection(toolFamily, "below_min_bytes", "none", size);
+        return;
+      }
+      if (size > RTK_CONFIG.maxTextBytes) {
+        usage.eligibility.rejected.above_max_bytes++;
+        recordRtkRejection(toolFamily, "above_max_bytes", "none", size);
+        return;
+      }
+      if (selected + size > RTK_CONFIG.maxSelectedBytes) {
+        usage.eligibility.rejected.selection_budget++;
+        recordRtkRejection(toolFamily, "selection_budget", "none", size);
+        return;
+      }
+      const filter = classifyToolCall(call, content, (reason, detail = "none") => {
+        usage.eligibility.rejected[reason]++;
+        recordRtkRejection(toolFamily, reason, detail, size);
+      });
       if (!filter) return;
       selected += size;
-      jobs.push({ owner, key, content, size, shape, filter, call });
+      jobs.push({ owner, key, content, size, shape, filter, call, toolFamily });
     }, usage.eligibility);
     if (!supported) { reason = "unsupported_shape"; return null; }
     if (usage.eligibility.toolResults === resultsBefore && performance.now() < deadline && !combined.aborted) usage.eligibility.noToolResultsPreparations++;
@@ -159,32 +179,151 @@ export async function compressMessages(body, enabled, { signal, disabledReason =
     async function worker() {
       while (next < jobs.length && !combined.aborted && performance.now() < deadline) {
         const job = jobs[next++];
-        if (job.call?.ambiguous) { usage.eligibility.rejected.unlinked_call++; continue; }
+        if (job.call?.ambiguous) {
+          usage.eligibility.rejected.unlinked_call++;
+          recordRtkRejection("unlinked", "unlinked_call", "none", job.size);
+          continue;
+        }
         eligibleJobs++;
         const local = job.filter.startsWith("local:");
-        let output;
-        let engine = "sidecar";
+        const toolFamily = job.toolFamily ?? getRtkToolFamily(job.call);
+        let output = null;
         if (local) {
           usage.local.attempts++;
-          output = filterLocalOutput(job.filter.slice(6), job.content);
+          let rawOutcome = null;
+          let rawBytes = 0;
+          let finalOutcome = null;
+          try {
+            output = filterLocalOutput(job.filter.slice(6), job.content, (resOutcome, resBytes) => {
+              rawOutcome = resOutcome;
+              rawBytes = resBytes;
+            });
+            finalOutcome = rawOutcome;
+            if (signal?.aborted) {
+              if (rawOutcome === "candidate") finalOutcome = "discarded_cancelled";
+              throw signal.reason;
+            }
+            if (performance.now() >= deadline && !controller.signal.aborted) {
+              controller.abort(Object.assign(new Error("RTK timeout"), { code: "RTK_TIMEOUT" }));
+            }
+            if (combined.aborted && rawOutcome === "candidate") {
+              finalOutcome = signal?.aborted ? "discarded_cancelled" : "discarded_deadline";
+            }
+            if (!combined.aborted && output !== null) {
+              const size = Buffer.byteLength(output);
+              if (size && size < job.size) {
+                job.owner[job.key] = output;
+                finalOutcome = "applied";
+                usage.local.applied++;
+                stats.bytesAfter -= job.size - size;
+                stats.hits.push({
+                  shape: job.shape,
+                  filter: job.filter,
+                  engine: "local",
+                  saved: job.size - size,
+                  bytesBefore: job.size,
+                  bytesAfter: size,
+                  estimatedTokensSaved: Math.max(0, estimateOutputTokens(job.content.length) - estimateOutputTokens(output.length)),
+                });
+              }
+            }
+          } finally {
+            recordRtkFilterOutcome(toolFamily, job.filter, "local", false, finalOutcome ?? rawOutcome, job.size, rawBytes);
+          }
         } else {
-          output = await filterToolOutput({ filter: job.filter, content: job.content, signal: combined, internalSignal: controller.signal });
+          let sidecarRawOutcome = null;
+          let sidecarRawBytes = 0;
+          let sidecarFinalOutcome = null;
+          try {
+            output = await filterToolOutput({
+              filter: job.filter,
+              content: job.content,
+              signal: combined,
+              internalSignal: controller.signal,
+              onOutcome: (resOutcome, resBytes) => {
+                sidecarRawOutcome = resOutcome;
+                sidecarRawBytes = resBytes;
+              },
+            });
+            sidecarFinalOutcome = sidecarRawOutcome;
+            if (signal?.aborted) {
+              if (sidecarRawOutcome === "candidate") sidecarFinalOutcome = "discarded_cancelled";
+              throw signal.reason;
+            }
+            if (performance.now() >= deadline && !controller.signal.aborted) {
+              controller.abort(Object.assign(new Error("RTK timeout"), { code: "RTK_TIMEOUT" }));
+            }
+            if (combined.aborted && sidecarRawOutcome === "candidate") {
+              sidecarFinalOutcome = signal?.aborted ? "discarded_cancelled" : "discarded_deadline";
+            }
+            if (!combined.aborted && output !== null) {
+              const size = Buffer.byteLength(output);
+              if (size && size < job.size) {
+                job.owner[job.key] = output;
+                sidecarFinalOutcome = "applied";
+                stats.bytesAfter -= job.size - size;
+                stats.hits.push({
+                  shape: job.shape,
+                  filter: job.filter,
+                  engine: "sidecar",
+                  saved: job.size - size,
+                  bytesBefore: job.size,
+                  bytesAfter: size,
+                  estimatedTokensSaved: Math.max(0, estimateOutputTokens(job.content.length) - estimateOutputTokens(output.length)),
+                });
+              }
+            }
+          } finally {
+            recordRtkFilterOutcome(toolFamily, job.filter, "sidecar", false, sidecarFinalOutcome ?? sidecarRawOutcome, job.size, sidecarRawBytes);
+          }
           if (output === null && !combined.aborted && ["grep", "git-status"].includes(job.filter)) {
             usage.local.attempts++;
-            output = filterLocalOutput(job.filter, job.content);
-            if (output !== null) engine = "local";
+            let fallbackRawOutcome = null;
+            let fallbackRawBytes = 0;
+            let fallbackFinalOutcome = null;
+            let fallbackOutput = null;
+            try {
+              fallbackOutput = filterLocalOutput(job.filter, job.content, (resOutcome, resBytes) => {
+                fallbackRawOutcome = resOutcome;
+                fallbackRawBytes = resBytes;
+              });
+              fallbackFinalOutcome = fallbackRawOutcome;
+              if (signal?.aborted) {
+                if (fallbackRawOutcome === "candidate") fallbackFinalOutcome = "discarded_cancelled";
+                throw signal.reason;
+              }
+              if (performance.now() >= deadline && !controller.signal.aborted) {
+                controller.abort(Object.assign(new Error("RTK timeout"), { code: "RTK_TIMEOUT" }));
+              }
+              if (combined.aborted && fallbackRawOutcome === "candidate") {
+                fallbackFinalOutcome = signal?.aborted ? "discarded_cancelled" : "discarded_deadline";
+              }
+              if (!combined.aborted && fallbackOutput !== null) {
+                const size = Buffer.byteLength(fallbackOutput);
+                if (size && size < job.size) {
+                  job.owner[job.key] = fallbackOutput;
+                  fallbackFinalOutcome = "applied";
+                  usage.local.applied++;
+                  usage.local.fallbacks++;
+                  stats.bytesAfter -= job.size - size;
+                  stats.hits.push({
+                    shape: job.shape,
+                    filter: job.filter,
+                    engine: "local",
+                    saved: job.size - size,
+                    bytesBefore: job.size,
+                    bytesAfter: size,
+                    estimatedTokensSaved: Math.max(0, estimateOutputTokens(job.content.length) - estimateOutputTokens(fallbackOutput.length)),
+                  });
+                }
+              }
+            } finally {
+              recordRtkFilterOutcome(toolFamily, job.filter, "local", true, fallbackFinalOutcome ?? fallbackRawOutcome, job.size, fallbackRawBytes);
+            }
           }
         }
         if (signal?.aborted) throw signal.reason;
         if (performance.now() >= deadline && !controller.signal.aborted) controller.abort(Object.assign(new Error("RTK timeout"), { code: "RTK_TIMEOUT" }));
-        if (combined.aborted || output === null) continue;
-        const size = Buffer.byteLength(output);
-        if (!size || size >= job.size) continue;
-        job.owner[job.key] = output;
-        if (local || engine === "local") usage.local.applied++;
-        if (engine === "local" && !local) usage.local.fallbacks++;
-        stats.bytesAfter -= job.size - size;
-        stats.hits.push({ shape: job.shape, filter: job.filter, engine: local ? "local" : engine, saved: job.size - size, bytesBefore: job.size, bytesAfter: size, estimatedTokensSaved: Math.max(0, estimateOutputTokens(job.content.length) - estimateOutputTokens(output.length)) });
       }
     }
     await Promise.all(Array.from({ length: Math.min(RTK_CONFIG.perRequestConcurrency, jobs.length) }, worker));
@@ -201,6 +340,7 @@ export async function compressMessages(body, enabled, { signal, disabledReason =
     else { if (controller.signal.aborted) reason = "timeout"; commit(); }
     clearTimeout(timer);
     controller.abort(Object.assign(new Error("RTK finished"), { code: "RTK_TIMEOUT" }));
+    maybeLogRtkDiagnostics();
   }
 }
 

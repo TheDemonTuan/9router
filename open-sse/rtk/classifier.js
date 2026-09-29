@@ -71,7 +71,20 @@ function formatFlag(argv, name, value) {
     : argv[positions[0]] === `${name}=${value}`;
 }
 
-function reject(onReject, reason) { onReject?.(reason); return null; }
+function reject(onReject, reason, detail = "none") { onReject?.(reason, detail); return null; }
+
+export function getRtkToolFamily(call) {
+  if (!call || call.ambiguous) return "unlinked";
+  if (typeof call.name !== "string" || call.name.length > 128) return "other";
+  const name = call.name.split(".").at(-1).toLowerCase();
+  if (shellTools.has(name)) return "shell";
+  if (name === "grep") return "grep";
+  if (name === "glob") return "glob";
+  if (name === "read" || name === "read_file" || name === "readfile") return "read";
+  if (name === "edit" || name === "edit_file" || name === "apply_patch") return "edit";
+  if (name === "write" || name === "write_file" || name === "write_to_file") return "write";
+  return "other";
+}
 
 export function classifyToolCall(call, content, onReject) {
   if (!call) return reject(onReject, "unlinked_call");
@@ -80,25 +93,31 @@ export function classifyToolCall(call, content, onReject) {
   let input = call.input;
   if (typeof input === "string" && shellTools.has(tool)) {
     if (input.trimStart().startsWith("{")) {
-      if (Buffer.byteLength(input) > 8192) return reject(onReject, "metadata_limit");
+      if (Buffer.byteLength(input) > 8192) return reject(onReject, "metadata_limit", "serialized_metadata_limit");
       try { input = JSON.parse(input); } catch { return reject(onReject, "invalid_command_metadata"); }
     } else input = { command: input };
   } else if (typeof input === "string") {
-    if (Buffer.byteLength(input) > 8192) return reject(onReject, "metadata_limit");
+    if (Buffer.byteLength(input) > 8192) return reject(onReject, "metadata_limit", "serialized_metadata_limit");
     try { input = JSON.parse(input); } catch { return reject(onReject, "invalid_command_metadata"); }
   }
   if (!input || typeof input !== "object" || Array.isArray(input)) return reject(onReject, "invalid_command_metadata");
   if (typeof input.command === "string" && typeof input.cmd === "string" && input.command !== input.cmd) return reject(onReject, "invalid_command_metadata");
   const command = input.command ?? input.cmd;
   if (typeof command !== "string") {
-    if (typeof input.path === "string" && !input.command && !input.cmd) {
-      if (tool === "grep" && typeof input.pattern === "string" && isGrepOutput(content)) return "local:grep";
-      if (tool === "glob" && isPathOutput(content)) return "local:find";
+    if (tool === "grep") {
+      const hasMetadata = typeof input.path === "string" && typeof input.pattern === "string" && !input.command && !input.cmd;
+      if (!hasMetadata) return reject(onReject, "missing_command", "native_metadata_missing");
+      return isGrepOutput(content) ? "local:grep" : reject(onReject, "missing_command", "native_output_mismatch");
     }
-    return reject(onReject, "missing_command");
+    if (tool === "glob") {
+      const hasMetadata = typeof input.path === "string" && !input.command && !input.cmd;
+      if (!hasMetadata) return reject(onReject, "missing_command", "native_metadata_missing");
+      return isPathOutput(content) ? "local:find" : reject(onReject, "missing_command", "native_output_mismatch");
+    }
+    return reject(onReject, "missing_command", "no_command");
   }
   if (!shellTools.has(tool)) return reject(onReject, "unsupported_command");
-  if (Buffer.byteLength(command) > 8192) return reject(onReject, "metadata_limit");
+  if (Buffer.byteLength(command) > 8192) return reject(onReject, "metadata_limit", "command_length_limit");
   const segments = tokenize(command);
   if (!segments) return reject(onReject, "unsupported_shell_syntax");
   if (segments.length === 2) {

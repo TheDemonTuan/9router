@@ -302,4 +302,161 @@ describe("RTK process dashboard", () => {
     expect(state.getRtkSnapshot().usage).toMatchObject({ http: { attempts: 4, cancelled: 4, failed: 0 }, skipped: { saturated: 1 } });
     expect(client.getRtkClientStatus().active).toBe(0);
   });
+
+  it("diagnoses sidecar empty, unchanged, larger and applied outcomes with fallback separation", async () => {
+    let step = 0;
+    await setup((_, input) => {
+      step++;
+      if (step === 1) return output("");
+      if (step === 2) return output(input.content);
+      if (step === 3) return output(input.content + "extra_bytes");
+      return output("x".repeat(50));
+    });
+
+    // 1: empty_output
+    const raw = "x".repeat(1000);
+    await compressor.compressMessages(body(raw), true);
+    // 2: not_smaller (equal)
+    await compressor.compressMessages(body(raw), true);
+    // 3: not_smaller (larger)
+    await compressor.compressMessages(body(raw), true);
+    // 4: applied
+    await compressor.compressMessages(body(raw), true);
+
+    const snap = state.getRtkSnapshot();
+    const emptyRow = snap.diagnostics.filters.find(r => r.outcome === "empty_output");
+    const notSmallerRow = snap.diagnostics.filters.find(r => r.outcome === "not_smaller");
+    const appliedRow = snap.diagnostics.filters.find(r => r.outcome === "applied");
+    expect(emptyRow).toBeDefined();
+    expect(notSmallerRow).toBeDefined();
+    expect(notSmallerRow.count).toBe(2);
+    expect(appliedRow).toBeDefined();
+
+    // git-status unchanged triggers fallback row with fallback: true
+    step = 0;
+    const statusText = "## master...origin/master\n M file1.txt\n\n".repeat(25);
+    const statusCall = () => ({ id: "c_stat", type: "function", function: { name: "Bash", arguments: JSON.stringify({ command: "git status" }) } });
+    const statusBody = { messages: [{ role: "assistant", tool_calls: [statusCall()] }, { role: "tool", tool_call_id: "c_stat", content: statusText }] };
+    await compressor.compressMessages(statusBody, true);
+    const snap2 = state.getRtkSnapshot();
+    const fallbackRow = snap2.diagnostics.filters.find(r => r.filter === "git-status" && r.fallback === true);
+    expect(fallbackRow).toBeDefined();
+    expect(fallbackRow.engine).toBe("local");
+  });
+
+  it("isolates concurrent preparation outcomes and tracks aborted candidates as discarded", async () => {
+    await setup((_, input) => {
+      if (input?.filter === "ctest") return output(input.content);
+      return output("x".repeat(100));
+    });
+    const raw = "x".repeat(1000);
+    const ctestCall = () => ({ id: "c_test", type: "function", function: { name: "Bash", arguments: JSON.stringify({ command: "ctest" }) } });
+    const ctestBody = { messages: [{ role: "assistant", tool_calls: [ctestCall()] }, { role: "tool", tool_call_id: "c_test", content: raw }] };
+    const diffBody = body(raw);
+
+    // Concurrent preparations
+    await Promise.all([
+      compressor.compressMessages(ctestBody, true),
+      compressor.compressMessages(diffBody, true),
+    ]);
+
+    const snap = state.getRtkSnapshot();
+    const ctestOutcome = snap.diagnostics.filters.find(r => r.filter === "ctest");
+    const diffOutcome = snap.diagnostics.filters.find(r => r.filter === "git-diff" && r.outcome === "applied");
+    expect(ctestOutcome.outcome).toBe("not_smaller");
+    expect(diffOutcome.outcome).toBe("applied");
+
+    // External abort causes discarded_cancelled without applying candidate
+    const abortController = new AbortController();
+    const abortBody = body(raw);
+    const abortPromise = compressor.compressMessages(abortBody, true, { signal: abortController.signal });
+    abortController.abort(new Error("client canceled"));
+    await expect(abortPromise).rejects.toThrow("client canceled");
+    expect(abortBody.messages[1].content).toBe(raw);
+
+    // checkRtkConnection does not add diagnostic rows for real preparations
+    const filtersCountBefore = state.getRtkSnapshot().diagnostics.filters.length;
+    await client.checkRtkConnection();
+    expect(state.getRtkSnapshot().diagnostics.filters.length).toBe(filtersCountBefore);
+  });
+
+  it("preserves privacy: sentinels never appear in diagnostics, unknown tools become other, and dictionary bounds overflow", async () => {
+    await setup(() => output("x".repeat(100)));
+    const logs = [];
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation(msg => { if (typeof msg === "string" && msg.startsWith("[RTK diagnostics]")) logs.push(msg); });
+    try {
+      const sentinel = "SECRET_SENTINEL_XYZ_999";
+      const secretBody = {
+        messages: [
+          { role: "assistant", tool_calls: [{ id: "c_sec", type: "function", function: { name: `unknown_tool_${sentinel}`, arguments: JSON.stringify({ path: `/${sentinel}/file.js`, error: sentinel }) } }] },
+          { role: "tool", tool_call_id: "c_sec", content: `sensitive output with ${sentinel}\n`.repeat(25) },
+        ],
+      };
+      await compressor.compressMessages(secretBody, true);
+      const snap = state.getRtkSnapshot();
+      const serialized = JSON.stringify(snap.diagnostics);
+      expect(serialized).not.toContain(sentinel);
+      expect(logs.some(l => l.includes(sentinel))).toBe(false);
+
+      // Tool family for unknown tool is "other"
+      const otherRejection = snap.diagnostics.rejections.find(r => r.toolFamily === "other");
+      expect(otherRejection).toBeDefined();
+
+      // Bound dictionary: overflow increments beyond 128 rows
+      const families = ["shell", "grep", "glob", "read", "edit", "write", "other", "unlinked"];
+      const details = ["none", "no_command", "native_metadata_missing", "native_output_mismatch", "serialized_metadata_limit", "command_length_limit"];
+      let combinations = 0;
+      for (const fam of families) {
+        for (const det of details) {
+          for (const reason of ["error_result", "cache_marker", "below_min_bytes", "above_max_bytes", "selection_budget"]) {
+            state.recordRtkRejection(fam, reason, det, 100);
+            combinations++;
+          }
+        }
+      }
+      expect(combinations).toBeGreaterThan(128);
+      const snapAfter = state.getRtkSnapshot();
+      expect(snapAfter.diagnostics.rejections.length).toBeLessThanOrEqual(128);
+      expect(snapAfter.diagnostics.overflow.rejections).toBeGreaterThan(0);
+    } finally {
+      consoleSpy.mockRestore();
+    }
+  });
+
+  it("throttles diagnostics log to 60s window and captures cumulative counts", async () => {
+    await setup(() => output("x".repeat(100)));
+    const logs = [];
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation(msg => { if (typeof msg === "string" && msg.startsWith("[RTK diagnostics]")) logs.push(msg); });
+    let mockTime = 1000;
+    const perfSpy = vi.spyOn(performance, "now").mockImplementation(() => mockTime);
+    try {
+      const raw = "x".repeat(1000);
+      // 1st preparation: emits log immediately
+      await compressor.compressMessages(body(raw), true);
+      expect(logs.length).toBe(1);
+      const firstPayload = JSON.parse(logs[0].replace("[RTK diagnostics] ", ""));
+      expect(firstPayload.preparations).toBe(1);
+
+      // 2nd preparation at +10s: throttled, no new log
+      mockTime += 10_000;
+      await compressor.compressMessages(body(raw), true);
+      expect(logs.length).toBe(1);
+
+      // 3rd preparation at +65s: emits log with cumulative counts
+      mockTime += 55_000;
+      await compressor.compressMessages(body(raw), true);
+      expect(logs.length).toBe(2);
+      const secondPayload = JSON.parse(logs[1].replace("[RTK diagnostics] ", ""));
+      expect(secondPayload.preparations).toBe(3);
+
+      // RTK disabled does not emit diagnostics log
+      const countBefore = logs.length;
+      mockTime += 70_000;
+      await compressor.compressMessages(body(raw), false);
+      expect(logs.length).toBe(countBefore);
+    } finally {
+      perfSpy.mockRestore();
+      consoleSpy.mockRestore();
+    }
+  });
 });

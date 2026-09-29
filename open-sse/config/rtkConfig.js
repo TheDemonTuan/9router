@@ -14,6 +14,9 @@ export const RTK_CONFIG = Object.freeze({
   gatewayConcurrency: 4,
   sidecarConcurrency: 4,
   maxSelectedBytes: 10_485_760,
+  diagnosticMaxRows: 128,
+  diagnosticLogMs: 60_000,
+  diagnosticLogRows: 10,
 });
 
 export const RTK_REJECTIONS = Object.freeze([
@@ -42,4 +45,20 @@ export const RTK_ROUTABLE_FILTERS = Object.freeze([
   "cargo-test", "pytest", "go-test", "go-build", "ctest", "tsc", "vitest",
   "grep", "git-diff", "git-status", "mypy", "ruff-check", "ruff-format",
   "sqlfluff-lint", "prettier", "phpunit", "pest", "paratest", "ecs", "phpstan", "pint",
+]);
+
+export const RTK_TOOL_FAMILIES = Object.freeze([
+  "shell", "grep", "glob", "read", "edit", "write", "other", "unlinked",
+]);
+
+export const RTK_DIAGNOSTIC_DETAILS = Object.freeze([
+  "none", "no_command", "native_metadata_missing", "native_output_mismatch",
+  "serialized_metadata_limit", "command_length_limit",
+]);
+
+export const RTK_DIAGNOSTIC_OUTCOMES = Object.freeze([
+  "applied", "discarded_deadline", "discarded_cancelled", "not_smaller", "empty_output",
+  "invalid_text", "format_not_accepted", "busy", "rejected", "timeout", "cancelled", "failed",
+  "skip_unconfigured", "skip_invalid_url", "skip_invalid_text", "skip_size_limit",
+  "skip_circuit_open", "skip_probe_in_flight", "skip_saturated", "skip_payload_limit",
 ]);
