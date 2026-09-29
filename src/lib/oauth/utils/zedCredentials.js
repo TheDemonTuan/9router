@@ -82,14 +82,13 @@ export async function readZedSystemId() {
 
 async function queryKvStore(dbPath, key) {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const Database = require("better-sqlite3");
-    const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    const { Database } = await import("bun:sqlite");
+    const db = new Database(dbPath, { readonly: true });
     try {
-      const row = db.prepare("SELECT value FROM kv_store WHERE key = ? LIMIT 1").get(key);
+      const row = db.query("SELECT value FROM kv_store WHERE key = ? LIMIT 1").get(key);
       return row?.value || null;
     } finally {
-      db.close();
+      try { db.close(); } catch {}
     }
   } catch {
     // Fall back to sqlite3 CLI when native bindings are unavailable.

@@ -29,7 +29,8 @@ vi.mock("../../open-sse/executors/index.js", () => ({
   })),
 }));
 
-vi.mock("../../open-sse/translator/index.js", () => ({
+vi.mock("../../open-sse/translator/index.js", async (importOriginal) => ({
+  ...await importOriginal(),
   translateRequest: translateRequestMock,
 }));
 
