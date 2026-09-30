@@ -23,7 +23,7 @@ jobs:
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
@@ -45,11 +45,11 @@ jobs:
     permissions:
       contents: read
       packages: read
-    uses: TheDemonTuan/vps-deploy/.github/workflows/security-trivy.yml@30cc9192f22c5d4e4d43935164b6e2455d8365b4
+    uses: TheDemonTuan/vps-deploy/.github/workflows/security-trivy.yml@c3c8131b78c1456f37da3b6646101bbdb9069c0b
     with:
       app: 9router
       source-sha: ${{ github.sha }}
-      platform-ref: 30cc9192f22c5d4e4d43935164b6e2455d8365b4
+      platform-ref: c3c8131b78c1456f37da3b6646101bbdb9069c0b
       config: .deploy/app.yml
       scan-mode: source
 
@@ -61,11 +61,11 @@ jobs:
     permissions:
       contents: read
       packages: write
-    uses: TheDemonTuan/vps-deploy/.github/workflows/build-docker.yml@30cc9192f22c5d4e4d43935164b6e2455d8365b4
+    uses: TheDemonTuan/vps-deploy/.github/workflows/build-docker.yml@c3c8131b78c1456f37da3b6646101bbdb9069c0b
     with:
       app: 9router
       source-sha: ${{ github.sha }}
-      platform-ref: 30cc9192f22c5d4e4d43935164b6e2455d8365b4
+      platform-ref: c3c8131b78c1456f37da3b6646101bbdb9069c0b
       config: .deploy/app.yml
 
   security-image:
@@ -74,11 +74,11 @@ jobs:
     permissions:
       contents: read
       packages: read
-    uses: TheDemonTuan/vps-deploy/.github/workflows/security-trivy.yml@30cc9192f22c5d4e4d43935164b6e2455d8365b4
+    uses: TheDemonTuan/vps-deploy/.github/workflows/security-trivy.yml@c3c8131b78c1456f37da3b6646101bbdb9069c0b
     with:
       app: 9router
       source-sha: ${{ github.sha }}
-      platform-ref: 30cc9192f22c5d4e4d43935164b6e2455d8365b4
+      platform-ref: c3c8131b78c1456f37da3b6646101bbdb9069c0b
       config: .deploy/app.yml
       scan-mode: image
       image-ref: ${{ needs.build.outputs.image-ref }}
@@ -93,12 +93,12 @@ jobs:
     environment: production
     timeout-minutes: 17
     steps:
-      - uses: TheDemonTuan/vps-deploy/.github/actions/deploy@630272ccb6c4377748e4b153d1784586ff8c6602
+      - uses: TheDemonTuan/vps-deploy/.github/actions/deploy@c3c8131b78c1456f37da3b6646101bbdb9069c0b
         with:
           operation: deploy
           component: app
           source-sha: ${{ github.sha }}
-          platform-ref: 630272ccb6c4377748e4b153d1784586ff8c6602
+          platform-ref: c3c8131b78c1456f37da3b6646101bbdb9069c0b
           config: .deploy/app.yml
           image-ref: ${{ needs.build.outputs.image-ref }}
         env:
