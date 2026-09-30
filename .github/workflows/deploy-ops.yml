@@ -26,6 +26,8 @@ jobs:
     steps:
       - uses: TheDemonTuan/vps-deploy/.github/actions/deploy@c3c8131b78c1456f37da3b6646101bbdb9069c0b
         with:
+          app: 9router
+          host: oracle-main
           operation: ${{ inputs.operation }}
           component: ${{ inputs.component }}
           source-sha: ${{ github.sha }}
