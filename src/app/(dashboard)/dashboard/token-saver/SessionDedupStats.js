@@ -76,7 +76,7 @@ export default function SessionDedupStats({ mode }) {
     </div>
     {error && <p role="alert" className="text-sm text-warning">{error}</p>}
     {newSession && <p role="status" className="text-sm text-warning">Runtime statistics session changed; counters reset.</p>}
-    <p className="text-sm text-text-muted">Counts are request preparations, not logical requests. Shadow only measures; existing enabled savers may still run outside cached prefixes. Bytes saved are source-payload-equivalent estimates, not billed-token, provider-cache or cost savings.</p>
+    <p className="text-sm text-text-muted">Counts are request preparations, not logical requests. Active mode deduplicates repeated historical results; existing enabled savers may still run outside cached prefixes. Bytes saved are source-payload-equivalent estimates, not billed-token, provider-cache or cost savings.</p>
     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
       <Metric label="Applied results" value={num(usage?.appliedResults)} sub="Final correspondence verified · On" />
       <Metric label="Bytes saved" value={num(usage?.bytesSaved)} sub="Source-payload-equivalent · On" />
@@ -93,7 +93,7 @@ export default function SessionDedupStats({ mode }) {
       </p>
     )}
     <div className="grid gap-3 md:grid-cols-2">
-      {(["shadow", "on"]).map(key => <div className="text-sm" key={key}><h4 className="font-medium capitalize">{key} preparation latency</h4>
+      {(usage?.latency?.shadow?.sampleCount > 0 ? ["shadow", "on"] : ["on"]).map(key => <div className="text-sm" key={key}><h4 className="font-medium capitalize">{key === "on" ? "Dedup active" : "Historical measurement"} preparation latency</h4>
         <p>p50: {ms(usage?.latency?.[key]?.p50Ms)} · p95: {ms(usage?.latency?.[key]?.p95Ms)} · Samples: {num(usage?.latency?.[key]?.sampleCount)} / {num(usage?.latency?.[key]?.capacity)} · Soft target exceeded: {num(usage?.latency?.[key]?.softTargetExceeded)}</p></div>)}
     </div>
     <details><summary className="cursor-pointer font-medium">Measurement details</summary>

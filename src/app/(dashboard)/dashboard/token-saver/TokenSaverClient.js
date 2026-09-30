@@ -252,17 +252,15 @@ export default function TokenSaverClient() {
         </div>
         {rtkError && <p role="alert" className="text-sm text-warning">{rtkError}</p>}
         <RtkStats enabled={rtkEnabled} />
-        <div className="flex flex-col items-start sm:flex-row sm:items-center justify-between pt-4 pb-4 border-b border-border gap-4">
+        <div className="flex items-center justify-between pt-4 pb-4 border-b border-border gap-4">
           <div className="min-w-0 flex-1">
             <p className="font-medium">
               Session Dedup{" "}
               <span className="text-xs text-text-muted">
-                {sessionDedupMode === "shadow"
-                  ? "Shadow — measuring only; tool results are not deduplicated."
-                  : sessionDedupMode === "on"
+                {sessionDedupMode === "on"
                   ? "On — verified replacements written to prepared body."
                   : sessionDedupMode === "off"
-                  ? "Off — hashing disabled."
+                  ? "Off"
                   : "Loading…"}
               </span>
             </p>
@@ -270,23 +268,13 @@ export default function TokenSaverClient() {
               Exact repeated historical tool results and completed batches in the same turn. The latest two completed batches, pending/ambiguous batches, previous two user turns, and cache/opaque states are protected.
             </p>
           </div>
-          <div className="shrink-0 flex items-center gap-2">
-            <label htmlFor="session-dedup-mode" className="text-sm font-medium sr-only">
-              Session Dedup mode
-            </label>
-            <select
-              id="session-dedup-mode"
-              aria-label="Session Dedup mode"
-              value={sessionDedupMode ?? "shadow"}
-              onChange={(event) => handleSessionDedupMode(event.target.value)}
-              disabled={sessionDedupSaving || sessionDedupMode === null}
-              className="bg-surface border border-border rounded px-3 py-2 text-sm font-medium"
-            >
-              <option value="off">Off</option>
-              <option value="shadow">Shadow</option>
-              <option value="on">On</option>
-            </select>
-          </div>
+          <Toggle
+            checked={sessionDedupMode === "on"}
+            onChange={(checked) => handleSessionDedupMode(checked ? "on" : "off")}
+            label="Session Dedup enabled"
+            disabled={sessionDedupSaving || sessionDedupMode === null}
+            className="shrink-0"
+          />
         </div>
         {sessionDedupError && <p role="alert" className="text-sm text-warning">{sessionDedupError}</p>}
         {sessionDedupMode === "on" && (
