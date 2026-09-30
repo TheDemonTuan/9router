@@ -287,6 +287,28 @@ describe("resolveCodexModels", () => {
     expect(ids).not.toContain("gpt-5.3-codex-spark-review");
     expect(result.models.find((model) => model.id === "gpt-6-sol").supportedReasoningLevels).toContain("ultra");
   });
+
+  it("keeps official-only models as candidates when live catalog does not observe them", async () => {
+    const fetchImpl = vi.fn(async (url) => {
+      if (url.startsWith(CODEX_MODELS_URL)) {
+        return response({ models: [liveModel("existing-model")] });
+      }
+      if (url.startsWith(CODEX_OFFICIAL_MODELS_URL)) {
+        return response({
+          models: [
+            liveModel("existing-model"),
+            liveModel("gpt-discovery-next"),
+          ],
+        });
+      }
+      throw new Error(`Unexpected url: ${url}`);
+    });
+
+    const result = await resolveCodexModels({ id: "acc-1", accessToken: "fake-token" }, { fetchImpl });
+    expect(result.models.map((m) => m.id)).not.toContain("gpt-discovery-next");
+    const candidateIds = (result.candidateModels || []).map((m) => m.id);
+    expect(candidateIds).toContain("gpt-discovery-next");
+  });
 });
 
 describe("projectCodexModel public contract", () => {

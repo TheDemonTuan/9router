@@ -1,5 +1,5 @@
 "use client";
-
+/* eslint-disable react-hooks/set-state-in-effect */
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
@@ -24,6 +24,8 @@ import AddCustomModelModal from "./AddCustomModelModal";
 import BulkImportCodexModal from "./BulkImportCodexModal";
 import BulkImportGrokCliModal from "./BulkImportGrokCliModal";
 
+import { CODEX_MODEL_CACHE_TTL_MS } from "open-sse/config/codexModels.js";
+import { mergeCodexCandidateModels } from "open-sse/providers/codexCandidates.js";
 const ONE_BY_ONE_DELAY_MS = 1000;
 
 const AUTO_PING_SETTINGS_KEYS = {
@@ -75,6 +77,13 @@ export default function ProviderDetailPage() {
   const [liveModelsRefreshNonce, setLiveModelsRefreshNonce] = useState(0);
   // Live-catalog fetch warning/error (surfaced for live account catalogs).
   const [liveModelsError, setLiveModelsError] = useState(null);
+  const [codexCandidateModels, setCodexCandidateModels] = useState([]);
+  const [codexCatalogResolved, setCodexCatalogResolved] = useState(false);
+  const [codexCatalogAccess, setCodexCatalogAccess] = useState(null);
+  const [codexCatalogLoading, setCodexCatalogLoading] = useState(false);
+  const codexForceRefreshRef = useRef(false);
+  const lastCodexFetchTimeRef = useRef(0);
+  const codexInflightRef = useRef(false);
   const [kiloFreeModels, setKiloFreeModels] = useState([]);
   const [disabledModelIds, setDisabledModelIds] = useState([]);
   const [confirmState, setConfirmState] = useState(null);
@@ -164,9 +173,14 @@ export default function ProviderDetailPage() {
   // Deprecated compat aliases (alitp preview) stay routable but leave the picker.
   const staticModels = getModelsByProviderId(providerId)
     .filter((m) => !(m.deprecated && providerId === "alitp-intl"));
-  const models = (providerId === "codex" || providerId === "cursor" || providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web") && liveModels.length > 0
-    ? liveModels
-    : staticModels;
+  const activeCodexConnections = providerId === "codex"
+    ? connections.filter((item) => item.isActive !== false && item.id)
+    : [];
+  const models = providerId === "codex"
+    ? (activeCodexConnections.length > 0 ? (codexCatalogResolved ? liveModels : []) : staticModels)
+    : (providerId === "cursor" || providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web") && liveModels.length > 0
+      ? liveModels
+      : staticModels;
   const providerAlias = getProviderAlias(providerId);
   
   const isOpenAICompatible = isOpenAICompatibleProvider(providerId);
@@ -485,48 +499,206 @@ export default function ProviderDetailPage() {
   // Personal + Team account exposes the union; its API already falls back to the
   // official edition catalog, so a discovery failure never blanks the picker.
   useEffect(() => {
-    const isLiveCatalog = providerId === "codex" || providerId === "cursor" || providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web";
+    const isLiveCatalog = providerId === "cursor" || providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web";
     if (!isLiveCatalog) {
-      setLiveModels([]);
+      if (providerId !== "codex") setLiveModels([]);
       return;
     }
 
     const activeConnections = connections.filter((item) => item.isActive !== false && item.id);
     if (!activeConnections.length) {
       setLiveModels([]);
-      if (providerId === "codex" || providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web") setLiveModelsError(null);
+      if (providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web") setLiveModelsError(null);
       return;
     }
 
     let cancelled = false;
-    if (providerId === "codex" || providerId === "zed" || providerId === "alitp-intl") setLiveModelsError(null);
-    const catalogConnections = providerId === "codex" || providerId === "alitp-intl" || providerId === "chatgpt-web" ? activeConnections : [activeConnections[0]];
+    if (providerId === "zed" || providerId === "alitp-intl") setLiveModelsError(null);
+    const catalogConnections = providerId === "alitp-intl" || providerId === "chatgpt-web" ? activeConnections : [activeConnections[0]];
     Promise.all(catalogConnections.map((connection) =>
-      fetch(`/api/providers/${connection.id}/models${providerId === "codex" && liveModelsRefreshNonce > 0 ? "?refresh=true" : ""}`, { cache: "no-store" })
+      fetch(`/api/providers/${connection.id}/models`, { cache: "no-store" })
         .then(async (res) => ({ ok: res.ok, data: await res.json().catch(() => null) }))
         .catch(() => ({ ok: false, data: null })),
     )).then((results) => {
       if (cancelled) return;
       const merged = new Map();
       for (const { ok, data } of results) {
-        if (ok && (!data?.stale || providerId === "codex") && Array.isArray(data?.models)) {
+        if (ok && !data?.stale && Array.isArray(data?.models)) {
           for (const model of data.models) if (model?.id && !merged.has(model.id)) merged.set(model.id, model);
         }
       }
       if (merged.size) setLiveModels([...merged.values()]);
       else setLiveModels([]);
       const warning = results.map((r) => r.data?.warning || (r.data?.stale
-        ? providerId === "codex"
-          ? "Showing stale Codex catalog."
-          : "Showing stale bridge catalog; routing remains disabled until refresh succeeds."
+        ? "Showing stale bridge catalog; routing remains disabled until refresh succeeds."
         : null)).find(Boolean);
-      if ((providerId === "codex" || providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web") && warning) setLiveModelsError(warning);
+      if ((providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web") && warning) setLiveModelsError(warning);
       if (providerId === "zed" && !merged.size) setLiveModelsError(warning || "Zed returned no live models.");
-      if (providerId === "codex" && !merged.size) setLiveModelsError(warning || "No Codex models are available.");
       if (providerId === "chatgpt-web" && !merged.size) setLiveModelsError(warning || "No verified ChatGPT Web models are available.");
     });
 
     return () => { cancelled = true; };
+  }, [providerId, connections]);
+
+  // Live Codex catalog with candidate models & 5-minute auto-refresh while visible
+  useEffect(() => {
+    if (providerId !== "codex") {
+      setCodexCandidateModels([]);
+      setCodexCatalogResolved(false);
+      setCodexCatalogAccess(null);
+      setCodexCatalogLoading(false);
+      lastCodexFetchTimeRef.current = 0;
+      return;
+    }
+
+    const activeConnections = connections
+      .filter((item) => item.isActive !== false && item.id)
+      .slice()
+      .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+
+    if (!activeConnections.length) {
+      setLiveModels([]);
+      setCodexCandidateModels([]);
+      setCodexCatalogResolved(false);
+      setCodexCatalogAccess(null);
+      setCodexCatalogLoading(false);
+      setLiveModelsError(null);
+      lastCodexFetchTimeRef.current = 0;
+      return;
+    }
+
+    let cancelled = false;
+    const abortController = new AbortController();
+    let timerId = null;
+
+    const scheduleNextRefresh = () => {
+      if (timerId) clearTimeout(timerId);
+      timerId = setTimeout(() => {
+        if (!cancelled && document.visibilityState === "visible") {
+          loadCodexCatalog(false);
+        }
+      }, CODEX_MODEL_CACHE_TTL_MS);
+    };
+
+    const handleVisibilityOrFocus = () => {
+      if (cancelled || document.visibilityState !== "visible") return;
+      const elapsed = Date.now() - lastCodexFetchTimeRef.current;
+      if (elapsed >= CODEX_MODEL_CACHE_TTL_MS && !codexInflightRef.current) {
+        loadCodexCatalog(false);
+      }
+    };
+
+    async function loadCodexCatalog(force = false) {
+      if (codexInflightRef.current || cancelled) return;
+      codexInflightRef.current = true;
+      setCodexCatalogLoading(true);
+
+      const batchAbortController = new AbortController();
+      const onParentAbort = () => batchAbortController.abort();
+      abortController.signal.addEventListener("abort", onParentAbort);
+
+      try {
+        const results = await Promise.all(
+          activeConnections.map((connection) =>
+            fetch(`/api/providers/${connection.id}/models${force ? "?refresh=true" : ""}`, {
+              cache: "no-store",
+              signal: batchAbortController.signal,
+            })
+              .then(async (res) => ({ ok: res.ok, data: await res.json().catch(() => null) }))
+              .catch(() => ({ ok: false, data: null }))
+          )
+        );
+
+        if (cancelled) return;
+
+        const successful = results.filter(
+          (r) => r.ok && r.data?.resolved === true && Array.isArray(r.data?.models)
+        );
+
+        if (!successful.length) {
+          setCodexCatalogResolved((prevResolved) => {
+            if (prevResolved) {
+              setLiveModelsError("Unable to refresh Codex catalog; showing previous results.");
+            } else {
+              setLiveModelsError("No Codex models are available.");
+              setLiveModels([]);
+              setCodexCandidateModels([]);
+            }
+            return prevResolved;
+          });
+        } else {
+          const verified = successful.filter(
+            (r) => r.data?.access === "observed" || r.data?.access === "stale"
+          );
+          const selectableResults = verified.length ? verified : successful;
+
+          const mergedModels = new Map();
+          for (const { data } of selectableResults) {
+            for (const model of data.models || []) {
+              if (model?.id && !mergedModels.has(model.id)) {
+                mergedModels.set(model.id, model);
+              }
+            }
+          }
+          const selectableList = [...mergedModels.values()];
+
+          const candidateLists = successful.map((r) => r.data?.candidateModels || []);
+          const candidateList = mergeCodexCandidateModels(candidateLists, selectableList);
+
+          const access = verified.length
+            ? (verified.some((r) => r.data?.access === "observed") ? "observed" : "stale")
+            : "unverified";
+
+          const hasFailure = results.some((r) => !r.ok || r.data?.resolved !== true);
+
+          setLiveModels(selectableList);
+          setCodexCandidateModels(candidateList);
+          setCodexCatalogResolved(true);
+          setCodexCatalogAccess(access);
+
+          if (hasFailure) {
+            setLiveModelsError("Some Codex account catalogs could not be refreshed.");
+          } else {
+            setLiveModelsError(null);
+          }
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setCodexCatalogResolved((prevResolved) => {
+            if (prevResolved) {
+              setLiveModelsError("Unable to refresh Codex catalog; showing previous results.");
+            } else {
+              setLiveModelsError("No Codex models are available.");
+            }
+            return prevResolved;
+          });
+        }
+      } finally {
+        abortController.signal.removeEventListener("abort", onParentAbort);
+        if (!cancelled) {
+          codexInflightRef.current = false;
+          setCodexCatalogLoading(false);
+          lastCodexFetchTimeRef.current = Date.now();
+          scheduleNextRefresh();
+        }
+      }
+    }
+
+    document.addEventListener("visibilitychange", handleVisibilityOrFocus);
+    window.addEventListener("focus", handleVisibilityOrFocus);
+
+    const isManualForce = codexForceRefreshRef.current;
+    codexForceRefreshRef.current = false;
+    loadCodexCatalog(isManualForce);
+
+    return () => {
+      cancelled = true;
+      if (timerId) clearTimeout(timerId);
+      document.removeEventListener("visibilitychange", handleVisibilityOrFocus);
+      window.removeEventListener("focus", handleVisibilityOrFocus);
+      abortController.abort();
+      codexInflightRef.current = false;
+    };
   }, [providerId, connections, liveModelsRefreshNonce]);
 
   // Fetch suggested models from provider's public API (if configured)
@@ -1250,7 +1422,7 @@ export default function ProviderDetailPage() {
               isTesting={testingModelIds.has(model.id)}
               isFree={model.isFree}
               onDisable={() => handleDisableModel(model.id)}
-              caps={getCaps(`${providerId}/${model.id}`)}
+              caps={providerId === "codex" && model.capabilities ? model.capabilities : getCaps(`${providerId}/${model.id}`)}
               thinkingSuffix={resolveThinkingSuffix(model.id)}
             />
           );
@@ -1835,10 +2007,100 @@ export default function ProviderDetailPage() {
           <p className={`text-xs mb-3 break-words ${providerId === "alitp-intl" ? "text-text-muted" : "text-red-500"}`}>{liveModelsError}</p>
         )}
         {providerId === "codex" && connections.length > 0 && (
-          <div className="mb-3">
-            <Button size="sm" variant="secondary" icon="refresh" onClick={() => setLiveModelsRefreshNonce((value) => value + 1)}>
-              Refresh Codex catalog
+          <div className="mb-3 flex flex-wrap items-center gap-3">
+            <Button
+              size="sm"
+              variant="secondary"
+              icon="refresh"
+              disabled={codexCatalogLoading}
+              onClick={() => {
+                codexForceRefreshRef.current = true;
+                setLiveModelsRefreshNonce((value) => value + 1);
+              }}
+            >
+              {translate("Refresh Codex catalog")}
             </Button>
+            <span className="text-xs text-text-muted">
+              {translate("Auto-refreshes every 5 minutes while this tab is visible.")}
+            </span>
+            {codexCatalogAccess === "unverified" && (
+              <Badge variant="warning" size="sm">
+                {translate("Static fallback — account access unverified")}
+              </Badge>
+            )}
+            {codexCatalogAccess === "stale" && (
+              <Badge variant="warning" size="sm">
+                {translate("Last known account catalog")}
+              </Badge>
+            )}
+          </div>
+        )}
+        {providerId === "codex" && codexCandidateModels.length > 0 && (
+          <div className="mb-4 rounded-lg border border-border bg-surface-secondary/40 p-3">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-sm font-medium text-text-primary">
+                {translate("Discovered candidates")}
+              </span>
+              <span className="text-xs text-text-muted">
+                {codexCandidateModels.length}
+              </span>
+            </div>
+            <p className="mb-3 text-xs text-text-muted">
+              {translate("Candidates are not advertised by /v1/models. They become available after account discovery confirms them.")}
+            </p>
+            <div className="space-y-2">
+              {codexCandidateModels.map((candidate) => {
+                const source = candidate.discoverySource || "official";
+                const isVersionBlocked = candidate.compatibilityReason === "minimal_client_version";
+                const isOfficialUnverified = candidate.discoveryStatus === "official-unverified" || candidate.compatibilityReason === "not_observed_in_account_catalog";
+                return (
+                  <div
+                    key={candidate.id}
+                    className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border/60 bg-surface px-3 py-2 text-xs"
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <code className="rounded bg-surface-secondary px-1.5 py-0.5 font-mono font-medium text-text-primary">
+                        {candidate.id}
+                      </code>
+                      {candidate.name && (
+                        <span className="text-text-muted">{candidate.name}</span>
+                      )}
+                      <span className="rounded bg-surface-secondary/80 px-1.5 py-0.5 text-[11px] text-text-muted">
+                        {translate(`Source: ${source}`)}
+                      </span>
+                      {candidate.stale && (
+                        <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[11px] text-amber-600 dark:text-amber-400">
+                          {translate("Cached official metadata")}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {isOfficialUnverified && (
+                        <>
+                          <Badge variant="secondary" size="sm">
+                            {translate("Candidate")}
+                          </Badge>
+                          <span className="text-[11px] text-text-muted">
+                            {translate("Account access: not yet observed")}
+                          </span>
+                        </>
+                      )}
+                      {isVersionBlocked && (
+                        <>
+                          <Badge variant="warning" size="sm">
+                            {translate("Candidate")}
+                          </Badge>
+                          <span className="text-[11px] text-text-muted">
+                            {translate("Requires Codex client")}{" "}
+                            {candidate.minimalClientVersion ? `v${candidate.minimalClientVersion}` : ""}
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         )}
         {renderModelsSection()}

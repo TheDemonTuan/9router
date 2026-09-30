@@ -1,4 +1,27 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
+
+vi.mock("@/models", () => ({
+  getModelAliases: vi.fn(async () => ({})),
+  setModelAlias: vi.fn(),
+  getCustomModels: vi.fn(async () => []),
+  getProviderConnections: vi.fn(async () => []),
+  getCombos: vi.fn(async () => []),
+}));
+vi.mock("@/lib/localDb", () => ({
+  getProviderConnections: vi.fn(async () => []),
+  getCombos: vi.fn(async () => []),
+  getSettings: vi.fn(async () => ({})),
+}));
+vi.mock("@/lib/disabledModelsDb", () => ({
+  getDisabledModels: vi.fn(async () => ({})),
+}));
+vi.mock("@/lib/customModelsDb", () => ({
+  getCustomModels: vi.fn(async () => []),
+}));
+vi.mock("@/lib/modelAliasesDb", () => ({
+  getModelAliases: vi.fn(async () => ({})),
+}));
+
 import { buildModelsList } from "@/app/api/v1/models/route.js";
 import { GET as getModelById } from "@/app/api/v1/models/[...model]/route.js";
 import { GET as getModelInfo } from "@/app/api/v1/models/info/route.js";

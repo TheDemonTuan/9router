@@ -166,7 +166,7 @@ export async function GET(request) {
       const connections = await getProviderConnections({ provider: "codex", isActive: true });
       if (connections.length > 0) {
         const resolved = await resolveEffectiveCodexCatalog(connections);
-        if (resolved?.models?.length) codexCatalog = resolved.models;
+        if (resolved?.resolved === true) codexCatalog = resolved.models || [];
       }
     } catch {
       // fall back to static

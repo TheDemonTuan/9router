@@ -1,5 +1,12 @@
 import { createHash } from "crypto";
 import { CODEX_CLIENT_VERSION, CODEX_ORIGINATOR, CODEX_USER_AGENT } from "../config/codexClient.js";
+import {
+  CODEX_MODEL_CACHE_TTL_MS,
+  CODEX_DISCOVERY_STATUS,
+  CODEX_COMPATIBILITY_REASON,
+  CODEX_DISCOVERY_SOURCE,
+} from "../config/codexModels.js";
+import { mergeCodexCandidateModels } from "../providers/codexCandidates.js";
 import { getModelsByProviderId } from "../config/providerModels.js";
 import { withCodexReviewModels } from "../providers/models/helpers.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
@@ -9,11 +16,9 @@ import { cancelResponseBody } from "./usage/shared.js";
 
 export const CODEX_MODELS_URL = "https://chatgpt.com/backend-api/codex/models";
 export const CODEX_OFFICIAL_MODELS_URL = "https://raw.githubusercontent.com/openai/codex/main/codex-rs/models-manager/models.json";
-export const CODEX_MODEL_CACHE_TTL_MS = 5 * 60 * 1000;
 export const CODEX_MODEL_STALE_TTL_MS = 24 * 60 * 60 * 1000;
 export const CODEX_MODEL_RETRY_MS = 30 * 1000;
 export const CODEX_MODEL_FETCH_TIMEOUT_MS = 5 * 1000;
-
 const liveCache = new Map();
 const liveLastKnownGood = new Map();
 const liveInflight = new Map();
@@ -219,7 +224,11 @@ export function normalizeCodexCatalog(payload, { includeCandidates = false } = {
     if (!model || seen.has(model.id)) continue;
     seen.add(model.id);
     if (model.minimalClientVersion && compareCodexVersions(model.minimalClientVersion, CODEX_CLIENT_VERSION) > 0) {
-      candidateModels.push({ ...model, discoveryStatus: "candidate", compatibilityReason: "minimal_client_version" });
+      candidateModels.push({
+        ...model,
+        discoveryStatus: CODEX_DISCOVERY_STATUS.CANDIDATE,
+        compatibilityReason: CODEX_COMPATIBILITY_REASON.MINIMAL_CLIENT_VERSION,
+      });
       continue;
     }
     models.push(model);
@@ -453,7 +462,11 @@ function splitCompatibleModels(models, candidateModels = []) {
   const candidates = [...candidateModels];
   for (const model of models || []) {
     if (model?.minimalClientVersion && compareCodexVersions(model.minimalClientVersion, CODEX_CLIENT_VERSION) > 0) {
-      candidates.push({ ...model, discoveryStatus: "candidate", compatibilityReason: "minimal_client_version" });
+      candidates.push({
+        ...model,
+        discoveryStatus: CODEX_DISCOVERY_STATUS.CANDIDATE,
+        compatibilityReason: CODEX_COMPATIBILITY_REASON.MINIMAL_CLIENT_VERSION,
+      });
     } else {
       compatible.push(model);
     }
@@ -683,6 +696,9 @@ async function resolveOfficialCatalog(options) {
     return { ...officialCache, source: "github", access: "unverified", stale: false };
   }
   if (!options.forceRefresh && officialFailureAt && now - officialFailureAt < CODEX_MODEL_RETRY_MS) {
+    if (officialCache && officialCache.staleAt > now) {
+      return { ...officialCache, source: "github-cache", access: "unverified", stale: true };
+    }
     return null;
   }
   if (officialInflight) return officialInflight;
@@ -702,6 +718,7 @@ async function resolveOfficialCatalog(options) {
         if (!previous) throw new Error("Codex official catalog returned 304 without cached data");
         officialCache = makeCatalogEntry(previous.models, response, now, previous);
         officialCache.candidateModels = previous.candidateModels || [];
+        officialFailureAt = 0;
         return { ...officialCache, source: "github", access: "unverified", stale: false };
       }
       if (!response.ok) throw Object.assign(new Error(`Codex official catalog request failed (${response.status})`), { status: response.status });
@@ -730,7 +747,12 @@ function buildStaticFallback() {
   for (const model of staticModels()) {
     if (!model?.id) continue;
     if (model.minimalClientVersion && compareCodexVersions(model.minimalClientVersion, CODEX_CLIENT_VERSION) > 0) {
-      candidateModels.push({ ...model, discoveryStatus: "candidate", compatibilityReason: "minimal_client_version" });
+      candidateModels.push({
+        ...model,
+        discoveryStatus: CODEX_DISCOVERY_STATUS.CANDIDATE,
+        compatibilityReason: CODEX_COMPATIBILITY_REASON.MINIMAL_CLIENT_VERSION,
+        discoverySource: CODEX_DISCOVERY_SOURCE.STATIC,
+      });
       continue;
     }
     models.push({ ...model });
@@ -739,9 +761,10 @@ function buildStaticFallback() {
     models: withReviews(models),
     candidateModels,
     fetchedAt: null,
-    source: "static",
+    source: CODEX_DISCOVERY_SOURCE.STATIC,
     access: "unverified",
     stale: false,
+    resolved: true,
   };
 }
 
@@ -827,15 +850,42 @@ export async function resolveCodexModels(connection, options = {}) {
     hasToken ? resolveLiveCatalog(connection, options) : Promise.resolve(null),
     resolveOfficialCatalog(options),
   ]);
-  let warning = null;
+
+  const officialVersionCandidates = (official?.candidateModels || []).map((model) => ({
+    ...model,
+    discoveryStatus: model.discoveryStatus || CODEX_DISCOVERY_STATUS.CANDIDATE,
+    compatibilityReason: model.compatibilityReason || CODEX_COMPATIBILITY_REASON.MINIMAL_CLIENT_VERSION,
+    discoverySource: CODEX_DISCOVERY_SOURCE.OFFICIAL,
+    stale: official?.stale === true,
+  }));
+
+  const officialUnverifiedCandidates = (official?.models || []).map((model) => ({
+    ...model,
+    discoveryStatus: CODEX_DISCOVERY_STATUS.OFFICIAL_UNVERIFIED,
+    compatibilityReason: CODEX_COMPATIBILITY_REASON.NOT_OBSERVED_IN_ACCOUNT_CATALOG,
+    discoverySource: CODEX_DISCOVERY_SOURCE.OFFICIAL,
+    stale: official?.stale === true,
+  }));
 
   if (hasToken) {
     if (liveResult) {
       const enriched = enrichModels(liveResult.entry.models, official?.models);
       const compatible = splitCompatibleModels(enriched, liveResult.entry.candidateModels || []);
+      const finalModels = withReviews(appendStaticMedia(compatible.models));
+
+      const liveCandidates = (compatible.candidateModels || []).map((model) => ({
+        ...model,
+        discoverySource: CODEX_DISCOVERY_SOURCE.LIVE,
+      }));
+
+      const candidateModels = mergeCodexCandidateModels(
+        [liveCandidates, officialVersionCandidates, officialUnverifiedCandidates],
+        finalModels
+      );
+
       return {
-        models: withReviews(appendStaticMedia(compatible.models)),
-        candidateModels: compatible.candidateModels,
+        models: finalModels,
+        candidateModels,
         source: liveResult.source,
         access: liveResult.access,
         stale: false,
@@ -850,37 +900,60 @@ export async function resolveCodexModels(connection, options = {}) {
     if (stale && stale.staleAt > Date.now()) {
       const enriched = enrichModels(stale.models, official?.models);
       const compatible = splitCompatibleModels(enriched, stale.candidateModels || []);
+      const finalModels = withReviews(appendStaticMedia(compatible.models));
+
+      const liveCandidates = (compatible.candidateModels || []).map((model) => ({
+        ...model,
+        discoverySource: CODEX_DISCOVERY_SOURCE.LIVE,
+      }));
+
+      const candidateModels = mergeCodexCandidateModels(
+        [liveCandidates, officialVersionCandidates, officialUnverifiedCandidates],
+        finalModels
+      );
+
+      let warning = "Live Codex catalog unavailable; using the last known catalog.";
+      if (official?.stale) warning += " Official Codex metadata is stale.";
+
       return {
-        models: withReviews(appendStaticMedia(compatible.models)),
-        candidateModels: compatible.candidateModels,
+        models: finalModels,
+        candidateModels,
         source: "cache",
         access: "stale",
         stale: true,
         fetchedAt: stale.fetchedAt,
-        warning: "Live Codex catalog unavailable; using the last known catalog.",
+        warning,
         resolved: true,
       };
     }
-    warning = "Live Codex catalog unavailable; showing an unverified catalog.";
   }
 
-  if (official?.models?.length) {
-    const compatible = splitCompatibleModels(enrichModels(official.models, staticModels()), official.candidateModels || []);
-    return {
-      models: withReviews(appendStaticMedia(compatible.models)),
-      candidateModels: compatible.candidateModels,
-      source: official.source,
-      access: official.access,
-      stale: official.stale,
-      fetchedAt: official.fetchedAt,
-      warning: warning || (official.stale ? "Official Codex catalog is stale." : "Account access was not verified."),
-      resolved: true,
-    };
+  const finalModels = staticFallback.models;
+  const staticCandidates = (staticFallback.candidateModels || []).map((model) => ({
+    ...model,
+    discoverySource: CODEX_DISCOVERY_SOURCE.STATIC,
+  }));
+
+  const candidateModels = mergeCodexCandidateModels(
+    [staticCandidates, officialVersionCandidates, officialUnverifiedCandidates],
+    finalModels
+  );
+
+  let warning = hasToken
+    ? "Live Codex catalog unavailable; using the static fallback. Official-only models are candidates."
+    : "Account access was not verified; using the static fallback.";
+  if (official?.stale) {
+    warning += " Official Codex metadata is stale.";
   }
 
   return {
-    ...staticFallback,
-    warning: warning || "Using the static Codex catalog.",
+    models: finalModels,
+    candidateModels,
+    source: CODEX_DISCOVERY_SOURCE.STATIC,
+    access: "unverified",
+    stale: false,
+    fetchedAt: null,
+    warning,
     resolved: true,
   };
 }
@@ -894,6 +967,19 @@ export async function resolveEffectiveCodexCatalog(connections, options = {}) {
     .filter(Boolean)
     .slice()
     .sort((left, right) => String(getConnectionId(left)).localeCompare(String(getConnectionId(right))));
+  if (!candidates.length) {
+    return {
+      models: [],
+      candidateModels: [],
+      accountCatalogs: [],
+      resolved: false,
+      source: "static",
+      access: "unavailable",
+      stale: false,
+      fetchedAt: null,
+      warning: null,
+    };
+  }
   const results = await Promise.all(candidates.map(async (connection) => {
     try {
       const result = await resolveCodexModels(connection, {
@@ -912,9 +998,10 @@ export async function resolveEffectiveCodexCatalog(connections, options = {}) {
   const usable = verified.length ? verified : results.filter(({ result }) => result);
   const modelLists = usable.map(({ result }) => result.models || []);
   const models = mergeCodexModelLists(modelLists);
-  const candidateModels = [...new Map(
-    usable.flatMap(({ result }) => result.candidateModels || []).map((model) => [model.id, model]),
-  ).values()];
+  const candidateLists = results
+    .filter(({ result }) => result && Array.isArray(result.candidateModels))
+    .map(({ result }) => result.candidateModels);
+  const candidateModels = mergeCodexCandidateModels(candidateLists, models);
   const access = verified.length
     ? (verified.some(({ result }) => result.access === "observed") ? "observed" : "stale")
     : usable.length ? "unverified" : "unavailable";
