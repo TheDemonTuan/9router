@@ -19,6 +19,7 @@
 - **Session Dedup / Responses**: identify genuine user turns in OpenAI Responses format when input items omit `type` but include role; prevent unknown history from being tagged as current or recent turns; guard final translated bodies against signed thinking or cache fence mutation.
 - **RTK linkage**: share the Dedup failed-result predicate; preserve duplicate result IDs, function/custom kind mismatches and duplicate/stale Gemini name-only responses. Keep these results raw before local or sidecar evaluation.
 - **Token Saver acceptance**: gate focused RTK/dedup/policy/auth suites, isolated settings persistence and actual loopback provider-bound streaming/non-streaming saver smoke in sidecar verification; retain existing native architecture and publish/deploy gates.
+- **RTK workflow validation**: initialize disposable HOME and DATA_DIR through a Bash step and `$GITHUB_ENV`; remove unsupported `runner.temp` expressions from job-level environment so GitHub can schedule verification.
 - **Codex streaming**: commit on reasoning, text, or tool events; classify pre-output capacity errors by SSE record instead of matching model text, and replay the original bytes.
 - **Streaming**: time out pending upstream reads without aborting clients paused by downstream backpressure; declare no-transform/no-buffer SSE headers.
 - **Account selection / Codex catalog**: serialize rotation per provider, fetch independent model catalogs concurrently, and bound response-body parsing by the existing request deadline.

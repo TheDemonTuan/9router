@@ -40,10 +40,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
-      HOME: ${{ runner.temp }}/token-saver-home
-      USERPROFILE: ${{ runner.temp }}/token-saver-home
-      APPDATA: ${{ runner.temp }}/token-saver-home
-      DATA_DIR: ${{ runner.temp }}/token-saver-home/data
       ENABLE_REQUEST_LOGS: 'false'
       ENABLE_TRANSLATOR: 'false'
       RTK_URL: ''
@@ -55,7 +51,12 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.2
-      - run: mkdir -p "$HOME" "$DATA_DIR"
+      - name: Isolate verification state
+        shell: bash
+        run: |
+          state_home="$RUNNER_TEMP/token-saver-home"
+          mkdir -p "$state_home/data"
+          printf 'HOME=%s\nUSERPROFILE=%s\nAPPDATA=%s\nDATA_DIR=%s/data\n' "$state_home" "$state_home" "$state_home" "$state_home" >> "$GITHUB_ENV"
       - run: bun install --frozen-lockfile
       - run: bun install --frozen-lockfile --cwd tests
       - name: Run focused RTK regressions
