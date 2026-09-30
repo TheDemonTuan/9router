@@ -55,18 +55,49 @@ describe("session dedup dispatch", () => {
     expect(stats.wouldDedupResults).toBeGreaterThanOrEqual(2);
     expect(stats.appliedResults).toBeGreaterThanOrEqual(2);
   });
-  it.each(["claude", "gemini"]) ("keeps the verified Chat canonical before markers through %s translation", targetFormat => {
+  it("protects real translated Claude with final_cache_fence and Gemini with final_opaque_state", () => {
     const body = fixture();
     const index = inspectSource(body, "openai");
     const plan = planSessionDedup(index, { mode: "on", fence: detectCacheFence(body, index) });
-    const translated = translateRequest("openai", targetFormat, targetFormat === "claude" ? "claude-3-5-sonnet" : "gemini-2.5-pro", body, false);
-    const commit = commitSessionDedup(translated, { sourceFormat: "openai", finalFormat: targetFormat, sourceIndex: index, plan });
-    expect(commit.appliedResults).toBe(2);
-    const final = inspectSource(translated, targetFormat);
-    const first = targetFormat === "gemini" ? final.results[0].resultContainer.response.result.result : final.results[0].text;
-    const second = targetFormat === "gemini" ? final.results[1].resultContainer.response.result.result : final.results[1].text;
-    expect(first).toBe("x".repeat(2048));
-    expect(second).toMatch(/^\[9router dedup:v1 /);
+
+    // Real Claude translation sets cache_control on tool definitions / messages
+    const claudeTranslated = translateRequest("openai", "claude", "claude-3-5-sonnet", body, false);
+    const claudeCommit = commitSessionDedup(claudeTranslated, { sourceFormat: "openai", finalFormat: "claude", sourceIndex: index, plan });
+    expect(claudeCommit.appliedResults).toBe(0);
+    expect(claudeCommit.skipReason).toBe("final_cache_fence");
+
+    // Real Gemini translation includes thoughtSignature on function calls
+    const geminiTranslated = translateRequest("openai", "gemini", "gemini-2.5-pro", body, false);
+    const geminiCommit = commitSessionDedup(geminiTranslated, { sourceFormat: "openai", finalFormat: "gemini", sourceIndex: index, plan });
+    expect(geminiCommit.appliedResults).toBe(0);
+    expect(geminiCommit.skipReason).toBe("final_opaque_state");
+  });
+  it("proves positive cross-format marker dispatch on Responses→Chat without signed/cached state", () => {
+    const responsesBody = {
+      input: [
+        { role: "user", content: [{ type: "input_text", text: "query" }] },
+      ],
+    };
+    for (let i = 0; i < 6; i++) {
+      responsesBody.input.push(
+        { type: "function_call", call_id: `c${i}`, name: "read_file", arguments: "{}" },
+        { type: "function_call_output", call_id: `c${i}`, output: "x".repeat(2048) },
+      );
+    }
+    const index = inspectSource(responsesBody, "openai-responses");
+    const plan = planSessionDedup(index, { mode: "on", fence: detectCacheFence(responsesBody, index) });
+    expect(plan.replacements.length).toBe(3);
+
+    const chatTranslated = translateRequest("openai-responses", "openai", "gpt-4o", responsesBody, false);
+    const commit = commitSessionDedup(chatTranslated, { sourceFormat: "openai-responses", finalFormat: "openai", sourceIndex: index, plan });
+    expect(commit.appliedResults).toBe(3);
+    const toolOutputs = chatTranslated.messages.filter(m => m.role === "tool");
+    expect(toolOutputs[0].content).toBe("x".repeat(2048));
+    expect(toolOutputs[1].content).toMatch(/^\[9router dedup:v1 /);
+    expect(toolOutputs[2].content).toMatch(/^\[9router dedup:v1 /);
+    expect(toolOutputs[3].content).toMatch(/^\[9router dedup:v1 /);
+    expect(toolOutputs[4].content).toBe("x".repeat(2048));
+    expect(toolOutputs[5].content).toBe("x".repeat(2048));
   });
   it("rejects a missing same-family anchor even if another tool preserved the same text", () => {
     const body = fixture(); const index = inspectSource(body, "openai");
@@ -79,16 +110,39 @@ describe("session dedup dispatch", () => {
     expect(commit.appliedResults).toBe(0);
     expect(translated).toEqual(before);
   });
-  it("declines an oversized JSON codec before writing any marker", () => {
+  it("declines an oversized JSON codec before writing any marker using synthetic unsigned Gemini", () => {
     const body = fixture();
     const original = "x".repeat(900_000);
     for (const message of body.messages) if (message.role === "tool") message.content = original;
     const index = inspectSource(body, "openai");
     const plan = planSessionDedup(index, { mode: "on", fence: detectCacheFence(body, index) });
-    const translated = translateRequest("openai", "gemini", "gemini-2.5-pro", body, false);
-    const result = commitSessionDedup(translated, { sourceFormat: "openai", finalFormat: "gemini", sourceIndex: index, plan });
+    expect(plan.replacements.length).toBe(2);
+
+    const syntheticGemini = {
+      contents: [
+        { role: "user", parts: [{ text: "turn 0" }] },
+        { role: "model", parts: [{ functionCall: { name: "read_file", id: "c0", args: {} } }] },
+        { role: "user", parts: [{ functionResponse: { name: "read_file", id: "c0", response: { result: { result: original } } } }] },
+        { role: "user", parts: [{ text: "turn 1" }] },
+        { role: "model", parts: [{ functionCall: { name: "read_file", id: "c1", args: {} } }] },
+        { role: "user", parts: [{ functionResponse: { name: "read_file", id: "c1", response: { result: { result: original } } } }] },
+        { role: "user", parts: [{ text: "turn 2" }] },
+        { role: "model", parts: [{ functionCall: { name: "read_file", id: "c2", args: {} } }] },
+        { role: "user", parts: [{ functionResponse: { name: "read_file", id: "c2", response: { result: { result: original } } } }] },
+        { role: "user", parts: [{ text: "turn 3" }] },
+        { role: "model", parts: [{ functionCall: { name: "read_file", id: "c3", args: {} } }] },
+        { role: "user", parts: [{ functionResponse: { name: "read_file", id: "c3", response: { result: { result: original } } } }] },
+        { role: "user", parts: [{ text: "turn 4" }] },
+        { role: "model", parts: [{ functionCall: { name: "read_file", id: "c4", args: {} } }] },
+        { role: "user", parts: [{ functionResponse: { name: "read_file", id: "c4", response: { result: { result: original } } } }] },
+        { role: "user", parts: [{ text: "turn 5" }] },
+        { role: "model", parts: [{ functionCall: { name: "read_file", id: "c5", args: {} } }] },
+        { role: "user", parts: [{ functionResponse: { name: "read_file", id: "c5", response: { result: { result: original } } } }] },
+      ],
+    };
+    const result = commitSessionDedup(syntheticGemini, { sourceFormat: "openai", finalFormat: "gemini", sourceIndex: index, plan });
     expect(result.skipReason).toBe("final_budget");
     expect(result.appliedResults).toBe(0);
-    expect(translated.contents[2].parts[0].functionResponse.response.result.result).toBe(original);
+    expect(syntheticGemini.contents[2].parts[0].functionResponse.response.result.result).toBe(original);
   });
 });

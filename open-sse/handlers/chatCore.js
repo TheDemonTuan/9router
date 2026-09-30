@@ -274,9 +274,9 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       }
     }
   }
-  const rtkStats = await compressMessages(sourceBody, tokenSaverEnabled && rtkEnabled && sourceIndex?.supported && fence?.reason !== "opaque_state", {
+  const rtkStats = await compressMessages(sourceBody, tokenSaverEnabled && rtkEnabled && sourceIndex?.supported && fence?.reason !== "opaque_state" && !dedupPlan?.hasExistingMarkers, {
     signal: rtkSignal,
-    disabledReason: !rtkEnabled ? "disabled" : clientTokenSaverOptOut ? "opted_out" : strictStructuredOutput ? "structured_output" : nativePassthrough ? "native_passthrough" : "unsupported_shape",
+    disabledReason: !rtkEnabled ? "disabled" : clientTokenSaverOptOut ? "opted_out" : strictStructuredOutput ? "structured_output" : nativePassthrough ? "native_passthrough" : dedupPlan?.hasExistingMarkers ? "existing_marker" : "unsupported_shape",
     getProtectionReason: (owner, key) => protectedLeaves.get(owner)?.get(key) || dedupPlan?.protection.get(owner)?.get(key) || null,
   });
   if (rtkSignal?.aborted) throw rtkSignal.reason;
@@ -429,36 +429,88 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const xf = [];
 
   if (rtkStats?.hits?.length) xf.push(`RTK:${rtkStats.hits.length}`);
+  const postSaversActive = tokenSaverEnabled &&
+    !fence?.blockPromptInjection &&
+    fence?.reason !== "opaque_state" &&
+    !dedupPlan?.hasExistingMarkers &&
+    Boolean((cavemanEnabled && cavemanLevel) || (ponytailEnabled && ponytailLevel) || pxpipeEnabled);
+
+  const needsFinalInspection = (dedupPlan?.mode === "on" && dedupPlan.replacements.length > 0) || postSaversActive;
+  let finalIndex = null;
+  let finalFence = null;
+  let blockPostSavers = false;
   dedupCommit = { appliedResults: 0, bytesSaved: 0, estimatedTokensSaved: 0, retainedReferences: 0, skipReason: null };
+
   const commitStarted = performance.now();
-  if (dedupPlan?.mode === "on") {
+  if (rtkSignal?.aborted) throw rtkSignal.reason;
+  if (needsFinalInspection) {
     try {
-      dedupCommit = commitSessionDedup(translatedBody, {
-        sourceFormat, finalFormat, sourceIndex, plan: dedupPlan, toolNameMap, customToolNames, signal: rtkSignal,
-      });
+      finalIndex = inspectSource(translatedBody, finalFormat);
+      finalFence = detectCacheFence(translatedBody, finalIndex);
+      if (finalIndex.supported) {
+        if (finalFence.blockPromptInjection || finalFence.reason === "opaque_state") {
+          blockPostSavers = true;
+        }
+      } else if (finalIndex.formatKnown) {
+        blockPostSavers = true;
+        saverReason ||= "failed";
+      }
     } catch (error) {
       if (rtkSignal?.aborted) throw rtkSignal.reason;
-      dedupCommit.skipReason = "failed";
+      if (finalIndex?.formatKnown) {
+        blockPostSavers = true;
+        saverReason ||= "failed";
+      }
+    }
+  }
+
+  if (dedupPlan?.mode === "on" && dedupPlan.replacements.length > 0) {
+    try {
+      dedupCommit = commitSessionDedup(translatedBody, {
+        sourceFormat,
+        finalFormat,
+        sourceIndex,
+        plan: dedupPlan,
+        toolNameMap,
+        customToolNames,
+        signal: rtkSignal,
+        finalIndex,
+        finalFence,
+      });
+      if (dedupCommit.skipReason === "final_budget" || dedupCommit.skipReason === "failed") {
+        if (finalIndex?.formatKnown) blockPostSavers = true;
+      }
+    } catch (error) {
+      if (rtkSignal?.aborted) throw rtkSignal.reason;
+      dedupCommit = { appliedResults: 0, bytesSaved: 0, estimatedTokensSaved: 0, retainedReferences: 0, skipReason: "failed" };
+      if (finalIndex?.formatKnown) blockPostSavers = true;
     }
   }
   saverElapsedMs += performance.now() - commitStarted;
   if (dedupCommit.appliedResults) xf.push(`DEDUP:${dedupCommit.appliedResults}`);
 
+  const postSaversBlocked = !tokenSaverEnabled ||
+    fence?.blockPromptInjection ||
+    fence?.reason === "opaque_state" ||
+    dedupPlan?.hasExistingMarkers ||
+    blockPostSavers ||
+    (finalIndex?.supported && (finalFence?.blockPromptInjection || finalFence?.reason === "opaque_state"));
+
   // Caveman: inject terse-style system prompt
-  if (tokenSaverEnabled && !fence?.blockPromptInjection && cavemanEnabled && cavemanLevel) {
+  if (!postSaversBlocked && cavemanEnabled && cavemanLevel) {
     injectCaveman(translatedBody, finalFormat, cavemanLevel);
     xf.push(`CAVEMAN:${cavemanLevel}`);
   }
 
   // Ponytail: inject lazy-senior-dev system prompt
-  if (tokenSaverEnabled && !fence?.blockPromptInjection && ponytailEnabled && ponytailLevel) {
+  if (!postSaversBlocked && ponytailEnabled && ponytailLevel) {
     injectPonytail(translatedBody, finalFormat, ponytailLevel);
     xf.push(`PONYTAIL:${ponytailLevel}`);
   }
 
   // PXPIPE: image bulky context (Claude-format bodies only), last saver before dispatch
   pxpipeSummary = null;
-  if (pxpipeEnabled && tokenSaverEnabled && !strictStructuredOutput && !fence?.blockPromptInjection && !dedupCommit.retainedReferences) {
+  if (pxpipeEnabled && !postSaversBlocked && !strictStructuredOutput && !dedupCommit.retainedReferences) {
     const pxpipeResult = await compressWithPxpipe(translatedBody, {
       enabled: true, format: finalFormat, model: upstreamModel,
       minChars: pxpipeMinChars, timeoutMs: pxpipeTimeoutMs, transform: pxpipeTransform,
@@ -468,8 +520,8 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     if (pxpipeSummary?.applied) xf.push(`PXPIPE:${pxpipeSummary.imageCount}img`);
     try { onPxpipeEvent?.({ provider, model, ...pxpipeSummary }); } catch { /* stats must not break requests */ }
   }
-  else if (pxpipeEnabled && tokenSaverEnabled && (fence?.blockPromptInjection || dedupCommit.retainedReferences)) {
-    pxpipeSummary = { applied: false, reason: fence?.reason || "dedup_reference" };
+  else if (pxpipeEnabled && tokenSaverEnabled && (postSaversBlocked || dedupCommit.retainedReferences)) {
+    pxpipeSummary = { applied: false, reason: fence?.reason || finalFence?.reason || (dedupPlan?.hasExistingMarkers ? "existing_marker" : "dedup_reference") };
     try { onPxpipeEvent?.({ provider, model, ...pxpipeSummary }); } catch { /* stats must not break requests */ }
   }
 
@@ -487,6 +539,8 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
         commit: dedupCommit, elapsedMs: saverElapsedMs || performance.now() - saverStarted,
         reason: saverReason || (!tokenSaverEnabled ? clientTokenSaverOptOut ? "opted_out" : strictStructuredOutput ? "structured_output" : "native_passthrough"
           : !sourceIndex?.supported ? sourceIndex?.blockedReason : fence?.reason === "opaque_state" ? "opaque_state" : null),
+        sourceDiagnostics: sourceIndex?.diagnostics,
+        opaqueReasons: fence?.opaqueReasons,
       });
     } catch { /* metrics must not break requests */ }
   }

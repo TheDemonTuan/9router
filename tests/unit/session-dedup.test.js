@@ -121,4 +121,171 @@ describe("request-local exact session dedup", () => {
     expect(() => commitSessionDedup(body, { sourceFormat: "openai", finalFormat: "openai", sourceIndex: index, plan, signal: controller.signal })).toThrow(reason);
     expect(result(body, 1)).toBe(big);
   });
+  it("treats typed and role-only Responses user messages identically and counts implicit user turns", () => {
+    const makeResponsesBody = (withType = true, stringContent = false) => {
+      const input = [];
+      for (let i = 0; i < 6; i++) {
+        const userMsg = withType
+          ? { type: "message", role: "user", content: stringContent ? `turn ${i}` : [{ type: "input_text", text: `turn ${i}` }] }
+          : { role: "user", content: stringContent ? `turn ${i}` : [{ type: "input_text", text: `turn ${i}` }] };
+        input.push(
+          userMsg,
+          { type: "function_call", call_id: `c${i}`, name: "read_file", arguments: "{}" },
+          { type: "function_call_output", call_id: `c${i}`, output: big },
+        );
+      }
+      return { input };
+    };
+
+    const typed = makeResponsesBody(true, false);
+    const roleOnly = makeResponsesBody(false, false);
+    const stringContent = makeResponsesBody(false, true);
+
+    const typedExec = execute(typed, "openai-responses");
+    const roleOnlyExec = execute(roleOnly, "openai-responses");
+    const stringExec = execute(stringContent, "openai-responses");
+
+    expect(typedExec.index.currentTurnIndex).toBe(5);
+    expect(roleOnlyExec.index.currentTurnIndex).toBe(5);
+    expect(stringExec.index.currentTurnIndex).toBe(5);
+
+    expect(typedExec.index.diagnostics.userTurns).toBe(6);
+    expect(roleOnlyExec.index.diagnostics.userTurns).toBe(6);
+    expect(roleOnlyExec.index.diagnostics.responsesImplicitUserMessages).toBe(6);
+    expect(typedExec.index.diagnostics.responsesImplicitUserMessages).toBe(0);
+
+    expect(roleOnlyExec.commit.appliedResults).toBe(2);
+    expect(typedExec.commit.appliedResults).toBe(2);
+    expect(stringExec.commit.appliedResults).toBe(2);
+
+    for (let i = 0; i < 6; i++) {
+      expect(roleOnlyExec.index.results[i].turnIndex).toBe(typedExec.index.results[i].turnIndex);
+      expect(roleOnlyExec.index.results[i].isCurrentTurn).toBe(i === 5);
+      expect(roleOnlyExec.index.results[i].isRecentTurn).toBe(i >= 3);
+    }
+
+    expect(stringExec.index.textSegments.some(s => s.role === "user" && s.text === "turn 0")).toBe(true);
+  });
+  it("marks unknown history when no genuine user turn exists and never flags as current or recent", () => {
+    const body = {
+      input: [
+        { type: "function_call", call_id: "c0", name: "read_file", arguments: "{}" },
+        { type: "function_call_output", call_id: "c0", output: big },
+      ],
+    };
+    const { index, commit } = execute(body, "openai-responses");
+    expect(index.currentTurnIndex).toBe(-1);
+    expect(index.diagnostics.userTurns).toBe(0);
+    expect(index.results[0].turnIndex).toBe(-1);
+    expect(index.results[0].isCurrentTurn).toBe(false);
+    expect(index.results[0].isRecentTurn).toBe(false);
+    expect(commit.appliedResults).toBe(0);
+  });
+  it("detects batch completion, taints interleaved batches, and vetoes ambiguous turns", () => {
+    // Interleaved batches: A/B -> out A -> C -> out B/C
+    const interleaved = {
+      input: [
+        { role: "user", content: [{ type: "input_text", text: "go" }] },
+        { type: "function_call", call_id: "cA", name: "read_file", arguments: "{}" },
+        { type: "function_call", call_id: "cB", name: "read_file", arguments: "{}" },
+        { type: "function_call_output", call_id: "cA", output: big },
+        { type: "function_call", call_id: "cC", name: "read_file", arguments: "{}" },
+        { type: "function_call_output", call_id: "cB", output: big },
+        { type: "function_call_output", call_id: "cC", output: big },
+      ],
+    };
+    const { index } = execute(interleaved, "openai-responses");
+    expect(index.toolBatches).toHaveLength(2);
+    expect(index.toolBatches[0].completed).toBe(false);
+    expect(index.toolBatches[0].tainted).toBe(true);
+    expect(index.toolBatches[1].completed).toBe(false);
+    expect(index.toolBatches[1].tainted).toBe(true);
+
+    // Ambiguous turn: mixed Claude user wrapper
+    const mixedClaude = {
+      messages: [
+        { role: "user", content: "hello" },
+        { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "read_file", input: {} }] },
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "t1", content: big },
+            { type: "text", text: "extra user instruction" },
+          ],
+        },
+      ],
+    };
+    const claudeExec = execute(mixedClaude, "claude");
+    expect(claudeExec.index.diagnostics.ambiguousTurns).toBe(1);
+    expect(claudeExec.index.blockedReason).toBe("ambiguous_turn");
+  });
+  it("deduplicates old completed batches in a single user turn while preserving the latest two completed batches", () => {
+    const makeSingleTurnBatches = (count = 6) => {
+      const input = [
+        { role: "user", content: [{ type: "input_text", text: "single turn" }] },
+      ];
+      for (let i = 0; i < count; i++) {
+        input.push(
+          { type: "function_call", call_id: `c${i}`, name: "read_file", arguments: "{}" },
+          { type: "function_call_output", call_id: `c${i}`, output: big },
+        );
+      }
+      return { input };
+    };
+
+    // Shadow mode
+    const callerShadow = makeSingleTurnBatches(6);
+    const beforeShadow = structuredClone(callerShadow);
+    const shadow = execute(callerShadow, "openai-responses", "shadow");
+    expect(callerShadow).toEqual(beforeShadow);
+    expect(shadow.plan.stats.wouldDedupResults).toBe(3);
+    expect(shadow.commit.appliedResults).toBe(0);
+    expect(shadow.plan.stats.hashedResults).toBe(4); // B0 (anchor), B1, B2, B3 (duplicates)
+    expect(shadow.plan.stats.intraTurnEligibleResults).toBe(4);
+    expect(shadow.plan.stats.intraTurnDuplicatesFound).toBe(3);
+
+    // On mode
+    const callerOn = makeSingleTurnBatches(6);
+    const beforeOn = structuredClone(callerOn);
+    const active = execute(callerOn, "openai-responses", "on");
+    expect(active.commit.appliedResults).toBe(3);
+
+    const outputs = callerOn.input.filter(x => x.type === "function_call_output").map(x => x.output);
+    // B0: RAW anchor
+    expect(outputs[0]).toBe(big);
+    // B1, B2, B3: markers
+    expect(outputs[1]).toMatch(/^\[9router dedup:v1 /);
+    expect(outputs[2]).toMatch(/^\[9router dedup:v1 /);
+    expect(outputs[3]).toMatch(/^\[9router dedup:v1 /);
+    // B4, B5: RAW (latest two completed batches)
+    expect(outputs[4]).toBe(big);
+    expect(outputs[5]).toBe(big);
+
+    // Original caller object structure before dedup was untouched
+    expect(beforeOn.input[2].output).toBe(big);
+  });
+  it("bypasses hashing and savers when incoming history already has well-formed v1 markers", () => {
+    const marker = `[9router dedup:v1 this tool result is byte-identical to an earlier preserved result from the same tool family in this request; bytes=2048; sha256=${createHash("sha256").update(big).digest("hex")}]`;
+    const body = {
+      input: [
+        { role: "user", content: [{ type: "input_text", text: "query" }] },
+        { type: "function_call", call_id: "c0", name: "read_file", arguments: "{}" },
+        { type: "function_call_output", call_id: "c0", output: big },
+        { type: "function_call", call_id: "c1", name: "read_file", arguments: "{}" },
+        { type: "function_call_output", call_id: "c1", output: marker },
+      ],
+    };
+
+    for (const mode of ["off", "shadow", "on"]) {
+      const cloned = structuredClone(body);
+      const { plan, commit } = execute(cloned, "openai-responses", mode);
+      expect(plan.hasExistingMarkers).toBe(true);
+      expect(plan.skipReason).toBe("existing_marker");
+      expect(plan.stats.skipped.existing_marker).toBe(1);
+      expect(plan.stats.hashedResults).toBe(0);
+      expect(plan.replacements).toHaveLength(0);
+      expect(commit.appliedResults).toBe(0);
+      expect(cloned).toEqual(body);
+    }
+  });
 });

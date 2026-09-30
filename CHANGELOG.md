@@ -1,6 +1,7 @@
 # Unreleased
 
 ## Changed
+- **Session Dedup**: extend exact deduplication to older completed tool batches in the same user turn; protect the latest two completed batches, pending/incomplete batches, and previous two user turns; bypass subsequent savers when incoming history already carries valid v1 markers; replace the binary toggle with a single visible mode selector; add telemetry for turn buckets, batch completion, and source opaque reasons.
 - **Monitoring**: add authenticated `/api/monitor/ready` for SQLite settings-schema availability, distinct from `/api/health` liveness; dashboard HTML exposes a dedicated monitor marker. Configure Cloudflare Access team and admin application AUD on the production host before enabling external probes.
 - **RTK**: replace local JavaScript filters with an optional upstream `rtk pipe` HTTP sidecar; compress linked source-format tool results before translation, preserve original output on sidecar failure, and release the sidecar separately by immutable image digest.
 - **Console logs**: omit routine Responses normalization statistics; RTK logs report actual compression when a linked tool result shrinks.
@@ -12,6 +13,7 @@
 
 ## Fixes
 - **Dashboard Access**: verify Cloudflare Access JWT for `/dashboard` alongside existing signed sessions; invalid JWT redirects to login.
+- **Session Dedup / Responses**: identify genuine user turns in OpenAI Responses format when input items omit `type` but include role; prevent unknown history from being tagged as current or recent turns; guard final translated bodies against signed thinking or cache fence mutation.
 - **Codex streaming**: commit on reasoning, text, or tool events; classify pre-output capacity errors by SSE record instead of matching model text, and replay the original bytes.
 - **Streaming**: time out pending upstream reads without aborting clients paused by downstream backpressure; declare no-transform/no-buffer SSE headers.
 - **Account selection / Codex catalog**: serialize rotation per provider, fetch independent model catalogs concurrently, and bound response-body parsing by the existing request deadline.

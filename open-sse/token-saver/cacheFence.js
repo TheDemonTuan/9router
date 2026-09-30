@@ -1,28 +1,32 @@
 import { FORMATS } from "../translator/formats.js";
 
 const present = value => value != null;
-const hasOpaque = value => value && typeof value === "object" && (
-  present(value.cachedContent) || present(value.cached_content) || present(value.previous_response_id) ||
-  present(value.conversation) || value._compact === true || present(value.encrypted_content) ||
-  present(value.reasoning_encrypted_content) || present(value.reasoning?.encrypted_content) ||
-  present(value.thoughtSignature) || present(value.thought_signature) ||
-  present(value.signature) && ["thinking", "redacted_thinking"].includes(value.type) ||
-  value.type === "compaction" || value.type === "compaction_trigger" ||
-  present(value.context_management?.compaction)
-);
-
+function collectOpaqueReasons(value, set) {
+  if (!value || typeof value !== "object") return;
+  if (present(value.previous_response_id)) set.add("previous_response_id");
+  if (present(value.conversation)) set.add("conversation");
+  if (present(value.cachedContent) || present(value.cached_content)) set.add("cached_content");
+  if (present(value.encrypted_content) || present(value.reasoning_encrypted_content) || present(value.reasoning?.encrypted_content)) set.add("encrypted_reasoning");
+  if (present(value.thoughtSignature) || present(value.thought_signature)) set.add("thought_signature");
+  if (present(value.signature) && ["thinking", "redacted_thinking"].includes(value.type)) set.add("claude_thinking_signature");
+  if (value.type === "compaction" || value.type === "compaction_trigger" || value._compact === true || present(value.context_management?.compaction)) set.add("compaction");
+}
 export function detectCacheFence(body, sourceIndex) {
+  const opaqueSet = new Set();
   const fence = { hasFence: false, protectAll: false, lastProtectedPosition: -1,
-    blockPromptInjection: false, reason: null };
+    blockPromptInjection: false, reason: null, opaqueReasons: [] };
   if (!sourceIndex.supported) {
     fence.protectAll = fence.blockPromptInjection = true;
     fence.reason = sourceIndex.blockedReason;
     return fence;
   }
-  let opaque = false;
   const messageEnds = new Map();
   for (const n of sourceIndex.protocolNodes) if (n.enclosingMessage) messageEnds.set(n.enclosingMessage, n.position);
-  opaque = Boolean(hasOpaque(body) || hasOpaque(body.request) || hasOpaque(body.generationConfig) || hasOpaque(body.request?.generationConfig));
+  collectOpaqueReasons(body, opaqueSet);
+  collectOpaqueReasons(body.request, opaqueSet);
+  collectOpaqueReasons(body.generationConfig, opaqueSet);
+  collectOpaqueReasons(body.request?.generationConfig, opaqueSet);
+  let opaque = opaqueSet.size > 0;
   if (opaque || present(body.cache_control) || present(body.request?.cache_control) || present(body.prompt_cache_breakpoint)) {
     fence.protectAll = fence.blockPromptInjection = true;
     fence.reason = opaque ? "opaque_state" : "cache_fence";
@@ -30,8 +34,12 @@ export function detectCacheFence(body, sourceIndex) {
   }
   for (const n of sourceIndex.protocolNodes) {
     const owner = n.owner;
-    if (hasOpaque(owner) || hasOpaque(owner?.functionCall) || hasOpaque(owner?.reasoning) ||
-      hasOpaque(owner?.functionResponse) || hasOpaque(owner?.functionResponse?.response)) {
+    collectOpaqueReasons(owner, opaqueSet);
+    collectOpaqueReasons(owner?.functionCall, opaqueSet);
+    collectOpaqueReasons(owner?.reasoning, opaqueSet);
+    collectOpaqueReasons(owner?.functionResponse, opaqueSet);
+    collectOpaqueReasons(owner?.functionResponse?.response, opaqueSet);
+    if (opaqueSet.size > 0) {
       opaque = true;
       fence.protectAll = fence.blockPromptInjection = true;
       fence.reason = "opaque_state";
@@ -54,6 +62,7 @@ export function detectCacheFence(body, sourceIndex) {
     }
   }
   if (opaque) fence.reason = "opaque_state";
+  fence.opaqueReasons = Array.from(opaqueSet);
   if (fence.protectAll) fence.lastProtectedPosition = Number.MAX_SAFE_INTEGER;
   for (const result of sourceIndex.results) {
     result.cacheProtected = result.position <= fence.lastProtectedPosition;
