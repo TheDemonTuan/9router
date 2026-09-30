@@ -1,3 +1,4 @@
+import { summarizeTestOutput } from "./testOutput.js";
 // Command-aware companion to the pinned Rust pipe filters. Unlike a generic
 // text fallback, each formatter below validates the output shape it consumes.
 const grepLine = /^([^:\r\n]+):([0-9]+):(.*)$/;
@@ -79,21 +80,7 @@ function gitLog(text) {
   return output.join("\n");
 }
 
-function testSummary(text) {
-  // Only pass-only recognized runner summaries may omit detail lines. Failed
-  // tests, warnings and unknown output retain every byte of the original.
-  if (failure.test(text)) return null;
-  const lines = text.replace(/\r?\n$/, "").split(/\r?\n/);
-  if (!lines.some(line => /(?:Tests?\s+\d+\s+passed|Test Files\s+\d+\s+passed|^PASS\s+.+|^# pass\s+\d+)/i.test(line))) return null;
-  let omitted = 0;
-  const output = lines.filter(line => {
-    if (/^\s*(?:✓|✔|√|PASS)\s+.+/.test(line) && !/^PASS\s+.+/.test(line)) { omitted++; return false; }
-    return true;
-  });
-  if (!omitted) return text;
-  output.push(`[${omitted} passing test lines omitted]`);
-  return output.join("\n");
-}
+const testSummary = summarizeTestOutput;
 
 function cargoBuild(text) {
   if (failure.test(text)) return null;

@@ -7,6 +7,9 @@
 - **Console logs**: omit routine Responses normalization statistics; RTK logs report actual compression when a linked tool result shrinks.
 - **RTK dashboard**: show per-process compression/HTTP counters, estimated token savings, bypass reasons, and an opt-in bounded sidecar connection check; counters reset on restart and never persist tool output.
 - **RTK diagnosis**: count tool result containers, supported text leaves, and fixed rejection reasons in process memory; show eligibility breakdown without logging request contents or changing compression eligibility.
+- **Token Saver metrics**: move read-only statistics to `/dashboard/token-saver/metrics`; keep four settings toggles and accessible draft-based Configure dialogs; move the synthetic RTK check to settings and remove hidden PXPIPE mount-time checks. Add finite visibility-aware status polling, stale/auth/reset states, four-card sections and bounded diagnostic tables.
+- **RTK runner contracts**: recognize supported npm/pnpm/yarn/bun test scripts, Node tests and Vitest text; compress complete pass-only Vitest/Jest/Bun/flat-TAP detail runs while preserving warnings, summaries and original retained lines. Gate Vitest JSON on a strict all-pass schema. Classify file/source tools as not applicable and retain only allowlisted command-family telemetry.
+- **Dedup measurements**: separate cumulative latency samples from the 1,024-sample percentile window and result-level skips from once-per-preparation reasons; keep exact whole-result SHA256/equality, v1 in-request anchors and bounded atomic final proof unchanged.
 
 ## Removed
 - **Headroom**: remove compressor, sidecar, dashboard/CLI controls, and retire persisted settings on upgrade and restore.
@@ -14,6 +17,8 @@
 ## Fixes
 - **Dashboard Access**: verify Cloudflare Access JWT for `/dashboard` alongside existing signed sessions; invalid JWT redirects to login.
 - **Session Dedup / Responses**: identify genuine user turns in OpenAI Responses format when input items omit `type` but include role; prevent unknown history from being tagged as current or recent turns; guard final translated bodies against signed thinking or cache fence mutation.
+- **RTK linkage**: share the Dedup failed-result predicate; preserve duplicate result IDs, function/custom kind mismatches and duplicate/stale Gemini name-only responses. Keep these results raw before local or sidecar evaluation.
+- **Token Saver acceptance**: gate focused RTK/dedup/policy/auth suites, isolated settings persistence and actual loopback provider-bound streaming/non-streaming saver smoke in sidecar verification; retain existing native architecture and publish/deploy gates.
 - **Codex streaming**: commit on reasoning, text, or tool events; classify pre-output capacity errors by SSE record instead of matching model text, and replay the original bytes.
 - **Streaming**: time out pending upstream reads without aborting clients paused by downstream backpressure; declare no-transform/no-buffer SSE headers.
 - **Account selection / Codex catalog**: serialize rotation per provider, fetch independent model catalogs concurrently, and bound response-body parsing by the existing request deadline.

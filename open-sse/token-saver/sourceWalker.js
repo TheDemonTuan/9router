@@ -5,7 +5,7 @@ import { TOKEN_SAVER_CONFIG as LIMIT } from "../config/tokenSaverConfig.js";
 
 const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
 const validId = value => typeof value === "string" && value.length > 0;
-const failed = value => value?.is_error === true || value?.isError === true || value?.error != null ||
+export const isFailedToolResult = value => value?.is_error === true || value?.isError === true || value?.error != null ||
   (value?.status != null && !["success", "completed"].includes(value.status));
 const ownKeys = value => object(value) ? Object.keys(value) : [];
 
@@ -188,7 +188,7 @@ export function inspectSource(body, format) {
             if (block?.type === OPENAI_BLOCK.TEXT) segment(block, "text", message.role, n, b);
           }
         } else if (message?.role === ROLE.TOOL) {
-          textResult(message, n, message, "content", OPENAI_BLOCK.TEXT, "string", "function", message.tool_call_id, null, failed(message), false, activeBatchIndex);
+          textResult(message, n, message, "content", OPENAI_BLOCK.TEXT, "string", "function", message.tool_call_id, null, isFailedToolResult(message), false, activeBatchIndex);
         } else {
           endActiveBatch(n.position);
           segment(message, "content", message.role, n, n);
@@ -211,7 +211,7 @@ export function inspectSource(body, format) {
             for (const block of blocks) {
               const b = node(block, n, n, "block");
               if (block?.type === CLAUDE_BLOCK.TOOL_RESULT) {
-                textResult(block, b, block, "content", CLAUDE_BLOCK.TEXT, "string", "function", block.tool_use_id, null, failed(block), mixed, activeBatchIndex);
+                textResult(block, b, block, "content", CLAUDE_BLOCK.TEXT, "string", "function", block.tool_use_id, null, isFailedToolResult(block), mixed, activeBatchIndex);
               } else if (block?.type === CLAUDE_BLOCK.TEXT) {
                 segment(block, "text", message.role, n, b);
               }
@@ -278,7 +278,7 @@ export function inspectSource(body, format) {
           }
           textResult(item, n, item, "output", RESPONSES_ITEM.INPUT_TEXT, "string",
             itemType === RESPONSES_ITEM.CUSTOM_TOOL_CALL_OUTPUT ? "custom" : "function",
-            item.call_id, null, failed(item), false, activeBatchIndex);
+            item.call_id, null, isFailedToolResult(item), false, activeBatchIndex);
         } else if (itemType === RESPONSES_ITEM.REASONING) {
           if (activeBatch && activeBatchPhase === "results") {
             endActiveBatch(n.position);
@@ -324,7 +324,7 @@ export function inspectSource(body, format) {
                 addResult(r, p, typeof response === "string" ? r : allowed ? response : null,
                   typeof response === "string" ? "response" : allowed ? keys[0] : null,
                   typeof response === "string" ? "gemini_string" : allowed ? `gemini_${keys[0]}` : "structured",
-                  "function", r.id, r.name, failed(r) || failed(response), mixed, activeBatchIndex);
+                  "function", r.id, r.name, isFailedToolResult(r) || isFailedToolResult(response), mixed, activeBatchIndex);
               } else {
                 segment(part, "text", message.role, n, p);
               }
@@ -398,7 +398,7 @@ export function inspectSource(body, format) {
               const parts = result?.content;
               const single = Array.isArray(parts) && parts.length === 1 && ownKeys(parts[0]).length === 1 && typeof parts[0].text === "string";
               const r = addResult(result, n, single ? parts[0] : null, single ? "text" : null,
-                "kiro_text", "function", result.toolUseId, null, failed(result), mixed, activeBatchIndex);
+                "kiro_text", "function", result.toolUseId, null, isFailedToolResult(result), mixed, activeBatchIndex);
               if (message === state.currentMessage) r.blockedReason = "current";
             }
           } else {

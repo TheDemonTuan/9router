@@ -61,6 +61,15 @@ describe("request-local exact session dedup", () => {
     expect(result(duplicate, 0)).toBe(big);
     expect(result(duplicate, 1)).toBe(big);
   });
+  it("does not normalize one-byte, timestamp or newline differences", () => {
+    const base = "timestamp=2026-09-30T00:00:00Z\n" + "x".repeat(2048);
+    for (const changed of [base.replace(/x$/, "y"), base.replace("00:00:00", "00:00:01"), base.replaceAll("\n", "\r\n")]) {
+      const body = fixture([base, changed, "different".repeat(300), base, base, base]);
+      const before = structuredClone(body);
+      expect(execute(body).commit.appliedResults).toBe(0);
+      expect(body).toEqual(before);
+    }
+  });
   it("uses UTF-8 size boundaries and structured error metadata", () => {
     const short = fixture(Array(6).fill("é".repeat(511)));
     expect(execute(short).commit.appliedResults).toBe(0);

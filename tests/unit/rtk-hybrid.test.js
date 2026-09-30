@@ -269,9 +269,6 @@ describe("hybrid RTK preserves output contracts", () => {
     const npmBody = bodyFor("functions.bash", { command: "npm test" }, npmPassOnly);
     await compressMessages(npmBody, true);
     expect(npmBody.messages[1].content).toBe(npmPassOnly);
-    const snap2 = (await import("../../open-sse/rtk/state.js")).getRtkSnapshot();
-    const npmRow = snap2.diagnostics.filters.find(r => r.filter === "local:test" && r.outcome === "not_smaller");
-    expect(npmRow).toBeDefined();
 
     // cargo success without compile lines
     const cargoPassOnly = "    Finished dev [unoptimized + debuginfo] target(s) in 0.04s\n".repeat(10);

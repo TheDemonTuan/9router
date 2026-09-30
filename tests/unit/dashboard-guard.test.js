@@ -300,7 +300,7 @@ describe("RTK dashboard API guard", () => {
     delete process.env.API_HOST;
   });
 
-  for (const path of ["/api/rtk/status", "/api/rtk/check"]) {
+  for (const path of ["/api/rtk/status", "/api/rtk/check", "/api/token-saver/status"]) {
     it(`${path} requires dashboard auth and stays off API_HOST`, async () => {
       expect((await proxy(request(path, { host: "dashboard.example.com" }))).status).toBe(401);
       mocks.verifyDashboardAuthToken.mockResolvedValue(true);
@@ -311,6 +311,18 @@ describe("RTK dashboard API guard", () => {
       expect((await proxy(request(path, { host: "api.example.com" }))).status).toBe(404);
     });
   }
+  it("protects metrics with dashboard auth and excludes the API domain", async () => {
+    const path = "/dashboard/token-saver/metrics";
+    const denied = await proxy(request(path, { host: "dashboard.example.com" }));
+    expect(denied.status).toBe(307);
+    expect(denied.url.pathname).toBe("/login");
+    mocks.verifyDashboardAuthToken.mockResolvedValue(true);
+    const authorized = request(path, { host: "dashboard.example.com" });
+    authorized.cookies.get.mockReturnValue({ value: "test-session" });
+    expect(await proxy(authorized)).toBe(mocks.nextResponse);
+    process.env.API_HOST = "api.example.com";
+    expect((await proxy(request(path, { host: "api.example.com" }))).status).toBe(404);
+  });
 });
 
 describe("dashboard and monitor Access guard", () => {

@@ -32,18 +32,28 @@ function createState() {
       byMode: numeric(SESSION_DEDUP_MODES),
       protected: numeric(["current", "recent", "error", "cacheFence", "incompleteBatch"]),
       skipped: numeric(skipNames),
+      skippedResults: numeric(skipNames),
+      skippedPreparations: numeric(skipNames),
       preparationsByUserTurns: numeric(["unknown", "single", "multiple"]),
       responsesImplicitUserMessages: 0,
       toolBatches: numeric(["currentCompleted", "currentIncomplete"]),
       opaqueReasons: numeric(OPAQUE_REASONS),
       latency: Object.fromEntries(["shadow", "on"].map(mode => [mode, {
-        samples: new Float64Array(LIMIT.latencySamples), count: 0, cursor: 0, softTargetExceeded: 0,
+        samples: new Float64Array(LIMIT.latencySamples), count: 0, cursor: 0, softTargetExceeded: 0, totalSamples: 0,
       }])),
       cleanupShadow: numeric(cleanupKeys),
     },
   };
 }
-const state = () => globalThis[KEY] ??= createState();
+const state = () => {
+  const runtime = globalThis[KEY] ??= createState();
+  runtime.usage.skippedResults ??= numeric(skipNames);
+  runtime.usage.skippedPreparations ??= numeric(skipNames);
+  for (const ring of Object.values(runtime.usage.latency)) {
+    if (!Object.hasOwn(ring, "totalSamples")) ring.totalSamples = ring.count > 0 ? null : 0;
+  }
+  return runtime;
+};
 const add = (bucket, key, amount) => {
   if (Object.hasOwn(bucket, key) && Number.isFinite(amount) && amount >= 0) {
     bucket[key] = Math.min(Number.MAX_SAFE_INTEGER, bucket[key] + amount);
@@ -57,6 +67,15 @@ export function recordTokenSaverPreparation({ mode, stats, cleanup, commit, reas
   for (const [key, count] of Object.entries(stats?.protected ?? {})) add(usage.protected, key, count);
   for (const [key, count] of Object.entries(stats?.skipped ?? {})) add(usage.skipped, key, count);
   if (reason && (!stats?.skipped || !stats.skipped[reason])) add(usage.skipped, reason, 1);
+  const preparationReasons = new Set();
+  for (const [key, count] of Object.entries(stats?.skipped ?? {})) {
+    if (["scan_budget", "entry_budget", "existing_marker"].includes(key)) {
+      if (count > 0) preparationReasons.add(key);
+    } else add(usage.skippedResults, key, count);
+  }
+  if (reason) preparationReasons.add(reason);
+  if (commit?.skipReason) preparationReasons.add(commit.skipReason);
+  for (const key of preparationReasons) add(usage.skippedPreparations, key, 1);
   add(usage, "appliedResults", commit?.appliedResults || 0);
   add(usage, "bytesSaved", commit?.bytesSaved || 0);
   add(usage, "estimatedTokensSaved", commit?.estimatedTokensSaved || 0);
@@ -93,6 +112,7 @@ export function recordTokenSaverPreparation({ mode, stats, cleanup, commit, reas
     latency.samples[latency.cursor] = elapsedMs;
     latency.cursor = (latency.cursor + 1) % LIMIT.latencySamples;
     latency.count = Math.min(LIMIT.latencySamples, latency.count + 1);
+    if (latency.totalSamples !== null) add(latency, "totalSamples", 1);
     if (elapsedMs > LIMIT.softTargetMs) add(latency, "softTargetExceeded", 1);
   }
 }
@@ -105,7 +125,7 @@ export function getTokenSaverSnapshot() {
     return [mode, { sampleCount: ring.count, capacity: LIMIT.latencySamples,
       p50Ms: sorted.length ? sorted[Math.ceil(sorted.length * 0.5) - 1] : null,
       p95Ms: sorted.length ? sorted[Math.ceil(sorted.length * 0.95) - 1] : null,
-      softTargetExceeded: ring.softTargetExceeded }];
+      softTargetExceeded: ring.softTargetExceeded, totalSamples: ring.totalSamples }];
   }));
   return {
     session: { ...runtime.session },
@@ -114,6 +134,8 @@ export function getTokenSaverSnapshot() {
       byMode: { ...usage.byMode },
       protected: { ...usage.protected },
       skipped: { ...usage.skipped },
+      skippedResults: { ...usage.skippedResults },
+      skippedPreparations: { ...usage.skippedPreparations },
       cleanupShadow: { ...usage.cleanupShadow },
       preparationsByUserTurns: { ...usage.preparationsByUserTurns },
       toolBatches: { ...usage.toolBatches },

@@ -8,6 +8,7 @@ export const RTK_CONFIG = Object.freeze({
   subprocessMs: 1000,
   cooldownMs: 30_000,
   statusPollMs: 5000,
+  statusRequestMs: 5000,
   checkCooldownMs: 10_000,
   checkMaxHttpBytes: 65_536,
   perRequestConcurrency: 2,
@@ -20,6 +21,7 @@ export const RTK_CONFIG = Object.freeze({
 export const RTK_REJECTIONS = Object.freeze([
   "error_result", "cache_marker", "cache_fence", "dedup_anchor", "dedup_candidate", "dedup_marker", "below_min_bytes", "above_max_bytes", "selection_budget", "unlinked_call",
   "invalid_command_metadata", "metadata_limit", "missing_command", "unsupported_shell_syntax",
+  "not_applicable_tool", "native_metadata_missing",
   "already_rtk", "unsupported_command", "unsupported_mode", "unsupported_output_format",
 ]);
 
@@ -47,6 +49,15 @@ export const RTK_ROUTABLE_FILTERS = Object.freeze([
 
 export const RTK_TOOL_FAMILIES = Object.freeze([
   "shell", "grep", "glob", "read", "edit", "write", "other", "unlinked",
+]);
+
+export const RTK_COMMAND_FAMILIES = Object.freeze([
+  "git diff", "git status", "git log", "git other",
+  "npm test", "pnpm test", "yarn test", "bun test", "npm other", "pnpm other", "yarn other", "bun other",
+  "node test", "node other", "cargo test", "cargo build", "cargo other", "go test", "go build", "go other",
+  "docker ps", "docker logs", "docker other", "ruff check", "ruff format", "ruff other", "sqlfluff lint", "sqlfluff other",
+  "pytest", "ctest", "tsc", "vitest", "jest", "mypy", "prettier", "phpunit", "pest", "paratest", "ecs", "phpstan", "pint",
+  "rg", "grep", "find", "fd", "ls", "tree", "rtk", "eslint", "biome", "playwright", "make", "other",
 ]);
 
 export const RTK_TRACKED_FAMILIES = Object.freeze([

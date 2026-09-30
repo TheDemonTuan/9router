@@ -276,7 +276,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   }
   const rtkStats = await compressMessages(sourceBody, tokenSaverEnabled && rtkEnabled && sourceIndex?.supported && fence?.reason !== "opaque_state" && !dedupPlan?.hasExistingMarkers, {
     signal: rtkSignal,
-    disabledReason: !rtkEnabled ? "disabled" : clientTokenSaverOptOut ? "opted_out" : strictStructuredOutput ? "structured_output" : nativePassthrough ? "native_passthrough" : dedupPlan?.hasExistingMarkers ? "existing_marker" : "unsupported_shape",
+    disabledReason: !rtkEnabled ? "disabled" : clientTokenSaverOptOut ? "opted_out" : strictStructuredOutput ? "structured_output" : nativePassthrough ? "native_passthrough" : dedupPlan?.hasExistingMarkers ? "existing_marker" : fence?.reason === "opaque_state" ? "opaque_state" : sourceIndex?.blockedReason === "metadata_budget" ? "metadata_budget" : "unsupported_shape",
     getProtectionReason: (owner, key) => protectedLeaves.get(owner)?.get(key) || dedupPlan?.protection.get(owner)?.get(key) || null,
   });
   if (rtkSignal?.aborted) throw rtkSignal.reason;
@@ -538,7 +538,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       recordTokenSaverPreparation({ mode: dedupMode, stats: dedupPlan?.stats, cleanup: cleanupShadow,
         commit: dedupCommit, elapsedMs: saverElapsedMs || performance.now() - saverStarted,
         reason: saverReason || (!tokenSaverEnabled ? clientTokenSaverOptOut ? "opted_out" : strictStructuredOutput ? "structured_output" : "native_passthrough"
-          : !sourceIndex?.supported ? sourceIndex?.blockedReason : fence?.reason === "opaque_state" ? "opaque_state" : null),
+          : !sourceIndex?.supported ? sourceIndex?.blockedReason : fence?.reason === "opaque_state" ? "opaque_state" : dedupPlan?.skipReason),
         sourceDiagnostics: sourceIndex?.diagnostics,
         opaqueReasons: fence?.opaqueReasons,
       });

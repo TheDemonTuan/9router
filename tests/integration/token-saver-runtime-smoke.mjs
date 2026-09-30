@@ -1,0 +1,113 @@
+import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, isAbsolute } from "node:path";
+
+if (!process.argv.includes("--child")) {
+  const home = await mkdtemp(join(tmpdir(), "router-token-saver-runtime-"));
+  const env = { ...process.env, HOME: home, USERPROFILE: home, APPDATA: home, DATA_DIR: join(home,"data"), ENABLE_REQUEST_LOGS: "false", ENABLE_TRANSLATOR: "false" };
+  for (const k of Object.keys(env)) if (/proxy/i.test(k) || k === "RTK_URL") delete env[k];
+  try {
+    const child = Bun.spawn([process.execPath, import.meta.path, "--child", ...process.argv.slice(2)], { env, stdout: "inherit", stderr: "inherit" });
+    const timer = setTimeout(() => child.kill(), 45000);
+    const code = await child.exited; clearTimeout(timer);
+    assert.equal(code, 0, "provider-bound token saver smoke failed");
+  } finally { await rm(home, {recursive:true,force:true}); }
+} else {
+  await import("../translator/registerAll.js");
+  const { handleChatCore } = await import("../../open-sse/handlers/chatCore.js");
+  const { getRtkSnapshot } = await import("../../open-sse/rtk/state.js");
+  const { getTokenSaverSnapshot } = await import("../../open-sse/token-saver/state.js");
+  const binaryIndex = process.argv.indexOf("--rtk-binary");
+  let sidecar;
+  if (binaryIndex >= 0) {
+    const binaryPath = process.argv[binaryIndex+1]; assert(isAbsolute(binaryPath), "absolute RTK binary path required");
+    const { startRtkServer } = await import("../../sidecars/rtk/server.mjs");
+    sidecar = await startRtkServer({hostname:"127.0.0.1",port:0,binaryPath});
+    process.env.RTK_URL = `http://127.0.0.1:${sidecar.port}`;
+  }
+  const captured = [];
+  const provider = Bun.serve({hostname:"127.0.0.1",port:0,async fetch(request) {
+    const body = await request.json(); captured.push(body);
+    if (body.stream) return new Response(`data: ${JSON.stringify({id:"chatcmpl-synthetic",object:"chat.completion.chunk",choices:[{index:0,delta:{content:"ok"},finish_reason:"stop"}]})}\n\ndata: [DONE]\n\n`, {headers:{"content-type":"text/event-stream"}});
+    return Response.json({id:"chatcmpl-synthetic",object:"chat.completion",model:"synthetic",choices:[{index:0,message:{role:"assistant",content:"ok"},finish_reason:"stop"}]});
+  }});
+  const read = "synthetic exact result ".repeat(100).slice(0,2048);
+  const bun = "suite.test.js:\n"+Array.from({length:40},(_,i)=>`✓ synthetic passing test ${i} [1.00ms]`).join("\n")+"\nwarning: KEEP_WARNING\n40 pass\n0 fail\nRan 40 tests across 1 file. [40ms]\n";
+  const fixture = stream => {
+    const messages = [];
+    for(let i=0;i<6;i++) messages.push({role:"user",content:`genuine synthetic turn ${i}`},{role:"assistant",tool_calls:[{id:`r${i}`,type:"function",function:{name:"read_file",arguments:'{"path":"synthetic"}'}}]},{role:"tool",tool_call_id:`r${i}`,content:read});
+    messages.push({role:"assistant",tool_calls:[{id:"bun",type:"function",function:{name:"Bash",arguments:'{"command":"bun test"}'}}]},{role:"tool",tool_call_id:"bun",content:bun});
+    return {model:"synthetic",stream,messages};
+  };
+  const options = {modelInfo:{provider:"openai-compatible-chat-token-saver-smoke",model:"synthetic"},credentials:{apiKey:"synthetic-key",providerSpecificData:{baseUrl:`http://127.0.0.1:${provider.port}/v1`,apiType:"chat"}},rtkEnabled:true,sessionDedupMode:"on"};
+  async function run(body, extra={}) {
+    const original=structuredClone(body);
+    const result=await handleChatCore({body,...options,...extra});
+    assert.equal(result.response.status,200); const response=await result.response.text(); assert(response.includes("ok"));
+    if(body.stream) assert(response.includes("[DONE]"));
+    assert.deepEqual(body,original,"caller must remain unchanged");
+    return captured.at(-1);
+  }
+  const tools = body => body.messages.filter(m=>m.role==='tool');
+  try {
+    const beforeRtk=getRtkSnapshot(), beforeDedup=getTokenSaverSnapshot();
+    for (const stream of [false,true]) {
+      const sent=tools(await run(fixture(stream)));
+      assert.equal(sent[0].content,read);
+      for(const i of [1,2]) assert.match(sent[i].content,/^\[9router dedup:v1 /);
+      for(const i of [3,4,5]) assert.equal(sent[i].content,read);
+      assert(Buffer.byteLength(sent[6].content)<Buffer.byteLength(bun));
+      for(const token of ['KEEP_WARNING','0 fail','Ran 40 tests','[40 passing test lines omitted]']) assert(sent[6].content.includes(token));
+    }
+    const activeRtk=getRtkSnapshot(), activeDedup=getTokenSaverSnapshot();
+    assert.equal(activeDedup.usage.appliedResults-beforeDedup.usage.appliedResults,4);
+    assert.equal(activeRtk.usage.appliedOutputs-beforeRtk.usage.appliedOutputs,2);
+    for (const mode of ['off','shadow','opt-out']) {
+      const input=fixture(false);
+      const sent=tools(await run(input,{sessionDedupMode:mode==='opt-out'?'on':mode,rtkEnabled:mode==='opt-out',...(mode==='opt-out'?{clientRawRequest:{headers:{'x-9router-token-saver':'off'}}}:{})}));
+      assert.deepEqual(sent.map(m=>m.content),[...Array(6).fill(read),bun],`${mode} must not mutate results`);
+    }
+    const after=getTokenSaverSnapshot();
+    assert.equal(after.usage.appliedResults,activeDedup.usage.appliedResults);
+    assert(after.usage.wouldDedupResults>activeDedup.usage.wouldDedupResults);
+    console.log(JSON.stringify({scenario:'local+dedup stream/nonstream',appliedResults:4,bytesSaved:activeDedup.usage.bytesSaved-beforeDedup.usage.bytesSaved,compressedOutputs:2,rtkBytesSaved:(activeRtk.usage.bytesBefore-activeRtk.usage.bytesAfter)-(beforeRtk.usage.bytesBefore-beforeRtk.usage.bytesAfter),off:true,shadow:true,optOut:true}));
+    const ambiguousBefore=getTokenSaverSnapshot().usage.skippedPreparations.ambiguous_turn;
+    const ambiguous={model:'synthetic',stream:false,messages:[{role:'user',content:'hello'},{role:'assistant',content:[{type:'tool_use',id:'mixed',name:'read_file',input:{}}]},{role:'user',content:[{type:'tool_result',tool_use_id:'mixed',content:read},{type:'text',text:'synthetic extra instruction'}]}]};
+    const ambiguousSent=await run(ambiguous,{sourceFormatOverride:'claude'});
+    assert.equal(tools(ambiguousSent)[0].content,read);
+    assert.equal(getTokenSaverSnapshot().usage.skippedPreparations.ambiguous_turn-ambiguousBefore,1);
+    console.log(JSON.stringify({scenario:'supported ambiguous-turn',raw:true,skippedPreparations:1}));
+    if(sidecar) {
+      const diff="diff --git a/src/a.txt b/src/a.txt\nindex 1234567..89abcde 100644\n--- a/src/a.txt\n+++ b/src/a.txt\n@@ -1,80 +1,80 @@\n"+Array.from({length:39},(_,i)=>` context ${i}\n`).join('')+'-OLD_VALUE\n+NEW_VALUE\n'+Array.from({length:40},(_,i)=>` context ${i+40}\n`).join('');
+      const pipe = () => ({model:'synthetic',stream:false,messages:[{role:'assistant',tool_calls:[{id:'diff',type:'function',function:{name:'Bash',arguments:'{"command":"git diff"}'}}]},{role:'tool',tool_call_id:'diff',content:diff}]});
+      const healthy=tools(await run(pipe(),{sessionDedupMode:'off'}))[0].content;
+      assert(Buffer.byteLength(healthy)<Buffer.byteLength(diff));
+      for(const token of ['src/a.txt','OLD_VALUE','NEW_VALUE']) assert(healthy.includes(token));
+      const jsonText = JSON.stringify({ numTotalTests:40, numPassedTests:40, numFailedTests:0, testResults:[{name:'suite.test.js',assertionResults:Array.from({length:40},(_,i)=>({fullName:`synthetic passing test ${i}`,status:'passed',failureMessages:[]}))}] });
+      const jsonBody = {model:'synthetic',stream:false,messages:[{role:'assistant',tool_calls:[{id:'json',type:'function',function:{name:'Bash',arguments:'{"command":"vitest --reporter=json"}'}}]},{role:'tool',tool_call_id:'json',content:jsonText}]};
+      const jsonBefore=getRtkSnapshot();
+      const jsonOutput=tools(await run(jsonBody,{sessionDedupMode:'off'}))[0].content;
+      assert(Buffer.byteLength(jsonOutput)<Buffer.byteLength(jsonText));
+      assert.deepEqual((jsonOutput.match(/\d+/g) || []).map(Number), [40, 0], 'pass/failure counts must survive compression');
+      assert.equal(getRtkSnapshot().usage.http.attempts-jsonBefore.usage.http.attempts,1);
+      for(const field of ['console','coverage','unknown']) {
+        const rejected=structuredClone(jsonBody);
+        rejected.messages[1].content=JSON.stringify({...JSON.parse(jsonText),[field]:'KEEP_DIAGNOSTIC'});
+        assert.equal(tools(await run(rejected,{sessionDedupMode:'off'}))[0].content,rejected.messages[1].content);
+      }
+      assert.equal(getRtkSnapshot().usage.http.attempts-jsonBefore.usage.http.attempts,1);
+      console.log(JSON.stringify({scenario:'strict Vitest JSON',rawBytes:Buffer.byteLength(jsonText),compressedBytes:Buffer.byteLength(jsonOutput),diagnosticFieldsRaw:true}));
+      sidecar.stop(true); sidecar=null;
+      const outageBefore=getRtkSnapshot();
+      assert.equal(tools(await run(pipe(),{sessionDedupMode:'off'}))[0].content,diff);
+      assert.equal(tools(await run(pipe(),{sessionDedupMode:'off'}))[0].content,diff);
+      const local=tools(await run(fixture(false),{sessionDedupMode:'off'})).at(-1).content;
+      assert(local.includes('[40 passing test lines omitted]'));
+      const outageAfter=getRtkSnapshot();
+      assert.equal(outageAfter.usage.http.failed-outageBefore.usage.http.failed,1);
+      assert.equal(outageAfter.usage.skipped.circuit_open-outageBefore.usage.skipped.circuit_open,1);
+      console.log(JSON.stringify({scenario:'pinned binary healthy+outage',rawDiffBytes:Buffer.byteLength(diff),compressedDiffBytes:Buffer.byteLength(healthy),outageRaw:true,circuit:true,localAvailable:true}));
+    }
+  } finally { provider.stop(true); sidecar?.stop(true); }
+}

@@ -2,10 +2,11 @@ import { ROLE } from "../translator/schema/roles.js";
 import { OPENAI_BLOCK, CLAUDE_BLOCK, RESPONSES_ITEM } from "../translator/schema/blocks.js";
 import { RTK_CONFIG, RTK_FILTERS, RTK_LOCAL_FILTERS } from "../config/rtkConfig.js";
 import { estimateOutputTokens } from "../utils/usageTracking.js";
-import { getRtkState, recordRtkRejection, recordRtkFilterOutcome } from "./state.js";
+import { getRtkState, recordRtkCommand, recordRtkRejection, recordRtkFilterOutcome } from "./state.js";
 import { classifyToolCall, getRtkToolFamily } from "./classifier.js";
 import { filterToolOutput } from "./client.js";
 import { filterLocalOutput } from "./local.js";
+import { isFailedToolResult } from "../token-saver/sourceWalker.js";
 
 function collect(body, visit, eligibility) {
   const shapes = [body.conversationState, body.request?.contents, body.contents, body.messages, body.input].filter(x => Array.isArray(x) ? x.length : Boolean(x));
@@ -13,20 +14,21 @@ function collect(body, visit, eligibility) {
   const calls = new Map();
   const duplicates = new Set();
   const names = new Map();
-  function add(id, name, input, byName = false) {
+  function add(id, name, input, byName = false, kind = "function") {
     if (typeof name !== "string") return;
     if (id != null && (typeof id !== "string" || !id)) return;
-    const call = { name, input, id };
+    const call = { name, input, id, kind, resultCount: 0 };
     if (typeof id === "string") {
       if (calls.has(id)) { duplicates.add(id); calls.get(id).ambiguous = true; }
       else calls.set(id, call);
     } else if (byName) names.set(name, names.has(name) ? null : call);
   }
-  function match(id, name, byName = false) {
-    if (id != null) return typeof id === "string" && id && !duplicates.has(id) ? calls.get(id) : null;
-    if (!byName) return null;
-    const call = names.get(name);
-    names.set(name, null);
+  function match(id, name, byName = false, kind = "function") {
+    let call;
+    if (id != null) call = typeof id === "string" && id && !duplicates.has(id) ? calls.get(id) : null;
+    else if (byName) call = names.get(name);
+    if (!call || call.kind !== kind || name != null && name !== call.name) return null;
+    if (++call.resultCount > 1) call.ambiguous = true;
     return call;
   }
   function leaf(owner, key, shape, call, skip) {
@@ -54,20 +56,22 @@ function collect(body, visit, eligibility) {
       for (const itemResult of item?.userInputMessage?.userInputMessageContext?.toolResults ?? []) {
         const call = match(itemResult?.toolUseId);
         let leaves = 0;
-        for (const part of itemResult?.content ?? []) leaves += leaf(part, "text", "kiro-tool-result", call, itemResult.status === "error" || itemResult.is_error === true || itemResult.cache_control != null && "cache_marker");
+        for (const part of itemResult?.content ?? []) leaves += leaf(part, "text", "kiro-tool-result", call, isFailedToolResult(itemResult) || itemResult.cache_control != null && "cache_marker");
         result(leaves);
       }
     }
   } else if (body.request?.contents || body.contents) {
     const items = body.request?.contents ?? body.contents;
     const shape = body.request?.contents ? "antigravity-tool-result" : "gemini-tool-result";
-    for (const item of items) for (const part of item?.parts ?? []) {
+    for (const item of items) {
+      if ((item?.parts ?? []).some(part => part?.functionCall)) names.clear();
+      for (const part of item?.parts ?? []) {
       const callPart = part?.functionCall;
       if (callPart) add(callPart.id, callPart.name, callPart.args, true);
       const response = part?.functionResponse;
       if (!response) continue;
       const call = match(response.id, response.name, true);
-      const skip = response.is_error === true || response.status === "error" || response.response?.error != null || part.cache_control != null && "cache_marker";
+      const skip = isFailedToolResult(response) || isFailedToolResult(response.response) || part.cache_control != null && "cache_marker";
       if (typeof response.response === "string") result(leaf(response, "response", shape, call, skip));
       else {
         let leaves = 0;
@@ -75,23 +79,24 @@ function collect(body, visit, eligibility) {
         result(leaves);
       }
     }
+    }
   } else if (Array.isArray(body.messages)) {
     for (const item of body.messages) {
       if (item?.role === ROLE.ASSISTANT) {
-        for (const call of item.tool_calls ?? []) add(call?.id, call?.function?.name, call?.function?.arguments);
+        for (const call of item.tool_calls ?? []) add(call?.id, call?.function?.name ?? call?.custom?.name, call?.function?.arguments ?? call?.custom?.input, false, call?.type === "custom" ? "custom" : "function");
         for (const block of Array.isArray(item.content) ? item.content : []) if (block?.type === CLAUDE_BLOCK.TOOL_USE) add(block.id, block.name, block.input);
       }
-      if (item?.role === ROLE.TOOL) result(parts(item, "content", OPENAI_BLOCK.TEXT, "openai-tool", match(item.tool_call_id), item.is_error === true || item.status === "error"));
+      if (item?.role === ROLE.TOOL) result(parts(item, "content", OPENAI_BLOCK.TEXT, "openai-tool", match(item.tool_call_id, null, false, item.type === "custom_tool_call_output" ? "custom" : "function"), isFailedToolResult(item)));
       else for (const block of Array.isArray(item?.content) ? item.content : []) {
         if (block?.type !== CLAUDE_BLOCK.TOOL_RESULT) continue;
-        result(parts(block, "content", CLAUDE_BLOCK.TEXT, "claude-string", match(block.tool_use_id), block.is_error === true || block.status === "error"));
+        result(parts(block, "content", CLAUDE_BLOCK.TEXT, "claude-string", match(block.tool_use_id), isFailedToolResult(block)));
       }
     }
   } else if (Array.isArray(body.input)) {
     for (const item of body.input) {
-      if ([RESPONSES_ITEM.FUNCTION_CALL, RESPONSES_ITEM.CUSTOM_TOOL_CALL].includes(item?.type)) add(item.call_id, item.name, item.arguments ?? item.input);
+      if ([RESPONSES_ITEM.FUNCTION_CALL, RESPONSES_ITEM.CUSTOM_TOOL_CALL].includes(item?.type)) add(item.call_id, item.name, item.arguments ?? item.input, false, item.type === RESPONSES_ITEM.CUSTOM_TOOL_CALL ? "custom" : "function");
       if (![RESPONSES_ITEM.FUNCTION_CALL_OUTPUT, RESPONSES_ITEM.CUSTOM_TOOL_CALL_OUTPUT].includes(item?.type)) continue;
-      result(parts(item, "output", RESPONSES_ITEM.INPUT_TEXT, "openai-responses-string", match(item.call_id), item.is_error === true || item.status === "error"));
+      result(parts(item, "output", RESPONSES_ITEM.INPUT_TEXT, "openai-responses-string", match(item.call_id, null, false, item.type === RESPONSES_ITEM.CUSTOM_TOOL_CALL_OUTPUT ? "custom" : "function"), isFailedToolResult(item)));
     }
   }
   return true;
@@ -101,7 +106,7 @@ export async function compressMessages(body, enabled, { signal, disabledReason =
   const usage = getRtkState().usage;
   usage.preparations++;
   if (!enabled) {
-    usage.preparationReasons[["opted_out", "structured_output", "native_passthrough"].includes(disabledReason) ? disabledReason : "disabled"]++;
+    usage.preparationReasons[Object.hasOwn(usage.preparationReasons, disabledReason) ? disabledReason : "disabled"]++;
     return null;
   }
   if (!body || typeof body !== "object") { usage.preparationReasons.unsupported_shape++; return null; }
@@ -170,13 +175,17 @@ export async function compressMessages(body, enabled, { signal, disabledReason =
         recordRtkRejection(toolFamily, "selection_budget", "none", size);
         return;
       }
+      let commandFamily = "none";
       const filter = classifyToolCall(call, content, (reason, detail = "none") => {
         usage.eligibility.rejected[reason]++;
-        recordRtkRejection(toolFamily, reason, detail, size);
+        recordRtkRejection(toolFamily, reason, detail, size, commandFamily);
+      }, family => {
+        commandFamily = family;
+        recordRtkCommand(family, size);
       });
       if (!filter) return;
       selected += size;
-      jobs.push({ owner, key, content, size, shape, filter, call, toolFamily });
+      jobs.push({ owner, key, content, size, shape, filter, call, toolFamily, commandFamily });
     }, usage.eligibility);
     if (!supported) { reason = "unsupported_shape"; return null; }
     if (usage.eligibility.toolResults === resultsBefore && performance.now() < deadline && !combined.aborted) usage.eligibility.noToolResultsPreparations++;
@@ -186,7 +195,7 @@ export async function compressMessages(body, enabled, { signal, disabledReason =
         const job = jobs[next++];
         if (job.call?.ambiguous) {
           usage.eligibility.rejected.unlinked_call++;
-          recordRtkRejection("unlinked", "unlinked_call", "none", job.size);
+          recordRtkRejection("unlinked", "unlinked_call", "none", job.size, job.commandFamily);
           continue;
         }
         eligibleJobs++;
@@ -233,7 +242,7 @@ export async function compressMessages(body, enabled, { signal, disabledReason =
               }
             }
           } finally {
-            recordRtkFilterOutcome(toolFamily, job.filter, "local", false, finalOutcome ?? rawOutcome, job.size, rawBytes);
+            recordRtkFilterOutcome(toolFamily, job.filter, "local", false, finalOutcome ?? rawOutcome, job.size, rawBytes, job.commandFamily);
           }
         } else {
           let sidecarRawOutcome = null;
@@ -279,7 +288,7 @@ export async function compressMessages(body, enabled, { signal, disabledReason =
               }
             }
           } finally {
-            recordRtkFilterOutcome(toolFamily, job.filter, "sidecar", false, sidecarFinalOutcome ?? sidecarRawOutcome, job.size, sidecarRawBytes);
+            recordRtkFilterOutcome(toolFamily, job.filter, "sidecar", false, sidecarFinalOutcome ?? sidecarRawOutcome, job.size, sidecarRawBytes, job.commandFamily);
           }
           if (output === null && !combined.aborted && ["grep", "git-status"].includes(job.filter)) {
             usage.local.attempts++;
@@ -323,7 +332,7 @@ export async function compressMessages(body, enabled, { signal, disabledReason =
                 }
               }
             } finally {
-              recordRtkFilterOutcome(toolFamily, job.filter, "local", true, fallbackFinalOutcome ?? fallbackRawOutcome, job.size, fallbackRawBytes);
+              recordRtkFilterOutcome(toolFamily, job.filter, "local", true, fallbackFinalOutcome ?? fallbackRawOutcome, job.size, fallbackRawBytes, job.commandFamily);
             }
           }
         }

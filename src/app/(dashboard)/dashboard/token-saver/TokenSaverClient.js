@@ -1,569 +1,132 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
-import { Card, Button, Input, Modal, Toggle } from "@/shared/components";
+import { useState, useEffect, useRef } from "react";
+import Link from "next/link";
+import { Card, Button, Modal, Toggle } from "@/shared/components";
 import { getCurrentLocale, onLocaleChange } from "@/i18n/runtime";
-import RtkStats from "./RtkStats";
-import SessionDedupStats from "./SessionDedupStats";
 import { isValidSessionDedupMode } from "open-sse/config/tokenSaverConfig.js";
-import {
-  WENYAN_LOCALES,
-  CAVEMAN_LEVELS,
-  PONYTAIL_LEVELS,
-} from "../endpoint/endpointConstants";
+import { RTK_CONFIG } from "open-sse/config/rtkConfig.js";
+import { WENYAN_LOCALES, CAVEMAN_LEVELS, PONYTAIL_LEVELS } from "../endpoint/endpointConstants";
 
 export default function TokenSaverClient() {
-  const [rtkEnabled, setRtkEnabledState] = useState(true);
-  const [rtkSaving, setRtkSaving] = useState(false);
-  const [rtkError, setRtkError] = useState("");
-  const [sessionDedupMode, setSessionDedupMode] = useState(null);
-  const [sessionDedupSaving, setSessionDedupSaving] = useState(false);
-  const [sessionDedupError, setSessionDedupError] = useState("");
-  const [cavemanEnabled, setCavemanEnabled] = useState(false);
-  const [cavemanLevel, setCavemanLevel] = useState("full");
-  const [ponytailEnabled, setPonytailEnabled] = useState(false);
-  const [ponytailLevel, setPonytailLevel] = useState("full");
-  const [pxpipeEnabled, setPxpipeEnabled] = useState(false);
-  const [pxpipeMinChars, setPxpipeMinChars] = useState(25000);
-  const [pxpipeStatus, setPxpipeStatus] = useState({
-    installed: false,
-    installing: false,
-    running: false,
-    version: null,
-    loading: true,
-  });
-  const [pxpipeHealth, setPxpipeHealth] = useState(null);
-  const [showPxpipeModal, setShowPxpipeModal] = useState(false);
-  const [pxpipeActionLoading, setPxpipeActionLoading] = useState(false);
-  const [pxpipeActionError, setPxpipeActionError] = useState("");
+  const [settings, setSettings] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [configure, setConfigure] = useState(null);
+  const [draft, setDraft] = useState("");
+  const [modalError, setModalError] = useState("");
   const [locale, setLocale] = useState(() => getCurrentLocale());
   const [showWenyan, setShowWenyan] = useState(false);
+  const [rtkStatus, setRtkStatus] = useState(null);
+  const [rtkChecking, setRtkChecking] = useState(false);
+  const dialog = useRef(null);
+  const opener = useRef(null);
 
+  useEffect(() => onLocaleChange(() => setLocale(getCurrentLocale())), []);
   useEffect(() => {
-    return onLocaleChange(() => setLocale(getCurrentLocale()));
-  }, []);
-
-  const isWenyanLocale = WENYAN_LOCALES.includes(locale);
-  const isSelectedWenyan = CAVEMAN_LEVELS.some((lvl) => lvl.id === cavemanLevel && lvl.wenyan);
-  const showAllCavemanLevels = isWenyanLocale || isSelectedWenyan || showWenyan;
-  const visibleCavemanLevels = showAllCavemanLevels
-    ? CAVEMAN_LEVELS
-    : CAVEMAN_LEVELS.filter((lvl) => !lvl.wenyan);
-  const patchSetting = async (patch) => {
-    try {
-      await fetch("/api/settings", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(patch),
-      });
-    } catch (error) {
-      console.log("Error updating setting:", error);
-    }
-  };
-
-
-  const handleRtkEnabled = async (value) => {
-    setRtkSaving(true);
-    setRtkError("");
-    try {
-      const res = await fetch("/api/settings", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rtkEnabled: value }),
-      });
-      if (!res.ok) throw Error("RTK setting could not be saved.");
-      setRtkEnabledState(value);
-    } catch {
-      setRtkError("RTK setting could not be saved. Please retry.");
-    } finally {
-      setRtkSaving(false);
-    }
-  };
-
-  const handleSessionDedupMode = async (mode) => {
-    if (sessionDedupSaving || sessionDedupMode === null) return;
-    setSessionDedupSaving(true);
-    setSessionDedupError("");
-    try {
-      const res = await fetch("/api/settings", {
-        method: "PATCH", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionDedupMode: mode }),
-      });
-      if (!res.ok) throw Error("Setting unavailable");
-      setSessionDedupMode(mode);
-    } catch {
-      setSessionDedupError("Session Dedup setting could not be saved. Please retry.");
-    } finally {
-      setSessionDedupSaving(false);
-    }
-  };
-  const handleCavemanEnabled = (value) => {
-    setCavemanEnabled(value);
-    patchSetting({ cavemanEnabled: value });
-  };
-
-
-  const handleCavemanLevel = (level) => {
-    setCavemanLevel(level);
-    patchSetting({ cavemanLevel: level });
-  };
-
-  const handlePonytailEnabled = (value) => {
-    setPonytailEnabled(value);
-    patchSetting({ ponytailEnabled: value });
-  };
-
-  const handlePonytailLevel = (level) => {
-    setPonytailLevel(level);
-    patchSetting({ ponytailLevel: level });
-  };
-
-  const refreshPxpipeStatus = useCallback(async () => {
-    setPxpipeStatus((s) => ({ ...s, loading: true }));
-    try {
-      const res = await fetch("/api/pxpipe/status", {
-        headers: { "Cache-Control": "no-store" },
-      });
+    const controller = new AbortController();
+    fetch("/api/settings", { signal: controller.signal }).then(async res => {
+      if (!res.ok) throw Error("Settings unavailable. Reload to retry.");
       const data = await res.json();
-      setPxpipeStatus({ ...data, loading: false });
-      if (typeof data.minChars === "number") setPxpipeMinChars(data.minChars);
-    } catch {
-      setPxpipeStatus({ installed: false, installing: false, running: false, version: null, loading: false });
-    }
+      setSettings({ rtkEnabled: data.rtkEnabled !== false, sessionDedupMode: isValidSessionDedupMode(data.sessionDedupMode) ? data.sessionDedupMode : "off", cavemanEnabled: !!data.cavemanEnabled, cavemanLevel: data.cavemanLevel || "full", ponytailEnabled: !!data.ponytailEnabled, ponytailLevel: data.ponytailLevel || "full" });
+    }).catch(e => { if (!controller.signal.aborted) setError(e.message); });
+    return () => controller.abort();
   }, []);
-
-  const runPxpipeHealth = useCallback(async () => {
-    try {
-      const res = await fetch("/api/pxpipe/health", { method: "POST" });
-      setPxpipeHealth(await res.json());
-    } catch (e) {
-      setPxpipeHealth({ healthy: false, checks: [], error: e.message });
-    }
-  }, []);
-
-  const pxpipeAction = useCallback(
-    async (endpoint) => {
-      setPxpipeActionError("");
-      setPxpipeActionLoading(true);
-      try {
-        const res = await fetch(`/api/pxpipe/${endpoint}`, { method: "POST" });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error || `PXPIPE ${endpoint} failed`);
-        await refreshPxpipeStatus();
-        await runPxpipeHealth();
-      } catch (e) {
-        setPxpipeActionError(e.message);
-      } finally {
-        setPxpipeActionLoading(false);
-      }
-    },
-    [refreshPxpipeStatus, runPxpipeHealth]
-  );
-
-  const handlePxpipeEnabled = (value) => {
-    setPxpipeEnabled(value);
-    patchSetting({ pxpipeEnabled: value });
-  };
-
-  const handlePxpipeMinCharsBlur = () => {
-    const next = Math.max(0, Number(pxpipeMinChars) || 25000);
-    setPxpipeMinChars(next);
-    patchSetting({ pxpipeMinChars: next });
-  };
-
   useEffect(() => {
-    const loadSettings = async () => {
-      try {
-        const res = await fetch("/api/settings");
-        if (res.ok) {
-          const data = await res.json();
-          setRtkEnabledState(data.rtkEnabled !== false);
-          setSessionDedupMode(isValidSessionDedupMode(data.sessionDedupMode) ? data.sessionDedupMode : "off");
-          setCavemanEnabled(!!data.cavemanEnabled);
-          setCavemanLevel(data.cavemanLevel || "full");
-          setPonytailEnabled(!!data.ponytailEnabled);
-          setPonytailLevel(data.ponytailLevel || "full");
-          setPxpipeEnabled(!!data.pxpipeEnabled);
-          if (typeof data.pxpipeMinChars === "number") setPxpipeMinChars(data.pxpipeMinChars);
-          // PRD: run the PXPIPE health check automatically when the page opens
-          refreshPxpipeStatus().then(runPxpipeHealth);
-        } else {
-          setSessionDedupError("Session Dedup settings unavailable. Reload to retry.");
-        }
-      } catch {
-        setSessionDedupError("Session Dedup settings unavailable. Reload to retry.");
-      }
-    };
-    loadSettings();
-  }, [refreshPxpipeStatus, runPxpipeHealth]);
+    if (!configure) return;
+    dialog.current?.querySelector("button:not([disabled]), input:not([disabled])")?.focus();
+    return () => opener.current?.focus();
+  }, [configure]);
+  useEffect(() => {
+    if (configure !== "rtk") return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), RTK_CONFIG.statusRequestMs);
+    fetch("/api/rtk/status", { cache: "no-store", signal: controller.signal }).then(async res => {
+      if (!res.ok) throw Error("RTK status unavailable.");
+      setRtkStatus(await res.json());
+    }).catch(() => setModalError("RTK status unavailable. Check to retry.")).finally(() => clearTimeout(timer));
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [configure]);
 
-
-  const pxpipeHealthy = pxpipeHealth?.healthy === true;
-  const pxpipeStatusLabel = pxpipeStatus.loading
-    ? "Checking…"
-    : pxpipeStatus.installing
-      ? "Installing…"
-      : !pxpipeStatus.installed
-        ? "Not installed"
-        : pxpipeHealthy
-          ? "Healthy"
-          : pxpipeStatus.running
-            ? "Running"
-            : "Stopped";
-  const pxpipeChipClass =
-    pxpipeHealthy || pxpipeStatus.running
-      ? "bg-success/15 text-success"
-      : "bg-warning/15 text-warning";
-
-  return (
-    <div className="space-y-6 p-6">
-      <Card id="rtk">
-        <div className="flex items-center justify-between mb-2">
-          <h2 className="text-lg font-semibold flex items-center gap-2">
-            <span className="material-symbols-outlined text-primary">
-              bolt
-            </span>
-            Token Saver
-          </h2>
+  async function patch(patch, inModal = false) {
+    if (saving || !settings) return;
+    setSaving(true);
+    (inModal ? setModalError : setError)("");
+    try {
+      const res = await fetch("/api/settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) });
+      if (!res.ok) throw Error("Setting could not be saved. Please retry.");
+      setSettings(previous => ({ ...previous, ...patch }));
+      if (inModal) setConfigure(null);
+    } catch { (inModal ? setModalError : setError)("Setting could not be saved. Please retry."); }
+    finally { setSaving(false); }
+  }
+  function open(kind, event) {
+    opener.current = event.currentTarget;
+    setDraft(settings?.[`${kind}Level`] || "full");
+    setShowWenyan(false); setModalError(""); setRtkStatus(null); setConfigure(kind);
+  }
+  function close() { if (!saving && !rtkChecking) setConfigure(null); }
+  function trap(event) {
+    if (event.key !== "Tab") return;
+    const controls = [...dialog.current.querySelectorAll('button:not([disabled]), a[href], input:not([disabled]), [tabindex="0"]')];
+    if (!controls.length) { event.preventDefault(); dialog.current.focus(); return; }
+    const first = controls[0], last = controls.at(-1);
+    if (event.shiftKey && (document.activeElement === first || !dialog.current.contains(document.activeElement))) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && (document.activeElement === last || !dialog.current.contains(document.activeElement))) { event.preventDefault(); first.focus(); }
+  }
+  async function checkRtk() {
+    if (rtkChecking) return;
+    setRtkChecking(true); setModalError("");
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), RTK_CONFIG.statusRequestMs);
+    try {
+      const res = await fetch("/api/rtk/check", { method: "POST", signal: controller.signal });
+      const data = await res.json();
+      if (!res.ok) throw Error(data.error || "Sidecar check failed.");
+      setRtkStatus(previous => ({ ...previous, client: { ...previous?.client, check: data.check } }));
+    } catch (e) { setModalError(e.name === "AbortError" ? "Sidecar check timed out." : e.message); }
+    finally { clearTimeout(timer); setRtkChecking(false); }
+  }
+  const levels = configure === "ponytail" ? PONYTAIL_LEVELS : CAVEMAN_LEVELS;
+  const wenyan = WENYAN_LOCALES.includes(locale) || CAVEMAN_LEVELS.some(l => l.id === draft && l.wenyan) || showWenyan;
+  const visibleLevels = configure === "caveman" && !wenyan ? levels.filter(l => !l.wenyan) : levels;
+  const rows = [
+    { key: "rtk", title: "Compress tool output (RTK)", description: "Local filters and the optional Rust sidecar compress recognized outputs. Unsupported formats stay raw.", checked: settings?.rtkEnabled, field: "rtkEnabled" },
+    { key: "dedup", title: "Session Dedup", description: "Exact repeated results in this request only. Recent turns, pending batches and cache/opaque states are protected.", checked: settings?.sessionDedupMode === "on", field: "sessionDedupMode" },
+    { key: "caveman", title: "Shorter chat responses (Caveman)", description: "Encourages shorter replies; adds prompt overhead. Net savings depend on workload.", checked: settings?.cavemanEnabled, field: "cavemanEnabled" },
+    { key: "ponytail", title: "Lazy senior dev (Ponytail)", description: "Understand first, reuse existing code, then make the smallest complete change.", checked: settings?.ponytailEnabled, field: "ponytailEnabled" },
+  ];
+  return <div className="space-y-6 p-6">
+    <Card>
+      <div className="flex justify-between items-center gap-3"><h2 className="text-lg font-semibold">Token Saver</h2><Link className="text-primary underline text-sm" href="/dashboard/token-saver/metrics">View metrics</Link></div>
+      {rows.map(row => <div key={row.key} className="flex items-center justify-between gap-4 py-4 border-b border-border flex-wrap">
+        <div className="min-w-0 flex-1"><p className="font-medium">{row.title}</p><p className="text-sm text-text-muted">{row.description}</p>{row.key === "dedup" && settings?.sessionDedupMode === "shadow" && <p className="text-sm text-text-muted">Shadow — measurement only</p>}</div>
+        <div className="flex items-center gap-3">
+          {row.key !== "dedup" && <Button variant="ghost" disabled={!settings || saving} onClick={event => open(row.key, event)}>Configure{row.key === "rtk" ? " RTK" : ""}</Button>}
+          <Toggle label={`${row.key === "dedup" ? "Session Dedup" : row.key} enabled`} checked={!!row.checked} disabled={!settings || saving} onChange={checked => patch({ [row.field]: row.key === "dedup" ? checked ? "on" : "off" : checked })} />
         </div>
-        <div className="flex items-center justify-between pt-2 pb-4 border-b border-border gap-4">
-          <div className="min-w-0 flex-1">
-            <p className="font-medium">
-              Compress tool output{" "}
-              <a
-                href="https://github.com/rtk-ai/rtk"
-                target="_blank"
-                rel="noreferrer"
-                className="text-xs font-normal text-primary underline hover:opacity-80"
-              >
-                (RTK)
-              </a>
-            </p>
-            <p className="text-sm text-text-muted">
-              Compress recognized tool output with local filters and the optional upstream Rust RTK sidecar. Unsupported formats remain unchanged.
-            </p>
-          </div>
-          <Toggle
-            checked={rtkEnabled}
-            onChange={() => handleRtkEnabled(!rtkEnabled)}
-            label="RTK enabled"
-            disabled={rtkSaving}
-          />
-        </div>
-        {rtkError && <p role="alert" className="text-sm text-warning">{rtkError}</p>}
-        <RtkStats enabled={rtkEnabled} />
-        <div className="flex items-center justify-between pt-4 pb-4 border-b border-border gap-4">
-          <div className="min-w-0 flex-1">
-            <p className="font-medium">
-              Session Dedup{" "}
-              <span className="text-xs text-text-muted">
-                {sessionDedupMode === "on"
-                  ? "On — verified replacements written to prepared body."
-                  : sessionDedupMode === "off"
-                  ? "Off"
-                  : sessionDedupMode === "shadow"
-                  ? "Shadow — measurement only"
-                  : "Loading…"}
-              </span>
-            </p>
-            <p className="text-sm text-text-muted">
-              Exact repeated historical tool results and completed batches in the same turn. The latest two completed batches, pending/ambiguous batches, previous two user turns, and cache/opaque states are protected.
-            </p>
-          </div>
-          <Toggle
-            checked={sessionDedupMode === "on"}
-            onChange={(checked) => handleSessionDedupMode(checked ? "on" : "off")}
-            label="Session Dedup enabled"
-            disabled={sessionDedupSaving || sessionDedupMode === null}
-            className="shrink-0"
-          />
-        </div>
-        {sessionDedupError && <p role="alert" className="text-sm text-warning">{sessionDedupError}</p>}
-        {sessionDedupMode === "on" && (
-          <p className="text-sm text-warning">
-            Historical rewrites can reduce implicit prompt-cache reuse. Saved bytes are not billed-token or cost savings. Incoming pre-deduplicated history bypasses mutations.
-          </p>
-        )}
-        <SessionDedupStats mode={sessionDedupMode} />
-        <div className="flex items-center justify-between pt-4 border-t border-border gap-4 flex-wrap">
-          <div className="min-w-0 flex-1">
-            <p className="font-medium">
-              Shorter chat responses{" "}
-              <a
-                href="https://github.com/JuliusBrussee/caveman"
-                target="_blank"
-                rel="noreferrer"
-                className="text-xs font-normal text-primary underline hover:opacity-80"
-              >
-                (Caveman)
-              </a>
-            </p>
-            <p className="text-sm text-text-muted">
-              Encourages shorter chat replies; adds prompt overhead. Net savings depend on workload.
-            </p>
-          </div>
-          <div className="flex items-center gap-3 shrink-0">
-            {cavemanEnabled && (
-              <div className="flex flex-col items-end gap-1">
-                <div className="flex items-center gap-1.5">
-                  {visibleCavemanLevels.map((lvl) => (
-                    <button
-                      key={lvl.id}
-                      onClick={() => handleCavemanLevel(lvl.id)}
-                      className={`px-3 py-1.5 rounded text-xs font-medium border transition-colors ${
-                        cavemanLevel === lvl.id
-                          ? "bg-primary text-white border-primary"
-                          : "bg-transparent border-border text-text-muted hover:bg-surface-2"
-                      }`}
-                      title={lvl.desc}
-                    >
-                      {lvl.label}
-                    </button>
-                  ))}
-                  {!showAllCavemanLevels && (
-                    <button
-                      type="button"
-                      onClick={() => setShowWenyan(true)}
-                      className="px-2 py-1.5 rounded text-xs font-medium border border-dashed border-border text-text-muted hover:text-text hover:bg-surface-2 transition-colors"
-                      title="Show Classical Chinese (Wenyan) levels"
-                    >
-                      + 文言
-                    </button>
-                  )}
-                  {showWenyan && !isWenyanLocale && !isSelectedWenyan && (
-                    <button
-                      type="button"
-                      onClick={() => setShowWenyan(false)}
-                      className="px-1.5 py-1.5 rounded text-xs text-text-muted hover:text-text"
-                      title="Hide Wenyan levels"
-                    >
-                      ×
-                    </button>
-                  )}
-                </div>
-                <p className="text-xs text-primary">
-                  {
-                    CAVEMAN_LEVELS.find((lvl) => lvl.id === cavemanLevel)
-                      ?.desc
-                  }
-                </p>
-              </div>
-            )}
-            <Toggle
-              checked={cavemanEnabled}
-              onChange={() => handleCavemanEnabled(!cavemanEnabled)}
-            />
-          </div>
-        </div>
-        <div className="flex items-center justify-between pt-4 mt-4 border-t border-border gap-4 flex-wrap">
-          <div className="min-w-0 flex-1">
-            <p className="font-medium">
-              Lazy senior dev{" "}
-              <a
-                href="https://github.com/DietrichGebert/ponytail"
-                target="_blank"
-                rel="noreferrer"
-                className="text-xs font-normal text-primary underline hover:opacity-80"
-              >
-                (Ponytail)
-              </a>
-            </p>
-            <p className="text-sm text-text-muted">
-              Understand first, reuse existing code, then make the smallest complete change.
-            </p>
-          </div>
-          <div className="flex items-center gap-3 shrink-0">
-            {ponytailEnabled && (
-              <div className="flex flex-col items-end gap-1">
-                <div className="flex items-center gap-1.5">
-                  {PONYTAIL_LEVELS.map((lvl) => (
-                    <button
-                      key={lvl.id}
-                      onClick={() => handlePonytailLevel(lvl.id)}
-                      className={`px-3 py-1.5 rounded text-xs font-medium border transition-colors ${
-                        ponytailLevel === lvl.id
-                          ? "bg-primary text-white border-primary"
-                          : "bg-transparent border-border text-text-muted hover:bg-surface-2"
-                      }`}
-                      title={lvl.desc}
-                    >
-                      {lvl.label}
-                    </button>
-                  ))}
-                </div>
-                <p className="text-xs text-primary">
-                  {
-                    PONYTAIL_LEVELS.find((lvl) => lvl.id === ponytailLevel)
-                      ?.desc
-                  }
-                </p>
-              </div>
-            )}
-            <Toggle
-              checked={ponytailEnabled}
-              onChange={() => handlePonytailEnabled(!ponytailEnabled)}
-            />
-          </div>
-        </div>
-        <p className="text-xs text-text-muted pt-3 mt-3 border-t border-border">
-          Style instructions apply only to eligible requests. Native passthrough, structured output and token-saver opt-out skip injection.
-        </p>
-        {/* PXPIPE hidden from UI — experimental, not exposed to users yet */}
-        {false && (
-        <div className="flex items-center justify-between pt-4 mt-4 border-t border-border gap-4 flex-wrap">
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-3 flex-wrap">
-              <p className="font-medium">
-                Compress prompts as images{" "}
-                <a
-                  href="https://github.com/teamchong/pxpipe"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-xs font-normal text-primary underline hover:opacity-80"
-                >
-                  (PXPIPE)
-                </a>
-              </p>
-              <span className={`text-xs px-2 py-0.5 rounded ${pxpipeChipClass}`}>
-                {pxpipeStatusLabel}
-              </span>
-              <button
-                type="button"
-                onClick={() => setShowPxpipeModal(true)}
-                className="text-xs text-primary underline hover:opacity-80"
-              >
-                {pxpipeStatus.installed ? "Manage" : "Setup"}
-              </button>
-              <a
-                href="/dashboard/pxpipe"
-                className="text-xs text-primary underline hover:opacity-80"
-              >
-                Dashboard
-              </a>
-            </div>
-            <p className="text-sm text-text-muted mt-1">
-              Transforms large textual context into optimized images before
-              sending to the LLM. Ideal for huge prompts, tool outputs and long
-              conversations.
-            </p>
-          </div>
-          <Toggle
-            checked={pxpipeEnabled}
-            disabled={!pxpipeStatus.installed}
-            onChange={() => handlePxpipeEnabled(!pxpipeEnabled)}
-          />
-        </div>
-        )}
-      </Card>
-
-      <Modal
-        isOpen={false}
-        title={pxpipeStatus.installed ? "PXPIPE" : "Setup PXPIPE"}
-        onClose={() => setShowPxpipeModal(false)}
-      >
-        <div className="flex flex-col gap-4">
-          <p className="text-sm text-text-muted">
-            Compress prompts using multimodal encoding. Runs in-process — no
-            extra server or environment variables required.
-          </p>
-          <div className="flex items-center justify-between text-sm">
-            <span>Status</span>
-            <span className={pxpipeHealthy || pxpipeStatus.running ? "text-success" : "text-warning"}>
-              {pxpipeStatusLabel}
-              {pxpipeStatus.version ? ` · v${pxpipeStatus.version}` : ""}
-            </span>
-          </div>
-          {pxpipeHealth?.checks?.length > 0 && (
-            <div className="flex flex-col gap-1 rounded border border-border p-3">
-              <p className="text-sm font-medium mb-1">Health check</p>
-              {pxpipeHealth.checks.map((check) => (
-                <div key={check.id} className="flex items-center justify-between text-xs">
-                  <span className={check.ok ? "text-success" : "text-warning"}>
-                    {check.ok ? "●" : "○"} {check.label}
-                  </span>
-                  {check.detail && (
-                    <span className="text-text-muted font-mono truncate max-w-[50%]">{check.detail}</span>
-                  )}
-                </div>
-              ))}
-              {pxpipeHealth.error && (
-                <p className="text-xs text-warning mt-1">{pxpipeHealth.error}</p>
-              )}
-            </div>
-          )}
-          {!pxpipeStatus.installed ? (
-            <div className="flex flex-col gap-2">
-              <p className="text-sm text-warning">PXPIPE is not installed.</p>
-              <Button
-                onClick={() => pxpipeAction("install")}
-                fullWidth
-                disabled={pxpipeActionLoading || pxpipeStatus.installing}
-              >
-                {pxpipeActionLoading || pxpipeStatus.installing ? "Installing…" : "Install"}
-              </Button>
-              <p className="text-xs text-text-muted">
-                Installs the npm package <code className="font-mono">pxpipe-proxy</code> into
-                the 9Router data directory. May take a few minutes.
-              </p>
-            </div>
-          ) : (
-            <div className="grid grid-cols-2 gap-2">
-              {pxpipeStatus.running ? (
-                <>
-                  <Button onClick={() => pxpipeAction("restart")} variant="ghost" disabled={pxpipeActionLoading}>
-                    Restart
-                  </Button>
-                  <Button onClick={() => pxpipeAction("stop")} variant="ghost" disabled={pxpipeActionLoading}>
-                    Stop
-                  </Button>
-                </>
-              ) : (
-                <Button onClick={() => pxpipeAction("start")} disabled={pxpipeActionLoading}>
-                  {pxpipeActionLoading ? "Starting…" : "Start"}
-                </Button>
-              )}
-              <Button onClick={() => pxpipeAction("install")} variant="ghost" disabled={pxpipeActionLoading}>
-                Repair
-              </Button>
-              <a
-                href="/dashboard/pxpipe#logs"
-                className="col-span-2 rounded border border-border px-4 py-2 text-center text-sm hover:bg-surface-2"
-              >
-                Open Logs
-              </a>
-            </div>
-          )}
-          <div className="flex flex-col gap-1">
-            <p className="text-sm font-medium">Minimum prompt size (chars)</p>
-            <Input
-              value={String(pxpipeMinChars)}
-              onChange={(e) => setPxpipeMinChars(e.target.value)}
-              onBlur={handlePxpipeMinCharsBlur}
-              placeholder="25000"
-              className="font-mono text-sm"
-            />
-            <p className="text-xs text-text-muted">
-              Requests smaller than this bypass PXPIPE and are sent as-is.
-            </p>
-          </div>
-          {pxpipeActionError && (
-            <p className="text-sm text-warning">{pxpipeActionError}</p>
-          )}
-          <div className="flex gap-2">
-            <Button
-              onClick={() => refreshPxpipeStatus().then(runPxpipeHealth)}
-              variant="ghost"
-              fullWidth
-            >
-              Recheck
-            </Button>
-            <Button onClick={() => setShowPxpipeModal(false)} fullWidth>
-              Done
-            </Button>
-          </div>
-        </div>
-      </Modal>
-
-    </div>
-  );
+      </div>)}
+      {error && <p role="alert" className="text-sm text-warning mt-3">{error}</p>}
+      {settings?.sessionDedupMode === "on" && <p className="text-sm text-text-muted mt-3">Historical rewrites can reduce prompt-cache reuse. Saved source bytes are not billed-token or cost savings.</p>}
+      <p className="text-xs text-text-muted mt-3">Style instructions skip native passthrough, structured output and token-saver opt-out.</p>
+    </Card>
+    <Modal isOpen={!!configure} onClose={close} showTrafficLights={false} closeOnOverlay={!saving && !rtkChecking}>
+      <div ref={dialog} role="dialog" aria-modal="true" aria-labelledby="token-saver-configure-title" tabIndex={-1} onKeyDown={trap} className="space-y-4">
+        <h2 id="token-saver-configure-title" className="text-lg font-semibold">Configure {configure === "rtk" ? "RTK" : configure === "caveman" ? "Caveman" : "Ponytail"}</h2>
+        {configure === "rtk" ? <>
+          <p className="text-sm text-text-muted">Local filters work without a sidecar. Configure RTK_URL in the server environment to enable the pinned Rust sidecar, then restart the server. The URL cannot be edited here.</p>
+          <p className="text-sm">Sidecar: {rtkStatus?.config?.endpointState || "Loading…"} · Version: {rtkStatus?.client?.check?.rtkVersion || "—"}</p>
+          <p className="text-sm">{rtkStatus?.client?.check ? `Check ${rtkStatus.client.check.status}: ${rtkStatus.client.check.reason || "healthy"}` : "No synthetic check yet"}</p>
+          <Button onClick={checkRtk} disabled={rtkChecking}>{rtkChecking ? "Checking…" : "Check sidecar"}</Button>
+          <p className="text-xs text-text-muted">Synthetic check — does not count as real usage.</p>
+        </> : <>
+          <div className="flex flex-wrap gap-2">{visibleLevels.map(level => <button type="button" key={level.id} disabled={saving} aria-pressed={draft === level.id} title={level.desc} onClick={() => setDraft(level.id)} className={`px-3 py-2 rounded border text-sm ${draft === level.id ? "bg-primary text-white border-primary" : "border-border hover:bg-surface-2"}`}>{level.label}</button>)}</div>
+          {configure === "caveman" && !wenyan && <Button variant="ghost" onClick={() => setShowWenyan(true)}>+ 文言</Button>}
+          <p className="text-sm text-text-muted">{levels.find(l => l.id === draft)?.desc}</p>
+        </>}
+        {modalError && <p role="alert" className="text-sm text-warning">{modalError}</p>}
+        <div className="flex justify-end gap-2"><Button variant="ghost" disabled={saving || rtkChecking} onClick={close}>{configure === "rtk" ? "Close" : "Cancel"}</Button>{configure !== "rtk" && <Button disabled={saving} onClick={() => patch({ [`${configure}Level`]: draft }, true)}>{saving ? "Saving…" : "Save"}</Button>}</div>
+      </div>
+    </Modal>
+  </div>;
 }

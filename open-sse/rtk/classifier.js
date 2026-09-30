@@ -1,4 +1,25 @@
 import { exceedsPipeGrepCap, isGrepOutput, isPathOutput } from "./local.js";
+import { RTK_COMMAND_FAMILIES } from "../config/rtkConfig.js";
+import { isPassingVitestJson } from "./testOutput.js";
+
+const commandFamilies = new Set(RTK_COMMAND_FAMILIES);
+const testScripts = new Set(["test", "test:unit", "test:integration", "test:e2e"]);
+const isTestScript = argv => argv[1] === "test" || argv[1] === "run" && testScripts.has(argv[2]);
+function commandFamily(executable, argv) {
+  if (["npm", "pnpm", "yarn", "bun"].includes(executable)) return `${executable} ${isTestScript(argv) ? "test" : "other"}`;
+  if (executable === "node") return `node ${argv.includes("--test") ? "test" : "other"}`;
+  const subcommands = { git: ["diff", "status", "log"], cargo: ["test", "build"], go: ["test", "build"], docker: ["ps", "logs"], ruff: ["check", "format"], sqlfluff: ["lint"] };
+  if (subcommands[executable]) {
+    let i = 1;
+    if (executable === "git") while (i < argv.length) {
+      if (["--no-pager", "--no-optional-locks"].includes(argv[i])) i++;
+      else if (["-C", "-c"].includes(argv[i]) && argv[i + 1]) i += 2;
+      else break;
+    }
+    return `${executable} ${subcommands[executable].includes(argv[i]) ? argv[i] : "other"}`;
+  }
+  return commandFamilies.has(executable) ? executable : "other";
+}
 
 const shellTools = new Set(["bash", "shell", "terminal", "run_terminal_cmd", "exec_command", "execute_bash", "run_command"]);
 const direct = new Map(Object.entries({ pytest: "pytest", ctest: "ctest", tsc: "tsc", vitest: "vitest", mypy: "mypy", prettier: "prettier", phpunit: "phpunit", pest: "pest", paratest: "paratest", ecs: "ecs", phpstan: "phpstan", pint: "pint" }));
@@ -86,9 +107,12 @@ export function getRtkToolFamily(call) {
   return "other";
 }
 
-export function classifyToolCall(call, content, onReject) {
+export function classifyToolCall(call, content, onReject, onCommand) {
   if (!call) return reject(onReject, "unlinked_call");
   if (typeof call.name !== "string" || typeof content !== "string") return reject(onReject, "invalid_command_metadata");
+  const family = getRtkToolFamily(call);
+  if (family === "unlinked") return reject(onReject, "unlinked_call");
+  if (["read", "edit", "write", "other"].includes(family)) return reject(onReject, "not_applicable_tool");
   const tool = call.name.split(".").at(-1).toLowerCase();
   let input = call.input;
   if (typeof input === "string" && shellTools.has(tool)) {
@@ -100,19 +124,19 @@ export function classifyToolCall(call, content, onReject) {
     if (Buffer.byteLength(input) > 8192) return reject(onReject, "metadata_limit", "serialized_metadata_limit");
     try { input = JSON.parse(input); } catch { return reject(onReject, "invalid_command_metadata"); }
   }
-  if (!input || typeof input !== "object" || Array.isArray(input)) return reject(onReject, "invalid_command_metadata");
+  if (!input || typeof input !== "object" || Array.isArray(input)) return reject(onReject, family === "grep" || family === "glob" ? "native_metadata_missing" : "invalid_command_metadata");
   if (typeof input.command === "string" && typeof input.cmd === "string" && input.command !== input.cmd) return reject(onReject, "invalid_command_metadata");
   const command = input.command ?? input.cmd;
   if (typeof command !== "string") {
     if (tool === "grep") {
       const hasMetadata = typeof input.path === "string" && typeof input.pattern === "string" && !input.command && !input.cmd;
-      if (!hasMetadata) return reject(onReject, "missing_command", "native_metadata_missing");
-      return isGrepOutput(content) ? "local:grep" : reject(onReject, "missing_command", "native_output_mismatch");
+      if (!hasMetadata) return reject(onReject, "native_metadata_missing", "native_metadata_missing");
+      return isGrepOutput(content) ? "local:grep" : reject(onReject, "unsupported_output_format", "native_output_mismatch");
     }
     if (tool === "glob") {
       const hasMetadata = typeof input.path === "string" && !input.command && !input.cmd;
-      if (!hasMetadata) return reject(onReject, "missing_command", "native_metadata_missing");
-      return isPathOutput(content) ? "local:find" : reject(onReject, "missing_command", "native_output_mismatch");
+      if (!hasMetadata) return reject(onReject, "native_metadata_missing", "native_metadata_missing");
+      return isPathOutput(content) ? "local:find" : reject(onReject, "unsupported_output_format", "native_output_mismatch");
     }
     return reject(onReject, "missing_command", "no_command");
   }
@@ -131,12 +155,12 @@ export function classifyToolCall(call, content, onReject) {
   if (prefix) argv = argv.slice(prefix);
   const base = token => token.replaceAll("\\", "/").split("/").at(-1).replace(/\.exe$/i, "").toLowerCase();
   let executable = base(argv[0]);
-  if (executable === "rtk") return reject(onReject, "already_rtk");
   if (["python", "python3"].includes(executable) && argv[1] === "-m" && argv[2]) argv = argv.slice(2);
   else if (["npx", "bunx"].includes(executable) && argv[1]) argv = argv.slice(1);
   else if (executable === "pnpm" && argv[1] === "exec" && argv[2]) argv = argv.slice(2);
   else if (executable === "uv" && argv[1] === "run" && argv[2]) argv = argv.slice(2);
   executable = base(argv[0]);
+  onCommand?.(commandFamily(executable, argv));
   if (executable === "rtk") return reject(onReject, "already_rtk");
   if (argv.some(arg => ["-z", "--null", "--null-data", "--print0", "-print0"].includes(arg))) return reject(onReject, "unsupported_output_format");
   if (executable === "git") {
@@ -187,7 +211,12 @@ export function classifyToolCall(call, content, onReject) {
     if (argv[1] !== "lint" || !formatFlag(argv.slice(2), "--format", "json")) return reject(onReject, "unsupported_mode");
     return jsonArray(content) ? "sqlfluff-lint" : reject(onReject, "unsupported_output_format");
   }
-  if (["npm", "pnpm", "yarn", "bun"].includes(executable) && (argv[1] === "test" || argv[1] === "run" && argv[2] === "test")) return "local:test";
+  if (["npm", "pnpm", "yarn", "bun"].includes(executable) && isTestScript(argv)) return "local:test";
+  if (executable === "node" && argv.includes("--test")) return "local:test";
+  if (executable === "vitest") {
+    if (content.trimStart().startsWith("{")) return isPassingVitestJson(content) ? "vitest" : reject(onReject, "unsupported_output_format");
+    return "local:test";
+  }
   if (executable === "jest") return "local:test";
   if (executable === "docker" && ["ps", "logs"].includes(argv[1])) return `local:docker-${argv[1]}`;
   if (["ls", "tree"].includes(executable)) return "local:listing";

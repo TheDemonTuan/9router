@@ -52,6 +52,10 @@ describe("token saver numeric state", () => {
     expect(usage.opaqueReasons.cached_content).toBeGreaterThanOrEqual(1100);
     expect(usage.latency.on.sampleCount).toBe(1024);
     expect(usage.latency.on.capacity).toBe(1024);
+    expect(usage.latency.on.totalSamples).toBe(1100);
+    expect(usage.latency.on.p50Ms).toBe(588);
+    expect(usage.latency.on.p95Ms).toBe(1049);
+    expect(usage.latency.on.softTargetExceeded).toBe(1098);
 
     // Verify privacy: sentinel input never appears anywhere in the telemetry snapshot
     expect(JSON.stringify(usage)).not.toContain(secret);
@@ -65,5 +69,25 @@ describe("token saver numeric state", () => {
     expect(snap2.usage.preparationsByUserTurns.single).not.toBe(-999);
     expect(snap2.usage.toolBatches.currentCompleted).not.toBe(-999);
     expect(snap2.usage.opaqueReasons.thought_signature).not.toBe(-999);
+  });
+  it("separates result skips from once-per-preparation reasons", () => {
+    const before = getTokenSaverSnapshot().usage;
+    recordTokenSaverPreparation({ mode: "on", stats: { skipped: { unlinked_call: 2, scan_budget: 5 } }, reason: "scan_budget", commit: { skipReason: "scan_budget" } });
+    const after = getTokenSaverSnapshot().usage;
+    expect(after.skippedResults.unlinked_call - before.skippedResults.unlinked_call).toBe(2);
+    expect(after.skippedPreparations.unlinked_call - before.skippedPreparations.unlinked_call).toBe(0);
+    expect(after.skippedPreparations.scan_budget - before.skippedPreparations.scan_budget).toBe(1);
+    recordTokenSaverPreparation({ mode: "on", reason: "ambiguous_turn" });
+    expect(getTokenSaverSnapshot().usage.skippedPreparations.ambiguous_turn - before.skippedPreparations.ambiguous_turn).toBe(1);
+  });
+  it("does not invent a cumulative denominator for a legacy populated ring", () => {
+    const ring = globalThis[Symbol.for("9router.token-saver.runtime.v2")].usage.latency.on;
+    const total = ring.totalSamples;
+    delete ring.totalSamples;
+    try {
+      expect(getTokenSaverSnapshot().usage.latency.on.totalSamples).toBeNull();
+      recordTokenSaverPreparation({ mode: "on", elapsedMs: 1 });
+      expect(getTokenSaverSnapshot().usage.latency.on.totalSamples).toBeNull();
+    } finally { ring.totalSamples = total; }
   });
 });

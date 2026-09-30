@@ -7,11 +7,12 @@ import {
   RTK_TRACKED_FAMILIES,
   RTK_DIAGNOSTIC_DETAILS,
   RTK_DIAGNOSTIC_OUTCOMES,
+  RTK_COMMAND_FAMILIES,
 } from "../config/rtkConfig.js";
 import { randomUUID } from "node:crypto";
 
 const KEY = Symbol.for("9router.rtk.runtime.v1");
-const reasons = ["disabled", "opted_out", "structured_output", "native_passthrough", "unsupported_shape", "no_eligible_output", "no_change", "compressed", "timeout", "cancelled", "failed"];
+const reasons = ["disabled", "opted_out", "structured_output", "native_passthrough", "existing_marker", "opaque_state", "metadata_budget", "unsupported_shape", "no_eligible_output", "no_change", "compressed", "timeout", "cancelled", "failed"];
 const outcomes = ["attempts", "succeeded", "unchanged", "failed", "busy", "rejected", "timedOut", "cancelled", "totalDurationMs"];
 const skips = ["unconfigured", "invalid_url", "invalid_text", "size_limit", "circuit_open", "probe_in_flight", "saturated", "payload_limit"];
 const zero = keys => Object.fromEntries(keys.map(key => [key, 0]));
@@ -21,6 +22,8 @@ const validDetails = new Set(RTK_DIAGNOSTIC_DETAILS);
 const validFilters = new Set([...RTK_PIPE_FILTERS, ...RTK_LOCAL_FILTERS]);
 const validOutcomes = new Set(RTK_DIAGNOSTIC_OUTCOMES);
 const trackedFamilies = new Set(RTK_TRACKED_FAMILIES);
+const validCommands = new Set(RTK_COMMAND_FAMILIES);
+const safeCommand = value => value === "none" || validCommands.has(value) ? value : "other";
 
 function toSafeInt(val) {
   if (typeof val !== "number" || !Number.isFinite(val) || val <= 0) return 0;
@@ -62,6 +65,9 @@ export function getRtkState() {
     },
     client: { initialized: false, endpoint: null, endpointState: "unconfigured", dispatcher: null, active: 0, openUntil: 0, generation: 0, probe: false, warningAt: 0, lastSuccessAt: null, lastFailure: null, check: null, checkPromise: null },
   };
+  state.usage.commandFamilies ??= {};
+  for (const reason of RTK_REJECTIONS) state.usage.eligibility.rejected[reason] ??= 0;
+  for (const reason of reasons) state.usage.preparationReasons[reason] ??= 0;
   state.usage.diagnostics ??= {
     rejections: {},
     filters: {},
@@ -78,20 +84,31 @@ export function getRtkSnapshot() {
       ...usage, preparationReasons: { ...usage.preparationReasons }, http: { ...usage.http }, local: { ...usage.local },
       skipped: { ...usage.skipped }, filters: Object.values(usage.filters).map(row => ({ ...row, engines: { ...row.engines } })),
       eligibility: { ...usage.eligibility, rejected: { ...usage.eligibility.rejected } },
+      commandFamilies: Object.values(usage.commandFamilies).map(row => ({ ...row })),
       diagnostics,
     },
     diagnostics,
   };
 }
 
-export function recordRtkRejection(toolFamily, reason, detail, inputBytes) {
+export function recordRtkCommand(commandFamily, inputBytes) {
+  const family = safeCommand(commandFamily);
+  if (family === "none") return;
+  const rows = getRtkState().usage.commandFamilies;
+  const row = rows[family] ??= { commandFamily: family, count: 0, inputBytes: 0 };
+  row.count = safeAdd(row.count, 1);
+  row.inputBytes = safeAdd(row.inputBytes, toSafeInt(inputBytes));
+}
+
+export function recordRtkRejection(toolFamily, reason, detail, inputBytes, commandFamily = "none") {
   if (!trackedFamilies.has(toolFamily)) return;
   const diagnostics = getRtkState().usage.diagnostics;
   const safeFamily = validFamilies.has(toolFamily) ? toolFamily : "other";
   const safeReason = validRejections.has(reason) ? reason : "unknown";
   const safeDetail = validDetails.has(detail) ? detail : "none";
   const safeBytes = toSafeInt(inputBytes);
-  const key = `${safeFamily}:${safeReason}:${safeDetail}`;
+  const command = safeCommand(commandFamily);
+  const key = `${safeFamily}:${safeReason}:${safeDetail}:${command}`;
   const existing = diagnostics.rejections[key];
   if (existing) {
     existing.count = safeAdd(existing.count, 1);
@@ -104,6 +121,7 @@ export function recordRtkRejection(toolFamily, reason, detail, inputBytes) {
   }
   diagnostics.rejections[key] = {
     toolFamily: safeFamily,
+    commandFamily: command,
     reason: safeReason,
     detail: safeDetail,
     count: 1,
@@ -111,7 +129,7 @@ export function recordRtkRejection(toolFamily, reason, detail, inputBytes) {
   };
 }
 
-export function recordRtkFilterOutcome(toolFamily, filter, engine, fallback, outcome, inputBytes, outputBytes) {
+export function recordRtkFilterOutcome(toolFamily, filter, engine, fallback, outcome, inputBytes, outputBytes, commandFamily = "none") {
   if (engine !== "local" && engine !== "sidecar") return;
   if (typeof fallback !== "boolean") return;
   const diagnostics = getRtkState().usage.diagnostics;
@@ -120,7 +138,8 @@ export function recordRtkFilterOutcome(toolFamily, filter, engine, fallback, out
   const safeOutcome = validOutcomes.has(outcome) ? outcome : "unknown";
   const safeIn = toSafeInt(inputBytes);
   const safeOut = toSafeInt(outputBytes);
-  const key = `${safeFamily}:${safeFilter}:${engine}:${fallback ? 1 : 0}:${safeOutcome}`;
+  const command = safeCommand(commandFamily);
+  const key = `${safeFamily}:${safeFilter}:${engine}:${fallback ? 1 : 0}:${safeOutcome}:${command}`;
   const existing = diagnostics.filters[key];
   if (existing) {
     existing.count = safeAdd(existing.count, 1);
@@ -134,6 +153,7 @@ export function recordRtkFilterOutcome(toolFamily, filter, engine, fallback, out
   }
   diagnostics.filters[key] = {
     toolFamily: safeFamily,
+    commandFamily: command,
     filter: safeFilter,
     engine,
     fallback,

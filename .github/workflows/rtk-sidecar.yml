@@ -8,6 +8,16 @@ on:
       - open-sse/handlers/chatCore.js
       - tests/unit/rtk*.test.js
       - tests/integration/rtk-sidecar-smoke.mjs
+      - open-sse/token-saver/**
+      - open-sse/config/tokenSaverConfig.js
+      - tests/unit/session-dedup*.test.js
+      - tests/unit/token-saver*.test.js
+      - tests/unit/dashboard-guard.test.js
+      - tests/integration/token-saver-runtime-smoke.mjs
+      - tests/integration/token-saver-settings-smoke.mjs
+      - src/app/(dashboard)/dashboard/token-saver/**
+      - src/app/api/rtk/status/**
+      - src/app/api/token-saver/status/**
       - .deploy/app.yml
       - .github/workflows/rtk-sidecar.yml
   workflow_dispatch:
@@ -29,20 +39,40 @@ jobs:
   verify:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    env:
+      HOME: ${{ runner.temp }}/token-saver-home
+      USERPROFILE: ${{ runner.temp }}/token-saver-home
+      APPDATA: ${{ runner.temp }}/token-saver-home
+      DATA_DIR: ${{ runner.temp }}/token-saver-home/data
+      ENABLE_REQUEST_LOGS: 'false'
+      ENABLE_TRANSLATOR: 'false'
+      RTK_URL: ''
+      HTTP_PROXY: ''
+      HTTPS_PROXY: ''
+      ALL_PROXY: ''
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.2
+      - run: mkdir -p "$HOME" "$DATA_DIR"
       - run: bun install --frozen-lockfile
       - run: bun install --frozen-lockfile --cwd tests
-      - name: Run RTK and request regressions
+      - name: Run focused RTK regressions
         working-directory: tests
-        run: bun x vitest run --config vitest.config.js unit/rtk.test.js unit/rtkKiro.test.js unit/rtk-cursor-pretranslate.test.js unit/force-stream-config.test.js unit/minimax-transport-target-format.test.js
+        run: bun run test --config vitest.config.js unit/rtk-hybrid.test.js unit/rtk-dashboard.test.js unit/rtk.test.js unit/rtkKiro.test.js unit/rtk-cursor-pretranslate.test.js unit/rtk-production.test.js unit/rtk-test-output.test.js
+      - name: Run focused dedup policy and auth regressions
+        working-directory: tests
+        run: bun run test --config vitest.config.js unit/session-dedup.test.js unit/session-dedup-pipeline.test.js unit/token-saver-state.test.js unit/token-saver-fence.test.js unit/token-saver-shadow.test.js unit/token-saver-policy.test.js unit/dashboard-guard.test.js
+      - name: Preserve request regressions
+        working-directory: tests
+        run: bun x vitest run --config vitest.config.js unit/force-stream-config.test.js unit/minimax-transport-target-format.test.js
+      - name: Exercise provider-bound token savers
+        run: bun tests/integration/token-saver-runtime-smoke.mjs
+      - name: Exercise settings persistence
+        run: bun tests/integration/token-saver-settings-smoke.mjs
       - name: Build gateway
-        run: |
-          mkdir -p "$RUNNER_TEMP/rtk-home"
-          HOME="$RUNNER_TEMP/rtk-home" DATA_DIR="$RUNNER_TEMP/rtk-home" bun run build
+        run: bun run build
 
   native:
     needs: verify

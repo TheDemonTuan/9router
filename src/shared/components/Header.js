@@ -113,6 +113,13 @@ const getPageInfo = (pathname) => {
       icon: "security",
       breadcrumbs: [],
     };
+  if (pathname === "/dashboard/token-saver/metrics")
+    return {
+      title: "Token Saver Metrics",
+      description: "Compression results and runtime diagnostics",
+      icon: "savings",
+      breadcrumbs: [],
+    };
   if (pathname.includes("/token-saver"))
     return {
       title: "Token Saver",
