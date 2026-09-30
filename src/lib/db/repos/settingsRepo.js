@@ -52,7 +52,7 @@ const DEFAULT_SETTINGS = {
   mitmRouterBaseUrl: DEFAULT_MITM_ROUTER_BASE,
   dnsToolEnabled: {},
   rtkEnabled: true,
-  sessionDedupMode: "shadow",
+  sessionDedupMode: "off",
   cavemanEnabled: false,
   cavemanLevel: "full",
   ponytailEnabled: false,
@@ -87,7 +87,7 @@ export function mergeWithDefaults(raw) {
   }
   merged.cavemanLevel = normalizeCavemanLevel(merged.cavemanLevel, DEFAULT_SETTINGS.cavemanLevel);
   merged.ponytailLevel = normalizePonytailLevel(merged.ponytailLevel, DEFAULT_SETTINGS.ponytailLevel);
-  merged.sessionDedupMode = normalizeSessionDedupMode(merged.sessionDedupMode);
+  merged.sessionDedupMode = normalizeSessionDedupMode(merged.sessionDedupMode, DEFAULT_SETTINGS.sessionDedupMode);
   if (merged.capacityAdapter && typeof merged.capacityAdapter === "object") {
     for (const capKey of Object.keys(merged.capacityAdapter)) {
       const entry = merged.capacityAdapter[capKey];
@@ -121,7 +121,7 @@ export async function updateSettings(updates) {
       next.ponytailLevel = normalizePonytailLevel(next.ponytailLevel, DEFAULT_SETTINGS.ponytailLevel);
     }
     if (Object.hasOwn(next, "sessionDedupMode")) {
-      next.sessionDedupMode = normalizeSessionDedupMode(next.sessionDedupMode);
+      next.sessionDedupMode = normalizeSessionDedupMode(next.sessionDedupMode, DEFAULT_SETTINGS.sessionDedupMode);
     }
     db.run(
       `INSERT INTO settings(id, data) VALUES(1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data`,

@@ -42,13 +42,15 @@ function hasWellFormedMarker(sourceIndex) {
   return false;
 }
 
-export function planSessionDedup(sourceIndex, { mode = "shadow", fence, signal } = {}) {
+export function planSessionDedup(sourceIndex, { mode = "off", fence, signal } = {}) {
   mode = normalizeSessionDedupMode(mode);
   const stats = {
     scannedResults: sourceIndex?.results ? sourceIndex.results.length : 0,
     scannedBytes: 0,
     eligibleResults: 0,
     exactDuplicatesFound: 0,
+    plannedResults: 0,
+    plannedSaveBytes: 0,
     wouldDedupResults: 0,
     wouldSaveBytes: 0,
     crossFamilyDuplicates: 0,
@@ -83,6 +85,7 @@ export function planSessionDedup(sourceIndex, { mode = "shadow", fence, signal }
     stats.skipped[reason] = (stats.skipped[reason] || 0) + 1;
     plan.replacements.length = 0;
     plan.protection = new WeakMap();
+    stats.plannedResults = stats.plannedSaveBytes = 0;
     stats.wouldDedupResults = stats.wouldSaveBytes = 0;
   };
   for (let i = 0; i < sourceIndex.results.length; i++) {
@@ -170,10 +173,11 @@ export function planSessionDedup(sourceIndex, { mode = "shadow", fence, signal }
       digest,
     };
     plan.replacements.push(ref);
-    if (mode === "shadow") {
-      stats.wouldDedupResults++;
-      stats.wouldSaveBytes += size - markerBytes;
-    }
+    const saved = size - markerBytes;
+    stats.plannedResults++;
+    stats.plannedSaveBytes += saved;
+    stats.wouldDedupResults++;
+    stats.wouldSaveBytes += saved;
   }
   if (mode === "on") {
     for (const ref of plan.replacements) {

@@ -88,10 +88,10 @@ if (!process.argv.includes("--child")) {
     assert.equal(rowMissingLevel.cavemanLevel, undefined, "raw row without cavemanLevel must not gain cavemanLevel on unrelated update");
     const missingLevelSettings = await getSettings();
     assert.equal(missingLevelSettings.cavemanLevel, "full", "missing level gets default full");
-    assert.equal(missingLevelSettings.sessionDedupMode, "shadow");
+    assert.equal(missingLevelSettings.sessionDedupMode, "off");
     assert.equal(rowMissingLevel.sessionDedupMode, undefined);
-    assert.equal(mergeWithDefaults({ sessionDedupMode: "invalid" }).sessionDedupMode, "shadow");
-    assert.equal(mergeWithDefaults({ sessionDedupMode: null }).sessionDedupMode, "shadow");
+    assert.equal(mergeWithDefaults({ sessionDedupMode: "invalid" }).sessionDedupMode, "off");
+    assert.equal(mergeWithDefaults({ sessionDedupMode: null }).sessionDedupMode, "off");
     for (const mode of ["off", "shadow", "on"]) {
       assert.equal(isValidSessionDedupMode(mode), true);
       assert.equal((await updateSettings({ sessionDedupMode: mode })).sessionDedupMode, mode);
@@ -99,8 +99,15 @@ if (!process.argv.includes("--child")) {
       dbReopened = await getAdapter();
       assert.equal((await getSettings()).sessionDedupMode, mode);
     }
-    assert.equal(normalizeSessionDedupMode(true), "shadow");
+    assert.equal(normalizeSessionDedupMode(true), "off");
 
+    // Verify migration 004 migrates saved shadow to off
+    const m004 = (await import("../../src/lib/db/migrations/004-migrate-session-dedup-shadow-to-off.js")).default;
+    dbReopened.run("INSERT INTO settings(id, data) VALUES(1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data", [JSON.stringify({ sessionDedupMode: "shadow" })]);
+    m004.up(dbReopened);
+    const rowMigrated = JSON.parse(dbReopened.get("SELECT data FROM settings WHERE id = 1").data);
+    assert.equal(rowMigrated.sessionDedupMode, "off", "migration 004 must rewrite persisted shadow to off");
+    await updateSettings({ sessionDedupMode: "on" });
     await updateSettings({ cavemanLevel: "not-a-level", ponytailLevel: "not-a-level" });
     const rowUnknown = JSON.parse(dbReopened.get("SELECT data FROM settings WHERE id = 1").data);
     assert.equal(rowUnknown.cavemanLevel, "full", "unknown cavemanLevel must normalize to default full");

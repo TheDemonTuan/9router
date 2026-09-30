@@ -10,8 +10,9 @@ const skipNames = [
 ];
 const numeric = keys => Object.fromEntries(keys.map(key => [key, 0]));
 const usageKeys = [
-  "preparations", "scannedResults", "eligibleResults", "exactDuplicatesFound", "wouldDedupResults",
-  "wouldSaveBytes", "appliedResults", "bytesSaved", "scannedBytes", "estimatedTokensSaved", "crossFamilyDuplicates",
+  "preparations", "scannedResults", "eligibleResults", "exactDuplicatesFound",
+  "plannedResults", "plannedSaveBytes", "wouldDedupResults", "wouldSaveBytes",
+  "appliedResults", "bytesSaved", "scannedBytes", "estimatedTokensSaved", "crossFamilyDuplicates",
   "hashedResults", "intraTurnEligibleResults", "intraTurnDuplicatesFound",
   "budgetStoppedPreparations", "finalGuardSkippedPreparations",
 ];

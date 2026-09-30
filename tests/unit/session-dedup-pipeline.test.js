@@ -52,6 +52,8 @@ describe("session dedup dispatch", () => {
     expect(active.messages[8].content).toBe(active.messages[5].content);
     for (const i of [11, 14, 17]) expect(active.messages[i]).toEqual(before.messages[i]);
     const stats = getTokenSaverSnapshot().usage;
+    expect(stats.plannedResults).toBeGreaterThanOrEqual(2);
+    expect(stats.plannedSaveBytes).toBeGreaterThanOrEqual(1);
     expect(stats.wouldDedupResults).toBeGreaterThanOrEqual(2);
     expect(stats.appliedResults).toBeGreaterThanOrEqual(2);
   });

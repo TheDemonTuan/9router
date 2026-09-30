@@ -542,7 +542,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       }),
       ccFilterNaming: !!chatSettings.ccFilterNaming,
       rtkEnabled: !!chatSettings.rtkEnabled,
-      sessionDedupMode: chatSettings.sessionDedupMode,
+      sessionDedupMode: chatSettings.sessionDedupMode || "off",
       cavemanEnabled: !!chatSettings.cavemanEnabled,
       cavemanLevel: chatSettings.cavemanLevel || "full",
       ponytailEnabled: !!chatSettings.ponytailEnabled,

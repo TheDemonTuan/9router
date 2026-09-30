@@ -41,7 +41,11 @@ describe("request-local exact session dedup", () => {
   });
   it("keeps shadow mutation-free and off avoids hashing", () => {
     const body = fixture(); const before = structuredClone(body);
-    expect(execute(body, "openai", "shadow").plan.stats.wouldDedupResults).toBe(2);
+    const shadowPlan = execute(body, "openai", "shadow").plan;
+    expect(shadowPlan.stats.plannedResults).toBe(2);
+    expect(shadowPlan.stats.wouldDedupResults).toBe(2);
+    expect(shadowPlan.stats.plannedSaveBytes).toBeGreaterThan(0);
+    expect(shadowPlan.stats.wouldSaveBytes).toBe(shadowPlan.stats.plannedSaveBytes);
     expect(body).toEqual(before);
     const off = execute(body, "openai", "off");
     expect(off.plan.stats.scannedBytes).toBe(0);
@@ -238,6 +242,7 @@ describe("request-local exact session dedup", () => {
     const beforeShadow = structuredClone(callerShadow);
     const shadow = execute(callerShadow, "openai-responses", "shadow");
     expect(callerShadow).toEqual(beforeShadow);
+    expect(shadow.plan.stats.plannedResults).toBe(3);
     expect(shadow.plan.stats.wouldDedupResults).toBe(3);
     expect(shadow.commit.appliedResults).toBe(0);
     expect(shadow.plan.stats.hashedResults).toBe(4); // B0 (anchor), B1, B2, B3 (duplicates)
@@ -249,7 +254,8 @@ describe("request-local exact session dedup", () => {
     const beforeOn = structuredClone(callerOn);
     const active = execute(callerOn, "openai-responses", "on");
     expect(active.commit.appliedResults).toBe(3);
-
+    expect(active.plan.stats.plannedResults).toBe(3);
+    expect(active.plan.stats.plannedSaveBytes).toBeGreaterThan(0);
     const outputs = callerOn.input.filter(x => x.type === "function_call_output").map(x => x.output);
     // B0: RAW anchor
     expect(outputs[0]).toBe(big);

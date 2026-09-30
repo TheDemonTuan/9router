@@ -42,6 +42,7 @@ if (!process.argv.includes("--child")) {
   const { createBunSqliteAdapter } = await import("../../src/lib/db/adapters/bunSqliteAdapter.js");
   const { TABLES, buildCreateTableSql } = await import("../../src/lib/db/schema.js");
   const { getAdapter, resetAdapterForTest } = await import("../../src/lib/db/driver.js");
+  const { latestVersion } = await import("../../src/lib/db/migrations/index.js");
   const dbPath = join(process.env.DATA_DIR, "db", "data.sqlite");
   await mkdir(join(process.env.DATA_DIR, "db"), { recursive: true });
   const fixture = JSON.stringify(settings);
@@ -66,7 +67,7 @@ if (!process.argv.includes("--child")) {
       inspect.close();
     } else {
       const db = await getAdapter();
-      assert.equal(db.get("SELECT value FROM _meta WHERE key='schemaVersion'").value, "3");
+      assert.equal(db.get("SELECT value FROM _meta WHERE key='schemaVersion'").value, String(latestVersion()));
       if (scenario !== "fresh" && scenario !== "missing") assertClean(JSON.parse(db.get("SELECT data FROM settings WHERE id=1").data));
       if (scenario === "missing") assert.equal(db.get("SELECT data FROM settings WHERE id=1"), null);
       if (scenario !== "fresh" && scenario !== "missing") assert.deepEqual(db.get("SELECT * FROM providerConnections WHERE id=?", [sentinel.id]), sentinel);

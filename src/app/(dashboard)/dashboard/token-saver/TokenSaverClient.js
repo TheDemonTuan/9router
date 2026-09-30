@@ -178,7 +178,7 @@ export default function TokenSaverClient() {
         if (res.ok) {
           const data = await res.json();
           setRtkEnabledState(data.rtkEnabled !== false);
-          setSessionDedupMode(isValidSessionDedupMode(data.sessionDedupMode) ? data.sessionDedupMode : "shadow");
+          setSessionDedupMode(isValidSessionDedupMode(data.sessionDedupMode) ? data.sessionDedupMode : "off");
           setCavemanEnabled(!!data.cavemanEnabled);
           setCavemanLevel(data.cavemanLevel || "full");
           setPonytailEnabled(!!data.ponytailEnabled);
@@ -261,6 +261,8 @@ export default function TokenSaverClient() {
                   ? "On — verified replacements written to prepared body."
                   : sessionDedupMode === "off"
                   ? "Off"
+                  : sessionDedupMode === "shadow"
+                  ? "Shadow — measurement only"
                   : "Loading…"}
               </span>
             </p>

@@ -17,6 +17,6 @@ export function isValidSessionDedupMode(value) {
   return SESSION_DEDUP_MODES.includes(value);
 }
 
-export function normalizeSessionDedupMode(value, fallback = "shadow") {
+export function normalizeSessionDedupMode(value, fallback = "off") {
   return isValidSessionDedupMode(value) ? value : fallback;
 }

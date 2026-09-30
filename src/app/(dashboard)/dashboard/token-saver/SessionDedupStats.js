@@ -80,8 +80,8 @@ export default function SessionDedupStats({ mode }) {
     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
       <Metric label="Applied results" value={num(usage?.appliedResults)} sub="Final correspondence verified · On" />
       <Metric label="Bytes saved" value={num(usage?.bytesSaved)} sub="Source-payload-equivalent · On" />
-      <Metric label="Source opportunities" value={num(usage?.wouldDedupResults)} sub="Source-stage only · Shadow" />
-      <Metric label="Would save bytes" value={num(usage?.wouldSaveBytes)} sub="Not guaranteed at dispatch · Shadow" />
+      <Metric label="Candidates found" value={num(usage?.plannedResults ?? usage?.wouldDedupResults)} sub="Source-stage planned · Shadow & On" />
+      <Metric label="Potential save" value={num(usage?.plannedSaveBytes ?? usage?.wouldSaveBytes)} sub="Source-payload estimate · Shadow & On" />
       <Metric label="Estimated tokens saved" value={num(usage?.estimatedTokensSaved)} sub="Active estimate only" />
       <Metric label="Cross-family duplicates" value={num(usage?.crossFamilyDuplicates)} sub="Observed only · never deduplicated" />
     </div>
