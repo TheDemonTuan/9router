@@ -25,6 +25,7 @@ import { detectFormatByEndpoint } from "open-sse/translator/formats.js";
 import { detectClientTool } from "open-sse/utils/clientDetector.js";
 import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
+import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy.js";
 
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
 import {
@@ -460,9 +461,11 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
 
     if (provider === "codex") {
       try {
+        const proxyOptions = await resolveConnectionProxyConfig(refreshedCredentials.providerSpecificData || {});
         const catalog = await resolveCodexModels(refreshedCredentials, {
           signal: request?.signal,
           log,
+          proxyOptions,
           onCredentialsRefreshed: async (newCreds) => {
             await updateProviderCredentials(credentials.connectionId, {
               ...newCreds,

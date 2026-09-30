@@ -3,6 +3,8 @@ import { AI_PROVIDERS, ALIAS_TO_ID } from "@/shared/constants/providers";
 import { getModelKind } from "@/shared/constants/models";
 import { getProviderConnections } from "@/lib/localDb";
 import { getDisabledModels } from "@/lib/disabledModelsDb";
+import { updateProviderCredentials } from "@/sse/services/tokenRefresh";
+import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { resolveEffectiveCodexCatalog } from "open-sse/services/codexModels.js";
 import { getAdvertisedThinkingLevels } from "open-sse/providers/thinkingLevels.js";
 
@@ -165,7 +167,15 @@ export async function GET(request) {
     try {
       const connections = await getProviderConnections({ provider: "codex", isActive: true });
       if (connections.length > 0) {
-        const resolved = await resolveEffectiveCodexCatalog(connections);
+        const resolved = await resolveEffectiveCodexCatalog(connections, {
+          resolveProxyOptions: (connection) => resolveConnectionProxyConfig(connection.providerSpecificData || {}),
+          onCredentialsRefreshed: async (connection, refreshed) => {
+            await updateProviderCredentials(connection.id, {
+              ...refreshed,
+              existingProviderSpecificData: connection.providerSpecificData || {},
+            });
+          },
+        });
         if (resolved?.resolved === true) codexCatalog = resolved.models || [];
       }
     } catch {

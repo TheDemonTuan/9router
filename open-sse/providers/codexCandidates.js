@@ -1,4 +1,3 @@
-import { CODEX_COMPATIBILITY_REASON } from "../config/codexModels.js";
 
 /**
  * Merge candidate model lists while filtering out entries already present in models,
@@ -25,14 +24,6 @@ export function mergeCodexCandidateModels(candidateLists, models = []) {
       if (!byId.has(id)) {
         order.push(id);
         byId.set(id, { ...candidate });
-      } else {
-        const existing = byId.get(id);
-        if (
-          candidate.compatibilityReason === CODEX_COMPATIBILITY_REASON.MINIMAL_CLIENT_VERSION &&
-          existing.compatibilityReason !== CODEX_COMPATIBILITY_REASON.MINIMAL_CLIENT_VERSION
-        ) {
-          byId.set(id, { ...candidate });
-        }
       }
     }
   }

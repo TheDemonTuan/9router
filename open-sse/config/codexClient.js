@@ -1,6 +1,6 @@
 const VERSION_PATTERN = /^\d+\.\d+\.\d+$/;
 
-export const DEFAULT_CODEX_CLIENT_VERSION = "0.155.0";
+export const DEFAULT_CODEX_CLIENT_VERSION = "0.159.2";
 
 export function isValidCodexClientVersion(value) {
   return typeof value === "string" && VERSION_PATTERN.test(value.trim());

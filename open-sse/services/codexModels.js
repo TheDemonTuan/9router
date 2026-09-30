@@ -47,20 +47,6 @@ function headerValue(response, name) {
   return null;
 }
 
-function versionParts(value) {
-  if (typeof value !== "string") return null;
-  const match = value.trim().match(/^(\d+)\.(\d+)\.(\d+)$/);
-  return match ? match.slice(1).map(Number) : null;
-}
-
-export function compareCodexVersions(left, right) {
-  const a = versionParts(left) || [0, 0, 0];
-  const b = versionParts(right) || [0, 0, 0];
-  for (let index = 0; index < 3; index += 1) {
-    if (a[index] !== b[index]) return a[index] - b[index];
-  }
-  return 0;
-}
 
 function getRawModels(payload) {
   if (Array.isArray(payload)) return payload;
@@ -205,17 +191,19 @@ export function normalizeCodexModel(record) {
 }
 
 function isAdvertisable(record) {
-  const visibility = String(record?.visibility ?? "").toLowerCase();
-  if (visibility === "hide") return false;
-  if (record?.supported_in_api === false || record?.supportedInApi === false) return false;
+  if (!record || typeof record !== "object") return false;
+  const rawVisibility = record.visibility;
+  if (rawVisibility !== undefined && rawVisibility !== null) {
+    const visibility = String(rawVisibility).trim().toLowerCase();
+    if (visibility !== "" && visibility !== "list") return false;
+  }
   return true;
 }
 
-export function normalizeCodexCatalog(payload, { includeCandidates = false } = {}) {
+export function normalizeCodexCatalog(payload) {
   const records = getRawModels(payload);
   if (!records) throw new Error("Codex model catalog has an invalid shape");
   const models = [];
-  const candidateModels = [];
   const seen = new Set();
 
   for (const record of records) {
@@ -223,17 +211,9 @@ export function normalizeCodexCatalog(payload, { includeCandidates = false } = {
     const model = normalizeCodexModel(record);
     if (!model || seen.has(model.id)) continue;
     seen.add(model.id);
-    if (model.minimalClientVersion && compareCodexVersions(model.minimalClientVersion, CODEX_CLIENT_VERSION) > 0) {
-      candidateModels.push({
-        ...model,
-        discoveryStatus: CODEX_DISCOVERY_STATUS.CANDIDATE,
-        compatibilityReason: CODEX_COMPATIBILITY_REASON.MINIMAL_CLIENT_VERSION,
-      });
-      continue;
-    }
     models.push(model);
   }
-  return includeCandidates ? { models, candidateModels } : models;
+  return models;
 }
 
 function staticModels() {
@@ -457,25 +437,6 @@ function enrichModels(models, officialModels) {
     .filter(Boolean);
 }
 
-function splitCompatibleModels(models, candidateModels = []) {
-  const compatible = [];
-  const candidates = [...candidateModels];
-  for (const model of models || []) {
-    if (model?.minimalClientVersion && compareCodexVersions(model.minimalClientVersion, CODEX_CLIENT_VERSION) > 0) {
-      candidates.push({
-        ...model,
-        discoveryStatus: CODEX_DISCOVERY_STATUS.CANDIDATE,
-        compatibilityReason: CODEX_COMPATIBILITY_REASON.MINIMAL_CLIENT_VERSION,
-      });
-    } else {
-      compatible.push(model);
-    }
-  }
-  return {
-    models: compatible,
-    candidateModels: [...new Map(candidates.filter((model) => model?.id).map((model) => [model.id, model])).values()],
-  };
-}
 
 function appendStaticMedia(models) {
   const result = [...models];
@@ -646,15 +607,14 @@ async function fetchLiveCatalog(connection, previous, options) {
     }
     if (response.status === 304) {
       if (!previous) throw Object.assign(new Error("Codex model catalog returned 304 without cached data"), { status: 304 });
-      return { entry: makeCatalogEntry(previous.models, response, Date.now(), previous), candidates: previous.candidateModels || [] };
+      return { entry: makeCatalogEntry(previous.models, response, Date.now(), previous) };
     }
     if (!response.ok) throw Object.assign(new Error(`Codex model catalog request failed (${response.status})`), { status: response.status });
 
     if (payload == null) throw new Error("Codex model catalog returned empty JSON");
-    const normalized = normalizeCodexCatalog(payload, { includeCandidates: true });
-    const entry = makeCatalogEntry(normalized.models, response, Date.now());
-    entry.candidateModels = normalized.candidateModels;
-    return { entry, candidates: normalized.candidateModels };
+    const normalized = normalizeCodexCatalog(payload);
+    const entry = makeCatalogEntry(normalized, response, Date.now());
+    return { entry };
   }
   throw Object.assign(new Error("Codex model catalog has no access token"), { status: 401 });
 }
@@ -666,23 +626,25 @@ async function resolveLiveCatalog(connection, options) {
   if (!options.forceRefresh && cached?.expiresAt > now) {
     return { entry: cached, source: "cache", access: "observed", stale: false };
   }
-  if (!options.forceRefresh && liveFailures.has(key) && now - liveFailures.get(key) < CODEX_MODEL_RETRY_MS) {
+  const failure = liveFailures.get(key);
+  if (!options.forceRefresh && failure && now - failure.at < CODEX_MODEL_RETRY_MS) {
     return null;
   }
   if (liveInflight.has(key)) return liveInflight.get(key);
 
   const previous = cached || liveLastKnownGood.get(key) || null;
   const promise = fetchLiveCatalog(connection, previous, options)
-    .then(({ entry, candidates }) => {
-      entry.candidateModels = candidates;
+    .then(({ entry }) => {
       liveCache.set(key, entry);
       liveLastKnownGood.set(key, entry);
       liveFailures.delete(key);
       return { entry, source: "live", access: "observed", stale: false };
     })
     .catch((error) => {
-      liveFailures.set(key, Date.now());
-      options.log?.warn?.("CODEX_MODELS", `live discovery failed (${error?.status || "network"})`);
+      const rawStatus = Number(error?.status);
+      const status = Number.isInteger(rawStatus) && rawStatus >= 100 && rawStatus <= 599 ? rawStatus : null;
+      liveFailures.set(key, { at: Date.now(), status });
+      options.log?.warn?.("CODEX_MODELS", `live discovery failed (${status || "network"})`);
       return null;
     })
     .finally(() => liveInflight.delete(key));
@@ -717,15 +679,13 @@ async function resolveOfficialCatalog(options) {
       if (response.status === 304) {
         if (!previous) throw new Error("Codex official catalog returned 304 without cached data");
         officialCache = makeCatalogEntry(previous.models, response, now, previous);
-        officialCache.candidateModels = previous.candidateModels || [];
         officialFailureAt = 0;
         return { ...officialCache, source: "github", access: "unverified", stale: false };
       }
       if (!response.ok) throw Object.assign(new Error(`Codex official catalog request failed (${response.status})`), { status: response.status });
       if (payload == null) throw new Error("Codex official catalog returned empty JSON");
-      const normalized = normalizeCodexCatalog(payload, { includeCandidates: true });
-      officialCache = makeCatalogEntry(normalized.models, response, now);
-      officialCache.candidateModels = normalized.candidateModels;
+      const normalized = normalizeCodexCatalog(payload);
+      officialCache = makeCatalogEntry(normalized, response, now);
       officialFailureAt = 0;
       return { ...officialCache, source: "github", access: "unverified", stale: false };
     })
@@ -742,24 +702,10 @@ async function resolveOfficialCatalog(options) {
 }
 
 function buildStaticFallback() {
-  const models = [];
-  const candidateModels = [];
-  for (const model of staticModels()) {
-    if (!model?.id) continue;
-    if (model.minimalClientVersion && compareCodexVersions(model.minimalClientVersion, CODEX_CLIENT_VERSION) > 0) {
-      candidateModels.push({
-        ...model,
-        discoveryStatus: CODEX_DISCOVERY_STATUS.CANDIDATE,
-        compatibilityReason: CODEX_COMPATIBILITY_REASON.MINIMAL_CLIENT_VERSION,
-        discoverySource: CODEX_DISCOVERY_SOURCE.STATIC,
-      });
-      continue;
-    }
-    models.push({ ...model });
-  }
+  const models = staticModels().map((model) => ({ ...model }));
   return {
     models: withReviews(models),
-    candidateModels,
+    candidateModels: [],
     fetchedAt: null,
     source: CODEX_DISCOVERY_SOURCE.STATIC,
     access: "unverified",
@@ -851,15 +797,7 @@ export async function resolveCodexModels(connection, options = {}) {
     resolveOfficialCatalog(options),
   ]);
 
-  const officialVersionCandidates = (official?.candidateModels || []).map((model) => ({
-    ...model,
-    discoveryStatus: model.discoveryStatus || CODEX_DISCOVERY_STATUS.CANDIDATE,
-    compatibilityReason: model.compatibilityReason || CODEX_COMPATIBILITY_REASON.MINIMAL_CLIENT_VERSION,
-    discoverySource: CODEX_DISCOVERY_SOURCE.OFFICIAL,
-    stale: official?.stale === true,
-  }));
-
-  const officialUnverifiedCandidates = (official?.models || []).map((model) => ({
+  const officialCandidates = (official?.models || []).map((model) => ({
     ...model,
     discoveryStatus: CODEX_DISCOVERY_STATUS.OFFICIAL_UNVERIFIED,
     compatibilityReason: CODEX_COMPATIBILITY_REASON.NOT_OBSERVED_IN_ACCOUNT_CATALOG,
@@ -870,18 +808,8 @@ export async function resolveCodexModels(connection, options = {}) {
   if (hasToken) {
     if (liveResult) {
       const enriched = enrichModels(liveResult.entry.models, official?.models);
-      const compatible = splitCompatibleModels(enriched, liveResult.entry.candidateModels || []);
-      const finalModels = withReviews(appendStaticMedia(compatible.models));
-
-      const liveCandidates = (compatible.candidateModels || []).map((model) => ({
-        ...model,
-        discoverySource: CODEX_DISCOVERY_SOURCE.LIVE,
-      }));
-
-      const candidateModels = mergeCodexCandidateModels(
-        [liveCandidates, officialVersionCandidates, officialUnverifiedCandidates],
-        finalModels
-      );
+      const finalModels = withReviews(appendStaticMedia(enriched));
+      const candidateModels = mergeCodexCandidateModels([officialCandidates], finalModels);
 
       return {
         models: finalModels,
@@ -892,6 +820,7 @@ export async function resolveCodexModels(connection, options = {}) {
         fetchedAt: liveResult.entry.fetchedAt,
         warning: official?.stale ? "Official Codex metadata is stale; account catalog remains active." : null,
         resolved: true,
+        clientVersion: CODEX_CLIENT_VERSION,
       };
     }
 
@@ -899,20 +828,14 @@ export async function resolveCodexModels(connection, options = {}) {
     const stale = liveLastKnownGood.get(key);
     if (stale && stale.staleAt > Date.now()) {
       const enriched = enrichModels(stale.models, official?.models);
-      const compatible = splitCompatibleModels(enriched, stale.candidateModels || []);
-      const finalModels = withReviews(appendStaticMedia(compatible.models));
+      const finalModels = withReviews(appendStaticMedia(enriched));
+      const candidateModels = mergeCodexCandidateModels([officialCandidates], finalModels);
 
-      const liveCandidates = (compatible.candidateModels || []).map((model) => ({
-        ...model,
-        discoverySource: CODEX_DISCOVERY_SOURCE.LIVE,
-      }));
-
-      const candidateModels = mergeCodexCandidateModels(
-        [liveCandidates, officialVersionCandidates, officialUnverifiedCandidates],
-        finalModels
-      );
-
-      let warning = "Live Codex catalog unavailable; using the last known catalog.";
+      const failure = liveFailures.get(key);
+      const prefix = failure?.status
+        ? `Live Codex catalog unavailable (HTTP ${failure.status});`
+        : "Live Codex catalog unavailable (network or invalid response);";
+      let warning = `${prefix} using the last known catalog.`;
       if (official?.stale) warning += " Official Codex metadata is stale.";
 
       return {
@@ -924,24 +847,25 @@ export async function resolveCodexModels(connection, options = {}) {
         fetchedAt: stale.fetchedAt,
         warning,
         resolved: true,
+        clientVersion: CODEX_CLIENT_VERSION,
       };
     }
   }
 
   const finalModels = staticFallback.models;
-  const staticCandidates = (staticFallback.candidateModels || []).map((model) => ({
-    ...model,
-    discoverySource: CODEX_DISCOVERY_SOURCE.STATIC,
-  }));
+  const candidateModels = mergeCodexCandidateModels([officialCandidates], finalModels);
 
-  const candidateModels = mergeCodexCandidateModels(
-    [staticCandidates, officialVersionCandidates, officialUnverifiedCandidates],
-    finalModels
-  );
-
-  let warning = hasToken
-    ? "Live Codex catalog unavailable; using the static fallback. Official-only models are candidates."
-    : "Account access was not verified; using the static fallback.";
+  let warning;
+  if (!hasToken) {
+    warning = "Account access was not verified; using the static fallback.";
+  } else {
+    const key = getCodexCacheKey(connection);
+    const failure = liveFailures.get(key);
+    const prefix = failure?.status
+      ? `Live Codex catalog unavailable (HTTP ${failure.status});`
+      : "Live Codex catalog unavailable (network or invalid response);";
+    warning = `${prefix} using the static fallback. Official-only models are candidates.`;
+  }
   if (official?.stale) {
     warning += " Official Codex metadata is stale.";
   }
@@ -955,6 +879,7 @@ export async function resolveCodexModels(connection, options = {}) {
     fetchedAt: null,
     warning,
     resolved: true,
+    clientVersion: CODEX_CLIENT_VERSION,
   };
 }
 
@@ -978,12 +903,17 @@ export async function resolveEffectiveCodexCatalog(connections, options = {}) {
       stale: false,
       fetchedAt: null,
       warning: null,
+      clientVersion: CODEX_CLIENT_VERSION,
     };
   }
   const results = await Promise.all(candidates.map(async (connection) => {
     try {
+      const proxyOptions = typeof options.resolveProxyOptions === "function"
+        ? await options.resolveProxyOptions(connection)
+        : options.proxyOptions;
       const result = await resolveCodexModels(connection, {
         ...options,
+        proxyOptions,
         onCredentialsRefreshed: async (refreshed) => {
           await options.onCredentialsRefreshed?.(connection, refreshed);
         },
@@ -1011,10 +941,13 @@ export async function resolveEffectiveCodexCatalog(connections, options = {}) {
     accountCatalogs: usable.map(({ connectionId, result }) => ({
       connectionId,
       models: result.models || [],
+      candidateModels: result.candidateModels || [],
       access: result.access,
       source: result.source,
       stale: result.stale === true,
       fetchedAt: result.fetchedAt || null,
+      warning: result.warning,
+      clientVersion: result.clientVersion || CODEX_CLIENT_VERSION,
     })),
     resolved: usable.length > 0,
     source: verified.length ? "effective" : (usable[0]?.result?.source || "static"),
@@ -1022,6 +955,7 @@ export async function resolveEffectiveCodexCatalog(connections, options = {}) {
     stale: usable.some(({ result }) => result.stale === true),
     fetchedAt: usable.map(({ result }) => result.fetchedAt).filter(Boolean).sort().at(-1) || null,
     warning: usable.map(({ result }) => result.warning).filter(Boolean).join(" ") || null,
+    clientVersion: CODEX_CLIENT_VERSION,
   };
 }
 

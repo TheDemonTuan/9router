@@ -180,8 +180,8 @@ describe("Codex discovery flow & regression matrix", () => {
     const candidateIds = result.candidateModels.map((m) => m.id);
     expect(candidateIds).toContain("gpt-discovery-next");
     expect(candidateIds).toContain("future-version");
+    expect(candidateIds).toContain("api-disabled");
     expect(candidateIds).not.toContain("hidden-model");
-    expect(candidateIds).not.toContain("api-disabled");
 
     const mCandidate = result.candidateModels.find((m) => m.id === "gpt-discovery-next");
     expect(mCandidate).toMatchObject({
@@ -195,8 +195,8 @@ describe("Codex discovery flow & regression matrix", () => {
     const futureCandidate = result.candidateModels.find((m) => m.id === "future-version");
     expect(futureCandidate).toMatchObject({
       id: "future-version",
-      discoveryStatus: CODEX_DISCOVERY_STATUS.CANDIDATE,
-      compatibilityReason: CODEX_COMPATIBILITY_REASON.MINIMAL_CLIENT_VERSION,
+      discoveryStatus: CODEX_DISCOVERY_STATUS.OFFICIAL_UNVERIFIED,
+      compatibilityReason: CODEX_COMPATIBILITY_REASON.NOT_OBSERVED_IN_ACCOUNT_CATALOG,
       discoverySource: CODEX_DISCOVERY_SOURCE.OFFICIAL,
       stale: false,
     });
@@ -307,6 +307,7 @@ describe("Codex discovery flow & regression matrix", () => {
     expect(staleResult.access).toBe("stale");
     expect(staleResult.models.map((m) => m.id)).toContain("base-live");
     expect(staleResult.candidateModels.map((m) => m.id)).toContain("gpt-discovery-next");
+    expect(staleResult.warning).toContain("Live Codex catalog unavailable (HTTP 502); using the last known catalog.");
 
     // Cold failure for an unknown account
     const cold = await resolveCodexModels({ id: "acc-cold", accessToken: "token-cold" }, { forceRefresh: true });
@@ -314,7 +315,7 @@ describe("Codex discovery flow & regression matrix", () => {
     expect(cold.access).toBe("unverified");
     expect(cold.models.map((m) => m.id)).toContain("gpt-6-sol");
     expect(cold.candidateModels.map((m) => m.id)).toContain("gpt-discovery-next");
-    expect(cold.warning).toContain("Live Codex catalog unavailable; using the static fallback.");
+    expect(cold.warning).toContain("Live Codex catalog unavailable (HTTP 502); using the static fallback.");
   });
 
   // 5. Official cache retry cooldown returns stale snapshot, resets on 304
@@ -521,5 +522,86 @@ describe("Codex discovery flow & regression matrix", () => {
     });
     const failChatRes = await handleChat(failChatReq);
     expect(failChatRes.status).toBe(404);
+  });
+  // 9. Multi-proxy isolation: two connections with distinct proxy configurations
+  it("routes discovery through each connection's specific proxy and validates ChatGPT-Account-ID", async () => {
+    clearCodexModelCache();
+    mocks.proxyAwareFetch.mockImplementation(async (url, opts, proxyOptions) => {
+      if (url.startsWith(CODEX_MODELS_URL)) {
+        const auth = opts?.headers?.Authorization || "";
+        const acct = opts?.headers?.["ChatGPT-Account-ID"];
+        const proxyUrl = proxyOptions?.connectionProxyUrl;
+
+        if (auth.includes("token-a") && acct === "acct-a" && proxyUrl === "http://proxy-a.test:8080") {
+          return makeResponse({ models: [syntheticModel("gpt-6.1-sol")] });
+        }
+        if (auth.includes("token-b") && acct === "acct-b" && proxyUrl === "http://proxy-b.test:8080") {
+          return makeResponse({ models: [syntheticModel("gpt-6-luna")] });
+        }
+        // Missing or cross-wired proxy/account -> reject with 403
+        return makeResponse({ error: "forbidden" }, 403);
+      }
+      if (url.startsWith(CODEX_OFFICIAL_MODELS_URL)) {
+        return makeResponse({ models: [syntheticModel("gpt-6.1-sol"), syntheticModel("gpt-6-luna")] });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+
+    mocks.connections = [
+      {
+        id: "cx-proxy-a",
+        provider: "codex",
+        name: "Conn A",
+        accessToken: "token-a",
+        isActive: true,
+        providerSpecificData: {
+          chatgptAccountId: "acct-a",
+          connectionProxyEnabled: true,
+          connectionProxyUrl: "http://proxy-a.test:8080",
+        },
+      },
+      {
+        id: "cx-proxy-b",
+        provider: "codex",
+        name: "Conn B",
+        accessToken: "token-b",
+        isActive: true,
+        providerSpecificData: {
+          chatgptAccountId: "acct-b",
+          connectionProxyEnabled: true,
+          connectionProxyUrl: "http://proxy-b.test:8080",
+        },
+      },
+    ];
+
+    // Verify /api/models with cold cache
+    clearCodexModelCache();
+    const apiModelsRes = await getModelsApi();
+    const apiModelsJson = await apiModelsRes.json();
+    const apiCodexIds = apiModelsJson.models.filter((m) => m.provider === "cx").map((m) => m.model);
+    expect(apiCodexIds).toContain("gpt-6.1-sol");
+    expect(apiCodexIds).toContain("gpt-6-luna");
+
+    // Verify /v1/models with cold cache
+    clearCodexModelCache();
+    const v1Models = await buildModelsList(["llm"]);
+    const v1Ids = v1Models.map((m) => m.id);
+    expect(v1Ids).toContain("cx/gpt-6.1-sol");
+    expect(v1Ids).toContain("cx/gpt-6-luna");
+
+    // Verify /v1/models/info with cold cache
+    clearCodexModelCache();
+    const infoReqA = new Request("http://localhost/v1/models/info?id=cx/gpt-6.1-sol");
+    const infoResA = await getModelInfo(infoReqA);
+    expect(infoResA.status).toBe(200);
+    const infoJsonA = await infoResA.json();
+    expect(infoJsonA.id).toBe("cx/gpt-6.1-sol");
+
+    clearCodexModelCache();
+    const infoReqB = new Request("http://localhost/v1/models/info?id=cx/gpt-6-luna");
+    const infoResB = await getModelInfo(infoReqB);
+    expect(infoResB.status).toBe(200);
+    const infoJsonB = await infoResB.json();
+    expect(infoJsonB.id).toBe("cx/gpt-6-luna");
   });
 });

@@ -167,17 +167,21 @@ const PROVIDER_MODELS_CONFIG = {
     parseResponse: (data) => data.models || []
   },
   codex: {
-    customResolver: async (connection, options = {}) => resolveCodexModels(connection, {
-      forceRefresh: options.forceRefresh === true,
-      signal: options.signal,
-      log: console,
-      onCredentialsRefreshed: async (refreshed) => {
-        await updateProviderCredentials(connection.id, {
-          ...refreshed,
-          existingProviderSpecificData: connection.providerSpecificData || {},
-        });
-      },
-    }),
+    customResolver: async (connection, options = {}) => {
+      const proxyOptions = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
+      return resolveCodexModels(connection, {
+        forceRefresh: options.forceRefresh === true,
+        signal: options.signal,
+        log: console,
+        proxyOptions,
+        onCredentialsRefreshed: async (refreshed) => {
+          await updateProviderCredentials(connection.id, {
+            ...refreshed,
+            existingProviderSpecificData: connection.providerSpecificData || {},
+          });
+        },
+      });
+    },
   },
   antigravity: {
     url: "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:models",
@@ -652,7 +656,8 @@ export async function GET(request, { params }) {
         ...(result.stale !== undefined ? { stale: result.stale } : {}),
         ...(result.resolved !== undefined ? { resolved: result.resolved } : {}),
         ...(result.candidateModels?.length ? { candidateModels: result.candidateModels } : {}),
-        ...(result.fetchedAt ? { fetchedAt: result.fetchedAt } : {})
+        ...(result.fetchedAt ? { fetchedAt: result.fetchedAt } : {}),
+        ...(result.clientVersion ? { clientVersion: result.clientVersion } : {})
       });
     }
 

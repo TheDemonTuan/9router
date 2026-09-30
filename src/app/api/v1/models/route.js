@@ -60,6 +60,7 @@ const LIVE_MODEL_RESOLVERS = {
     const connections = (ctx?.connections || []).filter((entry) => entry.provider === "codex");
     const resolved = await resolveEffectiveCodexCatalog(connections.length ? connections : [conn], {
       log: console,
+      resolveProxyOptions: (connection) => resolveConnectionProxyConfig(connection.providerSpecificData || {}),
       onCredentialsRefreshed: async (connection, refreshed) => {
         await updateProviderCredentials(connection.id, {
           ...refreshed,

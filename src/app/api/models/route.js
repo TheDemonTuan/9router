@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getModelAliases, setModelAlias, getCustomModels, getProviderConnections } from "@/models";
 import { getDisabledModels } from "@/lib/disabledModelsDb";
 import { updateProviderCredentials } from "@/sse/services/tokenRefresh";
+import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { AI_MODELS } from "@/shared/constants/config";
 import { getProviderAlias } from "@/shared/constants/providers";
 import { getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
@@ -99,6 +100,7 @@ export async function GET() {
     const codexConnections = await getProviderConnections({ provider: "codex", isActive: true });
     if (codexConnections.length > 0) {
       const effective = await resolveEffectiveCodexCatalog(codexConnections, {
+        resolveProxyOptions: (connection) => resolveConnectionProxyConfig(connection.providerSpecificData || {}),
         onCredentialsRefreshed: async (connection, refreshed) => {
           await updateProviderCredentials(connection.id, {
             ...refreshed,

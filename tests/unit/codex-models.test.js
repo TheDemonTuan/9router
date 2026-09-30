@@ -6,7 +6,6 @@ import {
   CODEX_OFFICIAL_MODELS_URL,
   CODEX_MODELS_URL,
   clearCodexModelCache,
-  compareCodexVersions,
   getCodexCacheKey,
   normalizeCodexCatalog,
   normalizeCodexModel,
@@ -42,28 +41,29 @@ beforeEach(() => {
   clearCodexModelCache();
 });
 
-describe("Codex client version", () => {
-  it("uses one current version for model discovery", () => {
-    expect(CODEX_CLIENT_VERSION).toBe("0.155.0");
-    expect(compareCodexVersions("0.154.0", CODEX_CLIENT_VERSION)).toBeLessThan(0);
-    expect(compareCodexVersions("0.155.0", CODEX_CLIENT_VERSION)).toBe(0);
-    expect(compareCodexVersions("0.99.0", "0.155.0")).toBeLessThan(0);
-  });
-});
-
 describe("normalizeCodexCatalog", () => {
-  it("accepts reasoning objects and filters hidden, disabled, and incompatible entries", () => {
-    const { models, candidateModels } = normalizeCodexCatalog({
+  it("accepts reasoning objects and preserves supported_in_api=false and future minimal versions", () => {
+    const models = normalizeCodexCatalog({
       models: [
         liveModel("gpt-6-sol", [{ effort: "low" }, { effort: "ultra" }]),
         { ...liveModel("gpt-6-luna"), visibility: "hide" },
+        { ...liveModel("gpt-none"), visibility: "none" },
         { ...liveModel("disabled"), supported_in_api: false },
         { ...liveModel("future"), minimal_client_version: "9.0.0" },
+        { ...liveModel("missing-visibility"), visibility: undefined },
       ],
-    }, { includeCandidates: true });
+    });
 
-    expect(models).toHaveLength(1);
-    expect(models[0]).toMatchObject({
+    const ids = models.map((m) => m.id);
+    expect(ids).toContain("gpt-6-sol");
+    expect(ids).toContain("disabled");
+    expect(ids).toContain("future");
+    expect(ids).toContain("missing-visibility");
+    expect(ids).not.toContain("gpt-6-luna");
+    expect(ids).not.toContain("gpt-none");
+
+    const sol = models.find((m) => m.id === "gpt-6-sol");
+    expect(sol).toMatchObject({
       id: "gpt-6-sol",
       name: "GPT-6-SOL",
       contextLength: 272000,
@@ -71,7 +71,14 @@ describe("normalizeCodexCatalog", () => {
       supportedReasoningLevels: ["low", "ultra"],
       capabilities: { reasoning: true, vision: true },
     });
-    expect(candidateModels.map((model) => model.id)).toEqual(["future"]);
+    const future = models.find((m) => m.id === "future");
+    expect(future.minimalClientVersion).toBe("9.0.0");
+  });
+
+  it("throws on invalid catalog shapes and returns empty array on empty models", () => {
+    expect(() => normalizeCodexCatalog(null)).toThrow("Codex model catalog has an invalid shape");
+    expect(() => normalizeCodexCatalog("not-an-object")).toThrow("Codex model catalog has an invalid shape");
+    expect(normalizeCodexCatalog({ models: [] })).toEqual([]);
   });
 });
 
@@ -192,7 +199,7 @@ describe("resolveCodexModels", () => {
     });
     expect(second.source).toBe("cache");
     expect(calls).toHaveLength(2);
-    expect(calls[0].url).toContain("client_version=0.155.0");
+    expect(calls[0].url).toContain(`client_version=${CODEX_CLIENT_VERSION}`);
     expect(calls[0].options.headers.Authorization).toBe("Bearer token-a");
     expect(calls[0].options.headers["ChatGPT-Account-ID"]).toBe("acct-a");
   });
@@ -308,6 +315,120 @@ describe("resolveCodexModels", () => {
     expect(result.models.map((m) => m.id)).not.toContain("gpt-discovery-next");
     const candidateIds = (result.candidateModels || []).map((m) => m.id);
     expect(candidateIds).toContain("gpt-discovery-next");
+  });
+  it("promotes live gpt-6.1-sol, supported_in_api=false, and minimal=9.0.0 without demoting from official metadata", async () => {
+    const fetchImpl = vi.fn(async (url) => {
+      if (url.startsWith(CODEX_MODELS_URL)) {
+        return response({
+          models: [
+            {
+              slug: "gpt-6.1-sol",
+              display_name: "GPT-6.1-Sol",
+              context_window: 256000,
+              max_context_window: 512000,
+              supported_reasoning_levels: [{ effort: "low" }, { effort: "ultra" }],
+              default_reasoning_level: "low",
+              input_modalities: ["text", "image"],
+              visibility: "list",
+              supported_in_api: true,
+              minimal_client_version: "0.153.0",
+            },
+            {
+              slug: "synthetic-disabled-future",
+              display_name: "Synthetic Disabled Future",
+              visibility: "list",
+              supported_in_api: false,
+              minimal_client_version: "9.0.0",
+            },
+            {
+              slug: "live-without-min",
+              display_name: "Live Without Min",
+              visibility: "list",
+            },
+          ],
+        });
+      }
+      if (url.startsWith(CODEX_OFFICIAL_MODELS_URL)) {
+        return response({
+          models: [
+            {
+              slug: "gpt-6.1-sol",
+              display_name: "GPT-6.1-Sol Official",
+              minimal_client_version: "0.153.0",
+            },
+            {
+              slug: "live-without-min",
+              minimal_client_version: "9.0.0",
+            },
+          ],
+        });
+      }
+      throw new Error(`Unexpected url: ${url}`);
+    });
+
+    const result = await resolveCodexModels({ id: "acc-sol", accessToken: "token-sol" }, { fetchImpl });
+    expect(result.access).toBe("observed");
+    expect(result.clientVersion).toBe(CODEX_CLIENT_VERSION);
+
+    const modelIds = result.models.map((m) => m.id);
+    expect(modelIds).toContain("gpt-6.1-sol");
+    expect(modelIds).toContain("synthetic-disabled-future");
+    expect(modelIds).toContain("live-without-min");
+
+    const candidateIds = (result.candidateModels || []).map((m) => m.id);
+    expect(candidateIds).not.toContain("gpt-6.1-sol");
+    expect(candidateIds).not.toContain("synthetic-disabled-future");
+    expect(candidateIds).not.toContain("live-without-min");
+  });
+
+  it("handles cold/warm HTTP 403 with exact warning format and resets warning on recovery", async () => {
+    let httpStatus = 403;
+    const fetchImpl = vi.fn(async (url) => {
+      if (url.startsWith(CODEX_MODELS_URL)) {
+        if (httpStatus >= 400) return response({ error: "forbidden" }, httpStatus);
+        return response({ models: [liveModel("recovered-model")] });
+      }
+      if (url.startsWith(CODEX_OFFICIAL_MODELS_URL)) {
+        return response({ models: [liveModel("official-only-model")] });
+      }
+      throw new Error(`Unexpected url: ${url}`);
+    });
+
+    // Cold 403
+    const cold = await resolveCodexModels({ id: "acc-cold", accessToken: "token" }, { fetchImpl });
+    expect(cold.source).toBe("static");
+    expect(cold.access).toBe("unverified");
+    expect(cold.warning).toContain("Live Codex catalog unavailable (HTTP 403); using the static fallback.");
+    expect(cold.clientVersion).toBe(CODEX_CLIENT_VERSION);
+    expect(cold.candidateModels.map((m) => m.id)).toContain("official-only-model");
+
+    // Recover to populate cache / LKG
+    httpStatus = 200;
+    const recovered = await resolveCodexModels({ id: "acc-cold", accessToken: "token" }, { fetchImpl, forceRefresh: true });
+    expect(recovered.access).toBe("observed");
+    expect(recovered.warning).toBeNull();
+    expect(recovered.models.map((m) => m.id)).toContain("recovered-model");
+
+    // Warm 403 -> uses LKG stale with HTTP 403 warning
+    httpStatus = 403;
+    const warm = await resolveCodexModels({ id: "acc-cold", accessToken: "token" }, { fetchImpl, forceRefresh: true });
+    expect(warm.access).toBe("stale");
+    expect(warm.models.map((m) => m.id)).toContain("recovered-model");
+    expect(warm.warning).toContain("Live Codex catalog unavailable (HTTP 403); using the last known catalog.");
+  });
+
+  it("sanitizes network or malformed errors without leaking sentinels", async () => {
+    const SECRET_SENTINEL = "SUPER_SECRET_TOKEN_VALUE_XYZ";
+    const fetchImpl = vi.fn(async (url) => {
+      if (url.startsWith(CODEX_MODELS_URL)) {
+        throw new Error(`Network failure with ${SECRET_SENTINEL}`);
+      }
+      return response({ models: [] });
+    });
+
+    const result = await resolveCodexModels({ id: "acc-sec", accessToken: "token" }, { fetchImpl });
+    expect(result.warning).toContain("Live Codex catalog unavailable (network or invalid response);");
+    expect(result.warning).not.toContain(SECRET_SENTINEL);
   });
 });
 

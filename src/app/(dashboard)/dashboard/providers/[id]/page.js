@@ -81,6 +81,7 @@ export default function ProviderDetailPage() {
   const [codexCatalogResolved, setCodexCatalogResolved] = useState(false);
   const [codexCatalogAccess, setCodexCatalogAccess] = useState(null);
   const [codexCatalogLoading, setCodexCatalogLoading] = useState(false);
+  const [codexCatalogClientVersion, setCodexCatalogClientVersion] = useState(null);
   const codexForceRefreshRef = useRef(false);
   const lastCodexFetchTimeRef = useRef(0);
   const codexInflightRef = useRef(false);
@@ -547,6 +548,7 @@ export default function ProviderDetailPage() {
       setCodexCatalogResolved(false);
       setCodexCatalogAccess(null);
       setCodexCatalogLoading(false);
+      setCodexCatalogClientVersion(null);
       lastCodexFetchTimeRef.current = 0;
       return;
     }
@@ -562,6 +564,7 @@ export default function ProviderDetailPage() {
       setCodexCatalogResolved(false);
       setCodexCatalogAccess(null);
       setCodexCatalogLoading(false);
+      setCodexCatalogClientVersion(null);
       setLiveModelsError(null);
       lastCodexFetchTimeRef.current = 0;
       return;
@@ -604,12 +607,57 @@ export default function ProviderDetailPage() {
               cache: "no-store",
               signal: batchAbortController.signal,
             })
-              .then(async (res) => ({ ok: res.ok, data: await res.json().catch(() => null) }))
-              .catch(() => ({ ok: false, data: null }))
+              .then(async (res) => ({
+                connectionId: connection.id,
+                connectionName: connection.name || connection.id,
+                ok: res.ok,
+                status: res.status,
+                data: await res.json().catch(() => null),
+              }))
+              .catch(() => ({
+                connectionId: connection.id,
+                connectionName: connection.name || connection.id,
+                ok: false,
+                status: null,
+                data: null,
+              }))
           )
         );
 
         if (cancelled) return;
+
+        const warnings = [];
+        const seenWarnings = new Set();
+        const clientVersions = [];
+        const seenVersions = new Set();
+
+        for (const r of results) {
+          const label = r.connectionName;
+          if (r.data?.clientVersion && typeof r.data.clientVersion === "string") {
+            const v = r.data.clientVersion.trim();
+            if (v && !seenVersions.has(v)) {
+              seenVersions.add(v);
+              clientVersions.push(v);
+            }
+          }
+          if (r.data?.warning && typeof r.data.warning === "string") {
+            const warnText = `[${label}] ${r.data.warning.trim()}`;
+            if (!seenWarnings.has(warnText)) {
+              seenWarnings.add(warnText);
+              warnings.push(warnText);
+            }
+          } else if (!r.ok || r.data?.resolved !== true) {
+            const failureReason = r.status ? `HTTP ${r.status}` : "network or invalid response";
+            const warnText = `[${label}] Live Codex catalog unavailable (${failureReason}).`;
+            if (!seenWarnings.has(warnText)) {
+              seenWarnings.add(warnText);
+              warnings.push(warnText);
+            }
+          }
+        }
+
+        const effectiveVersion = clientVersions.length ? clientVersions.join(", ") : null;
+        setCodexCatalogClientVersion(effectiveVersion);
 
         const successful = results.filter(
           (r) => r.ok && r.data?.resolved === true && Array.isArray(r.data?.models)
@@ -617,10 +665,11 @@ export default function ProviderDetailPage() {
 
         if (!successful.length) {
           setCodexCatalogResolved((prevResolved) => {
+            const combinedWarning = warnings.join(" ");
             if (prevResolved) {
-              setLiveModelsError("Unable to refresh Codex catalog; showing previous results.");
+              setLiveModelsError(combinedWarning || "Unable to refresh Codex catalog; showing previous results.");
             } else {
-              setLiveModelsError("No Codex models are available.");
+              setLiveModelsError(combinedWarning || "No Codex models are available.");
               setLiveModels([]);
               setCodexCandidateModels([]);
             }
@@ -649,15 +698,13 @@ export default function ProviderDetailPage() {
             ? (verified.some((r) => r.data?.access === "observed") ? "observed" : "stale")
             : "unverified";
 
-          const hasFailure = results.some((r) => !r.ok || r.data?.resolved !== true);
-
           setLiveModels(selectableList);
           setCodexCandidateModels(candidateList);
           setCodexCatalogResolved(true);
           setCodexCatalogAccess(access);
 
-          if (hasFailure) {
-            setLiveModelsError("Some Codex account catalogs could not be refreshed.");
+          if (warnings.length > 0) {
+            setLiveModelsError(warnings.join(" "));
           } else {
             setLiveModelsError(null);
           }
@@ -2021,6 +2068,9 @@ export default function ProviderDetailPage() {
               {translate("Refresh Codex catalog")}
             </Button>
             <span className="text-xs text-text-muted">
+              {translate("Codex client version")}: {codexCatalogClientVersion || "unknown"}
+            </span>
+            <span className="text-xs text-text-muted">
               {translate("Auto-refreshes every 5 minutes while this tab is visible.")}
             </span>
             {codexCatalogAccess === "unverified" && (
@@ -2039,20 +2089,18 @@ export default function ProviderDetailPage() {
           <div className="mb-4 rounded-lg border border-border bg-surface-secondary/40 p-3">
             <div className="mb-2 flex items-center justify-between">
               <span className="text-sm font-medium text-text-primary">
-                {translate("Discovered candidates")}
+                {translate("Models not observed in account catalogs")}
               </span>
               <span className="text-xs text-text-muted">
                 {codexCandidateModels.length}
               </span>
             </div>
             <p className="mb-3 text-xs text-text-muted">
-              {translate("Candidates are not advertised by /v1/models. They become available after account discovery confirms them.")}
+              {translate("These models are listed in the official Codex catalog but have not been returned by the connected accounts. This is not an access-denied result. They are not advertised by /v1/models.")}
             </p>
             <div className="space-y-2">
               {codexCandidateModels.map((candidate) => {
                 const source = candidate.discoverySource || "official";
-                const isVersionBlocked = candidate.compatibilityReason === "minimal_client_version";
-                const isOfficialUnverified = candidate.discoveryStatus === "official-unverified" || candidate.compatibilityReason === "not_observed_in_account_catalog";
                 return (
                   <div
                     key={candidate.id}
@@ -2068,6 +2116,11 @@ export default function ProviderDetailPage() {
                       <span className="rounded bg-surface-secondary/80 px-1.5 py-0.5 text-[11px] text-text-muted">
                         {translate(`Source: ${source}`)}
                       </span>
+                      {candidate.minimalClientVersion && (
+                        <span className="rounded bg-surface-secondary/80 px-1.5 py-0.5 text-[11px] text-text-muted">
+                          {`v${candidate.minimalClientVersion}`}
+                        </span>
+                      )}
                       {candidate.stale && (
                         <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[11px] text-amber-600 dark:text-amber-400">
                           {translate("Cached official metadata")}
@@ -2075,27 +2128,12 @@ export default function ProviderDetailPage() {
                       )}
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
-                      {isOfficialUnverified && (
-                        <>
-                          <Badge variant="secondary" size="sm">
-                            {translate("Candidate")}
-                          </Badge>
-                          <span className="text-[11px] text-text-muted">
-                            {translate("Account access: not yet observed")}
-                          </span>
-                        </>
-                      )}
-                      {isVersionBlocked && (
-                        <>
-                          <Badge variant="warning" size="sm">
-                            {translate("Candidate")}
-                          </Badge>
-                          <span className="text-[11px] text-text-muted">
-                            {translate("Requires Codex client")}{" "}
-                            {candidate.minimalClientVersion ? `v${candidate.minimalClientVersion}` : ""}
-                          </span>
-                        </>
-                      )}
+                      <Badge variant="secondary" size="sm">
+                        {translate("Not observed")}
+                      </Badge>
+                      <span className="text-[11px] text-text-muted">
+                        {translate("No matching account catalog entry")}
+                      </span>
                     </div>
                   </div>
                 );
