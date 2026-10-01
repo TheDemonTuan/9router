@@ -18,6 +18,7 @@ function protect(map, result, reason) {
   map.set(result.owner, keys);
 }
 function reasonFor(result, sourceIndex) {
+  if (result.opaqueProtected) return "opaque";
   if (result.cacheProtected) return "cacheFence";
   if (result.blockedReason === "current") return "current";
   if (result.isError) return "error";
@@ -58,11 +59,11 @@ export function planSessionDedup(sourceIndex, { mode = "off", fence, signal } = 
     intraTurnEligibleResults: 0,
     intraTurnDuplicatesFound: 0,
     budgetStoppedPreparations: 0,
-    protected: { current: 0, recent: 0, error: 0, cacheFence: 0, incompleteBatch: 0 },
+    protected: { current: 0, recent: 0, error: 0, cacheFence: 0, opaque: 0, incompleteBatch: 0 },
     skipped: {},
   };
   const plan = { mode, stats, protection: new WeakMap(), replacements: [], hasExistingMarkers: false, skipReason: null };
-  if (!sourceIndex?.supported || fence?.reason === "opaque_state") return plan;
+  if (!sourceIndex?.supported || fence?.protectAll && fence?.reason === "opaque_state") return plan;
   if (sourceIndex.blockedReason) {
     plan.skipReason = sourceIndex.blockedReason;
     return plan;
@@ -223,6 +224,7 @@ const writable = (owner, key) => {
 export function commitSessionDedup(body, {
   sourceFormat,
   finalFormat,
+  targetModel,
   sourceIndex,
   plan,
   toolNameMap,
@@ -231,7 +233,7 @@ export function commitSessionDedup(body, {
   finalIndex: providedFinalIndex,
   finalFence: providedFinalFence,
 } = {}) {
-  const zero = reason => ({ appliedResults: 0, bytesSaved: 0, estimatedTokensSaved: 0, retainedReferences: 0, skipReason: reason });
+  const zero = (reason, detail = null) => ({ appliedResults: 0, bytesSaved: 0, estimatedTokensSaved: 0, retainedReferences: 0, skipReason: reason, skipDetail: detail });
   if (signal?.aborted) throw signal.reason;
   if (plan?.mode !== "on" || !plan.replacements.length) return zero(null);
 
@@ -240,24 +242,26 @@ export function commitSessionDedup(body, {
     : inspectSource(body, finalFormat);
   const fence = (providedFinalIndex && providedFinalIndex.body === body && providedFinalIndex.format === finalFormat && providedFinalFence)
     ? providedFinalFence
-    : detectCacheFence(body, final);
+    : detectCacheFence(body, final, { targetFormat: finalFormat, targetModel });
 
-  const reject = reason => zero(reason);
-  if (!final.supported || final.calls.length !== sourceIndex.calls.length || final.results.length !== sourceIndex.results.length) return reject("final_correspondence");
+  const reject = (reason, detail = null) => zero(reason, detail);
+  if (!final.supported) return reject("final_correspondence", "unsupported_final");
+  if (final.calls.length !== sourceIndex.calls.length) return reject("final_correspondence", "call_count");
+  if (final.results.length !== sourceIndex.results.length) return reject("final_correspondence", "result_count");
   const mapping = toolNameMap && typeof toolNameMap === "object" ? toolNameMap : {};
   const sanitized = new Map();
   for (let i = 0; i < final.calls.length; i++) {
     const a = sourceIndex.calls[i], b = final.calls[i];
     const mapped = mapping instanceof Map ? mapping.get(b.name) ?? b.name : mapping[b.name] ?? b.name;
     const expected = gemini(finalFormat) && !gemini(sourceFormat) ? sanitizeGeminiFunctionName(a.name) : a.name;
-    if (gemini(finalFormat) && sanitized.has(expected) && sanitized.get(expected) !== a.name) return reject("final_correspondence");
+    if (gemini(finalFormat) && sanitized.has(expected) && sanitized.get(expected) !== a.name) return reject("final_correspondence", "call_identity");
     sanitized.set(expected, a.name);
     if (a.ambiguous || b.ambiguous || a.kind !== b.kind && !(a.kind === "custom" && b.kind === "function" && (customToolNames?.has?.(a.name) || customToolNames?.includes?.(a.name))) ||
-      expected !== b.name && a.name !== mapped) return reject("final_correspondence");
+      expected !== b.name && a.name !== mapped) return reject("final_correspondence", "call_identity");
   }
   for (let i = 0; i < final.results.length; i++) {
     const a = sourceIndex.results[i], b = final.results[i];
-    if (a.callOrdinal !== b.callOrdinal || a.callOrdinal == null || ["unlinked_call", "ambiguous_call"].includes(b.blockedReason)) return reject("final_correspondence");
+    if (a.callOrdinal !== b.callOrdinal || a.callOrdinal == null || ["unlinked_call", "ambiguous_call"].includes(b.blockedReason)) return reject("final_correspondence", "result_linkage");
   }
   for (const ref of plan.replacements) {
     const sourceAnchor = sourceIndex.results[ref.anchorResultIndex];
@@ -265,13 +269,16 @@ export function commitSessionDedup(body, {
     const sourceTarget = sourceIndex.results[ref.resultIndex];
     const target = final.results[ref.resultIndex];
     if (ref.anchorResultIndex >= ref.resultIndex || sourceAnchor.toolFamily !== sourceTarget.toolFamily ||
-      sourceAnchor.callOrdinal !== anchor.callOrdinal || sourceTarget.callOrdinal !== target.callOrdinal) return reject("final_correspondence");
+      sourceAnchor.callOrdinal !== anchor.callOrdinal || sourceTarget.callOrdinal !== target.callOrdinal) return reject("final_correspondence", "anchor_mapping");
   }
 
-  if (fence?.reason === "opaque_state") return reject("final_opaque_state");
+  if (fence?.protectAll && fence?.reason === "opaque_state") return reject("final_opaque_state");
   if (fence?.protectAll && fence?.reason === "cache_fence") return reject("final_cache_fence");
   for (const ref of plan.replacements) {
     const target = final.results[ref.resultIndex];
+    const anchor = final.results[ref.anchorResultIndex];
+    if (target.opaqueProtected || anchor.opaqueProtected || sourceIndex.results[ref.resultIndex].opaqueProtected ||
+      sourceIndex.results[ref.anchorResultIndex].opaqueProtected) return reject("final_opaque_state");
     if (target.cacheProtected) return reject("final_cache_fence");
   }
 
@@ -307,15 +314,16 @@ export function commitSessionDedup(body, {
     const anchorProof = selectedLeaf(sourceAnchor, anchor, ref.originalText, sourceFormat, finalFormat);
     const targetProof = selectedLeaf(sourceTarget, target, ref.originalText, sourceFormat, finalFormat);
     const newValue = selectedLeaf(sourceTarget, target, ref.marker, sourceFormat, finalFormat);
-    if (!anchorProof || !targetProof || !newValue || !writable(anchorProof.owner, anchorProof.key) ||
-      !writable(targetProof.owner, targetProof.key) || !writable(newValue.owner, newValue.key) ||
-      anchorProof.owner[anchorProof.key] !== anchorProof.expected || targetProof.owner[targetProof.key] !== targetProof.expected ||
-      newValue.owner !== targetProof.owner || newValue.key !== targetProof.key) return reject("final_correspondence");
+    if (!anchorProof || !targetProof || !newValue) return reject("final_correspondence", "leaf_proof");
+    if (!writable(anchorProof.owner, anchorProof.key) || !writable(targetProof.owner, targetProof.key) ||
+      !writable(newValue.owner, newValue.key)) return reject("final_correspondence", "non_writable");
+    if (anchorProof.owner[anchorProof.key] !== anchorProof.expected || targetProof.owner[targetProof.key] !== targetProof.expected ||
+      newValue.owner !== targetProof.owner || newValue.key !== targetProof.key) return reject("final_correspondence", "leaf_proof");
     writes.push({ owner: targetProof.owner, key: targetProof.key, text: newValue.expected, ref });
   }
   if (signal?.aborted) throw signal.reason;
   for (const { owner, key, text } of writes) owner[key] = text;
   return { appliedResults: writes.length, bytesSaved: writes.reduce((n, w) => n + w.ref.originalBytes - w.ref.markerBytes, 0),
     estimatedTokensSaved: writes.reduce((n, w) => n + Math.max(0, estimateOutputTokens(w.ref.originalText.length) - estimateOutputTokens(w.ref.marker.length)), 0),
-    retainedReferences: writes.length, skipReason: null };
+    retainedReferences: writes.length, skipReason: null, skipDetail: null };
 }

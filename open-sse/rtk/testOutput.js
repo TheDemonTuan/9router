@@ -22,9 +22,10 @@ function counts(value) {
   return result;
 }
 
-export function summarizeTestOutput(text) {
+export function summarizeTestOutput(text, onDetail) {
+  const finish = (output, detail) => { onDetail?.(detail); return output; };
   const parsed = text.replace(sgr, '');
-  if (parsed.includes('\u001b') || /\r(?!\n)/.test(parsed)) return null;
+  if (parsed.includes('\u001b') || /\r(?!\n)/.test(parsed)) return finish(null, 'unknown_terminal_control');
   const raw = text.match(/[^\n]*\n|[^\n]+$/g) ?? [];
   const lines = raw.map(line => line.replace(sgr, '').replace(/\r?\n$/, ''));
   const footers = { vitestFiles: [], vitestTests: [], jestFiles: [], jestTests: [], bunPass: [], bunFail: [], bunRan: [], tapPlan: [], tapTests: [], tapPass: [], tapFail: [], tapVersion: [] };
@@ -35,40 +36,59 @@ export function summarizeTestOutput(text) {
       if (m) footers[key].push({ i, m });
     }
   });
+  const families = [
+    ['vitestFiles', 'vitestTests'], ['jestFiles', 'jestTests'],
+    ['bunPass', 'bunFail', 'bunRan'], ['tapPlan', 'tapTests', 'tapPass', 'tapFail', 'tapVersion'],
+  ];
+  const hasFailure = lines.some(line => failure.test(line))
+    || ['bunFail', 'tapFail'].some(key => footers[key].some(({ m }) => Number(m[1]) > 0));
+  const bunBanners = lines.filter(line => /^bun test v/.test(line)).length;
+  const vitestBanners = lines.filter(line => /^\s*(?:RUN|DEV)\s+v/.test(line)).length;
+  const hints = [vitestBanners > 0, lines.some(line => /^PASS\s+/.test(line)), bunBanners > 0, footers.tapVersion.length > 0];
+  const multipleRuns = Object.values(footers).some(rows => rows.length > 1)
+    || families.filter((keys, i) => hints[i] || keys.some(key => footers[key].length)).length > 1
+    || bunBanners > 1 || vitestBanners > 1;
+  const nestedTap = families[3].some(key => footers[key].length)
+    && lines.some(line => /# Subtest|^\s+ok\b|^\s*---|Bail out!/.test(line));
+  // Classify only existing rejects: hints must not introduce a new acceptance gate.
+  const reject = detail => finish(null, hasFailure ? 'failure_detected'
+    : multipleRuns ? 'multiple_runs' : nestedTap ? 'unsupported_structure' : detail);
+  const hasHint = hints.some(Boolean);
+  const hasFooter = Object.entries(footers).some(([key, rows]) => key !== 'tapVersion' && rows.length);
   let runner, passed;
   const safeSummaries = new Set();
   const complete = [];
   for (const [name, files, tests] of [['vitest', 'vitestFiles', 'vitestTests'], ['jest', 'jestFiles', 'jestTests']]) {
     if (footers[files].length || footers[tests].length) {
-      if (footers[files].length !== 1 || footers[tests].length !== 1) return null;
+      if (footers[files].length !== 1 || footers[tests].length !== 1) return reject('incomplete_run');
       const f = counts(footers[files][0].m[1]), t = counts(footers[tests][0].m[1]);
-      if (!f || !t) return null;
+      if (!f || !t) return reject('totals_mismatch');
       complete.push([name, t.passed]);
       safeSummaries.add(footers[files][0].i); safeSummaries.add(footers[tests][0].i);
     }
   }
   if (footers.bunPass.length || footers.bunFail.length || footers.bunRan.length) {
-    if (['bunPass', 'bunFail', 'bunRan'].some(k => footers[k].length !== 1) || +footers.bunFail[0].m[1] !== 0) return null;
+    if (['bunPass', 'bunFail', 'bunRan'].some(k => footers[k].length !== 1) || +footers.bunFail[0].m[1] !== 0) return reject('incomplete_run');
     const p = +footers.bunPass[0].m[1], n = +footers.bunRan[0].m[1];
     const skips = lines.flatMap(line => /^\s*(\d+) (?:skip|todo)\s*$/.exec(line)?.slice(1) ?? []).reduce((a,b) => a + Number(b), 0);
     const fileCount = lines.filter(line => /^\S.*:$/.test(line)).length;
-    if (![p,n,+footers.bunRan[0].m[2]].every(Number.isSafeInteger) || p + skips !== n || fileCount !== +footers.bunRan[0].m[2] || lines.filter(line => /^bun test v/.test(line)).length > 1) return null;
+    if (![p,n,+footers.bunRan[0].m[2]].every(Number.isSafeInteger) || p + skips !== n || fileCount !== +footers.bunRan[0].m[2] || bunBanners > 1) return reject('totals_mismatch');
     complete.push(['bun', p]);
     for (const k of ['bunPass', 'bunFail', 'bunRan']) safeSummaries.add(footers[k][0].i);
   }
   if (Object.keys(footers).some(k => k.startsWith('tap') && footers[k].length)) {
-    if (['tapPlan', 'tapTests', 'tapPass', 'tapFail', 'tapVersion'].some(k => footers[k].length !== 1)) return null;
-    if (lines.some(line => /# Subtest|^\s+ok\b|^\s*---|Bail out!/.test(line))) return null;
+    if (['tapPlan', 'tapTests', 'tapPass', 'tapFail', 'tapVersion'].some(k => footers[k].length !== 1)) return reject(hasFooter ? 'incomplete_run' : 'missing_footer');
+    if (nestedTap) return reject('unsupported_structure');
     const n = +footers.tapPlan[0].m[1], p = +footers.tapPass[0].m[1];
     const s = lines.flatMap(line => /^# (?:skipped|todo) (\d+)$/.exec(line)?.slice(1) ?? []).reduce((a,b) => a + Number(b), 0);
     const rows = lines.filter(line => /^ok\s/.test(line));
-    if (+footers.tapTests[0].m[1] !== n || +footers.tapFail[0].m[1] !== 0 || p + s !== n || rows.length !== n || rows.some((line,i) => !new RegExp(`^ok ${i+1}(?: - .+|\\s*)$`).test(line))) return null;
+    if (+footers.tapTests[0].m[1] !== n || +footers.tapFail[0].m[1] !== 0 || p + s !== n || rows.length !== n || rows.some((line,i) => !new RegExp(`^ok ${i+1}(?: - .+|\\s*)$`).test(line))) return reject('totals_mismatch');
     complete.push(['tap', p]);
     safeSummaries.add(footers.tapFail[0].i);
   }
-  if (complete.length !== 1) return null;
+  if (complete.length !== 1) return reject(hasFooter ? 'incomplete_run' : hasHint ? 'missing_footer' : 'unknown_reporter');
   [runner, passed] = complete[0];
-  if (lines.some((line,i) => !safeSummaries.has(i) && failure.test(line))) return null;
+  if (lines.some((line,i) => !safeSummaries.has(i) && failure.test(line))) return reject('failure_detected');
   let section = false;
   const removable = lines.map(line => {
     if (runner === 'bun') {
@@ -78,7 +98,9 @@ export function summarizeTestOutput(text) {
     if (runner === 'tap') return /^ok \d+ - .+/.test(line) && !/# (?:SKIP|TODO)\b/i.test(line);
     return /^\s+[✓✔√]\s+.+/.test(line) && !/\(\d+ tests?\)\s*(?:\d|$)/.test(line);
   });
-  if (removable.filter(Boolean).length > passed) return null;
+  const removableCount = removable.filter(Boolean).length;
+  if (removableCount > passed) return reject('totals_mismatch');
+  if (removableCount === 0) return finish(text, 'no_removable_rows');
   const output = [];
   for (let i = 0; i < raw.length;) {
     if (!removable[i]) { output.push(raw[i++]); continue; }
@@ -90,7 +112,7 @@ export function summarizeTestOutput(text) {
     output.push(Buffer.byteLength(marker) < Buffer.byteLength(run) ? marker : run);
     i = end;
   }
-  return output.join('');
+  return finish(output.join(''), 'none');
 }
 
 export function isPassingVitestJson(text) {

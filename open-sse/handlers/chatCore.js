@@ -230,6 +230,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const dedupMode = normalizeSessionDedupMode(sessionDedupMode);
   let sourceIndex = null;
   let fence = null;
+  let finalFence = null;
   let dedupPlan = null;
   let cleanupShadow = null;
   let dedupCommit = null;
@@ -242,8 +243,8 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const indexStarted = performance.now();
   if (tokenSaverEnabled) {
     sourceIndex = inspectSource(sourceBody, sourceFormat);
-    fence = detectCacheFence(sourceBody, sourceIndex);
-    if (sourceIndex.supported && fence.reason !== "opaque_state") {
+    fence = detectCacheFence(sourceBody, sourceIndex, { targetFormat, targetModel: model });
+    if (sourceIndex.supported && !(fence.protectAll && fence.reason === "opaque_state")) {
       try {
         dedupPlan = planSessionDedup(sourceIndex, { mode: dedupMode, fence, signal: rtkSignal });
         if (dedupMode !== "off") cleanupShadow = measureCleanupOpportunities(sourceIndex, {
@@ -261,22 +262,19 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const protectedLeaves = new WeakMap();
   if (sourceIndex?.supported) {
     for (const segment of sourceIndex.textSegments) {
-      if (segment.protectedReason || segment.resultIndex != null && sourceIndex.results[segment.resultIndex].cacheProtected) {
+      const result = segment.resultIndex != null ? sourceIndex.results[segment.resultIndex] : null;
+      const reason = result?.opaqueProtected ? "opaque_state" : segment.protectedReason || (result?.cacheProtected ? "cache_fence" : null);
+      if (reason) {
         const keys = protectedLeaves.get(segment.owner) ?? new Map();
-        keys.set(segment.key, "cache_fence");
+        keys.set(segment.key, reason);
         protectedLeaves.set(segment.owner, keys);
       }
     }
-    for (const result of sourceIndex.results) if (result.cacheProtected && result.text === null) {
-      for (const segment of sourceIndex.textSegments) if (segment.resultIndex != null && sourceIndex.results[segment.resultIndex] === result) {
-        const keys = protectedLeaves.get(segment.owner) ?? new Map();
-        keys.set(segment.key, "cache_fence"); protectedLeaves.set(segment.owner, keys);
-      }
-    }
   }
-  const rtkStats = await compressMessages(sourceBody, tokenSaverEnabled && rtkEnabled && sourceIndex?.supported && fence?.reason !== "opaque_state" && !dedupPlan?.hasExistingMarkers, {
+  const globalOpaque = fence?.protectAll && fence?.reason === "opaque_state";
+  const rtkStats = await compressMessages(sourceBody, tokenSaverEnabled && rtkEnabled && sourceIndex?.supported && !globalOpaque && !dedupPlan?.hasExistingMarkers, {
     signal: rtkSignal,
-    disabledReason: !rtkEnabled ? "disabled" : clientTokenSaverOptOut ? "opted_out" : strictStructuredOutput ? "structured_output" : nativePassthrough ? "native_passthrough" : dedupPlan?.hasExistingMarkers ? "existing_marker" : fence?.reason === "opaque_state" ? "opaque_state" : sourceIndex?.blockedReason === "metadata_budget" ? "metadata_budget" : "unsupported_shape",
+    disabledReason: !rtkEnabled ? "disabled" : clientTokenSaverOptOut ? "opted_out" : strictStructuredOutput ? "structured_output" : nativePassthrough ? "native_passthrough" : dedupPlan?.hasExistingMarkers ? "existing_marker" : globalOpaque ? "opaque_state" : sourceIndex?.blockedReason === "metadata_budget" ? "metadata_budget" : "unsupported_shape",
     getProtectionReason: (owner, key) => protectedLeaves.get(owner)?.get(key) || dedupPlan?.protection.get(owner)?.get(key) || null,
   });
   if (rtkSignal?.aborted) throw rtkSignal.reason;
@@ -437,7 +435,6 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   const needsFinalInspection = (dedupPlan?.mode === "on" && dedupPlan.replacements.length > 0) || postSaversActive;
   let finalIndex = null;
-  let finalFence = null;
   let blockPostSavers = false;
   dedupCommit = { appliedResults: 0, bytesSaved: 0, estimatedTokensSaved: 0, retainedReferences: 0, skipReason: null };
 
@@ -446,7 +443,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   if (needsFinalInspection) {
     try {
       finalIndex = inspectSource(translatedBody, finalFormat);
-      finalFence = detectCacheFence(translatedBody, finalIndex);
+      finalFence = detectCacheFence(translatedBody, finalIndex, { targetFormat, targetModel: model });
       if (finalIndex.supported) {
         if (finalFence.blockPromptInjection || finalFence.reason === "opaque_state") {
           blockPostSavers = true;
@@ -469,6 +466,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       dedupCommit = commitSessionDedup(translatedBody, {
         sourceFormat,
         finalFormat,
+        targetModel: model,
         sourceIndex,
         plan: dedupPlan,
         toolNameMap,
@@ -538,9 +536,10 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       recordTokenSaverPreparation({ mode: dedupMode, stats: dedupPlan?.stats, cleanup: cleanupShadow,
         commit: dedupCommit, elapsedMs: saverElapsedMs || performance.now() - saverStarted,
         reason: saverReason || (!tokenSaverEnabled ? clientTokenSaverOptOut ? "opted_out" : strictStructuredOutput ? "structured_output" : "native_passthrough"
-          : !sourceIndex?.supported ? sourceIndex?.blockedReason : fence?.reason === "opaque_state" ? "opaque_state" : dedupPlan?.skipReason),
+          : !sourceIndex?.supported ? sourceIndex?.blockedReason : fence?.protectAll && fence?.reason === "opaque_state" ? "opaque_state" : dedupPlan?.skipReason),
         sourceDiagnostics: sourceIndex?.diagnostics,
         opaqueReasons: fence?.opaqueReasons,
+        finalOpaqueReasons: finalFence?.opaqueReasons,
       });
     } catch { /* metrics must not break requests */ }
   }

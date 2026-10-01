@@ -106,7 +106,7 @@ export function inspectSource(body, format) {
     const n = node(owner, parent, parent?.enclosingMessage || parent, "result");
     const result = { format, kind, id, name, owner: container || owner, key, text: null, position: n.position,
       turnIndex: turn, occurrenceTurnIndex: turn, occurrenceBatchIndex, batchIndex: null, isCurrentTurn: false,
-      isRecentTurn: false, isRecentToolBatch: false, isError: error, cacheProtected: false,
+      isRecentTurn: false, isRecentToolBatch: false, isError: error, cacheProtected: false, opaqueProtected: false,
       resultContainer: owner, ancestors: [parent?.owner, owner].filter(Boolean), callOrdinal: null,
       representation, group, blockedReason: mixed ? "ambiguous_turn" : null };
     const allowed = family === "gemini" ? ["id", "name", "response", "status", "error", "is_error", "isError"] :
@@ -234,18 +234,16 @@ export function inspectSource(body, format) {
             for (const block of blocks) {
               if (block?.type === CLAUDE_BLOCK.TOOL_USE) {
                 addCall("function", block.name, block.id, block, n, activeBatchIndex);
-              } else if (block?.type === CLAUDE_BLOCK.TEXT) {
+              } else {
                 const b = node(block, n, n, "block");
-                segment(block, "text", message.role, n, b);
+                if (block?.type === CLAUDE_BLOCK.TEXT) segment(block, "text", message.role, n, b);
               }
             }
           } else {
             endActiveBatch(n.position);
             for (const block of blocks) {
-              if (block?.type === CLAUDE_BLOCK.TEXT) {
-                const b = node(block, n, n, "block");
-                segment(block, "text", message.role, n, b);
-              }
+              const b = node(block, n, n, "block");
+              if (block?.type === CLAUDE_BLOCK.TEXT) segment(block, "text", message.role, n, b);
             }
           }
         } else {

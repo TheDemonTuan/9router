@@ -23,6 +23,10 @@ const OPAQUE_REASONS = [
   "previous_response_id", "conversation", "cached_content", "encrypted_reasoning",
   "thought_signature", "claude_thinking_signature", "compaction",
 ];
+const FINAL_CORRESPONDENCE_REASONS = [
+  "unsupported_final", "call_count", "result_count", "call_identity",
+  "result_linkage", "anchor_mapping", "leaf_proof", "non_writable",
+];
 const KEY = Symbol.for("9router.token-saver.runtime.v2");
 function createState() {
   return {
@@ -30,7 +34,7 @@ function createState() {
     usage: {
       ...numeric(usageKeys),
       byMode: numeric(SESSION_DEDUP_MODES),
-      protected: numeric(["current", "recent", "error", "cacheFence", "incompleteBatch"]),
+      protected: numeric(["current", "recent", "error", "cacheFence", "incompleteBatch", "opaque"]),
       skipped: numeric(skipNames),
       skippedResults: numeric(skipNames),
       skippedPreparations: numeric(skipNames),
@@ -38,6 +42,8 @@ function createState() {
       responsesImplicitUserMessages: 0,
       toolBatches: numeric(["currentCompleted", "currentIncomplete"]),
       opaqueReasons: numeric(OPAQUE_REASONS),
+      finalOpaqueReasons: numeric(OPAQUE_REASONS),
+      finalCorrespondenceReasons: numeric(FINAL_CORRESPONDENCE_REASONS),
       latency: Object.fromEntries(["shadow", "on"].map(mode => [mode, {
         samples: new Float64Array(LIMIT.latencySamples), count: 0, cursor: 0, softTargetExceeded: 0, totalSamples: 0,
       }])),
@@ -49,17 +55,22 @@ const state = () => {
   const runtime = globalThis[KEY] ??= createState();
   runtime.usage.skippedResults ??= numeric(skipNames);
   runtime.usage.skippedPreparations ??= numeric(skipNames);
+  runtime.usage.protected.opaque ??= 0;
+  runtime.usage.finalOpaqueReasons ??= numeric(OPAQUE_REASONS);
+  runtime.usage.finalCorrespondenceReasons ??= numeric(FINAL_CORRESPONDENCE_REASONS);
+  for (const key of OPAQUE_REASONS) runtime.usage.finalOpaqueReasons[key] ??= 0;
+  for (const key of FINAL_CORRESPONDENCE_REASONS) runtime.usage.finalCorrespondenceReasons[key] ??= 0;
   for (const ring of Object.values(runtime.usage.latency)) {
     if (!Object.hasOwn(ring, "totalSamples")) ring.totalSamples = ring.count > 0 ? null : 0;
   }
   return runtime;
 };
 const add = (bucket, key, amount) => {
-  if (Object.hasOwn(bucket, key) && Number.isFinite(amount) && amount >= 0) {
-    bucket[key] = Math.min(Number.MAX_SAFE_INTEGER, bucket[key] + amount);
+  if (typeof key === "string" && Object.hasOwn(bucket, key) && Number.isFinite(amount) && amount >= 0) {
+    bucket[key] = Math.min(Number.MAX_SAFE_INTEGER, bucket[key] + Math.trunc(amount));
   }
 };
-export function recordTokenSaverPreparation({ mode, stats, cleanup, commit, reason, elapsedMs, sourceDiagnostics, opaqueReasons } = {}) {
+export function recordTokenSaverPreparation({ mode, stats, cleanup, commit, reason, elapsedMs, sourceDiagnostics, opaqueReasons, finalOpaqueReasons } = {}) {
   const usage = state().usage;
   add(usage, "preparations", 1);
   add(usage.byMode, mode, 1);
@@ -96,11 +107,13 @@ export function recordTokenSaverPreparation({ mode, stats, cleanup, commit, reas
     add(usage.toolBatches, "currentIncomplete", sourceDiagnostics.currentIncompleteToolBatches || 0);
   }
   if (Array.isArray(opaqueReasons)) {
-    for (const r of new Set(opaqueReasons)) {
-      if (Object.hasOwn(usage.opaqueReasons, r)) {
-        add(usage.opaqueReasons, r, 1);
-      }
-    }
+    for (const r of new Set(opaqueReasons)) add(usage.opaqueReasons, r, 1);
+  }
+  if (commit?.skipReason === "final_opaque_state" && Array.isArray(finalOpaqueReasons)) {
+    for (const r of new Set(finalOpaqueReasons)) add(usage.finalOpaqueReasons, r, 1);
+  }
+  if (commit?.skipReason === "final_correspondence") {
+    add(usage.finalCorrespondenceReasons, commit.skipDetail, 1);
   }
   if (cleanup) {
     for (const key of cleanupKeys) add(usage.cleanupShadow, key, cleanup[key] || 0);
@@ -140,6 +153,8 @@ export function getTokenSaverSnapshot() {
       preparationsByUserTurns: { ...usage.preparationsByUserTurns },
       toolBatches: { ...usage.toolBatches },
       opaqueReasons: { ...usage.opaqueReasons },
+      finalOpaqueReasons: { ...usage.finalOpaqueReasons },
+      finalCorrespondenceReasons: { ...usage.finalCorrespondenceReasons },
       latency,
     },
   };

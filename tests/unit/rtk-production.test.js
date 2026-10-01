@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { classifyToolCall } from "../../open-sse/rtk/classifier.js";
 import { compressMessages } from "../../open-sse/rtk/index.js";
-import { getRtkSnapshot, recordRtkCommand } from "../../open-sse/rtk/state.js";
+import { getRtkSnapshot, getRtkState, recordRtkCommand, recordRtkFilterOutcome } from "../../open-sse/rtk/state.js";
+import { RTK_COMMAND_FAMILIES, RTK_FILTER_DETAILS } from "../../open-sse/config/rtkConfig.js";
 
 const text = Array.from({ length: 40 }, (_, i) => `./synthetic/path/file-${i}.js`).join("\n") + "\n";
 const call = { role: "assistant", tool_calls: [{ id: "c", type: "function", function: { name: "Bash", arguments: '{"command":"find ."}' } }] };
@@ -63,5 +64,53 @@ describe("RTK production safety", () => {
     await compressMessages(body, true);
     expect(body.contents[1].parts.map(p => p.functionResponse.response.output)).toEqual([text, text]);
     expect(body.contents[3].parts[0].functionResponse.response.output).toBe(text);
+  });
+  it("keeps filter details bounded, isolated, sanitized and saturating", () => {
+    const key = Symbol.for("9router.rtk.runtime.v1");
+    const previous = globalThis[key];
+    delete globalThis[key];
+    try {
+      recordRtkFilterOutcome("shell", "local:test", "local", false, "format_not_accepted", Number.MAX_SAFE_INTEGER, -1, "bun test", "unknown_reporter");
+      recordRtkFilterOutcome("shell", "local:test", "local", false, "format_not_accepted", 10, Infinity, "bun test", "unknown_reporter");
+      recordRtkFilterOutcome("shell", "local:test", "local", false, "format_not_accepted", NaN, 12.8, "SECRET_COMMAND", "SECRET_TEST_PATH_PAYLOAD");
+      const snapshot = getRtkSnapshot();
+      const row = snapshot.diagnostics.filters.find(r => r.detail === "unknown_reporter");
+      expect(row).toMatchObject({ count: 2, inputBytes: Number.MAX_SAFE_INTEGER, outputBytes: 0 });
+      expect(snapshot.diagnostics.filters.find(r => r.commandFamily === "other")).toMatchObject({ detail: "none", inputBytes: 0, outputBytes: 12 });
+      expect(JSON.stringify(snapshot)).not.toContain("SECRET");
+      row.detail = "failure_detected";
+      row.count = 999;
+      expect(getRtkSnapshot().diagnostics.filters.find(r => r.detail === "unknown_reporter").count).toBe(2);
+      for (const command of RTK_COMMAND_FAMILIES) for (const detail of RTK_FILTER_DETAILS) {
+        recordRtkFilterOutcome("shell", "local:test", "local", false, "format_not_accepted", 1, 0, command, detail);
+      }
+      const full = getRtkSnapshot();
+      expect(full.diagnostics.filters).toHaveLength(128);
+      expect(full.diagnostics.overflow.filters).toBe(RTK_COMMAND_FAMILIES.length * RTK_FILTER_DETAILS.length - 128);
+      expect(full.diagnostics.filters.find(r => r.detail === "unknown_reporter" && r.commandFamily === "bun test")).toMatchObject({ count: 3, inputBytes: Number.MAX_SAFE_INTEGER });
+    } finally {
+      if (previous === undefined) delete globalThis[key]; else globalThis[key] = previous;
+    }
+  });
+  it("preserves hot runtime counters when old filter rows have no detail", () => {
+    const key = Symbol.for("9router.rtk.runtime.v1");
+    const previous = globalThis[key];
+    delete globalThis[key];
+    try {
+      const state = getRtkState();
+      state.usage.local.attempts = 20;
+      state.usage.diagnostics.filters["shell:local:test:local:0:not_smaller:bun test"] = {
+        toolFamily: "shell", filter: "local:test", engine: "local", fallback: false, outcome: "not_smaller", commandFamily: "bun test", count: 7, inputBytes: 700, outputBytes: 700,
+      };
+      expect(getRtkSnapshot().diagnostics.filters[0]).toMatchObject({ detail: "none", count: 7 });
+      recordRtkFilterOutcome("shell", "local:test", "local", false, "not_smaller", 100, 100, "bun test", "none");
+      const snapshot = getRtkSnapshot();
+      expect(snapshot.usage.local.attempts).toBe(20);
+      expect(snapshot.diagnostics.filters).toEqual([{
+        toolFamily: "shell", filter: "local:test", engine: "local", fallback: false, outcome: "not_smaller", commandFamily: "bun test", detail: "none", count: 8, inputBytes: 800, outputBytes: 800,
+      }]);
+    } finally {
+      if (previous === undefined) delete globalThis[key]; else globalThis[key] = previous;
+    }
   });
 });

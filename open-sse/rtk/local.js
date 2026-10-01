@@ -9,6 +9,34 @@ export function isGrepOutput(text) {
   return !text.includes("\u001b") && text.replace(/\r?\n$/, "").split(/\r?\n/).every(line => grepLine.test(line) && !/^[A-Za-z]:/.test(line));
 }
 
+export function inspectNativeGrepOutput(text) {
+  if (typeof text !== "string" || !text.isWellFormed() || /[\0\u001b]|\r(?!\n)/.test(text)) return "unknown";
+  if (isGrepOutput(text)) return "flat_numbered";
+  const lines = text.replace(/\r?\n$/, "").split(/\r?\n/);
+  let matches = 0;
+  let groups = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const match = /^(\d+):(.*)$/.exec(line);
+    if (match) {
+      const number = Number(match[1]);
+      if (!groups || !Number.isSafeInteger(number) || number <= 0) return "unknown";
+      matches++;
+    } else {
+      if (line === "") {
+        if (!matches || i === lines.length - 1 || lines[i + 1] === "") return "unknown";
+        // A separator must be followed by a new path, not another match row.
+        if (/^\d+:/.test(lines[i + 1])) return "unknown";
+        continue;
+      }
+      if (groups && !matches || !line.includes("/") || /^\s/.test(line) || /[:\x00-\x1f\x7f]/.test(line)) return "unknown";
+      groups++;
+      matches = 0;
+    }
+  }
+  return groups > 0 && matches > 0 ? "heading_numbered" : "unknown";
+}
+
 export function isPathOutput(text) {
   return !text.includes("\u001b") && text.replace(/\r?\n$/, "").split(/\r?\n/).every(line => pathLine.test(line));
 }
@@ -40,7 +68,7 @@ function group(text, pattern, groupLabel) {
 }
 
 function search(text) {
-  if (!isGrepOutput(text)) return null;
+  if (!isGrepOutput(text)) return inspectNativeGrepOutput(text) === "heading_numbered" ? text : null;
   return group(text, /^([^:\r\n]+):([0-9]+:.*)$/, "[file]");
 }
 
@@ -151,35 +179,36 @@ const formatters = {
 
 export function filterLocalOutput(filter, content, onOutcome) {
   if (typeof content !== "string" || !content.isWellFormed() || content.includes("\0")) {
-    onOutcome?.("invalid_text", 0);
+    onOutcome?.("invalid_text", 0, "none");
     return null;
   }
   const format = formatters[filter];
   if (!format) {
-    onOutcome?.("format_not_accepted", 0);
+    onOutcome?.("format_not_accepted", 0, "none");
     return null;
   }
   let output;
+  let detail = "none";
   try {
-    output = format(content);
+    output = filter === "test" ? format(content, value => { detail = value; }) : format(content);
   } catch {
-    onOutcome?.("failed", 0);
+    onOutcome?.("failed", 0, detail);
     return null;
   }
   if (output === null || output === undefined) {
-    onOutcome?.("format_not_accepted", 0);
+    onOutcome?.("format_not_accepted", 0, detail);
     return null;
   }
   if (output === "") {
-    onOutcome?.("empty_output", 0);
+    onOutcome?.("empty_output", 0, detail);
     return null;
   }
   const inputBytes = Buffer.byteLength(content);
   const outputBytes = Buffer.byteLength(output);
   if (outputBytes >= inputBytes) {
-    onOutcome?.("not_smaller", outputBytes);
+    onOutcome?.("not_smaller", outputBytes, detail);
     return null;
   }
-  onOutcome?.("candidate", outputBytes);
+  onOutcome?.("candidate", outputBytes, detail);
   return output;
 }

@@ -1,4 +1,4 @@
-import { exceedsPipeGrepCap, isGrepOutput, isPathOutput } from "./local.js";
+import { exceedsPipeGrepCap, isGrepOutput, isPathOutput, inspectNativeGrepOutput } from "./local.js";
 import { RTK_COMMAND_FAMILIES } from "../config/rtkConfig.js";
 import { isPassingVitestJson } from "./testOutput.js";
 
@@ -107,7 +107,7 @@ export function getRtkToolFamily(call) {
   return "other";
 }
 
-export function classifyToolCall(call, content, onReject, onCommand) {
+export function classifyToolCall(call, content, onReject, onCommand, onNativeShape) {
   if (!call) return reject(onReject, "unlinked_call");
   if (typeof call.name !== "string" || typeof content !== "string") return reject(onReject, "invalid_command_metadata");
   const family = getRtkToolFamily(call);
@@ -131,7 +131,9 @@ export function classifyToolCall(call, content, onReject, onCommand) {
     if (tool === "grep") {
       const hasMetadata = typeof input.path === "string" && typeof input.pattern === "string" && !input.command && !input.cmd;
       if (!hasMetadata) return reject(onReject, "native_metadata_missing", "native_metadata_missing");
-      return isGrepOutput(content) ? "local:grep" : reject(onReject, "unsupported_output_format", "native_output_mismatch");
+      const shape = inspectNativeGrepOutput(content);
+      onNativeShape?.(shape);
+      return shape !== "unknown" ? "local:grep" : reject(onReject, "unsupported_output_format", "native_output_mismatch");
     }
     if (tool === "glob") {
       const hasMetadata = typeof input.path === "string" && !input.command && !input.cmd;

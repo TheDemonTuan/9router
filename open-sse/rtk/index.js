@@ -2,7 +2,7 @@ import { ROLE } from "../translator/schema/roles.js";
 import { OPENAI_BLOCK, CLAUDE_BLOCK, RESPONSES_ITEM } from "../translator/schema/blocks.js";
 import { RTK_CONFIG, RTK_FILTERS, RTK_LOCAL_FILTERS } from "../config/rtkConfig.js";
 import { estimateOutputTokens } from "../utils/usageTracking.js";
-import { getRtkState, recordRtkCommand, recordRtkRejection, recordRtkFilterOutcome } from "./state.js";
+import { getRtkState, recordRtkCommand, recordRtkRejection, recordRtkFilterOutcome, recordRtkNativeGrepShape } from "./state.js";
 import { classifyToolCall, getRtkToolFamily } from "./classifier.js";
 import { filterToolOutput } from "./client.js";
 import { filterLocalOutput } from "./local.js";
@@ -182,7 +182,7 @@ export async function compressMessages(body, enabled, { signal, disabledReason =
       }, family => {
         commandFamily = family;
         recordRtkCommand(family, size);
-      });
+      }, shape => recordRtkNativeGrepShape(shape, size));
       if (!filter) return;
       selected += size;
       jobs.push({ owner, key, content, size, shape, filter, call, toolFamily, commandFamily });
@@ -206,11 +206,13 @@ export async function compressMessages(body, enabled, { signal, disabledReason =
           usage.local.attempts++;
           let rawOutcome = null;
           let rawBytes = 0;
+          let rawDetail = "none";
           let finalOutcome = null;
           try {
-            output = filterLocalOutput(job.filter.slice(6), job.content, (resOutcome, resBytes) => {
+            output = filterLocalOutput(job.filter.slice(6), job.content, (resOutcome, resBytes, detail) => {
               rawOutcome = resOutcome;
               rawBytes = resBytes;
+              rawDetail = detail;
             });
             finalOutcome = rawOutcome;
             if (signal?.aborted) {
@@ -242,7 +244,7 @@ export async function compressMessages(body, enabled, { signal, disabledReason =
               }
             }
           } finally {
-            recordRtkFilterOutcome(toolFamily, job.filter, "local", false, finalOutcome ?? rawOutcome, job.size, rawBytes, job.commandFamily);
+            recordRtkFilterOutcome(toolFamily, job.filter, "local", false, finalOutcome ?? rawOutcome, job.size, rawBytes, job.commandFamily, rawDetail);
           }
         } else {
           let sidecarRawOutcome = null;
@@ -288,18 +290,20 @@ export async function compressMessages(body, enabled, { signal, disabledReason =
               }
             }
           } finally {
-            recordRtkFilterOutcome(toolFamily, job.filter, "sidecar", false, sidecarFinalOutcome ?? sidecarRawOutcome, job.size, sidecarRawBytes, job.commandFamily);
+            recordRtkFilterOutcome(toolFamily, job.filter, "sidecar", false, sidecarFinalOutcome ?? sidecarRawOutcome, job.size, sidecarRawBytes, job.commandFamily, "none");
           }
           if (output === null && !combined.aborted && ["grep", "git-status"].includes(job.filter)) {
             usage.local.attempts++;
             let fallbackRawOutcome = null;
             let fallbackRawBytes = 0;
+            let fallbackRawDetail = "none";
             let fallbackFinalOutcome = null;
             let fallbackOutput = null;
             try {
-              fallbackOutput = filterLocalOutput(job.filter, job.content, (resOutcome, resBytes) => {
+              fallbackOutput = filterLocalOutput(job.filter, job.content, (resOutcome, resBytes, detail) => {
                 fallbackRawOutcome = resOutcome;
                 fallbackRawBytes = resBytes;
+                fallbackRawDetail = detail;
               });
               fallbackFinalOutcome = fallbackRawOutcome;
               if (signal?.aborted) {
@@ -332,7 +336,7 @@ export async function compressMessages(body, enabled, { signal, disabledReason =
                 }
               }
             } finally {
-              recordRtkFilterOutcome(toolFamily, job.filter, "local", true, fallbackFinalOutcome ?? fallbackRawOutcome, job.size, fallbackRawBytes, job.commandFamily);
+              recordRtkFilterOutcome(toolFamily, job.filter, "local", true, fallbackFinalOutcome ?? fallbackRawOutcome, job.size, fallbackRawBytes, job.commandFamily, fallbackRawDetail);
             }
           }
         }

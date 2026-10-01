@@ -24,7 +24,7 @@ function gemini(envelope = false) {
     { role: "model", parts: [{ functionCall: { name: "read_file", args: { path: i } } }] },
     { role: "user", parts: [{ functionResponse: { name: "read_file", response: { result: text } } }] },
   ]).flat();
-  return envelope ? { request: { contents } } : { contents };
+  return envelope ? { model: "gemini-fixture", request: { contents } } : { contents };
 }
 function responses() {
   return { input: Array.from({ length: 6 }, (_, i) => [
@@ -108,5 +108,122 @@ describe("protocol-specific cache and tool result indexing", () => {
     const body = build(); const { fence } = inspect(body, format);
     expect(fence.reason).toBe("opaque_state");
     expect(fence.protectAll).toBe(true);
+  });
+  it("scopes encrypted Responses history without changing protocol objects", () => {
+    const body = responses();
+    body.input = body.input.flatMap(item => item.role === "user" ?
+      [item, { type: "reasoning", encrypted_content: "synthetic-encrypted" }] : [item]);
+    const before = structuredClone(body);
+    const index = inspectSource(body, "openai-responses");
+    const fence = detectCacheFence(body, index);
+    expect(fence.protectAll).toBe(false);
+    expect(fence.protectCurrentTurn).toBe(true);
+    expect(fence.blockPromptInjection).toBe(true);
+    expect(fence.opaqueReasons).toEqual(["encrypted_reasoning"]);
+    expect(index.results.map(r => r.opaqueProtected)).toEqual([false, false, false, true, true, true]);
+    expect(index.results.every(r => !r.cacheProtected)).toBe(true);
+    expect(index.textSegments.filter(s => s.resultIndex != null).map(s => s.protectedReason)).toEqual(
+      [null, null, null, "opaque_state", "opaque_state", "opaque_state"]);
+    expect(body).toEqual(before);
+  });
+  it("predicts Gemini signature replay without fabricating observed state", () => {
+    const body = responses();
+    body.input = body.input.flatMap(item => item.type === "function_call_output" ? [item, { type: "message", role: "assistant", content: "complete" }] : [item]);
+    const index = inspectSource(body, "openai-responses");
+    const fence = detectCacheFence(body, index, { targetFormat: "gemini", targetModel: "gemini-fixture" });
+    expect(fence.protectAll).toBe(false);
+    expect(fence.protectCurrentTurn).toBe(true);
+    expect(fence.opaqueReasons).toEqual([]);
+    expect(index.results.map(r => r.opaqueProtected)).toEqual([false, false, false, true, true, true]);
+  });
+  it.each(["claude-fixture", null, "unknown"])("fails closed for Antigravity target %s", targetModel => {
+    const body = responses();
+    const index = inspectSource(body, "openai-responses");
+    expect(detectCacheFence(body, index, { targetFormat: "antigravity", targetModel }).protectAll).toBe(true);
+    expect(index.results.every(r => r.opaqueProtected)).toBe(true);
+  });
+  it.each(["thinking", "redacted_thinking"])("keeps Claude %s prefix global", type => {
+    const body = claude();
+    body.messages[1].content.unshift(type === "thinking" ? { type, signature: "synthetic" } : { type, data: "synthetic" });
+    const { fence, index } = inspect(body, "claude");
+    expect(fence.protectAll).toBe(true);
+    expect(fence.opaqueReasons).toEqual(["claude_thinking_signature"]);
+    expect(index.results.every(r => r.opaqueProtected && !r.cacheProtected)).toBe(true);
+  });
+  it("retains cache prefix protection alongside local signed state", () => {
+    const body = responses();
+    body.input[0].prompt_cache_breakpoint = { mode: "explicit" };
+    body.input.splice(1, 0, { type: "reasoning", encrypted_content: "synthetic" });
+    const { fence, index } = inspect(body, "openai-responses");
+    expect(fence.hasFence).toBe(true);
+    expect(fence.protectAll).toBe(false);
+    expect(index.results[5].opaqueProtected).toBe(true);
+  });
+  it("does not scope opaque fields on arbitrary results or root config", () => {
+    const body = responses();
+    body.input[2].encrypted_content = "synthetic";
+    expect(inspect(body, "openai-responses").fence.protectAll).toBe(true);
+    delete body.input[2].encrypted_content;
+    body.generationConfig = { thoughtSignature: "synthetic" };
+    expect(inspect(body, "openai-responses").fence.protectAll).toBe(true);
+  });
+  it("commits exactly two encrypted Responses results without mutating source or reasoning items", () => {
+    const source = responses();
+    source.input = source.input.flatMap(item => item.role === "user" ? [item, { type: "reasoning", encrypted_content: "synthetic" }] : [item]);
+    const before = structuredClone(source);
+    const { index, plan } = inspect(source, "openai-responses");
+    const final = structuredClone(source);
+    const commit = commitSessionDedup(final, { sourceFormat: "openai-responses", finalFormat: "openai-responses", sourceIndex: index, plan });
+    const results = inspectSource(final, "openai-responses").results;
+    expect(commit.appliedResults).toBe(2);
+    expect(commit.bytesSaved).toBe(2 * (2048 - Buffer.byteLength(results[1].text)));
+    expect(results.map(r => r.text.startsWith("[9router dedup:v1 "))).toEqual([false, true, true, false, false, false]);
+    expect(final.input.filter(i => i.type === "reasoning")).toEqual(before.input.filter(i => i.type === "reasoning"));
+    expect(source).toEqual(before);
+  });
+  it("preserves every batch in a signed Gemini current turn", () => {
+    const body = gemini();
+    body.contents = [body.contents[0], ...body.contents.filter(m => m.role === "model" || m.parts.some(p => p.functionResponse))];
+    for (const message of body.contents) if (message.role === "model") message.parts[0].thoughtSignature = "synthetic";
+    const before = structuredClone(body);
+    const { fence, index, plan } = inspect(body, "gemini");
+    expect(fence.protectAll).toBe(false);
+    expect(plan.stats.protected.opaque).toBe(6);
+    expect(plan.replacements).toEqual([]);
+    expect(index.results.every(r => r.opaqueProtected)).toBe(true);
+    expect(body).toEqual(before);
+  });
+  it.each(["previous_response_id", "conversation", "cached_content", "cachedContent"])("keeps root %s state request-wide", key => {
+    const body = responses();
+    body[key] = "synthetic";
+    const { fence, index, plan } = inspect(body, "openai-responses");
+    expect(fence.protectAll).toBe(true);
+    expect(fence.blockPromptInjection).toBe(true);
+    expect(plan.replacements).toEqual([]);
+    expect(index.results.every(r => r.opaqueProtected)).toBe(true);
+  });
+  it.each(["compaction", "compaction_trigger"])("keeps protocol %s global", type => {
+    const body = responses(); body.input.unshift({ type });
+    expect(inspect(body, "openai-responses").fence.protectAll).toBe(true);
+  });
+  it.each(["", {}, 4])("does not scope malformed encrypted state %#", encrypted_content => {
+    const body = responses(); body.input.splice(1, 0, { type: "reasoning", encrypted_content });
+    expect(inspect(body, "openai-responses").fence.protectAll).toBe(true);
+  });
+  it("fails closed when signed history has no genuine user turn", () => {
+    const body = responses(); body.input = body.input.filter(i => i.role !== "user");
+    body.input.unshift({ type: "reasoning", encrypted_content: "synthetic" });
+    expect(inspect(body, "openai-responses").fence.protectAll).toBe(true);
+  });
+  it("does not mistake a Chat result type for a Responses reasoning item", () => {
+    const body = { messages: Array.from({ length: 6 }, (_, i) => [
+      { role: "user", content: `u${i}` },
+      { role: "assistant", tool_calls: [{ id: `c${i}`, type: "function", function: { name: "read_file", arguments: "{}" } }] },
+      { role: "tool", tool_call_id: `c${i}`, content: text },
+    ]).flat() };
+    Object.assign(body.messages.at(-1), { type: "reasoning", encrypted_content: "synthetic" });
+    const { fence, plan } = inspect(body, "openai");
+    expect(fence.protectAll).toBe(true);
+    expect(plan.replacements).toEqual([]);
   });
 });

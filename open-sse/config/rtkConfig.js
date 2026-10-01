@@ -19,7 +19,7 @@ export const RTK_CONFIG = Object.freeze({
 });
 
 export const RTK_REJECTIONS = Object.freeze([
-  "error_result", "cache_marker", "cache_fence", "dedup_anchor", "dedup_candidate", "dedup_marker", "below_min_bytes", "above_max_bytes", "selection_budget", "unlinked_call",
+  "error_result", "cache_marker", "cache_fence", "opaque_state", "dedup_anchor", "dedup_candidate", "dedup_marker", "below_min_bytes", "above_max_bytes", "selection_budget", "unlinked_call",
   "invalid_command_metadata", "metadata_limit", "missing_command", "unsupported_shell_syntax",
   "not_applicable_tool", "native_metadata_missing",
   "already_rtk", "unsupported_command", "unsupported_mode", "unsupported_output_format",
@@ -67,6 +67,14 @@ export const RTK_DIAGNOSTIC_DETAILS = Object.freeze([
   "none", "no_command", "native_metadata_missing", "native_output_mismatch",
   "serialized_metadata_limit", "command_length_limit",
 ]);
+
+export const RTK_FILTER_DETAILS = Object.freeze([
+  "none", "unknown_terminal_control", "failure_detected", "multiple_runs",
+  "unsupported_structure", "unknown_reporter", "missing_footer", "incomplete_run",
+  "totals_mismatch", "no_removable_rows",
+]);
+
+export const RTK_NATIVE_GREP_SHAPES = Object.freeze(["flat_numbered", "heading_numbered", "unknown"]);
 
 export const RTK_DIAGNOSTIC_OUTCOMES = Object.freeze([
   "applied", "discarded_deadline", "discarded_cancelled", "not_smaller", "empty_output",

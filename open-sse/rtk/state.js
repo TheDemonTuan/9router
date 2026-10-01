@@ -8,6 +8,8 @@ import {
   RTK_DIAGNOSTIC_DETAILS,
   RTK_DIAGNOSTIC_OUTCOMES,
   RTK_COMMAND_FAMILIES,
+  RTK_FILTER_DETAILS,
+  RTK_NATIVE_GREP_SHAPES,
 } from "../config/rtkConfig.js";
 import { randomUUID } from "node:crypto";
 
@@ -23,6 +25,8 @@ const validFilters = new Set([...RTK_PIPE_FILTERS, ...RTK_LOCAL_FILTERS]);
 const validOutcomes = new Set(RTK_DIAGNOSTIC_OUTCOMES);
 const trackedFamilies = new Set(RTK_TRACKED_FAMILIES);
 const validCommands = new Set(RTK_COMMAND_FAMILIES);
+const validFilterDetails = new Set(RTK_FILTER_DETAILS);
+const validNativeGrepShapes = new Set(RTK_NATIVE_GREP_SHAPES);
 const safeCommand = value => value === "none" || validCommands.has(value) ? value : "other";
 
 function toSafeInt(val) {
@@ -43,8 +47,8 @@ function getDiagnosticsSnapshot(diagnostics) {
     .map(row => ({ ...row }));
   const filters = Object.values(diagnostics.filters || {})
     .filter(row => row.count > 0)
-    .sort((a, b) => b.count - a.count || `${a.toolFamily}:${a.filter}:${a.engine}:${a.fallback}:${a.outcome}`.localeCompare(`${b.toolFamily}:${b.filter}:${b.engine}:${b.fallback}:${b.outcome}`))
-    .map(row => ({ ...row }));
+    .sort((a, b) => b.count - a.count || `${a.toolFamily}:${a.filter}:${a.engine}:${a.fallback}:${a.outcome}:${a.detail ?? "none"}`.localeCompare(`${b.toolFamily}:${b.filter}:${b.engine}:${b.fallback}:${b.outcome}:${b.detail ?? "none"}`))
+    .map(row => ({ ...row, detail: validFilterDetails.has(row.detail) ? row.detail : "none" }));
   return {
     rejections,
     filters,
@@ -66,6 +70,8 @@ export function getRtkState() {
     client: { initialized: false, endpoint: null, endpointState: "unconfigured", dispatcher: null, active: 0, openUntil: 0, generation: 0, probe: false, warningAt: 0, lastSuccessAt: null, lastFailure: null, check: null, checkPromise: null },
   };
   state.usage.commandFamilies ??= {};
+  state.usage.nativeGrepShapes ??= {};
+  for (const shape of RTK_NATIVE_GREP_SHAPES) state.usage.nativeGrepShapes[shape] ??= { count: 0, inputBytes: 0 };
   for (const reason of RTK_REJECTIONS) state.usage.eligibility.rejected[reason] ??= 0;
   for (const reason of reasons) state.usage.preparationReasons[reason] ??= 0;
   state.usage.diagnostics ??= {
@@ -85,6 +91,7 @@ export function getRtkSnapshot() {
       skipped: { ...usage.skipped }, filters: Object.values(usage.filters).map(row => ({ ...row, engines: { ...row.engines } })),
       eligibility: { ...usage.eligibility, rejected: { ...usage.eligibility.rejected } },
       commandFamilies: Object.values(usage.commandFamilies).map(row => ({ ...row })),
+      nativeGrepShapes: Object.fromEntries(RTK_NATIVE_GREP_SHAPES.map(shape => [shape, { ...usage.nativeGrepShapes[shape] }])),
       diagnostics,
     },
     diagnostics,
@@ -96,6 +103,12 @@ export function recordRtkCommand(commandFamily, inputBytes) {
   if (family === "none") return;
   const rows = getRtkState().usage.commandFamilies;
   const row = rows[family] ??= { commandFamily: family, count: 0, inputBytes: 0 };
+  row.count = safeAdd(row.count, 1);
+  row.inputBytes = safeAdd(row.inputBytes, toSafeInt(inputBytes));
+}
+
+export function recordRtkNativeGrepShape(shape, inputBytes) {
+  const row = getRtkState().usage.nativeGrepShapes[validNativeGrepShapes.has(shape) ? shape : "unknown"];
   row.count = safeAdd(row.count, 1);
   row.inputBytes = safeAdd(row.inputBytes, toSafeInt(inputBytes));
 }
@@ -129,7 +142,7 @@ export function recordRtkRejection(toolFamily, reason, detail, inputBytes, comma
   };
 }
 
-export function recordRtkFilterOutcome(toolFamily, filter, engine, fallback, outcome, inputBytes, outputBytes, commandFamily = "none") {
+export function recordRtkFilterOutcome(toolFamily, filter, engine, fallback, outcome, inputBytes, outputBytes, commandFamily = "none", detail = "none") {
   if (engine !== "local" && engine !== "sidecar") return;
   if (typeof fallback !== "boolean") return;
   const diagnostics = getRtkState().usage.diagnostics;
@@ -139,8 +152,18 @@ export function recordRtkFilterOutcome(toolFamily, filter, engine, fallback, out
   const safeIn = toSafeInt(inputBytes);
   const safeOut = toSafeInt(outputBytes);
   const command = safeCommand(commandFamily);
-  const key = `${safeFamily}:${safeFilter}:${engine}:${fallback ? 1 : 0}:${safeOutcome}:${command}`;
-  const existing = diagnostics.filters[key];
+  const safeDetail = validFilterDetails.has(detail) ? detail : "none";
+  const key = `${safeFamily}:${safeFilter}:${engine}:${fallback ? 1 : 0}:${safeOutcome}:${command}:${safeDetail}`;
+  let existing = diagnostics.filters[key];
+  if (!existing && safeDetail === "none") {
+    const legacyKey = `${safeFamily}:${safeFilter}:${engine}:${fallback ? 1 : 0}:${safeOutcome}:${command}`;
+    existing = diagnostics.filters[legacyKey];
+    if (existing) {
+      existing.detail = "none";
+      diagnostics.filters[key] = existing;
+      delete diagnostics.filters[legacyKey];
+    }
+  }
   if (existing) {
     existing.count = safeAdd(existing.count, 1);
     existing.inputBytes = safeAdd(existing.inputBytes, safeIn);
@@ -158,6 +181,7 @@ export function recordRtkFilterOutcome(toolFamily, filter, engine, fallback, out
     engine,
     fallback,
     outcome: safeOutcome,
+    detail: safeDetail,
     count: 1,
     inputBytes: safeIn,
     outputBytes: safeOut,

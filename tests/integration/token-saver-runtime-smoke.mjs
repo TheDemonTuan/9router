@@ -18,6 +18,8 @@ if (!process.argv.includes("--child")) {
   const { handleChatCore } = await import("../../open-sse/handlers/chatCore.js");
   const { getRtkSnapshot } = await import("../../open-sse/rtk/state.js");
   const { getTokenSaverSnapshot } = await import("../../open-sse/token-saver/state.js");
+  const { translateRequest } = await import("../../open-sse/translator/index.js");
+  const { inspectSource } = await import("../../open-sse/token-saver/sourceWalker.js");
   const binaryIndex = process.argv.indexOf("--rtk-binary");
   let sidecar;
   if (binaryIndex >= 0) {
@@ -29,6 +31,16 @@ if (!process.argv.includes("--child")) {
   const captured = [];
   const provider = Bun.serve({hostname:"127.0.0.1",port:0,async fetch(request) {
     const body = await request.json(); captured.push(body);
+    if (body.input) {
+      const response = { id: "resp-synthetic", object: "response", status: "completed", model: "synthetic", output: [{ id: "msg-synthetic", type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: "ok", annotations: [] }] }], usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } };
+      if (!body.stream) return Response.json(response);
+      const events = [{ type: "response.created", response: { ...response, status: "in_progress", output: [] } }, { type: "response.output_text.delta", item_id: "msg-synthetic", output_index: 0, content_index: 0, delta: "ok" }, { type: "response.completed", response }];
+      return new Response(events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
+    }
+    if (body.contents) {
+      const chunk = { candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }], usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1, totalTokenCount: 2 } };
+      return request.url.includes("gemini-stream") ? new Response(`data: ${JSON.stringify(chunk)}\n\n`, { headers: { "content-type": "text/event-stream" } }) : Response.json(chunk);
+    }
     if (body.stream) return new Response(`data: ${JSON.stringify({id:"chatcmpl-synthetic",object:"chat.completion.chunk",choices:[{index:0,delta:{content:"ok"},finish_reason:"stop"}]})}\n\ndata: [DONE]\n\n`, {headers:{"content-type":"text/event-stream"}});
     return Response.json({id:"chatcmpl-synthetic",object:"chat.completion",model:"synthetic",choices:[{index:0,message:{role:"assistant",content:"ok"},finish_reason:"stop"}]});
   }});
@@ -45,7 +57,7 @@ if (!process.argv.includes("--child")) {
     const original=structuredClone(body);
     const result=await handleChatCore({body,...options,...extra});
     assert.equal(result.response.status,200); const response=await result.response.text(); assert(response.includes("ok"));
-    if(body.stream) assert(response.includes("[DONE]"));
+    if (body.stream) assert(extra.sourceFormatOverride === "openai-responses" ? response.includes("response.completed") : extra.modelInfo?.provider === "gemini" ? /"finish_reason":"stop"/.test(response) : response.includes("[DONE]"));
     assert.deepEqual(body,original,"caller must remain unchanged");
     return captured.at(-1);
   }
@@ -78,6 +90,78 @@ if (!process.argv.includes("--child")) {
     assert.equal(tools(ambiguousSent)[0].content,read);
     assert.equal(getTokenSaverSnapshot().usage.skippedPreparations.ambiguous_turn-ambiguousBefore,1);
     console.log(JSON.stringify({scenario:'supported ambiguous-turn',raw:true,skippedPreparations:1}));
+    for (const stream of [false, true]) {
+      const encrypted = fixture(stream);
+      encrypted.messages = encrypted.messages.slice(0, 18);
+      for (const message of encrypted.messages) if (message.role === "assistant") message.reasoning = { encrypted_content: "synthetic-encrypted" };
+      const before = getTokenSaverSnapshot().usage;
+      const sent = await run(encrypted);
+      const outputs = tools(sent);
+      assert.equal(outputs[0].content, read);
+      for (const i of [1, 2]) assert.match(outputs[i].content, /^\[9router dedup:v1 /);
+      for (const i of [3, 4, 5]) assert.equal(outputs[i].content, read);
+      assert.deepEqual(sent.messages.filter(m => m.role === "assistant"), encrypted.messages.filter(m => m.role === "assistant"));
+      const after = getTokenSaverSnapshot().usage;
+      const markerBytes = Buffer.byteLength(outputs[1].content);
+      assert.equal(after.appliedResults - before.appliedResults, 2);
+      assert.equal(after.bytesSaved - before.bytesSaved, 2 * (2048 - markerBytes));
+      console.log(JSON.stringify({ scenario: "encrypted old-history", stream, appliedResults: 2, bytesSaved: after.bytesSaved - before.bytesSaved, signedProtocolUnchanged: true }));
+
+      const signedChain = structuredClone(encrypted);
+      signedChain.messages = [signedChain.messages[0], ...signedChain.messages.filter(m => m.role !== "user")];
+      const chainBefore = getTokenSaverSnapshot().usage.appliedResults;
+      assert.deepEqual((await run(signedChain)).messages, signedChain.messages);
+      assert.equal(getTokenSaverSnapshot().usage.appliedResults, chainBefore);
+
+      const geminiSource = fixture(stream);
+      geminiSource.messages = geminiSource.messages.slice(0, 18).flatMap(m => m.role === "tool" ? [m, { role: "assistant", content: "complete" }] : [m]);
+      const baseline = translateRequest("openai", "gemini", "gemini-2.5-pro", structuredClone(geminiSource), stream);
+      const geminiBefore = getTokenSaverSnapshot().usage;
+      const geminiSent = await run(geminiSource, { modelInfo: { provider: "gemini", model: "gemini-2.5-pro" }, credentials: { apiKey: "synthetic-key", runtimeTransport: { baseUrl: `http://127.0.0.1:${provider.port}/gemini-${stream ? "stream" : "json"}` } } });
+      const geminiResults = inspectSource(geminiSent, "gemini").results;
+      const baselineResults = inspectSource(baseline, "gemini").results;
+      for (const i of [0, 3, 4, 5]) assert.deepEqual(geminiResults[i].resultContainer, baselineResults[i].resultContainer);
+      for (const i of [1, 2]) assert.match(geminiResults[i].resultContainer.response.result.result, /^\[9router dedup:v1 /);
+      assert.deepEqual(geminiSent.contents.filter(m => m.role === "model"), baseline.contents.filter(m => m.role === "model"));
+      assert.equal(getTokenSaverSnapshot().usage.appliedResults - geminiBefore.appliedResults, 2);
+      console.log(JSON.stringify({ scenario: "final-only Gemini signatures", stream, appliedResults: 2, signedProtocolUnchanged: true, currentChainUnchanged: true }));
+      const signedRtk = structuredClone(encrypted);
+      for (const message of signedRtk.messages) {
+        if (message.role === "assistant") message.tool_calls[0].function = { name: "Bash", arguments: '{"command":"bun test"}' };
+        else if (message.role === "tool") message.content = bun;
+      }
+      const rtkBefore = getRtkSnapshot().usage;
+      const rtkSent = tools(await run(signedRtk, { sessionDedupMode: "off" }));
+      for (const i of [0, 1, 2]) {
+        assert(Buffer.byteLength(rtkSent[i].content) < Buffer.byteLength(bun));
+        assert(rtkSent[i].content.includes("KEEP_WARNING"));
+      }
+      for (const i of [3, 4, 5]) assert.equal(rtkSent[i].content, bun);
+      const rtkAfter = getRtkSnapshot().usage;
+      assert.equal(rtkAfter.appliedOutputs - rtkBefore.appliedOutputs, 3);
+      assert.equal(rtkAfter.eligibility.rejected.opaque_state - rtkBefore.eligibility.rejected.opaque_state, 3);
+      signedRtk.messages = [signedRtk.messages[0], ...signedRtk.messages.filter(m => m.role !== "user")];
+      assert.deepEqual((await run(signedRtk, { sessionDedupMode: "off" })).messages, signedRtk.messages);
+      assert.equal(getRtkSnapshot().usage.appliedOutputs, rtkAfter.appliedOutputs);
+      console.log(JSON.stringify({ scenario: "signed RTK replay", stream, oldCompressedOutputs: 3, currentChainAppliedOutputs: 0, rawSignedChain: true }));
+      const responses = { model: "synthetic", stream, input: Array.from({ length: 6 }, (_, i) => [
+        { type: "message", role: "user", content: [{ type: "input_text", text: `synthetic turn ${i}` }] },
+        { type: "reasoning", encrypted_content: "synthetic-encrypted" },
+        { type: "function_call", call_id: `response-${i}`, name: "read_file", arguments: "{}" },
+        { type: "function_call_output", call_id: `response-${i}`, output: read },
+      ]).flat() };
+      const responseBefore = getTokenSaverSnapshot().usage;
+      const responseSent = await run(responses, { sourceFormatOverride: "openai-responses", modelInfo: { provider: "openai-compatible-responses-token-saver-smoke", model: "synthetic" }, credentials: { apiKey: "synthetic-key", providerSpecificData: { baseUrl: `http://127.0.0.1:${provider.port}/v1`, apiType: "responses" } } });
+      const responseOutputs = responseSent.input.filter(item => item.type === "function_call_output");
+      assert.equal(responseOutputs[0].output, read);
+      for (const i of [1, 2]) assert.match(responseOutputs[i].output, /^\[9router dedup:v1 /);
+      for (const i of [3, 4, 5]) assert.equal(responseOutputs[i].output, read);
+      assert.deepEqual(responseSent.input.filter(item => item.type !== "function_call_output"), responses.input.filter(item => item.type !== "function_call_output"));
+      const responseAfter = getTokenSaverSnapshot().usage;
+      assert.equal(responseAfter.appliedResults - responseBefore.appliedResults, 2);
+      assert.equal(responseAfter.bytesSaved - responseBefore.bytesSaved, 2 * (2048 - Buffer.byteLength(responseOutputs[1].output)));
+      console.log(JSON.stringify({ scenario: "encrypted Responses provider-bound", stream, appliedResults: 2, bytesSaved: responseAfter.bytesSaved - responseBefore.bytesSaved, reasoningAndOrderUnchanged: true }));
+    }
     if(sidecar) {
       const diff="diff --git a/src/a.txt b/src/a.txt\nindex 1234567..89abcde 100644\n--- a/src/a.txt\n+++ b/src/a.txt\n@@ -1,80 +1,80 @@\n"+Array.from({length:39},(_,i)=>` context ${i}\n`).join('')+'-OLD_VALUE\n+NEW_VALUE\n'+Array.from({length:40},(_,i)=>` context ${i+40}\n`).join('');
       const pipe = () => ({model:'synthetic',stream:false,messages:[{role:'assistant',tool_calls:[{id:'diff',type:'function',function:{name:'Bash',arguments:'{"command":"git diff"}'}}]},{role:'tool',tool_call_id:'diff',content:diff}]});

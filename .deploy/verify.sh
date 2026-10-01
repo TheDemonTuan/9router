@@ -20,6 +20,12 @@ mkdir -p "$HOME" "$DATA_DIR"
     unit/rtk.test.js \
     unit/rtk-dashboard.test.js \
     unit/rtk-hybrid.test.js \
+    unit/rtk-production.test.js \
+    unit/rtk-test-output.test.js \
+    unit/token-saver-fence.test.js \
+    unit/session-dedup.test.js \
+    unit/session-dedup-pipeline.test.js \
+    unit/token-saver-state.test.js \
     unit/rtkKiro.test.js \
     unit/force-stream-config.test.js \
     unit/minimax-transport-target-format.test.js \
@@ -65,6 +71,7 @@ bun tests/integration/pre-response-lifecycle-smoke.mjs
 bun tests/integration/bypass-transport-smoke.mjs
 bun tests/integration/retired-settings-smoke.mjs
 bun tests/integration/token-saver-settings-smoke.mjs
+bun tests/integration/token-saver-runtime-smoke.mjs
 (
   cd tests
   node __baseline__/verify-providers.mjs

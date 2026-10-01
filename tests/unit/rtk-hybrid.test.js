@@ -2,8 +2,8 @@ import { afterAll, describe, expect, it, vi } from "vitest";
 import { createServer } from "node:http";
 import { classifyToolCall } from "../../open-sse/rtk/classifier.js";
 import { compressMessages } from "../../open-sse/rtk/index.js";
-import { filterLocalOutput } from "../../open-sse/rtk/local.js";
-import { getRtkState } from "../../open-sse/rtk/state.js";
+import { filterLocalOutput, inspectNativeGrepOutput } from "../../open-sse/rtk/local.js";
+import { getRtkState, getRtkSnapshot, recordRtkNativeGrepShape } from "../../open-sse/rtk/state.js";
 
 let requests = 0;
 const server = createServer((request, response) => {
@@ -174,7 +174,7 @@ describe("hybrid RTK preserves output contracts", () => {
     for (let i = 1; i <= 25; i++) expect(responsesBody.input[1].output).toContain(`KEEP_MATCH_${i}`);
     const snap = stateModule.getRtkSnapshot();
     const appliedGrepRow = snap.diagnostics.filters.find(r => r.filter === "local:grep" && r.outcome === "applied");
-    expect(appliedGrepRow).toMatchObject({ toolFamily: "grep", engine: "local", fallback: false, outcome: "applied" });
+    expect(appliedGrepRow).toMatchObject({ toolFamily: "grep", engine: "local", fallback: false, outcome: "applied", detail: "none" });
     expect(appliedGrepRow.inputBytes - beforeIn).toBe(Buffer.byteLength(grepContent));
     expect(appliedGrepRow.outputBytes - beforeOut).toBe(Buffer.byteLength(responsesBody.input[1].output));
     // Enveloped header/footer: native grep shape mismatch
@@ -261,7 +261,7 @@ describe("hybrid RTK preserves output contracts", () => {
     expect(lsBody.messages[1].content).toBe(lsPlain);
     const snap = (await import("../../open-sse/rtk/state.js")).getRtkSnapshot();
     const lsRow = snap.diagnostics.filters.find(r => r.filter === "local:listing" && r.outcome === "not_smaller");
-    expect(lsRow).toBeDefined();
+    expect(lsRow).toMatchObject({ detail: "none" });
 
     // npm test summary without passing detail lines
     const npmPassOnly = "Test Files  5 passed (5)\nTests  40 passed (40)\nTime: 1.2s\n".repeat(12);
@@ -269,6 +269,14 @@ describe("hybrid RTK preserves output contracts", () => {
     const npmBody = bodyFor("functions.bash", { command: "npm test" }, npmPassOnly);
     await compressMessages(npmBody, true);
     expect(npmBody.messages[1].content).toBe(npmPassOnly);
+    const multipleRow = (await import("../../open-sse/rtk/state.js")).getRtkSnapshot().diagnostics.filters.find(r => r.filter === "local:test" && r.detail === "multiple_runs");
+    expect(multipleRow).toMatchObject({ outcome: "format_not_accepted", outputBytes: 0 });
+    const compactSummary = "console: KEEP_COMPACT_DIAGNOSTIC\n".repeat(20) + "Test Files 5 passed (5)\nTests 40 passed (40)\n";
+    const compactBody = bodyFor("functions.bash", { command: "npm test" }, compactSummary);
+    await compressMessages(compactBody, true);
+    expect(compactBody.messages[1].content).toBe(compactSummary);
+    const compactRow = (await import("../../open-sse/rtk/state.js")).getRtkSnapshot().diagnostics.filters.find(r => r.filter === "local:test" && r.detail === "no_removable_rows");
+    expect(compactRow).toMatchObject({ outcome: "not_smaller", outputBytes: Buffer.byteLength(compactSummary) });
 
     // cargo success without compile lines
     const cargoPassOnly = "    Finished dev [unoptimized + debuginfo] target(s) in 0.04s\n".repeat(10);
@@ -286,12 +294,90 @@ describe("hybrid RTK preserves output contracts", () => {
     await compressMessages(failBody, true);
     expect(failBody.messages[1].content).toBe(failedNpm);
     const snap4 = (await import("../../open-sse/rtk/state.js")).getRtkSnapshot();
-    const failRow = snap4.diagnostics.filters.find(r => r.filter === "local:test" && r.outcome === "format_not_accepted");
+    const failRow = snap4.diagnostics.filters.find(r => r.filter === "local:test" && r.outcome === "format_not_accepted" && r.detail === "failure_detected");
     expect(failRow).toBeDefined();
 
     // Invalid text with NUL byte
     let invalidOutcome = null;
     filterLocalOutput("git-log", "commit 1234\0invalid", (outcome) => { invalidOutcome = outcome; });
     expect(invalidOutcome).toBe("invalid_text");
+  });
+});
+
+describe("documented native Grep contracts", () => {
+  const heading = ending => `src/SENTINEL_PATH.js${ending}` + Array.from({ length: 25 }, (_, i) => `${i + 1}:SENTINEL_PAYLOAD retained match ${i}`).join(ending) + ending;
+  it.each(["\n", "\r\n"])("recognizes already-grouped output without changing its raw endings %j", async ending => {
+    const content = heading(ending);
+    const before = getRtkSnapshot();
+    const requestsBefore = requests;
+    const { text, stats } = await compress("Grep", { path: "SENTINEL_COMMAND", pattern: "SENTINEL_PATTERN" }, content);
+    expect(text).toBe(content);
+    expect(stats.hits).toEqual([]);
+    const after = getRtkSnapshot();
+    expect(after.usage.nativeGrepShapes.heading_numbered.count - before.usage.nativeGrepShapes.heading_numbered.count).toBe(1);
+    expect(after.usage.nativeGrepShapes.heading_numbered.inputBytes - before.usage.nativeGrepShapes.heading_numbered.inputBytes).toBe(Buffer.byteLength(content));
+    expect(after.usage.local.attempts - before.usage.local.attempts).toBe(1);
+    expect(after.usage.http.attempts).toBe(before.usage.http.attempts);
+    expect(after.diagnostics.filters.some(r => r.toolFamily === "grep" && r.outcome === "not_smaller")).toBe(true);
+    expect(requests).toBe(requestsBefore);
+    expect(JSON.stringify(after)).not.toContain("SENTINEL_");
+  });
+  it("preserves all flat match numbers and text while shortening repeated paths", async () => {
+    const content = Array.from({ length: 25 }, (_, i) => `src/long/synthetic/path/file.js:${i + 1}:KEEP_${i}`).join("\n");
+    const before = getRtkSnapshot();
+    const { text } = await compress("Grep", { path: "src", pattern: "KEEP" }, content);
+    expect(Buffer.byteLength(text)).toBeLessThan(Buffer.byteLength(content));
+    for (let i = 0; i < 25; i++) expect(text).toContain(`${i + 1}:KEEP_${i}`);
+    expect(getRtkSnapshot().usage.nativeGrepShapes.flat_numbered.count - before.usage.nativeGrepShapes.flat_numbered.count).toBe(1);
+    expect(getRtkSnapshot().usage.http.attempts).toBe(before.usage.http.attempts);
+  });
+  it.each([
+    content => `Output:\n${content}`,
+    content => `${content}25 matches`,
+    content => content.replace("1:SENTINEL", "0:SENTINEL"),
+    content => content.replace("1:SENTINEL", "9007199254740992:SENTINEL"),
+    content => content.replace("1:SENTINEL", "src/file.js:1:SENTINEL"),
+    content => `\u001b[32m${content}`,
+    content => `${content}\0`,
+    content => content.replace("src/SENTINEL_PATH.js", "C:/src/file.js"),
+    content => content.replace("src/SENTINEL_PATH.js", " src/file.js"),
+    content => `${content}\n`,
+    content => content.replace("2:SENTINEL", "--\n2:SENTINEL"),
+  ])("keeps unsupported native structures raw without a sidecar attempt %#", async mutate => {
+    const content = mutate(heading("\n"));
+    const before = getRtkSnapshot();
+    const { text, stats } = await compress("Grep", { path: "src", pattern: "KEEP" }, content);
+    expect(inspectNativeGrepOutput(content)).toBe("unknown");
+    expect(text).toBe(content);
+    expect(stats.hits).toEqual([]);
+    const after = getRtkSnapshot();
+    expect(after.usage.nativeGrepShapes.unknown.count - before.usage.nativeGrepShapes.unknown.count).toBe(1);
+    expect(after.usage.http.attempts).toBe(before.usage.http.attempts);
+  });
+  it("requires complete groups and does not relax the shell contract", () => {
+    const groups = "src/a.js\n1:one\n2:two\n\nsrc/b.js\n3:three\n";
+    expect(inspectNativeGrepOutput(groups)).toBe("heading_numbered");
+    expect(inspectNativeGrepOutput(groups.replace("\n\nsrc/b", "\nsrc/b"))).toBe("heading_numbered");
+    for (const content of ["", "src/a.js\n", "src/a.js\n\n1:one", groups.replace("\n\nsrc/b", "\n\n\nsrc/b"), "1:one\nsrc/a.js\n2:two"]) expect(inspectNativeGrepOutput(content)).toBe("unknown");
+    expect(classifyToolCall(shell("rg -n KEEP src"), groups)).toBeNull();
+  });
+  it("does not attribute invalid metadata, below-min output or protected leaves", async () => {
+    const before = getRtkSnapshot().usage.nativeGrepShapes;
+    await compress("Grep", { pattern: "KEEP" }, heading("\n"));
+    await compress("Grep", { path: "src", pattern: "KEEP" }, "src/a.js\n1:tiny\n");
+    const protectedBody = bodyFor("Grep", { path: "src", pattern: "KEEP" }, heading("\n"));
+    await compressMessages(protectedBody, true, { getProtectionReason: () => "opaque_state" });
+    expect(getRtkSnapshot().usage.nativeGrepShapes).toEqual(before);
+  });
+  it("keeps fixed shape buckets detached and saturating without storing dynamic labels", () => {
+    const before = getRtkSnapshot();
+    recordRtkNativeGrepShape("SENTINEL_PRIVATE", Number.MAX_SAFE_INTEGER);
+    recordRtkNativeGrepShape("unknown", 20.9);
+    const snapshot = getRtkSnapshot();
+    expect(snapshot.usage.nativeGrepShapes.unknown.inputBytes).toBe(Number.MAX_SAFE_INTEGER);
+    expect(snapshot.usage.nativeGrepShapes.unknown.count - before.usage.nativeGrepShapes.unknown.count).toBe(2);
+    snapshot.usage.nativeGrepShapes.unknown.count = -1;
+    expect(getRtkSnapshot().usage.nativeGrepShapes.unknown.count).toBeGreaterThanOrEqual(2);
+    expect(JSON.stringify(getRtkSnapshot())).not.toContain("SENTINEL_PRIVATE");
   });
 });

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { recordTokenSaverPreparation, getTokenSaverSnapshot } from "../../open-sse/token-saver/state.js";
 
 describe("token saver numeric state", () => {
@@ -89,5 +89,160 @@ describe("token saver numeric state", () => {
       recordTokenSaverPreparation({ mode: "on", elapsedMs: 1 });
       expect(getTokenSaverSnapshot().usage.latency.on.totalSamples).toBeNull();
     } finally { ring.totalSamples = total; }
+  });
+});
+
+describe("token saver final diagnostics", () => {
+  const key = Symbol.for("9router.token-saver.runtime.v2");
+  const opaqueNames = [
+    "previous_response_id", "conversation", "cached_content", "encrypted_reasoning",
+    "thought_signature", "claude_thinking_signature", "compaction",
+  ];
+  const correspondenceNames = [
+    "unsupported_final", "call_count", "result_count", "call_identity",
+    "result_linkage", "anchor_mapping", "leaf_proof", "non_writable",
+  ];
+  let previousRuntime;
+  beforeEach(() => {
+    previousRuntime = globalThis[key];
+    delete globalThis[key];
+  });
+  afterEach(() => {
+    if (previousRuntime === undefined) delete globalThis[key];
+    else globalThis[key] = previousRuntime;
+  });
+
+  it("counts unique final opaque categories separately from source presence", () => {
+    recordTokenSaverPreparation({
+      mode: "on",
+      opaqueReasons: ["encrypted_reasoning", "encrypted_reasoning"],
+      finalOpaqueReasons: [...opaqueNames, ...opaqueNames],
+      commit: { skipReason: "final_opaque_state" },
+    });
+    const { usage } = getTokenSaverSnapshot();
+    expect(usage.finalOpaqueReasons).toEqual(Object.fromEntries(opaqueNames.map(name => [name, 1])));
+    expect(usage.opaqueReasons.encrypted_reasoning).toBe(1);
+    expect(usage.opaqueReasons.thought_signature).toBe(0);
+    expect(usage.finalGuardSkippedPreparations).toBe(1);
+    expect(usage.skippedPreparations.final_opaque_state).toBe(1);
+    expect(usage.skippedResults.final_opaque_state).toBe(0);
+  });
+
+  it("attributes only the actual final guard, not supplied presence or preparation reasons", () => {
+    const finalOpaqueReasons = ["thought_signature"];
+    recordTokenSaverPreparation({ mode: "on", reason: "final_opaque_state", finalOpaqueReasons });
+    recordTokenSaverPreparation({ mode: "on", finalOpaqueReasons, commit: { skipReason: "final_cache_fence", skipDetail: "leaf_proof" } });
+    recordTokenSaverPreparation({
+      mode: "on", finalOpaqueReasons, opaqueReasons: ["encrypted_reasoning"],
+      commit: { skipReason: "final_correspondence", skipDetail: "call_identity" },
+    });
+    recordTokenSaverPreparation({ mode: "on", commit: { skipReason: "final_opaque_state", skipDetail: "leaf_proof" } });
+    const { usage } = getTokenSaverSnapshot();
+    expect(usage.finalOpaqueReasons).toEqual(Object.fromEntries(opaqueNames.map(name => [name, 0])));
+    expect(usage.finalCorrespondenceReasons.call_identity).toBe(1);
+    expect(usage.finalCorrespondenceReasons.leaf_proof).toBe(0);
+    expect(usage.opaqueReasons.encrypted_reasoning).toBe(1);
+    expect(usage.finalGuardSkippedPreparations).toBe(3);
+    expect(usage.skippedPreparations.final_opaque_state).toBe(2);
+  });
+
+  it("records one allowed correspondence detail per rejected preparation", () => {
+    for (const skipDetail of correspondenceNames) {
+      recordTokenSaverPreparation({ mode: "on", commit: { skipReason: "final_correspondence", skipDetail } });
+    }
+    const { usage } = getTokenSaverSnapshot();
+    expect(usage.finalCorrespondenceReasons).toEqual(Object.fromEntries(correspondenceNames.map(name => [name, 1])));
+    expect(usage.finalGuardSkippedPreparations).toBe(8);
+    expect(usage.skippedPreparations.final_correspondence).toBe(8);
+  });
+
+  it("ignores unknown or non-string enum values without retaining payloads", () => {
+    const sentinel = "PRIVATE-DIAGNOSTIC-PAYLOAD-12345";
+    const invalid = [sentinel, "__proto__", "constructor", null, 1, ["leaf_proof"], { toString: () => "leaf_proof" }];
+    recordTokenSaverPreparation({
+      mode: "on", opaqueReasons: [...invalid, { toString: () => "thought_signature" }],
+      finalOpaqueReasons: [...invalid, { toString: () => "thought_signature" }],
+      stats: { protected: { opaque: 2, [sentinel]: 7 } },
+      commit: { skipReason: "final_opaque_state", payload: sentinel },
+    });
+    for (const skipDetail of invalid) {
+      recordTokenSaverPreparation({ mode: "on", commit: { skipReason: "final_correspondence", skipDetail } });
+    }
+    const snapshot = getTokenSaverSnapshot();
+    expect(snapshot.usage.finalOpaqueReasons).toEqual(Object.fromEntries(opaqueNames.map(name => [name, 0])));
+    expect(snapshot.usage.opaqueReasons).toEqual(Object.fromEntries(opaqueNames.map(name => [name, 0])));
+    expect(snapshot.usage.finalCorrespondenceReasons).toEqual(Object.fromEntries(correspondenceNames.map(name => [name, 0])));
+    expect(snapshot.usage.protected.opaque).toBe(2);
+    expect(Object.hasOwn(snapshot.usage.protected, sentinel)).toBe(false);
+    expect(JSON.stringify(snapshot)).not.toContain(sentinel);
+  });
+
+  it("detaches final diagnostic and opaque protection buckets", () => {
+    recordTokenSaverPreparation({ mode: "on", stats: { protected: { opaque: 3 } }, finalOpaqueReasons: ["encrypted_reasoning"], commit: { skipReason: "final_opaque_state" } });
+    recordTokenSaverPreparation({ mode: "on", commit: { skipReason: "final_correspondence", skipDetail: "non_writable" } });
+    const before = getTokenSaverSnapshot();
+    const detached = getTokenSaverSnapshot();
+    detached.usage.finalOpaqueReasons.encrypted_reasoning = -999;
+    detached.usage.finalCorrespondenceReasons.non_writable = -999;
+    detached.usage.protected.opaque = -999;
+    expect(getTokenSaverSnapshot()).toEqual(before);
+  });
+
+  it("initializes missing hot-state fields without resetting existing counters or latency", () => {
+    recordTokenSaverPreparation({ mode: "on", elapsedMs: 5, opaqueReasons: ["encrypted_reasoning"], stats: { plannedResults: 4, plannedSaveBytes: 800, protected: { cacheFence: 2 } } });
+    const before = getTokenSaverSnapshot();
+    const runtime = globalThis[key];
+    const ring = runtime.usage.latency.on;
+    delete runtime.usage.finalOpaqueReasons;
+    delete runtime.usage.finalCorrespondenceReasons;
+    delete runtime.usage.protected.opaque;
+    expect(getTokenSaverSnapshot()).toEqual(before);
+    expect(globalThis[key]).toBe(runtime);
+    expect(runtime.usage.latency.on).toBe(ring);
+    recordTokenSaverPreparation({ mode: "on", stats: { protected: { opaque: 3 } }, finalOpaqueReasons: ["thought_signature"], commit: { skipReason: "final_opaque_state" } });
+    const after = getTokenSaverSnapshot();
+    expect(after.session).toEqual(before.session);
+    expect(after.usage.preparations).toBe(before.usage.preparations + 1);
+    expect(after.usage.plannedResults).toBe(4);
+    expect(after.usage.plannedSaveBytes).toBe(800);
+    expect(after.usage.protected.cacheFence).toBe(2);
+    expect(after.usage.protected.opaque).toBe(3);
+    expect(after.usage.opaqueReasons).toEqual(before.usage.opaqueReasons);
+    expect(after.usage.finalOpaqueReasons.thought_signature).toBe(1);
+    expect(after.usage.latency).toEqual(before.usage.latency);
+  });
+
+  it("fills partial hot diagnostic buckets while preserving their populated counters", () => {
+    getTokenSaverSnapshot();
+    const usage = globalThis[key].usage;
+    usage.finalOpaqueReasons = { encrypted_reasoning: 9 };
+    usage.finalCorrespondenceReasons = { leaf_proof: 7 };
+    usage.protected.opaque = 4;
+    const snapshot = getTokenSaverSnapshot();
+    expect(snapshot.usage.finalOpaqueReasons).toEqual(Object.fromEntries(opaqueNames.map(name => [name, name === "encrypted_reasoning" ? 9 : 0])));
+    expect(snapshot.usage.finalCorrespondenceReasons).toEqual(Object.fromEntries(correspondenceNames.map(name => [name, name === "leaf_proof" ? 7 : 0])));
+    expect(snapshot.usage.protected.opaque).toBe(4);
+  });
+
+  it("saturates counters and rejects invalid increments while keeping integer totals", () => {
+    getTokenSaverSnapshot();
+    const usage = globalThis[key].usage;
+    usage.finalOpaqueReasons.encrypted_reasoning = Number.MAX_SAFE_INTEGER - 1;
+    usage.finalCorrespondenceReasons.leaf_proof = Number.MAX_SAFE_INTEGER - 1;
+    usage.protected.opaque = Number.MAX_SAFE_INTEGER - 1;
+    for (let i = 0; i < 3; i++) {
+      recordTokenSaverPreparation({ mode: "on", stats: { protected: { opaque: Number.MAX_VALUE } }, finalOpaqueReasons: ["encrypted_reasoning"], commit: { skipReason: "final_opaque_state" } });
+      recordTokenSaverPreparation({ mode: "on", commit: { skipReason: "final_correspondence", skipDetail: "leaf_proof" } });
+    }
+    for (const amount of [-1, NaN, Infinity, -Infinity, "2", null]) {
+      recordTokenSaverPreparation({ mode: "on", stats: { eligibleResults: amount, protected: { recent: amount } } });
+    }
+    recordTokenSaverPreparation({ mode: "on", stats: { eligibleResults: 2.9, protected: { recent: 2.9 } } });
+    const snapshot = getTokenSaverSnapshot().usage;
+    expect(snapshot.finalOpaqueReasons.encrypted_reasoning).toBe(Number.MAX_SAFE_INTEGER);
+    expect(snapshot.finalCorrespondenceReasons.leaf_proof).toBe(Number.MAX_SAFE_INTEGER);
+    expect(snapshot.protected.opaque).toBe(Number.MAX_SAFE_INTEGER);
+    expect(snapshot.eligibleResults).toBe(2);
+    expect(snapshot.protected.recent).toBe(2);
   });
 });
