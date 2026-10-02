@@ -251,7 +251,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     if (sourceIndex.supported && !(fence.protectAll && fence.reason === "opaque_state")) {
       try {
         dedupPlan = planSessionDedup(sourceIndex, { mode: dedupMode, fence, signal: rtkSignal });
-        if (dedupMode !== "off") cleanupShadow = measureCleanupOpportunities(sourceIndex, {
+        if (dedupMode === "shadow") cleanupShadow = measureCleanupOpportunities(sourceIndex, {
           remainingScanBytes: Math.max(0, TOKEN_SAVER_CONFIG.maxScanBytes - dedupPlan.stats.scannedBytes),
         });
       } catch (error) {

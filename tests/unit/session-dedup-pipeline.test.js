@@ -16,6 +16,7 @@ const { translateRequest } = await import("../../open-sse/translator/index.js");
 const { inspectSource } = await import("../../open-sse/token-saver/sourceWalker.js");
 const { detectCacheFence } = await import("../../open-sse/token-saver/cacheFence.js");
 const { planSessionDedup, commitSessionDedup } = await import("../../open-sse/token-saver/sessionDedup.js");
+const { codexOutput } = await import("../fixtures/compression-coverage.js");
 function fixture() {
   const messages = [];
   for (let i = 0; i < 6; i++) messages.push(
@@ -41,6 +42,38 @@ async function run(body, mode, options = {}) {
   return dispatched;
 }
 describe("session dedup dispatch", () => {
+  it("detects v2 replay inside the exact Responses single-text codec before RTK changes its anchor", () => {
+    const repeated = "synthetic log line\n".repeat(100);
+    const source = { input: Array.from({ length: 6 }, (_, i) => [
+      { type: "message", role: "user", content: [{ type: "input_text", text: `synthetic ${i}` }] },
+      { type: "function_call", call_id: `exec${i}`, name: "exec_command", arguments: '{"cmd":"docker logs synthetic"}' },
+      { type: "function_call_output", call_id: `exec${i}`, output: i === 1 ? [{ type: "input_text", text: codexOutput(repeated, "b") }] : codexOutput(i === 0 ? repeated : `different${i}`.repeat(200), `${i}`) },
+    ]).flat() };
+    const index = inspectSource(source, "openai-responses");
+    const plan = planSessionDedup(index, { mode: "on", fence: detectCacheFence(source, index) });
+    const final = translateRequest("openai-responses", "openai", "gpt-4o", source, false);
+    expect(commitSessionDedup(final, { sourceFormat: "openai-responses", finalFormat: "openai", sourceIndex: index, plan }).bodyAppliedResults).toBe(1);
+    const replay = planSessionDedup(inspectSource(final, "openai"), { mode: "on" });
+    expect(replay.hasExistingMarkers).toBe(true);
+  });
+  it("proves different raw envelopes through Gemini translation and recognizes v2 replay", () => {
+    const body = fixture();
+    for (const [i, message] of body.messages.entries()) {
+      if (message.role === "assistant") message.tool_calls[0].function = { name: "exec_command", arguments: '{"cmd":"bun test"}' };
+      if (message.role === "tool") message.content = codexOutput("x".repeat(2048), `chunk${i}`);
+    }
+    body.messages = body.messages.flatMap(m => m.role === "tool" ? [m, { role: "assistant", content: "complete" }] : [m]);
+    const index = inspectSource(body, "openai");
+    const plan = planSessionDedup(index, { mode: "on", fence: detectCacheFence(body, index, { targetFormat: "gemini" }) });
+    const translated = translateRequest("openai", "gemini", "gemini-2.5-pro", body, false);
+    const baseline = structuredClone(translated);
+    const commit = commitSessionDedup(translated, { sourceFormat: "openai", finalFormat: "gemini", targetModel: "gemini-2.5-pro", sourceIndex: index, plan });
+    expect(commit.bodyAppliedResults).toBe(2);
+    const output = inspectSource(translated, "gemini").results;
+    for (const i of [0, 3, 4, 5]) expect(output[i].resultContainer).toEqual(inspectSource(baseline, "gemini").results[i].resultContainer);
+    expect(output[1].resultContainer.response.result.result).toContain("[9router dedup:v2 ");
+    expect(planSessionDedup(inspectSource(translated, "gemini"), { mode: "on" }).hasExistingMarkers).toBe(true);
+  });
   it("keeps the canonical result and recent history raw while shadow only measures", async () => {
     const body = fixture();
     const before = structuredClone(body);

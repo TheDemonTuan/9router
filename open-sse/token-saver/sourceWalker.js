@@ -98,7 +98,7 @@ export function inspectSource(body, format) {
         batch.callCount++;
       }
     }
-    index.calls.push({ kind, name, id, position: n.position, turnIndex: turn, group, ambiguous: false, batchIndex: batchIdx });
+    index.calls.push({ kind, name, id, input: owner?.function?.arguments ?? owner?.custom?.input ?? owner?.arguments ?? owner?.input ?? owner?.args, position: n.position, turnIndex: turn, group, ambiguous: false, batchIndex: batchIdx });
     return n;
   }
   function addResult(owner, parent, container, key, representation, kind, id, name, error, mixed = false, occurrenceBatchIndex = null) {

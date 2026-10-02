@@ -70,6 +70,10 @@ export function getRtkState() {
     client: { initialized: false, endpoint: null, endpointState: "unconfigured", dispatcher: null, active: 0, openUntil: 0, generation: 0, probe: false, warningAt: 0, lastSuccessAt: null, lastFailure: null, check: null, checkPromise: null },
   };
   state.usage.commandFamilies ??= {};
+  state.usage.recognizedPreserved ??= 0;
+  state.usage.envelopeRejected ??= 0;
+  state.usage.eligibleOutputs ??= 0;
+  state.usage.candidateOutputs ??= 0;
   state.usage.nativeGrepShapes ??= {};
   for (const shape of RTK_NATIVE_GREP_SHAPES) state.usage.nativeGrepShapes[shape] ??= { count: 0, inputBytes: 0 };
   for (const reason of RTK_REJECTIONS) state.usage.eligibility.rejected[reason] ??= 0;

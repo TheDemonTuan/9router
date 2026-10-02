@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, isAbsolute } from "node:path";
+import { codexOutput, mixedBun, largePatch, ompGrep, openCodeGrep } from "../fixtures/compression-coverage.js";
 
 if (!process.argv.includes("--child")) {
   const home = await mkdtemp(join(tmpdir(), "router-token-saver-runtime-"));
@@ -72,6 +73,77 @@ if (!process.argv.includes("--child")) {
   }
   const tools = body => body.messages.filter(m=>m.role==='tool');
   try {
+    for (const stream of [false, true]) {
+      const scenarios = [
+        ["exec_command", { cmd: "bun --cwd tests run test --config vitest.config.js" }, codexOutput(mixedBun), "mixed"],
+        ["Bash", { command: "git diff" }, largePatch, "patch"],
+        ["grep", { path: "src", pattern: "synthetic" }, ompGrep.repeat(20), "omp"],
+        ["glob", { path: "**/*.js" }, "src/\n" + Array.from({ length: 40 }, (_, i) => `  synthetic-${i}.js\n`).join("") + "… 2 more\n", "glob"],
+        ["grep", { path: "src", pattern: "synthetic" }, openCodeGrep.replace("Found 3 matches", "Found 60 matches").replace("  Line 2: other\n", "  Line 2: other\n".repeat(58)), "opencode"],
+      ];
+      for (const [name, input, raw, scenario] of scenarios) {
+        const body = { model: "synthetic", stream, messages: [{ role: "assistant", tool_calls: [{ id: "corpus", type: "function", function: { name, arguments: JSON.stringify(input) } }] }, { role: "tool", tool_call_id: "corpus", content: raw }] };
+        const before = getRtkSnapshot().usage.http.attempts;
+        const started = performance.now();
+        const output = tools(await run(body, { sessionDedupMode: "off" }))[0].content;
+        if (scenario === "mixed") {
+          assert.equal(output.slice(0, raw.indexOf("Output:\n") + 8), raw.slice(0, raw.indexOf("Output:\n") + 8));
+          for (const token of ["KEEP_FAILURE", "KEEP_ERROR", "KEEP_STACK", "KEEP_WARNING", "40 pass", "1 fail", "Ran 41 tests"]) assert(output.includes(token));
+          assert(Buffer.byteLength(output) < Buffer.byteLength(raw));
+        } else if (scenario === "opencode") {
+          assert.equal((output.match(/synthetic/g) ?? []).length, 2, 'duplicate matches retain multiplicity');
+          assert.equal((output.match(/other/g) ?? []).length, 58);
+          assert(output.includes("/src/example.js:"));
+          assert(Buffer.byteLength(output) < Buffer.byteLength(raw));
+        } else assert.equal(output, raw);
+        assert.equal(getRtkSnapshot().usage.http.attempts, before);
+        console.log(JSON.stringify({ scenario: `RTK corpus ${scenario}`, stream, originalBytes: Buffer.byteLength(raw), reconstructedBytes: Buffer.byteLength(output), providerBound: true, latencyMs: +(performance.now() - started).toFixed(2) }));
+      }
+    }
+    for (const stream of [false, true]) {
+      const countersBefore = getTokenSaverSnapshot().usage;
+      const bodies = Array.from({ length: 6 }, (_, i) => codexOutput(read, `chunk${i}`, `0.${i}`));
+      const body = { model: "synthetic", stream, messages: bodies.flatMap((text, i) => [{ role: "user", content: `synthetic exec turn ${i}` }, { role: "assistant", tool_calls: [{ id: `exec${i}`, type: "function", function: { name: "exec_command", arguments: '{"cmd":"bun test"}' } }] }, { role: "tool", tool_call_id: `exec${i}`, content: text }]) };
+      const started = performance.now();
+      const sent = tools(await run(body));
+      for (const i of [0, 3, 4, 5]) assert.equal(sent[i].content, bodies[i]);
+      const countersAfter = getTokenSaverSnapshot().usage;
+      assert.equal(countersAfter.bodyExactDuplicatesFound - countersBefore.bodyExactDuplicatesFound, 2);
+      assert.equal(countersAfter.rawExactDuplicatesFound - countersBefore.rawExactDuplicatesFound, 0);
+      assert.equal(countersAfter.exactDuplicatesFound - countersBefore.exactDuplicatesFound, 2);
+      assert.equal(countersAfter.bodyAppliedResults - countersBefore.bodyAppliedResults, 2);
+      assert.deepEqual(countersAfter.cleanupShadow, countersBefore.cleanupShadow, 'on mode must not scan cleanup');
+      for (const i of [1, 2]) {
+        const prefix = bodies[i].slice(0, bodies[i].indexOf("Output:\n") + 8);
+        assert.equal(sent[i].content.slice(0, prefix.length), prefix);
+        assert.match(sent[i].content.slice(prefix.length), /^\[9router dedup:v2 this tool body is byte-identical/);
+      }
+      const originalBytes = bodies.reduce((n, s) => n + Buffer.byteLength(s), 0);
+      const reconstructedBytes = sent.reduce((n, s) => n + Buffer.byteLength(s.content), 0);
+      console.log(JSON.stringify({ scenario: "body-identical exec provider-bound", stream, appliedResults: 2, originalBytes, reconstructedBytes, bytesSaved: originalBytes - reconstructedBytes, headerPreserved: true, latencyMs: +(performance.now() - started).toFixed(2) }));
+      assert.equal(countersAfter.bodyAppliedSaveBytes - countersBefore.bodyAppliedSaveBytes, originalBytes - reconstructedBytes);
+      const replay = structuredClone(body); replay.messages.filter(m => m.role === "tool").forEach((m, i) => { m.content = sent[i].content; });
+      assert.deepEqual(tools(await run(replay)).map(m => m.content), sent.map(m => m.content));
+      const changed = structuredClone(body);
+      changed.messages[5].content += "y"; changed.messages[8].content += "\n";
+      assert.deepEqual(tools(await run(changed)).map(m => m.content), changed.messages.filter(m => m.role === "tool").map(m => m.content));
+    }
+    for (const stream of [false, true]) {
+      const repeated = "synthetic log line\n".repeat(100);
+      const source = { model: "synthetic", stream, input: Array.from({ length: 6 }, (_, i) => [
+        { type: "message", role: "user", content: [{ type: "input_text", text: `synthetic codec turn ${i}` }] },
+        { type: "function_call", call_id: `codec${i}`, name: "exec_command", arguments: '{"cmd":"docker logs synthetic"}' },
+        { type: "function_call_output", call_id: `codec${i}`, output: i === 1 ? [{ type: "input_text", text: codexOutput(repeated, "b") }] : codexOutput(i === 0 ? repeated : `distinct${i}`.repeat(200), `${i}`) },
+      ]).flat() };
+      const sent = await run(source, { sourceFormatOverride: "openai-responses" });
+      const outputs = tools(sent);
+      assert.equal(outputs[0].content, source.input[2].output);
+      assert(JSON.parse(outputs[1].content)[0].text.includes("[9router dedup:v2 "));
+      const replay = { ...sent, model: "synthetic", stream };
+      const replaySent = await run(replay, { sourceFormatOverride: "openai" });
+      assert.deepEqual(tools(replaySent).map(m => m.content), outputs.map(m => m.content));
+      console.log(JSON.stringify({ scenario: "Responses single-text v2 codec replay", stream, preservedAnchor: true, replayRaw: true }));
+    }
     const beforeRtk=getRtkSnapshot(), beforeDedup=getTokenSaverSnapshot();
     for (const stream of [false,true]) {
       const sent=tools(await run(fixture(stream)));
@@ -317,9 +389,10 @@ if (!process.argv.includes("--child")) {
     if(sidecar) {
       const diff="diff --git a/src/a.txt b/src/a.txt\nindex 1234567..89abcde 100644\n--- a/src/a.txt\n+++ b/src/a.txt\n@@ -1,80 +1,80 @@\n"+Array.from({length:39},(_,i)=>` context ${i}\n`).join('')+'-OLD_VALUE\n+NEW_VALUE\n'+Array.from({length:40},(_,i)=>` context ${i+40}\n`).join('');
       const pipe = () => ({model:'synthetic',stream:false,messages:[{role:'assistant',tool_calls:[{id:'diff',type:'function',function:{name:'Bash',arguments:'{"command":"git diff"}'}}]},{role:'tool',tool_call_id:'diff',content:diff}]});
+      const patchBefore = getRtkSnapshot().usage.http.attempts;
       const healthy=tools(await run(pipe(),{sessionDedupMode:'off'}))[0].content;
-      assert(Buffer.byteLength(healthy)<Buffer.byteLength(diff));
-      for(const token of ['src/a.txt','OLD_VALUE','NEW_VALUE']) assert(healthy.includes(token));
+      assert.equal(healthy, diff, 'patch must not pass through capped Rust diff filter');
+      assert.equal(getRtkSnapshot().usage.http.attempts, patchBefore);
       const jsonText = JSON.stringify({ numTotalTests:40, numPassedTests:40, numFailedTests:0, testResults:[{name:'suite.test.js',assertionResults:Array.from({length:40},(_,i)=>({fullName:`synthetic passing test ${i}`,status:'passed',failureMessages:[]}))}] });
       const jsonBody = {model:'synthetic',stream:false,messages:[{role:'assistant',tool_calls:[{id:'json',type:'function',function:{name:'Bash',arguments:'{"command":"vitest --reporter=json"}'}}]},{role:'tool',tool_call_id:'json',content:jsonText}]};
       const jsonBefore=getRtkSnapshot();
@@ -336,14 +409,14 @@ if (!process.argv.includes("--child")) {
       console.log(JSON.stringify({scenario:'strict Vitest JSON',rawBytes:Buffer.byteLength(jsonText),compressedBytes:Buffer.byteLength(jsonOutput),diagnosticFieldsRaw:true}));
       sidecar.stop(true); sidecar=null;
       const outageBefore=getRtkSnapshot();
-      assert.equal(tools(await run(pipe(),{sessionDedupMode:'off'}))[0].content,diff);
-      assert.equal(tools(await run(pipe(),{sessionDedupMode:'off'}))[0].content,diff);
+      assert.equal(tools(await run(jsonBody,{sessionDedupMode:'off'}))[0].content,jsonText);
+      assert.equal(tools(await run(jsonBody,{sessionDedupMode:'off'}))[0].content,jsonText);
       const local=tools(await run(fixture(false),{sessionDedupMode:'off'})).at(-1).content;
       assert(local.includes('[40 passing test lines omitted]'));
       const outageAfter=getRtkSnapshot();
       assert.equal(outageAfter.usage.http.failed-outageBefore.usage.http.failed,1);
       assert.equal(outageAfter.usage.skipped.circuit_open-outageBefore.usage.skipped.circuit_open,1);
-      console.log(JSON.stringify({scenario:'pinned binary healthy+outage',rawDiffBytes:Buffer.byteLength(diff),compressedDiffBytes:Buffer.byteLength(healthy),outageRaw:true,circuit:true,localAvailable:true}));
+      console.log(JSON.stringify({scenario:'pinned binary healthy+outage',rawDiffBytes:Buffer.byteLength(diff),preservedDiffBytes:Buffer.byteLength(healthy),outageRaw:true,circuit:true,localAvailable:true}));
     }
   } finally { provider.stop(true); sidecar?.stop(true); }
 }

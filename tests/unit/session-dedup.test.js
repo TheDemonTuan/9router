@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { inspectSource } from "../../open-sse/token-saver/sourceWalker.js";
 import { detectCacheFence } from "../../open-sse/token-saver/cacheFence.js";
 import { planSessionDedup, commitSessionDedup } from "../../open-sse/token-saver/sessionDedup.js";
+import { codexOutput, zcodePersisted, grokStructured } from "../fixtures/compression-coverage.js";
 
 const big = "x".repeat(2048);
 function fixture(texts = Array(6).fill(big), names = texts.map(() => "read_file")) {
@@ -22,6 +23,100 @@ function execute(body, format = "openai", mode = "on") {
   return { index, fence, plan, commit };
 }
 const result = (body, ordinal) => body.messages[ordinal * 3 + 2].content;
+function execFixture(texts = Array.from({ length: 6 }, (_, i) => codexOutput(big, `chunk${i}`, `0.${i}`))) {
+  const body = fixture(texts, texts.map(() => "exec_command"));
+  for (const m of body.messages) if (m.role === "assistant") m.tool_calls[0].function.arguments = '{"cmd":"bun test"}';
+  return body;
+}
+describe("request-local body equality", () => {
+  it("retains whole-result equality when body alone is below the body minimum", () => {
+    expect(execute(execFixture(Array(6).fill(codexOutput("x".repeat(1000))))).commit.appliedResults).toBe(2);
+  });
+  it("replaces two old bodies without changing target headers or preserved anchors", () => {
+    const body = execFixture(), before = structuredClone(body);
+    const { plan, commit } = execute(body);
+    expect(plan.stats).toMatchObject({ exactDuplicatesFound: 2, rawExactDuplicatesFound: 0, bodyExactDuplicatesFound: 2 });
+    expect(commit).toMatchObject({ appliedResults: 2, bodyAppliedResults: 2 });
+    expect(commit.bodyAppliedSaveBytes).toBe(commit.bytesSaved);
+    for (const i of [1, 2]) {
+      const prefix = result(before, i).slice(0, result(before, i).indexOf("Output:\n") + 8);
+      expect(result(body, i).slice(0, prefix.length)).toBe(prefix);
+      expect(result(body, i).slice(prefix.length)).toMatch(/^\[9router dedup:v2 this tool body is byte-identical/);
+    }
+    for (const i of [0, 3, 4, 5]) expect(result(body, i)).toBe(result(before, i));
+    const replay = structuredClone(body);
+    expect(execute(body).plan.hasExistingMarkers).toBe(true);
+    expect(body).toEqual(replay);
+  });
+  it("does not anchor to a carrier that will itself become a body marker", () => {
+    const texts = Array.from({ length: 6 }, (_, i) => codexOutput(big, `chunk${i}`, `0.${i}`));
+    texts[2] = texts[1];
+    const { plan, commit } = execute(execFixture(texts));
+    expect(commit.appliedResults).toBe(2);
+    expect(plan.replacements.map(r => r.anchorResultIndex)).toEqual([0, 0]);
+    expect(plan.stats.bodyExactDuplicatesFound).toBe(2);
+  });
+  it("retains raw equality precedence without double-counting", () => {
+    const { plan, commit } = execute(execFixture(Array(6).fill(codexOutput(big))));
+    expect(plan.stats).toMatchObject({ exactDuplicatesFound: 2, rawExactDuplicatesFound: 2, bodyExactDuplicatesFound: 0 });
+    expect(commit.bodyAppliedResults).toBe(0);
+  });
+  it.each(["y" + big.slice(1), big + "\n", big.replace(/x$/, "é")])("requires exact body bytes", changed => {
+    const body = execFixture([codexOutput(big), codexOutput(changed, "second"), codexOutput("different".repeat(300), "third"), ...Array(3).fill(codexOutput(big))]);
+    expect(execute(body).commit.appliedResults).toBe(0);
+  });
+  it.each([0, 1023, 1024])("applies body minimum rather than carrier minimum at %i bytes", size => {
+    expect(execute(execFixture(Array.from({ length: 6 }, (_, i) => codexOutput("x".repeat(size), `${i}`)))).commit.appliedResults).toBe(size < 1024 ? 0 : 2);
+  });
+  it("preserves rejected envelopes, artifacts, unknown structured carriers and malformed Unicode", () => {
+    for (const text of [codexOutput(big).replace("code 0", "code 1"), codexOutput(big).replace("Process exited with code 0", "Process running with session ID 1"), codexOutput("Warning: truncated output\n" + big), codexOutput("\ud800" + big), zcodePersisted("/synthetic/a"), grokStructured.repeat(20)]) {
+      const body = execFixture(Array(6).fill(text)), before = structuredClone(body);
+      expect(execute(body).commit.appliedResults).toBe(0);
+      expect(body).toEqual(before);
+    }
+    const body = execFixture([zcodePersisted("/synthetic/a"), zcodePersisted("/synthetic/b"), ...Array(4).fill(zcodePersisted("/synthetic/a"))]);
+    expect(execute(body).commit.appliedResults).toBe(0);
+  });
+  it("discards all writes when translation changes either raw carrier", () => {
+    for (const ordinal of [0, 2]) {
+      const body = execFixture(); const index = inspectSource(body, "openai");
+      const plan = planSessionDedup(index, { mode: "on", fence: detectCacheFence(body, index) });
+      const final = structuredClone(body); final.messages[ordinal * 3 + 2].content += "changed";
+      const before = structuredClone(final);
+      expect(commitSessionDedup(final, { sourceFormat: "openai", finalFormat: "openai", sourceIndex: index, plan }).appliedResults).toBe(0);
+      expect(final).toEqual(before);
+    }
+  });
+  it("keeps family, linkage and abort guards for body matches", () => {
+    const wrong = execFixture(); wrong.messages[4].tool_calls[0].function.name = "Bash"; wrong.messages[7].tool_calls[0].function.name = "functions.exec_command";
+    expect(execute(wrong).commit.appliedResults).toBe(0);
+    const body = execFixture(); const index = inspectSource(body, "openai");
+    const plan = planSessionDedup(index, { mode: "on", fence: detectCacheFence(body, index) });
+    const controller = new AbortController(); controller.abort(new Error("synthetic abort"));
+    expect(() => commitSessionDedup(body, { sourceFormat: "openai", finalFormat: "openai", sourceIndex: index, plan, signal: controller.signal })).toThrow("synthetic abort");
+    expect(result(body, 1)).toContain(big);
+  });
+});
+describe("body carrier budgets and line endings", () => {
+  it("uses raw carrier max and scan budgets without partial mutation", () => {
+    const maxBody = "m".repeat(4_194_304 - codexOutput("").length);
+    const atLimit = execFixture(Array(6).fill(codexOutput(maxBody)));
+    expect(execute(atLimit).commit.appliedResults).toBe(2);
+    const over = execFixture(Array(6).fill(codexOutput(maxBody + "x")));
+    expect(execute(over).commit.appliedResults).toBe(0);
+    const scan = execFixture(Array.from({ length: 13 }, (_, i) => codexOutput("z".repeat(2 * 1024 * 1024), `${i}`)));
+    const before = structuredClone(scan);
+    expect(execute(scan).plan.skipReason).toBe("scan_budget");
+    expect(scan).toEqual(before);
+  });
+  it("preserves CRLF headers and never normalizes body newlines", () => {
+    const body = execFixture(Array.from({ length: 6 }, (_, i) => codexOutput(big + "\r\n", `${i}`, "0.1", "\r\n")));
+    expect(execute(body).commit.bodyAppliedResults).toBe(2);
+    expect(result(body, 1)).toContain("Output:\r\n[9router dedup:v2 ");
+    const different = execFixture([codexOutput(big + "\n"), codexOutput(big + "\r\n", "second"), codexOutput("other".repeat(500), "third"), ...Array(3).fill(codexOutput(big))]);
+    expect(execute(different).commit.appliedResults).toBe(0);
+  });
+});
 describe("request-local exact session dedup", () => {
   it("preserves the first result, call metadata and three recent turns", () => {
     const body = fixture(); const original = structuredClone(body);

@@ -3,12 +3,49 @@ import { classifyToolCall } from "../../open-sse/rtk/classifier.js";
 import { compressMessages } from "../../open-sse/rtk/index.js";
 import { getRtkSnapshot, getRtkState, recordRtkCommand, recordRtkFilterOutcome } from "../../open-sse/rtk/state.js";
 import { RTK_COMMAND_FAMILIES, RTK_FILTER_DETAILS } from "../../open-sse/config/rtkConfig.js";
+import { codexOutput, largePatch, mixedBun, grokStructured, zcodePersisted, zcodeContext } from "../fixtures/compression-coverage.js";
 
 const text = Array.from({ length: 40 }, (_, i) => `./synthetic/path/file-${i}.js`).join("\n") + "\n";
 const call = { role: "assistant", tool_calls: [{ id: "c", type: "function", function: { name: "Bash", arguments: '{"command":"find ."}' } }] };
 const result = extra => ({ role: "tool", tool_call_id: "c", content: text, ...extra });
 
 describe("RTK production safety", () => {
+  it("never shortens Unicode filename or body content that resembles an OpenCode row", async () => {
+    const path = "/tmp/\u2028  Line 1: file.js:";
+    const payload = "matched text " + "synthetic ".repeat(100);
+    const raw = `Found 1 matches\n${path}\n  Line 2: ${payload}`;
+    const body = { messages: [{ role: "assistant", tool_calls: [{ id: "grep", type: "function", function: { name: "grep", arguments: '{"path":"/tmp","pattern":"matched"}' } }] }, { role: "tool", tool_call_id: "grep", content: raw }] };
+    await compressMessages(body, true);
+    expect(body.messages[1].content).toBe(`Found 1 matches\n${path}\n2: ${payload}`);
+  });
+  it("never dispatches patch or non-patch diff modes through a lossy filter", async () => {
+    const before = getRtkSnapshot().usage.http.attempts;
+    for (const command of ["git diff", "git diff --check", "git diff --quiet", "git diff -s", "git diff --no-patch"]) {
+      const body = { messages: [{ role: "assistant", tool_calls: [{ id: "patch", type: "function", function: { name: "Bash", arguments: JSON.stringify({ command }) } }] }, { role: "tool", tool_call_id: "patch", content: largePatch }] };
+      await compressMessages(body, true);
+      expect(body.messages[1].content).toBe(largePatch);
+      expect(body.messages[1].content.split("\n").filter(line => line.startsWith("+synthetic line "))).toHaveLength(250);
+    }
+    expect(getRtkSnapshot().usage.http.attempts).toBe(before);
+    expect(classifyToolCall({ name: "Bash", input: { command: "git diff" } }, "ordinary stdout")).toBeNull();
+  });
+  it("formats only completed linked exec bodies and accounts reconstructed bytes", async () => {
+    const raw = codexOutput(mixedBun);
+    const body = { input: [{ type: "function_call", call_id: "exec", name: "exec_command", arguments: JSON.stringify({ cmd: "bun --cwd tests run test --config vitest.config.js" }) }, { type: "function_call_output", call_id: "exec", output: raw }] };
+    const stats = await compressMessages(body, true);
+    const output = body.input[1].output;
+    expect(output.slice(0, raw.indexOf("Output:\n") + 8)).toBe(raw.slice(0, raw.indexOf("Output:\n") + 8));
+    for (const token of ["KEEP_FAILURE", "KEEP_ERROR", "KEEP_STACK", "KEEP_WARNING", "40 pass", "1 fail", "Ran 41 tests"]) expect(output).toContain(token);
+    expect(Buffer.byteLength(output)).toBeLessThan(Buffer.byteLength(raw));
+    expect(stats.bytesBefore - stats.bytesAfter).toBe(Buffer.byteLength(raw) - Buffer.byteLength(output));
+    for (const invalid of [raw.replace("code 0", "code 1"), raw.replace("Process exited with code 0", "Process running with session ID 3"), codexOutput("Warning: truncated output\n" + mixedBun), grokStructured, zcodePersisted("/synthetic/a"), zcodeContext]) {
+      const carrier = structuredClone(body); carrier.input[1].output = invalid;
+      await compressMessages(carrier, true);
+      expect(carrier.input[1].output).toBe(invalid);
+    }
+    for (const command of ["bun --cwd 'tests directory' run test --config vitest.config.js", "bun --cwd ./tests test"]) expect(classifyToolCall({ name: "Bash", input: { command } }, mixedBun)).toBe("local:test");
+    for (const command of ["bun --cwd tests --cwd other test", "bun --cwd tests run build", "bun --cwd tests run test | cat", "bun --cwd $(pwd) test", "timeout 3 bun test"]) expect(classifyToolCall({ name: "Bash", input: { command } }, mixedBun)).toBeNull();
+  });
   it("does not inspect non-command tool metadata", () => {
     for (const name of ["Read", "Edit", "Write", "read_file", "unknown_mcp_SECRET"]) {
       const reasons = [];

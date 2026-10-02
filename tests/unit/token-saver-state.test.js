@@ -100,7 +100,7 @@ describe("token saver final diagnostics", () => {
   ];
   const correspondenceNames = [
     "unsupported_final", "call_count", "result_count", "call_identity",
-    "result_linkage", "anchor_mapping", "leaf_proof", "non_writable",
+    "result_linkage", "anchor_mapping", "leaf_proof", "body_proof", "non_writable",
   ];
   let previousRuntime;
   beforeEach(() => {
@@ -152,8 +152,8 @@ describe("token saver final diagnostics", () => {
     }
     const { usage } = getTokenSaverSnapshot();
     expect(usage.finalCorrespondenceReasons).toEqual(Object.fromEntries(correspondenceNames.map(name => [name, 1])));
-    expect(usage.finalGuardSkippedPreparations).toBe(8);
-    expect(usage.skippedPreparations.final_correspondence).toBe(8);
+    expect(usage.finalGuardSkippedPreparations).toBe(correspondenceNames.length);
+    expect(usage.skippedPreparations.final_correspondence).toBe(correspondenceNames.length);
   });
 
   it("ignores unknown or non-string enum values without retaining payloads", () => {

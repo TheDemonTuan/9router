@@ -7,6 +7,7 @@ import { classifyToolCall, getRtkToolFamily } from "./classifier.js";
 import { filterToolOutput } from "./client.js";
 import { filterLocalOutput } from "./local.js";
 import { isFailedToolResult } from "../token-saver/sourceWalker.js";
+import { inspectToolOutput, replaceToolOutputBody, preservesToolOutput } from "../token-saver/toolOutput.js";
 
 function collect(body, visit, eligibility) {
   const shapes = [body.conversationState, body.request?.contents, body.contents, body.messages, body.input].filter(x => Array.isArray(x) ? x.length : Boolean(x));
@@ -175,17 +176,25 @@ export async function compressMessages(body, enabled, { signal, disabledReason =
         recordRtkRejection(toolFamily, "selection_budget", "none", size);
         return;
       }
-      let commandFamily = "none";
-      const filter = classifyToolCall(call, content, (reason, detail = "none") => {
+      const reject = (reason, detail = "none") => {
         usage.eligibility.rejected[reason]++;
+        if (reason === "recognized_preserved") usage.recognizedPreserved++;
+        if (reason === "envelope_rejected") usage.envelopeRejected++;
         recordRtkRejection(toolFamily, reason, detail, size, commandFamily);
-      }, family => {
+      };
+      let commandFamily = "none";
+      if (preservesToolOutput(content)) { reject("recognized_preserved", "carrier_context"); return; }
+      let envelopeRejected = false;
+      const descriptor = inspectToolOutput(content, call, detail => { envelopeRejected = true; reject("envelope_rejected", detail); });
+      if (envelopeRejected) return;
+      const formatterContent = descriptor ? content.slice(descriptor.bodyStart, descriptor.bodyEnd) : content;
+      const filter = classifyToolCall(call, formatterContent, reject, family => {
         commandFamily = family;
         recordRtkCommand(family, size);
       }, shape => recordRtkNativeGrepShape(shape, size));
       if (!filter) return;
       selected += size;
-      jobs.push({ owner, key, content, size, shape, filter, call, toolFamily, commandFamily });
+      jobs.push({ owner, key, content: formatterContent, rawContent: content, descriptor, size, shape, filter, call, toolFamily, commandFamily });
     }, usage.eligibility);
     if (!supported) { reason = "unsupported_shape"; return null; }
     if (usage.eligibility.toolResults === resultsBefore && performance.now() < deadline && !combined.aborted) usage.eligibility.noToolResultsPreparations++;
@@ -199,6 +208,7 @@ export async function compressMessages(body, enabled, { signal, disabledReason =
           continue;
         }
         eligibleJobs++;
+        usage.eligibleOutputs++;
         const local = job.filter.startsWith("local:");
         const toolFamily = job.toolFamily ?? getRtkToolFamily(job.call);
         let output = null;
@@ -215,6 +225,9 @@ export async function compressMessages(body, enabled, { signal, disabledReason =
               rawDetail = detail;
             });
             finalOutcome = rawOutcome;
+            if (rawDetail === "already_grouped") usage.recognizedPreserved++;
+            if (output !== null && output.length && job.descriptor) output = replaceToolOutputBody(job.rawContent, job.descriptor, output);
+            if (output !== null && Buffer.byteLength(output) < job.size) usage.candidateOutputs++;
             if (signal?.aborted) {
               if (rawOutcome === "candidate") finalOutcome = "discarded_cancelled";
               throw signal.reason;
@@ -239,7 +252,7 @@ export async function compressMessages(body, enabled, { signal, disabledReason =
                   saved: job.size - size,
                   bytesBefore: job.size,
                   bytesAfter: size,
-                  estimatedTokensSaved: Math.max(0, estimateOutputTokens(job.content.length) - estimateOutputTokens(output.length)),
+                  estimatedTokensSaved: Math.max(0, estimateOutputTokens(job.rawContent.length) - estimateOutputTokens(output.length)),
                 });
               }
             }
@@ -262,6 +275,8 @@ export async function compressMessages(body, enabled, { signal, disabledReason =
               },
             });
             sidecarFinalOutcome = sidecarRawOutcome;
+            if (output !== null && output.length && job.descriptor) output = replaceToolOutputBody(job.rawContent, job.descriptor, output);
+            if (output !== null && Buffer.byteLength(output) < job.size) usage.candidateOutputs++;
             if (signal?.aborted) {
               if (sidecarRawOutcome === "candidate") sidecarFinalOutcome = "discarded_cancelled";
               throw signal.reason;
@@ -285,7 +300,7 @@ export async function compressMessages(body, enabled, { signal, disabledReason =
                   saved: job.size - size,
                   bytesBefore: job.size,
                   bytesAfter: size,
-                  estimatedTokensSaved: Math.max(0, estimateOutputTokens(job.content.length) - estimateOutputTokens(output.length)),
+                  estimatedTokensSaved: Math.max(0, estimateOutputTokens(job.rawContent.length) - estimateOutputTokens(output.length)),
                 });
               }
             }
@@ -306,6 +321,8 @@ export async function compressMessages(body, enabled, { signal, disabledReason =
                 fallbackRawDetail = detail;
               });
               fallbackFinalOutcome = fallbackRawOutcome;
+              if (fallbackOutput !== null && fallbackOutput.length && job.descriptor) fallbackOutput = replaceToolOutputBody(job.rawContent, job.descriptor, fallbackOutput);
+              if (fallbackOutput !== null && Buffer.byteLength(fallbackOutput) < job.size) usage.candidateOutputs++;
               if (signal?.aborted) {
                 if (fallbackRawOutcome === "candidate") fallbackFinalOutcome = "discarded_cancelled";
                 throw signal.reason;
@@ -331,7 +348,7 @@ export async function compressMessages(body, enabled, { signal, disabledReason =
                     saved: job.size - size,
                     bytesBefore: job.size,
                     bytesAfter: size,
-                    estimatedTokensSaved: Math.max(0, estimateOutputTokens(job.content.length) - estimateOutputTokens(fallbackOutput.length)),
+                    estimatedTokensSaved: Math.max(0, estimateOutputTokens(job.rawContent.length) - estimateOutputTokens(fallbackOutput.length)),
                   });
                 }
               }
