@@ -38,10 +38,10 @@ const handlers = {
 const certCache = new Map();
 let rootCAPem;
 
-function sniCallback(servername, cb) {
+async function sniCallback(servername, cb) {
   try {
     if (certCache.has(servername)) return cb(null, certCache.get(servername));
-    const certData = getCertForDomain(servername);
+    const certData = await getCertForDomain(servername);
     if (!certData) return cb(new Error(`Failed to generate cert for ${servername}`));
     const ctx = require("tls").createSecureContext({
       key: certData.key,
@@ -55,20 +55,15 @@ function sniCallback(servername, cb) {
   }
 }
 
-let sslOptions;
-try {
+async function loadSslOptions() {
   if (!fs.existsSync(path.join(MITM_DIR, "rootCA.key")) || !fs.existsSync(path.join(MITM_DIR, "rootCA.crt"))) {
     log("Root CA missing, generating...");
-    generateCert();
+    await generateCert();
   }
-
   const rootKey = fs.readFileSync(path.join(MITM_DIR, "rootCA.key"));
   const rootCert = fs.readFileSync(path.join(MITM_DIR, "rootCA.crt"));
   rootCAPem = rootCert.toString("utf8");
-  sslOptions = { key: rootKey, cert: rootCert, SNICallback: sniCallback };
-} catch (e) {
-  err(`Root CA not found: ${e.message}`);
-  process.exit(1);
+  return { key: rootKey, cert: rootCert, SNICallback: sniCallback };
 }
 
 // ── Helpers ───────────────────────────────────────────────────
@@ -292,112 +287,120 @@ async function passthroughHttps(req, res, bodyBuffer, headers, targetHost, onRes
 
 // ── Request handler ───────────────────────────────────────────
 
-const server = https.createServer(sslOptions, async (req, res) => {
-  try {
-    if (req.url === "/_mitm_health") {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true, pid: process.pid }));
-      return;
-    }
-
-    const bodyBuffer = await collectBodyRaw(req);
-    if (ENABLE_FILE_LOG) dumpRequest(req, bodyBuffer, "raw");
-
-    // Anti-loop: skip requests from 9Router
-    if (req.headers[INTERNAL_REQUEST_HEADER.name] === INTERNAL_REQUEST_HEADER.value) {
-      return passthrough(req, res, bodyBuffer);
-    }
-
-    const tool = getToolForHost(req.headers.host);
-    if (!tool) return passthrough(req, res, bodyBuffer);
-
-    // Kiro IDE posts chat to `/` with x-amz-target (not path /generateAssistantResponse)
-    if (!isChatRequest(tool, req)) return passthrough(req, res, bodyBuffer);
-
-    // Cursor uses binary proto — model extraction not possible at this layer.
-    // Delegate directly to handler which decodes proto internally.
-    if (tool === "cursor") {
-      return handlers[tool].intercept(req, res, bodyBuffer, null, passthrough);
-    }
-
-    const model = extractModel(req.url, bodyBuffer);
-
-    // Intentional passthrough: some models must never be re-routed (e.g. Antigravity
-    // tab-autocomplete) so latency-critical inline completion stays native. Silent — this
-    // is by design, not a leak, and fires per keystroke. See MODEL_NO_MAP in config.js.
-    if (model && (MODEL_NO_MAP[tool] || []).some((re) => re.test(model))) {
-      return passthrough(req, res, bodyBuffer);
-    }
-
-    const mappedModel = getMappedModel(tool, model);
-    if (!mappedModel) {
-      return passthrough(req, res, bodyBuffer);
-    }
-
-    return handlers[tool].intercept(req, res, bodyBuffer, mappedModel, passthrough);
-  } catch (e) {
-    err(`Unhandled error: ${e.message}`);
-    if (!res.headersSent) res.writeHead(500, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: { message: e.message, type: "mitm_error" } }));
-  }
-});
-
-// Kill only processes LISTENING on LOCAL_PORT (not outbound connections)
-function killPort(port) {
-  try {
-    let pidList = [];
-    if (IS_WIN) {
-      const psCmd = `powershell -NonInteractive -WindowStyle Hidden -Command ` +
-        `"Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess"`;
-      const out = execSync(psCmd, { encoding: "utf-8", windowsHide: true }).trim();
-      if (!out) return;
-      pidList = out.split(/\r?\n/).map(s => s.trim()).filter(p => p && Number(p) !== process.pid && Number(p) > 4);
-    } else {
-      const out = execSync(`${LSOF_BIN} -nP -iTCP:${port} -sTCP:LISTEN -t`, { encoding: "utf-8", windowsHide: true }).trim();
-      if (!out) return;
-      pidList = out.split("\n").filter(p => p && Number(p) !== process.pid);
-    }
-    if (pidList.length === 0) return;
-    pidList.forEach(pid => {
-      try {
-        if (IS_WIN) execSync(`taskkill /F /PID ${pid}`, { windowsHide: true });
-        else process.kill(Number(pid), "SIGKILL");
-      } catch (e) {
-        err(`Failed to kill PID ${pid}: ${e.message}`);
+async function startServer() {
+  const sslOptions = await loadSslOptions();
+  const server = https.createServer(sslOptions, async (req, res) => {
+    try {
+      if (req.url === "/_mitm_health") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, pid: process.pid }));
+        return;
       }
-    });
-    log(`Killed ${pidList.length} process(es) on port ${port}`);
-  } catch (e) {
-    if (e.status !== 1) throw e;
+
+      const bodyBuffer = await collectBodyRaw(req);
+      if (ENABLE_FILE_LOG) dumpRequest(req, bodyBuffer, "raw");
+
+      // Anti-loop: skip requests from 9Router
+      if (req.headers[INTERNAL_REQUEST_HEADER.name] === INTERNAL_REQUEST_HEADER.value) {
+        return passthrough(req, res, bodyBuffer);
+      }
+
+      const tool = getToolForHost(req.headers.host);
+      if (!tool) return passthrough(req, res, bodyBuffer);
+
+      // Kiro IDE posts chat to `/` with x-amz-target (not path /generateAssistantResponse)
+      if (!isChatRequest(tool, req)) return passthrough(req, res, bodyBuffer);
+
+      // Cursor uses binary proto — model extraction not possible at this layer.
+      // Delegate directly to handler which decodes proto internally.
+      if (tool === "cursor") {
+        return handlers[tool].intercept(req, res, bodyBuffer, null, passthrough);
+      }
+
+      const model = extractModel(req.url, bodyBuffer);
+
+      // Intentional passthrough: some models must never be re-routed (e.g. Antigravity
+      // tab-autocomplete) so latency-critical inline completion stays native. Silent — this
+      // is by design, not a leak, and fires per keystroke. See MODEL_NO_MAP in config.js.
+      if (model && (MODEL_NO_MAP[tool] || []).some((re) => re.test(model))) {
+        return passthrough(req, res, bodyBuffer);
+      }
+
+      const mappedModel = getMappedModel(tool, model);
+      if (!mappedModel) {
+        return passthrough(req, res, bodyBuffer);
+      }
+
+      return handlers[tool].intercept(req, res, bodyBuffer, mappedModel, passthrough);
+    } catch (e) {
+      err(`Unhandled error: ${e.message}`);
+      if (!res.headersSent) res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { message: e.message, type: "mitm_error" } }));
+    }
+  });
+
+  // Kill only processes LISTENING on LOCAL_PORT (not outbound connections)
+  function killPort(port) {
+    try {
+      let pidList = [];
+      if (IS_WIN) {
+        const psCmd = `powershell -NonInteractive -WindowStyle Hidden -Command ` +
+          `"Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess"`;
+        const out = execSync(psCmd, { encoding: "utf-8", windowsHide: true }).trim();
+        if (!out) return;
+        pidList = out.split(/\r?\n/).map(s => s.trim()).filter(p => p && Number(p) !== process.pid && Number(p) > 4);
+      } else {
+        const out = execSync(`${LSOF_BIN} -nP -iTCP:${port} -sTCP:LISTEN -t`, { encoding: "utf-8", windowsHide: true }).trim();
+        if (!out) return;
+        pidList = out.split("\n").filter(p => p && Number(p) !== process.pid);
+      }
+      if (pidList.length === 0) return;
+      pidList.forEach(pid => {
+        try {
+          if (IS_WIN) execSync(`taskkill /F /PID ${pid}`, { windowsHide: true });
+          else process.kill(Number(pid), "SIGKILL");
+        } catch (e) {
+          err(`Failed to kill PID ${pid}: ${e.message}`);
+        }
+      });
+      log(`Killed ${pidList.length} process(es) on port ${port}`);
+    } catch (e) {
+      if (e.status !== 1) throw e;
+    }
   }
+
+  try {
+    killPort(LOCAL_PORT);
+  } catch (e) {
+    err(`Cannot kill process on port ${LOCAL_PORT}: ${e.message}`);
+    process.exit(1);
+  }
+
+  server.listen(LOCAL_PORT, () => log(`🚀 Server ready on :${LOCAL_PORT}`));
+
+  server.on("error", (e) => {
+    if (e.code === "EADDRINUSE") err(`Port ${LOCAL_PORT} already in use`);
+    else if (e.code === "EACCES") err(`Permission denied for port ${LOCAL_PORT}`);
+    else err(e.message);
+    process.exit(1);
+  });
+
+  const { removeAllDNSEntriesSync } = require("./dns/dnsConfig");
+  let isShuttingDown = false;
+  const shutdown = () => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    // Strip tool hosts from /etc/hosts so other apps aren't broken after exit
+    removeAllDNSEntriesSync();
+    const forceExit = setTimeout(() => process.exit(0), 1500);
+    server.close(() => { clearTimeout(forceExit); process.exit(0); });
+  };
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
+  if (process.platform === "win32") process.on("SIGBREAK", shutdown);
 }
 
-try {
-  killPort(LOCAL_PORT);
-} catch (e) {
-  err(`Cannot kill process on port ${LOCAL_PORT}: ${e.message}`);
-  process.exit(1);
-}
-
-server.listen(LOCAL_PORT, () => log(`🚀 Server ready on :${LOCAL_PORT}`));
-
-server.on("error", (e) => {
-  if (e.code === "EADDRINUSE") err(`Port ${LOCAL_PORT} already in use`);
-  else if (e.code === "EACCES") err(`Permission denied for port ${LOCAL_PORT}`);
-  else err(e.message);
+startServer().catch((e) => {
+  err(`MITM startup failed: ${e.message}`);
   process.exit(1);
 });
-
-const { removeAllDNSEntriesSync } = require("./dns/dnsConfig");
-let isShuttingDown = false;
-const shutdown = () => {
-  if (isShuttingDown) return;
-  isShuttingDown = true;
-  // Strip tool hosts from /etc/hosts so other apps aren't broken after exit
-  removeAllDNSEntriesSync();
-  const forceExit = setTimeout(() => process.exit(0), 1500);
-  server.close(() => { clearTimeout(forceExit); process.exit(0); });
-};
-process.on("SIGTERM", shutdown);
-process.on("SIGINT", shutdown);
-if (process.platform === "win32") process.on("SIGBREAK", shutdown);

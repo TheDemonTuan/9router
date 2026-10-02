@@ -15,6 +15,7 @@ mkdir -p "$HOME" "$DATA_DIR"
     unit/codex-tool-normalization.test.js \
     unit/codex-native-passthrough-thinking.test.js \
     unit/codex-same-wire.test.js \
+    unit/mitm-root-ca.test.js \
     unit/claude-header-forwarding.test.js \
     unit/session-manager.test.js \
     unit/rtk-cursor-pretranslate.test.js \
@@ -67,6 +68,7 @@ node --version
 bun --version
 node --test --test-concurrency=1 tests/unit/custom-server-h2c.test.cjs tests/unit/custom-server-h2c-concurrent.test.cjs
 bun test tests/unit/custom-server-h2c.test.cjs tests/unit/custom-server-h2c-concurrent.test.cjs tests/unit/bun-client-disconnect.test.cjs tests/unit/bun-next-request-disconnect.test.cjs
+node tests/integration/mitm-cert-runtime-smoke.cjs
 bun tests/integration/quota-persistence-smoke.mjs
 bun tests/integration/pre-response-lifecycle-smoke.mjs
 bun tests/integration/bypass-transport-smoke.mjs

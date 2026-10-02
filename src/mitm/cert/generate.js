@@ -1,6 +1,3 @@
-const path = require("path");
-const fs = require("fs");
-const { MITM_DIR } = require("../paths");
 const { generateRootCA, loadRootCA, generateLeafCert } = require("./rootCA");
 
 /**
@@ -15,10 +12,10 @@ function generateCert() {
  * Get certificate for a specific domain (dynamic generation)
  * Used by SNICallback in server.js
  */
-function getCertForDomain(domain) {
+async function getCertForDomain(domain) {
   try {
     const rootCA = loadRootCA();
-    const leafCert = generateLeafCert(domain, rootCA);
+    const leafCert = await generateLeafCert(domain, rootCA);
     return {
       key: leafCert.key,
       cert: leafCert.cert

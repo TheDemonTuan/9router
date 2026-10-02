@@ -117,6 +117,30 @@ try {
 '
 echo 'Native h2c image smoke passed.'
 
+echo 'Running native certificate generation from the exact image...'
+docker exec "$cid" bun -e '
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const { X509Certificate } = require("node:crypto");
+const home = fs.mkdtempSync("/tmp/9router-cert-image-");
+process.env.DATA_DIR = home;
+try {
+  const { generateRootCA, loadRootCA } = require("/app/src/mitm/cert/rootCA.js");
+  const { getCertForDomain } = require("/app/src/mitm/cert/generate.js");
+  await generateRootCA();
+  const ca = new X509Certificate(loadRootCA().cert);
+  const leaf = await getCertForDomain("synthetic.test");
+  assert(leaf, "image must contain certificate generator and its dependencies");
+  const cert = new X509Certificate(leaf.cert);
+  assert.equal(ca.ca, true);
+  assert.equal(cert.ca, false);
+  assert.equal(cert.verify(ca.publicKey), true);
+  assert.equal(cert.checkHost("synthetic.test"), "synthetic.test");
+  assert.equal(cert.checkHost("child.synthetic.test"), "*.synthetic.test");
+} finally { fs.rmSync(home, { recursive: true, force: true }); }
+'
+echo 'Native certificate image smoke passed.'
+
 echo 'Waiting 12s for initial background token refresh tick...'
 sleep 12
 
