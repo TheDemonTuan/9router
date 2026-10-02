@@ -4,7 +4,7 @@ import { compressMessages } from "../../open-sse/rtk/index.js";
 import { classifyToolCall } from "../../open-sse/rtk/classifier.js";
 import { filterToolOutput } from "../../open-sse/rtk/client.js";
 
-const input = "diff --git a/a b/a\n" + "+changed value\n".repeat(70);
+const input = " M synthetic.js\n".repeat(70);
 let requests = 0;
 const server = createServer(async (request, response) => {
   requests++;
@@ -14,7 +14,7 @@ const server = createServer(async (request, response) => {
     request.on("end", () => resolve(body));
     request.on("error", reject);
   }));
-  expect(data.filter).toBe("git-diff");
+  expect(["git-diff", "git-status"]).toContain(data.filter);
   if (data.content.startsWith("FAIL_")) { response.writeHead(500); response.end("offline"); return; }
   if (data.content.startsWith("BUSY_")) { response.writeHead(503); response.end("busy"); return; }
   if (data.content.startsWith("HANG_")) { response.setHeader("content-type", "application/json"); response.flushHeaders(); return; }
@@ -24,7 +24,7 @@ const server = createServer(async (request, response) => {
 await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
 process.env.RTK_URL = `http://127.0.0.1:${server.address().port}`;
 afterAll(() => new Promise(resolve => server.close(resolve)));
-const call = (id = "call_1", command = "git diff") => ({ id, type: "function", function: { name: "Bash", arguments: JSON.stringify({ command }) } });
+const call = (id = "call_1", command = "git status") => ({ id, type: "function", function: { name: "Bash", arguments: JSON.stringify({ command }) } });
 
 describe("upstream RTK source traversal", () => {
   it("compresses only linked tool result text, preserving caller ownership", async () => {
@@ -38,7 +38,7 @@ describe("upstream RTK source traversal", () => {
     expect(body.messages[3].content[0].text).toBe("shortened");
     expect(body.messages[3].content[1]).toEqual(original.messages[3].content[1]);
     expect(body.messages.slice(0, 3)).toEqual(original.messages.slice(0, 3));
-    expect(stats.hits[0].filter).toBe("git-diff");
+    expect(stats.hits[0].filter).toBe("git-status");
     expect(stats.bytesBefore).toBe(Buffer.byteLength(input));
   });
 
@@ -61,7 +61,7 @@ describe("upstream RTK source traversal", () => {
 
   it("supports Responses input even with OpenAI format override", async () => {
     const body = { input: [
-      { type: "function_call", call_id: "id", name: "Bash", arguments: '{"command":"git diff"}' },
+      { type: "function_call", call_id: "id", name: "Bash", arguments: '{"command":"git status"}' },
       { type: "function_call_output", call_id: "id", output: input },
     ], sourceFormat: "openai" };
     await compressMessages(body, true);
@@ -70,20 +70,20 @@ describe("upstream RTK source traversal", () => {
 
   it("handles Claude, custom Responses, Gemini, Antigravity and Kiro linked output", async () => {
     const claude = { messages: [
-      { role: "assistant", content: [{ type: "tool_use", id: "c", name: "Bash", input: { command: "git diff" } }] },
+      { role: "assistant", content: [{ type: "tool_use", id: "c", name: "Bash", input: { command: "git status" } }] },
       { role: "user", content: [{ type: "tool_result", tool_use_id: "c", content: [{ type: "text", text: input }, { type: "image", data: input }] }] },
     ] };
     const custom = { input: [
-      { type: "custom_tool_call", call_id: "x", name: "Bash", input: "git diff" },
+      { type: "custom_tool_call", call_id: "x", name: "Bash", input: "git status" },
       { type: "custom_tool_call_output", call_id: "x", output: [{ type: "input_text", text: input }, { type: "input_image", image_url: input }] },
     ] };
     const gemini = { contents: [
-      { role: "model", parts: [{ functionCall: { name: "Bash", args: { command: "git diff" } } }] },
+      { role: "model", parts: [{ functionCall: { name: "Bash", args: { command: "git status" } } }] },
       { role: "user", parts: [{ functionResponse: { name: "Bash", response: { result: input, metadata: { untouched: input } } } }] },
     ] };
     const antigravity = { request: { contents: structuredClone(gemini.contents) } };
     const kiro = { conversationState: { history: [
-      { assistantResponseMessage: { toolUses: [{ toolUseId: "k", name: "Bash", input: { command: "git diff" } }] } },
+      { assistantResponseMessage: { toolUses: [{ toolUseId: "k", name: "Bash", input: { command: "git status" } }] } },
       { userInputMessage: { userInputMessageContext: { toolResults: [{ toolUseId: "k", content: [{ text: input }] }] } } },
     ] } };
     for (const [body, result, sibling] of [
@@ -103,9 +103,9 @@ describe("upstream RTK source traversal", () => {
   it("leaves Gemini ambiguous names and mismatched IDs raw", async () => {
     const start = requests;
     const body = { contents: [
-      { parts: [{ functionCall: { name: "Bash", args: { command: "git diff" } } }, { functionCall: { name: "Bash", args: { command: "git diff" } } }] },
+      { parts: [{ functionCall: { name: "Bash", args: { command: "git status" } } }, { functionCall: { name: "Bash", args: { command: "git status" } } }] },
       { parts: [{ functionResponse: { name: "Bash", response: { output: input } } }, { functionResponse: { id: "unknown", name: "Bash", response: { result: input } } }] },
-      { parts: [{ functionCall: { id: 7, name: "Bash", args: { command: "git diff" } } }, { functionResponse: { id: 7, name: "Bash", response: { output: input } } }] },
+      { parts: [{ functionCall: { id: 7, name: "Bash", args: { command: "git status" } } }, { functionResponse: { id: 7, name: "Bash", response: { output: input } } }] },
     ] };
     await compressMessages(body, true);
     expect(body.contents[1].parts[0].functionResponse.response.output).toBe(input);
@@ -158,7 +158,7 @@ describe("upstream RTK source traversal", () => {
     for (const command of ["git log --oneline", "rg -n --stats x", "rg -n -C 3 x", "find . -ls", "fd --format x", "git diff | cat", "git diff; cat", "git diff 'unterminated", "git diff " + "x".repeat(8192)]) {
       expect(classifyToolCall({ name: "Bash", input: { command } }, input)).toBeNull();
     }
-    expect(classifyToolCall({ name: "Bash", input: { command: 'git -C "path with spaces" diff' } }, input)).toBe("git-diff");
+    expect(classifyToolCall({ name: "Bash", input: { command: 'git -C "path with spaces" status' } }, input)).toBe("git-status");
     expect(classifyToolCall({ name: "read_file", input: { path: "git diff" } }, input)).toBeNull();
     expect(classifyToolCall({ name: "Bash", input: { command: "go test ./..." } }, input)).toBeNull();
     const classify = (command, text) => classifyToolCall({ name: "Bash", input: { command } }, text);
@@ -182,21 +182,21 @@ describe("upstream RTK source traversal", () => {
       ["rg -n 'foo|bar' src", "grep", grepOutput],
       ["rg -n '(foo|bar);$`&' src", "grep", grepOutput],
       ['rg -n "foo|bar;()&" src', "grep", grepOutput],
-      ["git -C '/repo (test)' diff", "git-diff"],
-      ["git -C '/repo&&name' diff", "git-diff"],
-      [String.raw`git -C "C:\repo" diff`, "git-diff"],
-      ["/usr/bin/git diff", "git-diff"],
-      ["cd /repo && git diff", "git-diff"],
-      ["cd -- './repo (test)' && git diff", "git-diff"],
+      ["git -C '/repo (test)' status", "git-status"],
+      ["git -C '/repo&&name' status", "git-status"],
+      [String.raw`git -C "C:\repo" status`, "git-status"],
+      ["/usr/bin/git status", "git-status"],
+      ["cd /repo && git status", "git-status"],
+      ["cd -- './repo (test)' && git status", "git-status"],
       ["cd ./repo && rg -n 'foo|bar' src", "grep", grepOutput],
-      ["cd ../repo && git diff", "git-diff"],
+      ["cd ../repo && git status", "git-status"],
     ];
     for (const [command, filter, output = input] of cases) {
       const reasons = [];
       expect(classifyToolCall({ name: "functions.bash", input: { command } }, output, reason => reasons.push(reason)), command).toBe(filter);
       expect(reasons, command).toEqual([]);
     }
-    expect(classifyToolCall({ name: "exec_command", input: { cmd: "cd /repo && git diff" } }, input)).toBe("git-diff");
+    expect(classifyToolCall({ name: "exec_command", input: { cmd: "cd /repo && git status" } }, input)).toBe("git-status");
     expect(classifyToolCall({ name: "read_file", input: { command: "cd /repo && git diff" } }, input)).toBeNull();
   });
 

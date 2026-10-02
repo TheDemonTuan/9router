@@ -35,7 +35,7 @@ afterEach(async () => {
   server = null;
 });
 
-const call = (command = "git diff") => ({ id: "call", type: "function", function: { name: "Bash", arguments: JSON.stringify({ command }) } });
+const call = (command = "git status") => ({ id: "call", type: "function", function: { name: "Bash", arguments: JSON.stringify({ command }) } });
 const body = content => ({ messages: [{ role: "assistant", tool_calls: [call()] }, { role: "tool", tool_call_id: "call", content }] });
 const output = content => ({ protocolVersion: 1, content });
 
@@ -123,10 +123,10 @@ describe("RTK process dashboard", () => {
     await setup(() => { requests++; return output("shortened"); });
     const raw = "x".repeat(800);
     const cases = [
-      { type: "function", name: "functions.bash", input: { command: "git diff" }, reason: null },
-      { type: "function", name: "functions.bash", input: { command: "cd /repo && git diff" }, reason: null },
-      { type: "custom_tool", name: "Bash", input: "git diff", reason: null },
-      { type: "custom_tool", name: "Bash", input: "git -C '/repo (test)' diff", reason: null },
+      { type: "function", name: "functions.bash", input: { command: "git status" }, reason: null },
+      { type: "function", name: "functions.bash", input: { command: "cd /repo && git status" }, reason: null },
+      { type: "custom_tool", name: "Bash", input: "git status", reason: null },
+      { type: "custom_tool", name: "Bash", input: "git -C '/repo (test)' status", reason: null },
       { type: "function", name: "functions.read", input: { path: "synthetic" }, reason: "not_applicable_tool" },
       { type: "function", name: "functions.grep", input: { pattern: "x", path: "synthetic" }, reason: "unsupported_output_format" },
       { type: "function", name: "Bash", input: { command: "pwd && git diff" }, reason: "unsupported_shell_syntax" },
@@ -325,7 +325,7 @@ describe("RTK process dashboard", () => {
 
     const snap = state.getRtkSnapshot();
     const emptyRow = snap.diagnostics.filters.find(r => r.outcome === "empty_output");
-    const notSmallerRow = snap.diagnostics.filters.find(r => r.outcome === "not_smaller");
+    const notSmallerRow = snap.diagnostics.filters.find(r => r.outcome === "not_smaller" && r.engine === "sidecar");
     const appliedRow = snap.diagnostics.filters.find(r => r.outcome === "applied");
     expect(emptyRow).toBeDefined();
     expect(notSmallerRow).toBeDefined();
@@ -362,7 +362,7 @@ describe("RTK process dashboard", () => {
 
     const snap = state.getRtkSnapshot();
     const ctestOutcome = snap.diagnostics.filters.find(r => r.filter === "ctest");
-    const diffOutcome = snap.diagnostics.filters.find(r => r.filter === "git-diff" && r.outcome === "applied");
+    const diffOutcome = snap.diagnostics.filters.find(r => r.filter === "git-status" && r.outcome === "applied");
     expect(ctestOutcome.outcome).toBe("not_smaller");
     expect(diffOutcome.outcome).toBe("applied");
 

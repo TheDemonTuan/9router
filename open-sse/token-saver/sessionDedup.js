@@ -6,10 +6,13 @@ import { inspectSource } from "./sourceWalker.js";
 import { detectCacheFence } from "./cacheFence.js";
 import { sanitizeGeminiFunctionName } from "../translator/request/openai-to-gemini.js";
 import { RESPONSES_ITEM } from "../translator/schema/blocks.js";
+import { inspectToolOutput, replaceToolOutputBody, preservesToolOutput } from "./toolOutput.js";
 
 const markerPattern = /^\[9router dedup:v1 this tool result is byte-identical to an earlier preserved result from the same tool family in this request; bytes=(\d+); sha256=([0-9a-f]{64})\]$/;
 const hash = text => createHash("sha256").update(text, "utf8").digest("hex");
 const markerFor = (bytes, digest) => `[9router dedup:v1 this tool result is byte-identical to an earlier preserved result from the same tool family in this request; bytes=${bytes}; sha256=${digest}]`;
+const bodyMarkerFor = (bytes, digest) => `[9router dedup:v2 this tool body is byte-identical to an earlier preserved body from the same tool family and adapter in this request; bytes=${bytes}; sha256=${digest}]`;
+const bodyMarkerPattern = /^\[9router dedup:v2 this tool body is byte-identical to an earlier preserved body from the same tool family and adapter in this request; bytes=(\d+); sha256=([0-9a-f]{64})\]$/;
 const gemini = format => [FORMATS.GEMINI, FORMATS.GEMINI_CLI, FORMATS.VERTEX, FORMATS.ANTIGRAVITY].includes(format);
 const responses = format => [FORMATS.OPENAI_RESPONSES, FORMATS.OPENAI_RESPONSE, FORMATS.CODEX].includes(format);
 function protect(map, result, reason) {
@@ -30,12 +33,33 @@ function reasonFor(result, sourceIndex) {
   return null;
 }
 
-const maxMarkerLen = markerFor(LIMIT.maxResultBytes, "0".repeat(64)).length;
+const maxMarkerLen = Math.max(markerFor(LIMIT.maxResultBytes, "0".repeat(64)).length, bodyMarkerFor(LIMIT.maxResultBytes, "0".repeat(64)).length);
+function hasBodyMarker(text, call) {
+  const max = LIMIT.maxToolEnvelopeChars + maxMarkerLen;
+  if (typeof text !== "string") return false;
+  if (text.length <= max) {
+    const descriptor = inspectToolOutput(text, call);
+    if (descriptor && bodyMarkerPattern.test(text.slice(descriptor.bodyStart, descriptor.bodyEnd))) return true;
+  }
+  // Only the exact single-input_text codec emitted by bridgeText, bounded before parsing.
+  // Recognition disables savers; this never unwraps JSON for compression or equality.
+  if (text[0] !== "[" || text.length > 6 * max + 128) return false;
+  try {
+    const parts = JSON.parse(text);
+    if (!Array.isArray(parts) || parts.length !== 1 || parts[0]?.type !== RESPONSES_ITEM.INPUT_TEXT ||
+      Object.keys(parts[0]).length !== 2 || typeof parts[0].text !== "string" || parts[0].text.length > max ||
+      JSON.stringify(parts) !== text) return false;
+    const descriptor = inspectToolOutput(parts[0].text, call);
+    return !!descriptor && bodyMarkerPattern.test(parts[0].text.slice(descriptor.bodyStart, descriptor.bodyEnd));
+  } catch { return false; }
+}
 function hasWellFormedMarker(sourceIndex) {
   for (const r of sourceIndex.results) {
     if (typeof r.text === "string" && r.text.length <= maxMarkerLen && markerPattern.test(r.text)) return true;
+    if (hasBodyMarker(r.text, sourceIndex.calls[r.callOrdinal])) return true;
     const geminiLeaf = r.resultContainer?.response?.result?.result;
     if (typeof geminiLeaf === "string" && geminiLeaf.length <= maxMarkerLen && markerPattern.test(geminiLeaf)) return true;
+    if (hasBodyMarker(geminiLeaf, sourceIndex.calls[r.callOrdinal])) return true;
   }
   for (const seg of sourceIndex.textSegments) {
     if (seg.kind === "result_text" && typeof seg.text === "string" && seg.text.length <= maxMarkerLen && markerPattern.test(seg.text)) return true;
@@ -50,6 +74,9 @@ export function planSessionDedup(sourceIndex, { mode = "off", fence, signal } = 
     scannedBytes: 0,
     eligibleResults: 0,
     exactDuplicatesFound: 0,
+    rawExactDuplicatesFound: 0,
+    bodyExactDuplicatesFound: 0,
+    envelopeRejected: 0,
     plannedResults: 0,
     plannedSaveBytes: 0,
     wouldDedupResults: 0,
@@ -78,6 +105,7 @@ export function planSessionDedup(sourceIndex, { mode = "off", fence, signal } = 
 
   if (mode === "off") return plan;
   const canonical = new Map();
+  const bodyCanonical = new Map();
   const cross = new Map();
   let entries = 0;
   const stop = reason => {
@@ -103,7 +131,7 @@ export function planSessionDedup(sourceIndex, { mode = "off", fence, signal } = 
       continue;
     }
     const text = result.text;
-    if (text.startsWith("[9router dedup:v1 ")) continue;
+    if (text.startsWith("[9router dedup:v1 ") || text.startsWith("[9router dedup:v2 ")) continue;
     if (reason && reason !== "cacheFence") continue;
     if (text.length > LIMIT.maxResultBytes) {
       if (!reason) stats.skipped.above_max_bytes = (stats.skipped.above_max_bytes || 0) + 1;
@@ -123,6 +151,12 @@ export function planSessionDedup(sourceIndex, { mode = "off", fence, signal } = 
       break;
     }
     stats.scannedBytes += size;
+    if (!text.isWellFormed() || preservesToolOutput(text)) continue;
+    let envelopeRejected = false;
+    const descriptor = inspectToolOutput(text, sourceIndex.calls[result.callOrdinal], () => { envelopeRejected = true; stats.envelopeRejected++; });
+    if (envelopeRejected) continue;
+    const extracted = descriptor ? text.slice(descriptor.bodyStart, descriptor.bodyEnd) : null;
+    const bodyBytes = descriptor ? Buffer.byteLength(extracted) : 0;
     stats.hashedResults++;
     const digest = hash(text);
     const key = `${result.toolFamily}:${size}:${digest}`;
@@ -144,6 +178,19 @@ export function planSessionDedup(sourceIndex, { mode = "off", fence, signal } = 
       canonical.set(key, { result, index: i });
       entries++;
     }
+    let bodyPrev = null;
+    let bodyDigest = null;
+    if (descriptor && bodyBytes >= LIMIT.minResultBytes && !prev) {
+      bodyDigest = hash(extracted);
+      const bodyKey = `${result.toolFamily}:${descriptor.kind}:${bodyBytes}:${bodyDigest}`;
+      bodyPrev = bodyCanonical.get(bodyKey);
+      if (bodyPrev?.ambiguous || bodyPrev && bodyPrev.text !== extracted) {
+        if (bodyPrev) bodyPrev.ambiguous = true;
+        stats.skipped.hash_collision = (stats.skipped.hash_collision || 0) + 1;
+        continue;
+      }
+      if (!bodyPrev && !prev) bodyCanonical.set(bodyKey, { result, index: i, text: extracted, descriptor });
+    }
     if (!reason) {
       stats.eligibleResults++;
       if (result.turnIndex === sourceIndex.currentTurnIndex) {
@@ -156,22 +203,32 @@ export function planSessionDedup(sourceIndex, { mode = "off", fence, signal } = 
     } else if (!others) {
       cross.set(`${size}:${digest}`, { family: result.toolFamily, text });
     }
-    if (!prev || reason) continue;
+    if (reason || !prev && !bodyPrev) continue;
     stats.exactDuplicatesFound++;
-    if (result.turnIndex === sourceIndex.currentTurnIndex) {
-      stats.intraTurnDuplicatesFound++;
-    }
-    const marker = markerFor(size, digest);
+    if (prev) stats.rawExactDuplicatesFound++;
+    else stats.bodyExactDuplicatesFound++;
+    if (result.turnIndex === sourceIndex.currentTurnIndex) stats.intraTurnDuplicatesFound++;
+    const matchKind = prev ? "raw" : "body";
+    const anchor = prev ?? bodyPrev;
+    const bodyMarker = matchKind === "body" ? bodyMarkerFor(bodyBytes, bodyDigest) : null;
+    const marker = bodyMarker ? replaceToolOutputBody(text, descriptor, bodyMarker) : markerFor(size, digest);
     const markerBytes = Buffer.byteLength(marker);
     if (markerBytes >= size) continue;
+    // A body target is not a preserved raw anchor for subsequent carriers.
+    if (matchKind === "body") { canonical.delete(key); entries--; }
     const ref = {
-      anchorResultIndex: prev.index,
+      matchKind,
+      adapterKind: descriptor?.kind,
+      bodyText: matchKind === "body" ? extracted : null,
+      bodyBytes,
+      anchorOriginalText: anchor.result.text,
+      anchorResultIndex: anchor.index,
       resultIndex: i,
       originalText: text,
       originalBytes: size,
       marker,
       markerBytes,
-      digest,
+      digest: bodyDigest ?? digest,
     };
     plan.replacements.push(ref);
     const saved = size - markerBytes;
@@ -233,7 +290,7 @@ export function commitSessionDedup(body, {
   finalIndex: providedFinalIndex,
   finalFence: providedFinalFence,
 } = {}) {
-  const zero = (reason, detail = null) => ({ appliedResults: 0, bytesSaved: 0, estimatedTokensSaved: 0, retainedReferences: 0, skipReason: reason, skipDetail: detail });
+  const zero = (reason, detail = null) => ({ appliedResults: 0, bytesSaved: 0, estimatedTokensSaved: 0, bodyAppliedResults: 0, bodyAppliedSaveBytes: 0, retainedReferences: 0, skipReason: reason, skipDetail: detail });
   if (signal?.aborted) throw signal.reason;
   if (plan?.mode !== "on" || !plan.replacements.length) return zero(null);
 
@@ -299,7 +356,7 @@ export function commitSessionDedup(body, {
     const source = sourceIndex.results[ref.resultIndex];
     if (!gemini(sourceFormat) && !gemini(finalFormat) &&
       !(source.representation === "single_text" && (responses(sourceFormat) || [RESPONSES_ITEM.FUNCTION_CALL_OUTPUT, RESPONSES_ITEM.CUSTOM_TOOL_CALL_OUTPUT].includes(source.resultContainer?.type)))) continue;
-    for (const text of [ref.originalText, ref.marker]) {
+    for (const text of [ref.anchorOriginalText, ref.originalText, ref.marker]) {
       const bound = 6 * text.length + 128;
       if (bound > LIMIT.maxResultBytes || bounds + bound > LIMIT.maxScanBytes) return reject("final_budget");
       bounds += bound;
@@ -311,7 +368,7 @@ export function commitSessionDedup(body, {
     const anchor = final.results[ref.anchorResultIndex];
     const sourceTarget = sourceIndex.results[ref.resultIndex];
     const target = final.results[ref.resultIndex];
-    const anchorProof = selectedLeaf(sourceAnchor, anchor, ref.originalText, sourceFormat, finalFormat);
+    const anchorProof = selectedLeaf(sourceAnchor, anchor, ref.anchorOriginalText, sourceFormat, finalFormat);
     const targetProof = selectedLeaf(sourceTarget, target, ref.originalText, sourceFormat, finalFormat);
     const newValue = selectedLeaf(sourceTarget, target, ref.marker, sourceFormat, finalFormat);
     if (!anchorProof || !targetProof || !newValue) return reject("final_correspondence", "leaf_proof");
@@ -319,11 +376,28 @@ export function commitSessionDedup(body, {
       !writable(newValue.owner, newValue.key)) return reject("final_correspondence", "non_writable");
     if (anchorProof.owner[anchorProof.key] !== anchorProof.expected || targetProof.owner[targetProof.key] !== targetProof.expected ||
       newValue.owner !== targetProof.owner || newValue.key !== targetProof.key) return reject("final_correspondence", "leaf_proof");
+    if (ref.matchKind === "body") {
+      // Codec correspondence above proves the carrier; extraction proves the body.
+      const a = inspectToolOutput(ref.anchorOriginalText, sourceIndex.calls[sourceAnchor.callOrdinal]);
+      const b = inspectToolOutput(ref.originalText, sourceIndex.calls[sourceTarget.callOrdinal]);
+      if (!a || !b || a.kind !== ref.adapterKind || b.kind !== ref.adapterKind ||
+        ref.anchorOriginalText.slice(a.bodyStart, a.bodyEnd) !== ref.bodyText ||
+        ref.originalText.slice(b.bodyStart, b.bodyEnd) !== ref.bodyText) return reject("final_correspondence", "body_proof");
+      if (anchorProof.expected === ref.anchorOriginalText && targetProof.expected === ref.originalText) {
+        const finalA = inspectToolOutput(anchorProof.owner[anchorProof.key], sourceIndex.calls[sourceAnchor.callOrdinal]);
+        const finalB = inspectToolOutput(targetProof.owner[targetProof.key], sourceIndex.calls[sourceTarget.callOrdinal]);
+        if (!finalA || !finalB || finalA.kind !== ref.adapterKind || finalB.kind !== ref.adapterKind ||
+          anchorProof.owner[anchorProof.key].slice(finalA.bodyStart, finalA.bodyEnd) !== ref.bodyText ||
+          targetProof.owner[targetProof.key].slice(finalB.bodyStart, finalB.bodyEnd) !== ref.bodyText) return reject("final_correspondence", "body_proof");
+      }
+    }
     writes.push({ owner: targetProof.owner, key: targetProof.key, text: newValue.expected, ref });
   }
   if (signal?.aborted) throw signal.reason;
   for (const { owner, key, text } of writes) owner[key] = text;
   return { appliedResults: writes.length, bytesSaved: writes.reduce((n, w) => n + w.ref.originalBytes - w.ref.markerBytes, 0),
+    bodyAppliedResults: writes.filter(w => w.ref.matchKind === "body").length,
+    bodyAppliedSaveBytes: writes.reduce((n, w) => n + (w.ref.matchKind === "body" ? w.ref.originalBytes - w.ref.markerBytes : 0), 0),
     estimatedTokensSaved: writes.reduce((n, w) => n + Math.max(0, estimateOutputTokens(w.ref.originalText.length) - estimateOutputTokens(w.ref.marker.length)), 0),
     retainedReferences: writes.length, skipReason: null, skipDetail: null };
 }

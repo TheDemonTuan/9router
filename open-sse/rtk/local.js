@@ -9,10 +9,102 @@ export function isGrepOutput(text) {
   return !text.includes("\u001b") && text.replace(/\r?\n$/, "").split(/\r?\n/).every(line => grepLine.test(line) && !/^[A-Za-z]:/.test(line));
 }
 
+function isNativeText(text) {
+  return typeof text === "string" && text.isWellFormed() && !/[\0\u001b]|\r(?!\n)/.test(text);
+}
+
+function isLineNumber(value) {
+  return Number.isSafeInteger(Number(value)) && Number(value) > 0;
+}
+
+// OMP output-meta.ts / grep.ts @ 0d6dbd32fcd76bfb3bee0e6e01a26afda62628a8.
+// These notices are recognition only: never remove retrieval or omission hints.
+function isOmpNotice(line) {
+  if (/^… \d+ more$/.test(line)) return true;
+  if (/^Showing files \d+-\d+ of \d+\+?\. Use skip=\d+ for the next page, or narrow paths\/pattern\.$/.test(line)) return true;
+  if (/^Skipped missing paths: .+$/.test(line) || /^Skipped archive entries \(search supports text members only\): .+$/.test(line)) return true;
+  if (/^Searched only the first \d+MB of large files \(matches past the \d+MB window are not shown; use `read` for the rest\): .+$/.test(line)) return true;
+  if (/^Skipped \d+ unreadable large file\(s\); target them directly with `read`$/.test(line)) return true;
+  if (/^glob timed out after \d+(?:\.\d+)?s; returning \d+ partial matches — results are incomplete, scope to a deeper directory instead of retrying blindly$/.test(line)) return true;
+  if (!line.startsWith("[") || !line.endsWith("]")) return false;
+  const parts = line.slice(1, -1).split(". ");
+  return parts.every(part => /^(?:\d+ (?:matches|results) limit reached|Use limit=\d+ for more|Some lines truncated to \d+ (?:bytes|chars)|Showing (?:lines \d+-\d+ of \d+|\d+ of \d+ lines)(?: \(\d+(?:\.\d+)? ?[KMGT]?B limit\))?|Use :\d+ to continue|Read artifact:\/\/\d+ for full output)$/.test(part));
+}
+
+function isOmpGrep(lines) {
+  let matches = 0;
+  let fileMatches = 0;
+  let inFile = true; // A single-file scope can have no heading.
+  let footer = false;
+  for (const line of lines) {
+    if (line === "") continue;
+    if (isOmpNotice(line)) {
+      if (!matches || !inFile || !fileMatches) return false;
+      footer = true;
+      continue;
+    }
+    if (footer) return false;
+    const row = /^([* ])(\d+)[:|](.*)$/.exec(line);
+    if (row) {
+      if (!inFile || !isLineNumber(row[2])) return false;
+      if (row[1] === "*") { matches++; fileMatches++; }
+      continue;
+    }
+    if (line === "...") {
+      if (!inFile || !fileMatches) return false;
+      continue;
+    }
+    const heading = /^(#+) ([^\x00-\x1f\x7f]+)$/.exec(line);
+    const snapshot = /^\[[^\x00-\x1f\x7f\[\]]+#[0-9a-f]{4}\]$/i.test(line);
+    if (!heading && !snapshot) return false;
+    if (inFile && matches && !fileMatches) return false;
+    inFile = snapshot || !heading[2].endsWith("/");
+    fileMatches = 0;
+  }
+  return matches > 0 && inFile && fileMatches > 0;
+}
+
+// OpenCode grep.ts @ e63996919b6267d00a5ea224ab03b0f58fbd15d8.
+// Count occurrences, not distinct rows: repeated matches are meaningful output.
+function isOpenCodeGrep(lines) {
+  const header = /^Found (\d+) matches(?: \(more matches available\))?$/.exec(lines[0]);
+  if (!header || !isLineNumber(header[1])) return false;
+  let matches = 0;
+  let fileMatches = 0;
+  let files = 0;
+  let separator = false;
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (line === "") {
+      if (separator || i === lines.length - 1) return false;
+      separator = true;
+      continue;
+    }
+    if (line === "(Results truncated. Consider using a more specific path or pattern.)") {
+      if (!separator || !fileMatches || i !== lines.length - 1) return false;
+      continue;
+    }
+    const row = /^  Line (\d+): (.*)$/.exec(line);
+    if (row) {
+      if (!files || separator || !isLineNumber(row[1])) return false;
+      matches++;
+      fileMatches++;
+    } else {
+      if (!/^(?:\/|[A-Za-z]:[\\/])[^\x00-\x1f\x7f]+:$/.test(line) || files && (!fileMatches || !separator)) return false;
+      files++;
+      fileMatches = 0;
+    }
+    separator = false;
+  }
+  return files > 0 && fileMatches > 0 && matches === Number(header[1]);
+}
+
 export function inspectNativeGrepOutput(text) {
-  if (typeof text !== "string" || !text.isWellFormed() || /[\0\u001b]|\r(?!\n)/.test(text)) return "unknown";
+  if (!isNativeText(text)) return "unknown";
   if (isGrepOutput(text)) return "flat_numbered";
   const lines = text.replace(/\r?\n$/, "").split(/\r?\n/);
+  if (isOmpGrep(lines)) return "omp_grouped";
+  if (isOpenCodeGrep(lines)) return "opencode_heading";
   let matches = 0;
   let groups = 0;
   for (let i = 0; i < lines.length; i++) {
@@ -41,6 +133,44 @@ export function isPathOutput(text) {
   return !text.includes("\u001b") && text.replace(/\r?\n$/, "").split(/\r?\n/).every(line => pathLine.test(line));
 }
 
+// Only already-folded native glob shapes qualify here. Flat paths still use
+// isPathOutput and the existing lossless directory-prefix grouping.
+export function inspectNativeGlobOutput(text) {
+  if (!isNativeText(text) || isPathOutput(text)) return false;
+  const lines = text.replace(/\r?\n$/, "").split(/\r?\n/);
+  const directories = new Set();
+  let entries = 0;
+  let folded = false;
+  let footer = false;
+  let style;
+  for (const line of lines) {
+    if (line === "") continue;
+    if (isOmpNotice(line)) {
+      if (!entries) return false;
+      footer = true;
+      folded = true;
+      continue;
+    }
+    if (footer) return false;
+    const heading = /^(#+) ([^\x00-\x1f\x7f]+)$/.exec(line);
+    const tree = /^( *)([^\s\x00-\x1f\x7f][^\x00-\x1f\x7f]*)$/.exec(line);
+    if (!heading && !tree) return false;
+    const nextStyle = heading ? "heading" : "tree";
+    if (style && style !== nextStyle) return false;
+    style = nextStyle;
+    if (!heading && tree[1].length % 2 !== 0) return false;
+    const depth = heading ? heading[1].length - 1 : tree[1].length / 2;
+    const name = heading ? heading[2] : tree[2];
+    if (!heading && /^\[.*\]$/.test(name)) return false;
+    if (depth > 0 && !directories.has(depth - 1)) return false;
+    for (const level of directories) if (level >= depth) directories.delete(level);
+    if (name.endsWith("/")) directories.add(depth);
+    folded ||= Boolean(heading) || depth > 0 || name.endsWith("/");
+    entries++;
+  }
+  return entries > 0 && folded;
+}
+
 export function exceedsPipeGrepCap(text) {
   const counts = new Map();
   for (const line of text.replace(/\r?\n$/, "").split(/\r?\n/)) {
@@ -67,12 +197,22 @@ function group(text, pattern, groupLabel) {
   return output.join("\n");
 }
 
-function search(text) {
-  if (!isGrepOutput(text)) return inspectNativeGrepOutput(text) === "heading_numbered" ? text : null;
-  return group(text, /^([^:\r\n]+):([0-9]+:.*)$/, "[file]");
+function search(text, onDetail) {
+  const shape = inspectNativeGrepOutput(text);
+  if (shape === "flat_numbered") return group(text, /^([^:\r\n]+):([0-9]+:.*)$/, "[file]");
+  if (shape === "omp_grouped" || shape === "heading_numbered") {
+    onDetail?.("already_grouped");
+    return text;
+  }
+  if (shape === "opencode_heading") return text.replace(/(^|\n)  Line (?=\d+: )/g, "$1");
+  return null;
 }
 
-function paths(text) {
+function paths(text, onDetail) {
+  if (inspectNativeGlobOutput(text)) {
+    onDetail?.("already_grouped");
+    return text;
+  }
   if (!isPathOutput(text)) return null;
   // Grouping saves bytes by stripping repeated directory prefixes. If there
   // are no slashes to group, prepending [cwd] only adds bytes and is rejected.
@@ -190,7 +330,7 @@ export function filterLocalOutput(filter, content, onOutcome) {
   let output;
   let detail = "none";
   try {
-    output = filter === "test" ? format(content, value => { detail = value; }) : format(content);
+    output = format(content, value => { detail = value; });
   } catch {
     onOutcome?.("failed", 0, detail);
     return null;

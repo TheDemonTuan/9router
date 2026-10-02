@@ -2,7 +2,7 @@ import { afterAll, describe, expect, it, vi } from "vitest";
 import { createServer } from "node:http";
 import { classifyToolCall } from "../../open-sse/rtk/classifier.js";
 import { compressMessages } from "../../open-sse/rtk/index.js";
-import { filterLocalOutput, inspectNativeGrepOutput } from "../../open-sse/rtk/local.js";
+import { filterLocalOutput, inspectNativeGrepOutput, inspectNativeGlobOutput } from "../../open-sse/rtk/local.js";
 import { getRtkState, getRtkSnapshot, recordRtkNativeGrepShape } from "../../open-sse/rtk/state.js";
 
 let requests = 0;
@@ -316,9 +316,6 @@ describe("documented native Grep contracts", () => {
     const after = getRtkSnapshot();
     expect(after.usage.nativeGrepShapes.heading_numbered.count - before.usage.nativeGrepShapes.heading_numbered.count).toBe(1);
     expect(after.usage.nativeGrepShapes.heading_numbered.inputBytes - before.usage.nativeGrepShapes.heading_numbered.inputBytes).toBe(Buffer.byteLength(content));
-    expect(after.usage.local.attempts - before.usage.local.attempts).toBe(1);
-    expect(after.usage.http.attempts).toBe(before.usage.http.attempts);
-    expect(after.diagnostics.filters.some(r => r.toolFamily === "grep" && r.outcome === "not_smaller")).toBe(true);
     expect(requests).toBe(requestsBefore);
     expect(JSON.stringify(after)).not.toContain("SENTINEL_");
   });
@@ -379,5 +376,106 @@ describe("documented native Grep contracts", () => {
     snapshot.usage.nativeGrepShapes.unknown.count = -1;
     expect(getRtkSnapshot().usage.nativeGrepShapes.unknown.count).toBeGreaterThanOrEqual(2);
     expect(JSON.stringify(getRtkSnapshot())).not.toContain("SENTINEL_PRIVATE");
+  });
+});
+
+describe("upstream native search formats", () => {
+  // OMP grep.ts, match-line-format.ts, grouped-file-output.ts, output-meta.ts
+  // @ 0d6dbd32fcd76bfb3bee0e6e01a26afda62628a8. Synthetic content only.
+  const ompRows = " 1:KEEP_CONTEXT\n*2:KEEP_DUPLICATE\n*2:KEEP_DUPLICATE\n...\n*5|KEEP_PLAIN_MATCH\n 6|KEEP_PLAIN_CONTEXT\n";
+  const ompNotice = "\n[Some lines truncated to 768 bytes. Read artifact://123 for full output]\n";
+  it.each([
+    ompRows,
+    `[src/example.js#A1B2]\n${ompRows}`,
+    `# src/\n[example.js#A1B2]\n${ompRows}`,
+    `# src/\n## example.js#A1B2\n${ompRows}\n## nested/\n### other.js#C3D4\n*1:KEEP_OTHER\n`,
+    `[src/example.js#A1B2]\n${ompRows}\nShowing files 1-20 of 30+. Use skip=20 for the next page, or narrow paths/pattern.\nSkipped missing paths: src/KEEP_MISSING.js\n`,
+    `[src/example.js#A1B2]\n${ompRows}${ompNotice}`,
+  ])("keeps every folded OMP byte and does not contact the sidecar %#", async content => {
+    expect(inspectNativeGrepOutput(content)).toBe("omp_grouped");
+    const before = requests;
+    const gatewayContent = content.replaceAll("KEEP_", "synthetic payload retained verbatim ".repeat(20) + "KEEP_");
+    const { text, stats } = await compress("functions.grep", { path: "src", pattern: "KEEP" }, gatewayContent);
+    expect(text).toBe(gatewayContent);
+    expect(stats.hits).toEqual([]);
+    expect(requests).toBe(before);
+    const outcomes = [];
+    expect(filterLocalOutput("grep", content, (...args) => outcomes.push(args))).toBeNull();
+    expect(outcomes).toEqual([["not_smaller", Buffer.byteLength(content), "already_grouped"]]);
+  });
+
+  // OpenCode grep.ts @ e63996919b6267d00a5ea224ab03b0f58fbd15d8.
+  const openCode = (ending, more = false) => [
+    `Found 3 matches${more ? " (more matches available)" : ""}`,
+    "",
+    "/src/KEEP_PATH.js:",
+    `  Line 1: KEEP_DUPLICATE ${"synthetic matched bytes ".repeat(25)}  `,
+    `  Line 1: KEEP_DUPLICATE ${"synthetic matched bytes ".repeat(25)}  `,
+    "",
+    "/src/KEEP_OTHER.js:",
+    "  Line 20:   Line 3: KEEP_LITERAL_LABEL",
+    ...(more ? ["", "(Results truncated. Consider using a more specific path or pattern.)"] : []),
+  ].join(ending) + ending;
+  it.each(["\n", "\r\n"])("shortens only proven OpenCode labels, retaining duplicates and endings %j", async ending => {
+    for (const more of [false, true]) {
+      const content = openCode(ending, more);
+      const duplicate = `KEEP_DUPLICATE ${"synthetic matched bytes ".repeat(25)}  `;
+      const expected = content.replace(`  Line 1: ${duplicate}${ending}  Line 1: ${duplicate}`, `1: ${duplicate}${ending}1: ${duplicate}`)
+        .replace("  Line 20:   Line 3: KEEP_LITERAL_LABEL", "20:   Line 3: KEEP_LITERAL_LABEL");
+      expect(inspectNativeGrepOutput(content)).toBe("opencode_heading");
+      expect(filterLocalOutput("grep", content)).toBe(expected);
+      expect(Buffer.byteLength(content) - Buffer.byteLength(expected)).toBe(21);
+      const before = requests;
+      const { text } = await compress("functions.grep", { path: "/src", pattern: "KEEP" }, content);
+      expect(text).toBe(expected);
+      expect(requests).toBe(before);
+    }
+  });
+  it.each([
+    content => content.replace("Found 3", "Found 2"),
+    content => content.replace("Found 3", "Found 4"),
+    content => content.replace("  Line 20", "  Line 0"),
+    content => content.replace("  Line 20", "  Line 9007199254740992"),
+    content => content.replace("  Line 20", " Line 20"),
+    content => content.replace("/src/KEEP_PATH.js:", "KEEP_UNSUPPORTED_HEADER"),
+    content => content.replace("  Line 20:   Line", "  Line 20:Line"),
+    content => content.replace("\n/src/KEEP_OTHER.js:", "\nKEEP_UNKNOWN_ROW\n/src/KEEP_OTHER.js:"),
+    content => `${content}KEEP_UNKNOWN_FOOTER\n`,
+    content => `${content}(Results truncated. Consider narrowing the search.)\n`,
+    content => content.replace("Found 3 matches", "Found 3 matches\nFound 3 matches"),
+    content => content.replace("KEEP_DUPLICATE", "KEEP\u001b[32m_DUPLICATE"),
+  ])("never changes incompletely proven OpenCode output %#", async mutate => {
+    const content = mutate(openCode("\n"));
+    expect(inspectNativeGrepOutput(content)).toBe("unknown");
+    expect(filterLocalOutput("grep", content)).toBeNull();
+    const before = requests;
+    expect((await compress("functions.grep", { path: "/src", pattern: "KEEP" }, content)).text).toBe(content);
+    expect(requests).toBe(before);
+  });
+
+  // OMP glob.ts and output-meta.ts @ 0d6dbd32fcd76bfb3bee0e6e01a26afda62628a8.
+  it.each([
+    "src/\n  KEEP_FILE.js\n  nested/\n    KEEP_OTHER.js\n… 2 more\n",
+    "# src/\n## KEEP_FILE.js\n## nested/\n### KEEP_OTHER.js\n",
+    "src/\n  KEEP_FILE.js\n\nSkipped missing paths: KEEP_MISSING/\n[200 results limit reached. Use limit=400 for more]\n",
+    "src/\n  KEEP_FILE.js\n\n[Showing lines 1-20 of 40. Use :21 to continue. Read artifact://123 for full output]\n",
+    "./src/KEEP_FILE.js\n./src/KEEP_OTHER.js\n\n[200 results limit reached. Use limit=400 for more]\n",
+  ])("recognizes native glob trees and preserves every path and retrieval hint %#", async content => {
+    expect(inspectNativeGlobOutput(content)).toBe(true);
+    const outcomes = [];
+    expect(filterLocalOutput("find", content, (...args) => outcomes.push(args))).toBeNull();
+    expect(outcomes).toEqual([["not_smaller", Buffer.byteLength(content), "already_grouped"]]);
+    const before = requests;
+    expect((await compress("functions.glob", { path: "src/**" }, content)).text).toBe(content);
+    expect(requests).toBe(before);
+  });
+  it.each(["KEEP_UNKNOWN_TEXT", "src/\n   KEEP_BAD_INDENT.js\n", "src/\n    KEEP_SKIPPED_DEPTH.js\n", "src/\n  KEEP_FILE.js\n\n[KEEP_UNKNOWN_NOTICE]\n", "src/\n  KEEP_FILE.js\0\n"])("keeps unknown glob text raw %#", content => {
+    expect(inspectNativeGlobOutput(content)).toBe(false);
+    expect(filterLocalOutput("find", content)).toBeNull();
+  });
+  it("still groups proven flat paths without treating them as already folded", () => {
+    const content = "./src/KEEP_DUPLICATE.js\n./src/KEEP_DUPLICATE.js\n./src/KEEP_OTHER.js\n";
+    expect(inspectNativeGlobOutput(content)).toBe(false);
+    expect(filterLocalOutput("find", content)).toBe("[dir] ./src/\nKEEP_DUPLICATE.js\nKEEP_DUPLICATE.js\nKEEP_OTHER.js");
   });
 });

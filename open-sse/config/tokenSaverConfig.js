@@ -5,6 +5,8 @@ export const TOKEN_SAVER_CONFIG = Object.freeze({
   maxResultBytes: 4_194_304,
   maxScanBytes: 16_777_216,
   maxEntries: 2048,
+  maxToolEnvelopeChars: 1024,
+  maxToolMetadataBytes: 8192,
   maxProtocolNodes: 65_536,
   protectPreviousTurns: 2,
   protectRecentToolBatches: 2,

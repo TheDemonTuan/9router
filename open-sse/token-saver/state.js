@@ -15,6 +15,7 @@ const usageKeys = [
   "appliedResults", "bytesSaved", "scannedBytes", "estimatedTokensSaved", "crossFamilyDuplicates",
   "hashedResults", "intraTurnEligibleResults", "intraTurnDuplicatesFound",
   "budgetStoppedPreparations", "finalGuardSkippedPreparations",
+  "rawExactDuplicatesFound", "bodyExactDuplicatesFound", "bodyAppliedResults", "bodyAppliedSaveBytes", "envelopeRejected",
 ];
 const cleanupKeys = ["scannedBytes", "budgetStoppedPreparations", "completePreparations", "partialPreparations",
   "visitedSegments", "measuredSegments", "protectedSegments", "trailingWhitespaceBytes", "blankLineBytes",
@@ -25,7 +26,7 @@ const OPAQUE_REASONS = [
 ];
 const FINAL_CORRESPONDENCE_REASONS = [
   "unsupported_final", "call_count", "result_count", "call_identity",
-  "result_linkage", "anchor_mapping", "leaf_proof", "non_writable",
+  "result_linkage", "anchor_mapping", "leaf_proof", "body_proof", "non_writable",
 ];
 const KEY = Symbol.for("9router.token-saver.runtime.v2");
 function createState() {
@@ -53,6 +54,7 @@ function createState() {
 }
 const state = () => {
   const runtime = globalThis[KEY] ??= createState();
+  for (const key of usageKeys) runtime.usage[key] ??= 0;
   runtime.usage.skippedResults ??= numeric(skipNames);
   runtime.usage.skippedPreparations ??= numeric(skipNames);
   runtime.usage.protected.opaque ??= 0;
@@ -74,7 +76,7 @@ export function recordTokenSaverPreparation({ mode, stats, cleanup, commit, reas
   const usage = state().usage;
   add(usage, "preparations", 1);
   add(usage.byMode, mode, 1);
-  for (const key of usageKeys) if (key !== "preparations") add(usage, key, stats?.[key] || 0);
+  for (const key of usageKeys) if (!["preparations", "appliedResults", "bytesSaved", "estimatedTokensSaved", "bodyAppliedResults", "bodyAppliedSaveBytes"].includes(key)) add(usage, key, stats?.[key] || 0);
   for (const [key, count] of Object.entries(stats?.protected ?? {})) add(usage.protected, key, count);
   for (const [key, count] of Object.entries(stats?.skipped ?? {})) add(usage.skipped, key, count);
   if (reason && (!stats?.skipped || !stats.skipped[reason])) add(usage.skipped, reason, 1);
@@ -90,6 +92,8 @@ export function recordTokenSaverPreparation({ mode, stats, cleanup, commit, reas
   add(usage, "appliedResults", commit?.appliedResults || 0);
   add(usage, "bytesSaved", commit?.bytesSaved || 0);
   add(usage, "estimatedTokensSaved", commit?.estimatedTokensSaved || 0);
+  add(usage, "bodyAppliedResults", commit?.bodyAppliedResults || 0);
+  add(usage, "bodyAppliedSaveBytes", commit?.bodyAppliedSaveBytes || 0);
   if (commit?.skipReason) {
     add(usage.skipped, commit.skipReason, 1);
     add(usage, "finalGuardSkippedPreparations", 1);
@@ -115,7 +119,7 @@ export function recordTokenSaverPreparation({ mode, stats, cleanup, commit, reas
   if (commit?.skipReason === "final_correspondence") {
     add(usage.finalCorrespondenceReasons, commit.skipDetail, 1);
   }
-  if (cleanup) {
+  if (mode === "shadow" && cleanup) {
     for (const key of cleanupKeys) add(usage.cleanupShadow, key, cleanup[key] || 0);
     add(usage.cleanupShadow, cleanup.complete ? "completePreparations" : "partialPreparations", 1);
     if (cleanup.budgetStopped) add(usage.cleanupShadow, "budgetStoppedPreparations", 1);

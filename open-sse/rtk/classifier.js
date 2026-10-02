@@ -1,12 +1,13 @@
-import { exceedsPipeGrepCap, isGrepOutput, isPathOutput, inspectNativeGrepOutput } from "./local.js";
+import { exceedsPipeGrepCap, isGrepOutput, isPathOutput, inspectNativeGrepOutput, inspectNativeGlobOutput } from "./local.js";
 import { RTK_COMMAND_FAMILIES } from "../config/rtkConfig.js";
 import { isPassingVitestJson } from "./testOutput.js";
 
 const commandFamilies = new Set(RTK_COMMAND_FAMILIES);
 const testScripts = new Set(["test", "test:unit", "test:integration", "test:e2e"]);
 const isTestScript = argv => argv[1] === "test" || argv[1] === "run" && testScripts.has(argv[2]);
+const bunArgs = argv => argv[1] === "--cwd" && argv[2] && !argv[2].startsWith("-") ? [argv[0], ...argv.slice(3)] : argv;
 function commandFamily(executable, argv) {
-  if (["npm", "pnpm", "yarn", "bun"].includes(executable)) return `${executable} ${isTestScript(argv) ? "test" : "other"}`;
+  if (["npm", "pnpm", "yarn", "bun"].includes(executable)) return `${executable} ${isTestScript(executable === "bun" ? bunArgs(argv) : argv) ? "test" : "other"}`;
   if (executable === "node") return `node ${argv.includes("--test") ? "test" : "other"}`;
   const subcommands = { git: ["diff", "status", "log"], cargo: ["test", "build"], go: ["test", "build"], docker: ["ps", "logs"], ruff: ["check", "format"], sqlfluff: ["lint"] };
   if (subcommands[executable]) {
@@ -133,11 +134,13 @@ export function classifyToolCall(call, content, onReject, onCommand, onNativeSha
       if (!hasMetadata) return reject(onReject, "native_metadata_missing", "native_metadata_missing");
       const shape = inspectNativeGrepOutput(content);
       onNativeShape?.(shape);
+      if (shape === "omp_grouped") return reject(onReject, "recognized_preserved", "already_grouped");
       return shape !== "unknown" ? "local:grep" : reject(onReject, "unsupported_output_format", "native_output_mismatch");
     }
     if (tool === "glob") {
       const hasMetadata = typeof input.path === "string" && !input.command && !input.cmd;
       if (!hasMetadata) return reject(onReject, "native_metadata_missing", "native_metadata_missing");
+      if (inspectNativeGlobOutput(content)) return reject(onReject, "recognized_preserved", "already_grouped");
       return isPathOutput(content) ? "local:find" : reject(onReject, "unsupported_output_format", "native_output_mismatch");
     }
     return reject(onReject, "missing_command", "no_command");
@@ -179,6 +182,12 @@ export function classifyToolCall(call, content, onReject, onCommand, onNativeSha
         ? "local:git-log" : reject(onReject, "unsupported_mode");
     }
     if (sub !== "diff" && sub !== "status") return reject(onReject, "unsupported_mode");
+    if (sub === "diff") {
+      const args = argv.slice(i);
+      if (args.some(arg => ["--check", "--quiet", "-s", "--no-patch"].includes(arg))) return reject(onReject, "unsupported_output_format", "non_patch");
+      if (/^(?:diff --git |@@ |\[[^\r\n]+#[0-9a-fA-F]{4}\])/m.test(content)) return reject(onReject, "recognized_preserved", "lossy_filter");
+      return reject(onReject, "unsupported_output_format", "non_patch");
+    }
     if (argv.slice(i).some(arg => /^(--raw|--numstat|--name-only|--name-status|--format|--pretty|--word-diff|--word-diff-regex|--no-patch|--stat|--shortstat|--dirstat|--summary)(=|$)/.test(arg))) return reject(onReject, "unsupported_output_format");
     return `git-${sub}`;
   }
@@ -213,7 +222,7 @@ export function classifyToolCall(call, content, onReject, onCommand, onNativeSha
     if (argv[1] !== "lint" || !formatFlag(argv.slice(2), "--format", "json")) return reject(onReject, "unsupported_mode");
     return jsonArray(content) ? "sqlfluff-lint" : reject(onReject, "unsupported_output_format");
   }
-  if (["npm", "pnpm", "yarn", "bun"].includes(executable) && isTestScript(argv)) return "local:test";
+  if (["npm", "pnpm", "yarn", "bun"].includes(executable) && isTestScript(executable === "bun" ? bunArgs(argv) : argv)) return "local:test";
   if (executable === "node" && argv.includes("--test")) return "local:test";
   if (executable === "vitest") {
     if (content.trimStart().startsWith("{")) return isPassingVitestJson(content) ? "vitest" : reject(onReject, "unsupported_output_format");
