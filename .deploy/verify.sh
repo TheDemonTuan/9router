@@ -14,6 +14,7 @@ mkdir -p "$HOME" "$DATA_DIR"
     "${chatgpt_web_tests[@]}" \
     unit/codex-tool-normalization.test.js \
     unit/codex-native-passthrough-thinking.test.js \
+    unit/codex-same-wire.test.js \
     unit/claude-header-forwarding.test.js \
     unit/session-manager.test.js \
     unit/rtk-cursor-pretranslate.test.js \

@@ -18,6 +18,7 @@
 - **Headroom**: remove compressor, sidecar, dashboard/CLI controls, and retire persisted settings on upgrade and restore.
 
 ## Fixes
+- **Codex Responses same-wire**: bypass generic request normalization for non-native Responses→Codex requests while preserving reasoning summary/mode/context, ordered tool replay and opaque encrypted state. Keep Codex canonicalization/validation, native identity, token-saver fences and client response dialect handling unchanged; distinguish NATIVE, SAME-WIRE, TRANSLATE and NORMALIZE request logs.
 - **Dashboard Access**: verify Cloudflare Access JWT for `/dashboard` alongside existing signed sessions; invalid JWT redirects to login.
 - **Session Dedup / Responses**: identify genuine user turns in OpenAI Responses format when input items omit `type` but include role; prevent unknown history from being tagged as current or recent turns; guard final translated bodies against signed thinking or cache fence mutation.
 - **RTK linkage**: share the Dedup failed-result predicate; preserve duplicate result IDs, function/custom kind mismatches and duplicate/stale Gemini name-only responses. Keep these results raw before local or sidecar evaluation.

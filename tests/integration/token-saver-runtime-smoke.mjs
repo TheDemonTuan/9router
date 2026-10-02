@@ -6,7 +6,7 @@ import { join, isAbsolute } from "node:path";
 if (!process.argv.includes("--child")) {
   const home = await mkdtemp(join(tmpdir(), "router-token-saver-runtime-"));
   const env = { ...process.env, HOME: home, USERPROFILE: home, APPDATA: home, DATA_DIR: join(home,"data"), ENABLE_REQUEST_LOGS: "false", ENABLE_TRANSLATOR: "false" };
-  for (const k of Object.keys(env)) if (/proxy/i.test(k) || k === "RTK_URL") delete env[k];
+  for (const k of Object.keys(env)) if (/proxy/i.test(k) || k === "RTK_URL" || k === "RUN_REAL") delete env[k];
   try {
     const child = Bun.spawn([process.execPath, import.meta.path, "--child", ...process.argv.slice(2)], { env, stdout: "inherit", stderr: "inherit" });
     const timer = setTimeout(() => child.kill(), 45000);
@@ -29,12 +29,21 @@ if (!process.argv.includes("--child")) {
     process.env.RTK_URL = `http://127.0.0.1:${sidecar.port}`;
   }
   const captured = [];
+  const capturedHeaders = [];
+  let enrichTerminal = false;
   const provider = Bun.serve({hostname:"127.0.0.1",port:0,async fetch(request) {
-    const body = await request.json(); captured.push(body);
+    const body = await request.json(); captured.push(body); capturedHeaders.push(Object.fromEntries(request.headers));
     if (body.input) {
       const response = { id: "resp-synthetic", object: "response", status: "completed", model: "synthetic", output: [{ id: "msg-synthetic", type: "message", role: "assistant", status: "completed", content: [{ type: "output_text", text: "ok", annotations: [] }] }], usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } };
       if (!body.stream) return Response.json(response);
-      const events = [{ type: "response.created", response: { ...response, status: "in_progress", output: [] } }, { type: "response.output_text.delta", item_id: "msg-synthetic", output_index: 0, content_index: 0, delta: "ok" }, { type: "response.completed", response }];
+      const tool = { type: "function_call", id: "fc-synthetic", call_id: "synthetic-output-call", name: "synthetic_tool", arguments: "{}", status: "completed" };
+      const events = [
+        { type: "response.created", response: { ...response, status: "in_progress", output: [] } },
+        { type: "response.synthetic_unknown", synthetic: "keep-unknown-event" },
+        { type: "response.output_text.delta", item_id: "msg-synthetic", output_index: 0, content_index: 0, delta: "ok" },
+        ...(enrichTerminal ? [{ type: "response.output_item.done", output_index: 0, item: response.output[0] }, { type: "response.output_item.done", output_index: 1, item: tool }] : []),
+        { type: "response.completed", response: enrichTerminal ? { ...response, output: [] } : response },
+      ];
       return new Response(events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
     }
     if (body.contents) {
@@ -162,6 +171,149 @@ if (!process.argv.includes("--child")) {
       assert.equal(responseAfter.bytesSaved - responseBefore.bytesSaved, 2 * (2048 - Buffer.byteLength(responseOutputs[1].output)));
       console.log(JSON.stringify({ scenario: "encrypted Responses provider-bound", stream, appliedResults: 2, bytesSaved: responseAfter.bytesSaved - responseBefore.bytesSaved, reasoningAndOrderUnchanged: true }));
     }
+    const { getExecutor } = await import("../../open-sse/executors/index.js");
+    const { CAVEMAN_PROMPTS } = await import("../../open-sse/rtk/cavemanPrompts.js");
+    const { PONYTAIL_PROMPTS } = await import("../../open-sse/rtk/ponytailPrompt.js");
+    const codex = getExecutor("codex");
+    const originalConfig = codex.config;
+    const loopbackUrl = `http://127.0.0.1:${provider.port}/v1/responses`;
+    codex.config = { ...originalConfig, baseUrl: loopbackUrl, baseUrls: [loopbackUrl] };
+    const labels = new Set();
+    const responsesFixture = stream => ({
+      model: "gpt-5.5", stream, reasoning: { effort: "high", summary: "detailed", mode: "pro", context: "current_turn" },
+      input: Array.from({ length: 6 }, (_, i) => [
+        { type: "message", role: "user", content: [{ type: "input_text", text: `synthetic turn ${i}` }] },
+        { type: "reasoning", encrypted_content: `synthetic-opaque-${i}+/==`, summary: [] },
+        { type: "function_call", call_id: `codex-${i}`, name: "read_file", arguments: '{"path":"synthetic"}' },
+        { type: "function_call_output", call_id: `codex-${i}`, output: read },
+      ]).flat(),
+    });
+    const outputs = body => body.input.filter(item => item.type === "function_call_output").map(item => item.output);
+    async function runCodex(body, extra = {}, expectedLabel = "SAME-WIRE") {
+      assert.equal(codex.config.baseUrl, loopbackUrl);
+      assert.deepEqual(codex.config.baseUrls, [loopbackUrl]);
+      const original = structuredClone(body), start = captured.length;
+      const debug = [], lines = [];
+      const result = await handleChatCore({
+        body, modelInfo: { provider: "codex", model: body.model },
+        credentials: { accessToken: "synthetic-token", connectionId: "synthetic-connection", providerSpecificData: {} },
+        connectionId: "synthetic-connection", sourceFormatOverride: "openai-responses",
+        rtkEnabled: false, sessionDedupMode: "off", cavemanEnabled: false, ponytailEnabled: false, pxpipeEnabled: false,
+        clientRawRequest: { body, endpoint: "/v1/responses", headers: { "user-agent": "omp-test" } },
+        ...extra,
+        log: { debug(tag, message) { if (tag === "FORMAT") debug.push(message); }, line(...args) { lines.push(args.at(-1)); }, warn() {}, info() {} },
+      });
+      const text = await result.response.text();
+      assert.equal(result.response.status, 200, text);
+      assert.equal(captured.length - start, 1);
+      assert.deepEqual(body, original, "Codex canonicalizer must not mutate caller");
+      const fmt = debug[0].split(" | stream=")[0];
+      assert(fmt.endsWith(` · ${expectedLabel}`), fmt);
+      assert(lines.some(line => line.includes(fmt)), "summary and debug format must agree");
+      labels.add(expectedLabel);
+      if (body.stream) assert(text.includes("response.completed") || expectedLabel === "TRANSLATE" && text.includes("[DONE]"));
+      else {
+        const json = JSON.parse(text);
+        if (expectedLabel === "TRANSLATE") assert.equal(json.choices[0].message.content, "ok");
+        else {
+          assert.equal(json.object, "response"); assert(!("choices" in json));
+          assert.equal(json.output[0].content[0].text, "ok");
+          // The generic provider control exercises logging, not Codex's forced-SSE usage contract.
+          if (expectedLabel !== "NORMALIZE") assert.deepEqual(json.usage, { input_tokens: 1, output_tokens: 1, total_tokens: 2 });
+        }
+      }
+      return { sent: captured.at(-1), headers: capturedHeaders.at(-1), text };
+    }
+    try {
+      for (const stream of [false, true]) {
+        const body = responsesFixture(stream);
+        Object.assign(body, { text: { format: { type: "json_schema", name: "synthetic", schema: { type: "object", properties: {}, additionalProperties: false }, strict: true } }, include: ["message.output_text.logprobs"], client_metadata: { synthetic: "keep" }, prompt_cache_key: "synthetic-explicit", tools: [{ type: "custom", name: "synthetic_custom", format: { type: "text" } }, { type: "namespace", name: "synthetic_namespace", tools: [{ type: "function", name: "read_file", parameters: { type: "object", properties: {} } }] }] });
+        const { sent } = await runCodex(body);
+        for (const key of ["input", "reasoning", "text", "tools", "client_metadata", "prompt_cache_key"]) assert.deepEqual(sent[key], body[key]);
+        assert.deepEqual(sent.include, [...body.include, "reasoning.encrypted_content"]);
+        assert.equal(sent.stream, true); assert.equal(sent.store, false);
+        const lite = await runCodex({ ...body, model: "gpt-6-luna", instructions: "base" });
+        assert.equal(lite.sent.reasoning.context, "all_turns");
+        assert.equal(lite.sent.reasoning.summary, "detailed");
+        assert.deepEqual(lite.sent.input[0], { type: "additional_tools", role: "developer", tools: body.tools });
+        assert.equal(lite.sent.tools, null); assert.equal(lite.sent.instructions, ""); assert.equal(lite.sent.parallel_tool_calls, false);
+        assert.deepEqual(lite.sent.input.slice(2), body.input);
+
+        const active = responsesFixture(stream), before = getTokenSaverSnapshot().usage;
+        const dedup = (await runCodex(active, { sessionDedupMode: "on" })).sent;
+        const saved = outputs(dedup);
+        assert.equal(saved[0], read);
+        for (const i of [1, 2]) assert.match(saved[i], /^\[9router dedup:v1 /);
+        for (const i of [3, 4, 5]) assert.equal(saved[i], read);
+        assert.deepEqual(dedup.input.filter(item => item.type !== "function_call_output"), active.input.filter(item => item.type !== "function_call_output"));
+        assert.equal(getTokenSaverSnapshot().usage.appliedResults - before.appliedResults, 2);
+        assert.equal(getTokenSaverSnapshot().usage.bytesSaved - before.bytesSaved, 2 * (Buffer.byteLength(read) - Buffer.byteLength(saved[1])));
+        for (const mode of ["off", "shadow", "opt-out", "native"]) {
+          const baseline = getTokenSaverSnapshot().usage.appliedResults;
+          const headers = { "user-agent": mode === "native" ? "codex-cli/0.144.1" : "omp-test", ...(mode === "opt-out" ? { "x-9router-token-saver": "off" } : {}) };
+          const raw = await runCodex(responsesFixture(stream), { sessionDedupMode: mode === "off" || mode === "shadow" ? mode : "on", rtkEnabled: true, clientRawRequest: { headers } }, mode === "native" ? "NATIVE" : "SAME-WIRE");
+          assert.deepEqual(outputs(raw.sent), Array(6).fill(read));
+          assert.equal(getTokenSaverSnapshot().usage.appliedResults, baseline);
+          if (mode === "native" && stream) assert(raw.text.includes("keep-unknown-event"));
+        }
+        const marked = structuredClone(dedup); marked.stream = stream;
+        const markerBefore = getTokenSaverSnapshot().usage.appliedResults;
+        assert.deepEqual(outputs((await runCodex(marked, { sessionDedupMode: "on", rtkEnabled: true })).sent), saved);
+        assert.equal(getTokenSaverSnapshot().usage.appliedResults, markerBefore);
+
+        const rtk = responsesFixture(stream);
+        for (const item of rtk.input) {
+          if (item.type === "function_call") { item.name = "Bash"; item.arguments = '{"command":"bun test"}'; }
+          if (item.type === "function_call_output") item.output = bun;
+        }
+        const rtkBefore = getRtkSnapshot().usage.appliedOutputs;
+        const compressed = outputs((await runCodex(rtk, { rtkEnabled: true })).sent);
+        for (const i of [0, 1, 2]) {
+          assert(Buffer.byteLength(compressed[i]) < Buffer.byteLength(bun));
+          for (const token of ["KEEP_WARNING", "0 fail", "Ran 40 tests", "[40 passing test lines omitted]"]) assert(compressed[i].includes(token));
+        }
+        for (const i of [3, 4, 5]) assert.equal(compressed[i], bun);
+        assert.equal(getRtkSnapshot().usage.appliedOutputs - rtkBefore, 3);
+        for (const kind of ["structured", "signed-chain", "unscopable", "breakpoint"]) {
+          const guarded = responsesFixture(stream);
+          if (kind === "structured") guarded.text = body.text;
+          if (kind === "signed-chain") guarded.input = [guarded.input[0], ...guarded.input.filter(item => item.role !== "user")];
+          if (kind === "unscopable") guarded.input[3].encrypted_content = "synthetic";
+          if (kind === "breakpoint") guarded.input[20].prompt_cache_breakpoint = { mode: "explicit" };
+          const guardedBefore = getTokenSaverSnapshot().usage.appliedResults;
+          const guardedRtkBefore = getRtkSnapshot().usage.appliedOutputs;
+          assert.deepEqual(outputs((await runCodex(guarded, { sessionDedupMode: "on", rtkEnabled: true })).sent), Array(6).fill(read));
+          assert.equal(getTokenSaverSnapshot().usage.appliedResults, guardedBefore);
+          assert.equal(getRtkSnapshot().usage.appliedOutputs, guardedRtkBefore);
+        }
+        console.log(JSON.stringify({ scenario: "Codex same-wire HTTP", stream, dedupApplied: 2, rtkApplied: 3, lite: true, fences: true, callerUnchanged: true }));
+      }
+      enrichTerminal = true;
+      const enriched = await runCodex({ model: "gpt-5.5", stream: true, input: "hello" });
+      const terminal = enriched.text.split("\n").filter(line => line.startsWith("data: ")).map(line => JSON.parse(line.slice(6))).find(event => event.type === "response.completed");
+      assert.equal(terminal.response.output[0].content[0].text, "ok");
+      assert.equal(terminal.response.output[1].call_id, "synthetic-output-call");
+      enrichTerminal = false;
+      for (let i = 0; i < 2; i++) {
+        const session = await runCodex({ model: "gpt-5.5", stream: false, input: "hello" }, { clientRawRequest: { headers: { "user-agent": "omp-test", "x-client-request-id": "synthetic-session" } } });
+        assert.equal(session.sent.prompt_cache_key, "synthetic-session"); assert.equal(session.headers.session_id, "synthetic-session");
+      }
+      const explicit = await runCodex({ model: "gpt-5.5", stream: false, input: "hello", prompt_cache_key: "synthetic-explicit" });
+      assert.equal(explicit.sent.prompt_cache_key, "synthetic-explicit"); assert.equal(explicit.headers.session_id, "synthetic-explicit");
+      for (const mode of ["on", "native", "opt-out"]) {
+        const promptBody = { model: "gpt-5.5", stream: false, instructions: "base", input: [{ role: "user", content: "hello" }] };
+        const prompted = await runCodex(promptBody, { cavemanEnabled: true, cavemanLevel: "full", ponytailEnabled: true, ponytailLevel: "full", clientRawRequest: { headers: { "user-agent": mode === "native" ? "codex-cli/0.144.1" : "omp-test", ...(mode === "opt-out" ? { "x-9router-token-saver": "off" } : {}) } } }, mode === "native" ? "NATIVE" : "SAME-WIRE");
+        assert.equal(prompted.sent.instructions, mode === "on" ? ["base", CAVEMAN_PROMPTS.full, PONYTAIL_PROMPTS.full].join("\n\n") : "base");
+      }
+      await runCodex({ model: "gpt-5.5", stream: false, messages: [{ role: "user", content: "hello" }] }, { sourceFormatOverride: "openai" }, "TRANSLATE");
+      await runCodex({ model: "synthetic", stream: false, input: "hello" }, { modelInfo: { provider: "openai-compatible-responses-codex-log-smoke", model: "synthetic" }, credentials: { apiKey: "synthetic", providerSpecificData: { baseUrl: `http://127.0.0.1:${provider.port}/v1`, apiType: "responses" } } }, "NORMALIZE");
+      assert.deepEqual([...labels].sort(), ["NATIVE", "NORMALIZE", "SAME-WIRE", "TRANSLATE"]);
+      const controller = new AbortController(), reason = new Error("synthetic-client-abort"); controller.abort(reason);
+      const abortBefore = captured.length;
+      await assert.rejects(() => handleChatCore({ body: responsesFixture(false), modelInfo: { provider: "codex", model: "gpt-5.5" }, credentials: { accessToken: "synthetic" }, sourceFormatOverride: "openai-responses", clientSignal: controller.signal }), error => error === reason);
+      assert.equal(captured.length, abortBefore);
+      console.log(JSON.stringify({ scenario: "Codex response compatibility and logs", terminalEnriched: true, nativeUnknownPreserved: true, sessionHeaders: true, promptSavers: true, abortReasonPreserved: true, labels: [...labels].sort() }));
+    } finally { codex.config = originalConfig; enrichTerminal = false; }
     if(sidecar) {
       const diff="diff --git a/src/a.txt b/src/a.txt\nindex 1234567..89abcde 100644\n--- a/src/a.txt\n+++ b/src/a.txt\n@@ -1,80 +1,80 @@\n"+Array.from({length:39},(_,i)=>` context ${i}\n`).join('')+'-OLD_VALUE\n+NEW_VALUE\n'+Array.from({length:40},(_,i)=>` context ${i+40}\n`).join('');
       const pipe = () => ({model:'synthetic',stream:false,messages:[{role:'assistant',tool_calls:[{id:'diff',type:'function',function:{name:'Bash',arguments:'{"command":"git diff"}'}}]},{role:'tool',tool_call_id:'diff',content:diff}]});

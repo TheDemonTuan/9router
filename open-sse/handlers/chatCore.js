@@ -1,6 +1,6 @@
-import { detectFormat, getTargetFormat, resolveTransport } from "../services/provider.js";
+import { detectFormat, getTargetFormat, resolveTransport, normalizeThinkingConfig } from "../services/provider.js";
 import { translateRequest } from "../translator/index.js";
-import { applyThinking, extractThinking, stripThinkingSuffix } from "../translator/concerns/thinkingUnified.js";
+import { applyThinking, captureThinking, extractThinking, stripThinkingSuffix } from "../translator/concerns/thinkingUnified.js";
 import { FORMATS } from "../translator/formats.js";
 import { normalizeClaudePassthrough, anchorClaudeCache } from "../translator/formats/claude.js";
 import { createStreamController } from "../utils/streamHandler.js";
@@ -151,6 +151,10 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const detectedClientTool = detectClientTool(clientRawRequest?.headers || {}, body);
   const isChatGptWebCompact = provider === "chatgpt-web" && body?._compact === true;
   const nativePassthrough = isNativePassthrough(detectedClientTool, provider) || isChatGptWebCompact;
+  const sameWireCodex = !nativePassthrough
+    && provider === "codex"
+    && sourceFormat === FORMATS.OPENAI_RESPONSES
+    && targetFormat === FORMATS.OPENAI_RESPONSES;
 
   // Provider-level overrides are translation conveniences, never part of native passthrough.
   // Mutating a Codex request here would break opaque reasoning/tool state.
@@ -286,7 +290,11 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   });
   if (clientRawRequest) reqLogger.logClientRawRequest(clientRawRequest.endpoint, clientRawRequest.body, clientRawRequest.headers);
   reqLogger.logRawRequest(body);
-  log?.debug?.("FORMAT", `${sourceFormat} → ${targetFormat} | stream=${stream}`);
+  const fmtStr = nativePassthrough ? `FMT: ${sourceFormat} · NATIVE`
+    : sameWireCodex ? `FMT: ${sourceFormat} · SAME-WIRE`
+    : sourceFormat !== targetFormat ? `FMT: ${sourceFormat}→${targetFormat} · TRANSLATE`
+    : `FMT: ${sourceFormat} · NORMALIZE`;
+  log?.debug?.("FORMAT", `${fmtStr} | stream=${stream}`);
 
   // Native passthrough: CLI tool and provider are the same ecosystem
   // Skip all translation/normalization — only model and Bearer are swapped
@@ -337,6 +345,31 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     }
     // Normalize newer Cowork/CC beta shapes (adaptive thinking, mid-conversation system) the API rejects
     if (clientTool === "claude") normalizeClaudePassthrough(translatedBody, translatedBody.model);
+  } else if (sameWireCodex) {
+    translatedBody = { ...sourceBody, model: wireModel };
+    try {
+      normalizeThinkingConfig(translatedBody);
+      const thinkingIntent = captureThinking(translatedBody);
+      const resolvedThinking = {};
+      // Resolve only effort: applyThinking strips reasoning, including opaque sibling metadata.
+      applyThinking(targetFormat, upstreamModel, resolvedThinking, provider, thinkingIntent, credentials?.codexModelMetadata);
+      const reasoning = translatedBody.reasoning;
+      const reasoningObject = reasoning && typeof reasoning === "object" && !Array.isArray(reasoning) ? reasoning : {};
+      if (resolvedThinking.reasoning_effort) {
+        translatedBody.reasoning = { ...reasoningObject, effort: resolvedThinking.reasoning_effort };
+      } else if (Object.hasOwn(reasoningObject, "effort")) {
+        translatedBody.reasoning = { ...reasoningObject };
+        delete translatedBody.reasoning.effort;
+      }
+      delete translatedBody.reasoning_effort;
+    } catch (error) {
+      const message = error?.message
+        ? (error.code === "unsupported_feature" || error.code === "invalid_thinking_level"
+            ? error.message
+            : `Failed to translate request for ${sourceFormat} → ${targetFormat}: ${error.message}`)
+        : `Failed to translate request for ${sourceFormat} → ${targetFormat}`;
+      return createErrorResult(HTTP_STATUS.BAD_REQUEST, message);
+    }
   } else {
     try {
       translatedBody = translateRequest(sourceFormat, targetFormat, upstreamModel, sourceBody, stream, credentials, provider, reqLogger, stripList, connectionId, clientTool, body);
@@ -388,7 +421,6 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     const displayModel = formatRoute(routeContext);
     const msgN = translatedBody.messages?.length || translatedBody.input?.length || translatedBody.contents?.length || body.messages?.length || body.input?.length || 0;
     const toolN = translatedBody.tools?.length || body.tools?.length || 0;
-    const fmtStr = passthrough ? `FMT: ${sourceFormat} (passthrough)` : `FMT: ${sourceFormat}→${targetFormat}`;
     const showThinking = provider !== "grok-cli" || supportsGrokCliReasoningEffort(model);
     const think = showThinking ? log.fmtThink?.(extractThinking(translatedBody)) : null;
     const acc = credentials?.connectionName || credentials?.connectionId?.slice(0, 8) || "-";
