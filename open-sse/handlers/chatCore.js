@@ -150,7 +150,8 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   log?.debug?.("MODEL", `${model} · wire=${wireModel}`);
   const detectedClientTool = detectClientTool(clientRawRequest?.headers || {}, body);
   const isChatGptWebCompact = provider === "chatgpt-web" && body?._compact === true;
-  const nativePassthrough = isNativePassthrough(detectedClientTool, provider) || isChatGptWebCompact;
+  const nativePassthrough = (provider === "chatgpt-web" && !!credentials?.chatGptWebAuthority)
+    || isNativePassthrough(detectedClientTool, provider) || isChatGptWebCompact;
   const sameWireCodex = !nativePassthrough
     && provider === "codex"
     && sourceFormat === FORMATS.OPENAI_RESPONSES

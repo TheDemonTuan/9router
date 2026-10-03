@@ -15,9 +15,7 @@ import { makeKv } from "../../src/lib/db/helpers/kvStore.js";
 // Runtime storage: Key = connectionId, Value = { sessionId, lastUsed }
 const runtimeSessionStore = new Map();
 const continuationStore = new Map();
-const chatGptWebConnectionStore = new Map();
-const chatGptWebConversationLocks = new Map();
-const chatGptWebPinsKv = makeKv("chatgptWebPins");
+const chatGptWebLegacyPinsKv = makeKv("chatgptWebLegacyPins");
 
 // Periodically evict entries that haven't been used within TTL
 const cleanupInterval = setInterval(() => {
@@ -86,9 +84,6 @@ export function clearSessionStore() {
     runtimeSessionStore.clear();
     assistantSessionStore.clear();
     continuationStore.clear();
-    chatGptWebConnectionStore.clear();
-    chatGptWebConversationLocks.clear();
-    chatGptWebPinsKv.clear().catch(() => {});
 }
 
 // Conversation-stable session store: Key = hash(scope+assistant text), Value = { sessionId, lastUsed }
@@ -97,7 +92,6 @@ const ASSISTANT_MIN_LEN = 50;
 const ASSISTANT_CAP_LEN = 50;
 const MAX_ASSISTANT_SESSIONS = 5000;
 const MAX_CONTINUATION_SESSIONS = 5000;
-const MAX_CHATGPT_WEB_CONNECTIONS = 5000;
 
 // Client headers/body fields that carry an upstream session id (priority order)
 const SESSION_HEADER_KEYS = ["x-session-id", "session-id", "session_id", "x-amp-thread-id"];
@@ -185,11 +179,8 @@ function extractClientSessionId(headers, body, scope = "", { includeRequestId = 
     return fromBody || null;
 }
 
-/**
- * Resolve only explicit, stable continuation identifiers for ChatGPT Web routing.
- * Deliberately excludes assistant-text hashes and request-scoped x-client-request-id.
- */
-export function resolveChatGptWebConversationKey({ headers, body } = {}) {
+/** Computes only the historical migration tombstone key, never routing authority. */
+function legacyChatGptWebConversationKey({ headers, body } = {}) {
     const session = extractClientSessionId(headers, body, "chatgpt-web", {
         includeRequestId: false,
         includeMetadataUser: false,
@@ -281,73 +272,9 @@ export function resolveContinuationId({ sessionId, connectionId, scope = "", eph
     return continuationId;
 }
 
-/**
- * Return the connection pinned to an explicit ChatGPT Web conversation key.
- * No key means a new conversation and normal account selection.
- */
-export function getChatGptWebPinnedConnection(conversationKey) {
-    if (!conversationKey) return null;
-    const entry = chatGptWebConnectionStore.get(conversationKey);
-    if (!entry?.connectionId) return null;
-    if (Date.now() - entry.lastUsed > MEMORY_CONFIG.sessionTtlMs) {
-        chatGptWebConnectionStore.delete(conversationKey);
-        chatGptWebPinsKv.remove(conversationKey).catch(() => {});
-        return null;
-    }
-    entry.lastUsed = Date.now();
-    chatGptWebConnectionStore.delete(conversationKey);
-    chatGptWebConnectionStore.set(conversationKey, entry);
-    chatGptWebPinsKv.set(conversationKey, entry).catch(() => {});
-    return entry.connectionId;
-}
-
-export async function loadChatGptWebPinnedConnection(conversationKey) {
-    const current = getChatGptWebPinnedConnection(conversationKey);
-    if (current || !conversationKey) return current;
-    try {
-        const entry = await chatGptWebPinsKv.get(conversationKey, null);
-        if (!entry?.connectionId) return null;
-        chatGptWebConnectionStore.set(conversationKey, entry);
-        return getChatGptWebPinnedConnection(conversationKey);
-    } catch {
-        return null;
-    }
-}
-
-/**
- * Pin a selected ChatGPT Web connection for a bounded conversation TTL.
- */
-export async function pinChatGptWebConnection(conversationKey, connectionId) {
-    if (!conversationKey || !connectionId) return;
-    if (chatGptWebConnectionStore.size >= MAX_CHATGPT_WEB_CONNECTIONS && !chatGptWebConnectionStore.has(conversationKey)) {
-        const oldest = chatGptWebConnectionStore.keys().next().value;
-        chatGptWebConnectionStore.delete(oldest);
-        chatGptWebPinsKv.remove(oldest).catch(() => {});
-    }
-    const entry = { connectionId, lastUsed: Date.now() };
-    chatGptWebConnectionStore.set(conversationKey, entry);
-    try {
-        await chatGptWebPinsKv.set(conversationKey, entry);
-    } catch {
-        // Keep the live-process pin; persistence is best effort during DB shutdown.
-    }
-}
-
-export async function withChatGptWebConversationLock(conversationKey, task) {
-    if (!conversationKey) return task();
-    const previous = chatGptWebConversationLocks.get(conversationKey) || Promise.resolve();
-    let release;
-    const current = new Promise((resolve) => { release = resolve; });
-    chatGptWebConversationLocks.set(conversationKey, current);
-    await previous;
-    try {
-        return await task();
-    } finally {
-        release();
-        if (chatGptWebConversationLocks.get(conversationKey) === current) {
-            chatGptWebConversationLocks.delete(conversationKey);
-        }
-    }
+export async function getChatGptWebLegacyConversation(options) {
+    const key = legacyChatGptWebConversationKey(options);
+    return key ? (await chatGptWebLegacyPinsKv.get(key, null))?.status === "legacy_unavailable" : false;
 }
 
 // Capture session id from request body + credentials (envelope still intact here)
@@ -374,9 +301,6 @@ const assistantCleanup = setInterval(() => {
     }
     for (const [key, entry] of continuationStore) {
         if (now - entry.lastUsed > MEMORY_CONFIG.sessionTtlMs) continuationStore.delete(key);
-    }
-    for (const [key, entry] of chatGptWebConnectionStore) {
-        if (now - entry.lastUsed > MEMORY_CONFIG.sessionTtlMs) chatGptWebConnectionStore.delete(key);
     }
 }, MEMORY_CONFIG.sessionCleanupIntervalMs);
 if (assistantCleanup.unref) assistantCleanup.unref();

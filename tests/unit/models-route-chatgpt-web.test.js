@@ -1,91 +1,48 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { webModel, webCatalog } from "./chatgpt-web-fixtures.js";
 
-const mocks = vi.hoisted(() => ({
-  getModelAliases: vi.fn(),
-  getDisabledModels: vi.fn(),
-  getCustomModels: vi.fn(),
-  getProviderConnections: vi.fn(),
-  getChatGptWebCatalog: vi.fn(),
-}));
-
-vi.mock("@/models", () => ({
-  getModelAliases: mocks.getModelAliases,
-  getDisabledModels: mocks.getDisabledModels,
-  getCustomModels: mocks.getCustomModels,
-  getProviderConnections: mocks.getProviderConnections,
-}));
-vi.mock("@/lib/disabledModelsDb", () => ({
-  getDisabledModels: mocks.getDisabledModels,
-}));
-vi.mock("open-sse/services/chatgptWebBridge.js", () => ({
-  getChatGptWebCatalog: mocks.getChatGptWebCatalog,
-  chatGptWebModelSupportsNativeResponses: (model) => model?.capabilities?.native_responses === true,
-}));
-
+const mocks = vi.hoisted(() => ({ getModelAliases: vi.fn(), getDisabledModels: vi.fn(), getCustomModels: vi.fn(), getProviderConnections: vi.fn(), getChatGptWebCatalog: vi.fn() }));
+vi.mock("@/models", () => ({ getModelAliases: mocks.getModelAliases, getCustomModels: mocks.getCustomModels, getProviderConnections: mocks.getProviderConnections }));
+vi.mock("@/lib/disabledModelsDb", () => ({ getDisabledModels: mocks.getDisabledModels }));
+vi.mock("open-sse/services/chatgptWebRuntimeClient.js", () => ({ getChatGptWebCatalog: mocks.getChatGptWebCatalog }));
 const { GET } = await import("../../src/app/api/models/route.js");
 
-describe("GET /api/models ChatGPT Web catalog", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    mocks.getModelAliases.mockResolvedValue({});
-    mocks.getDisabledModels.mockResolvedValue({});
-    mocks.getCustomModels.mockResolvedValue([]);
-    mocks.getProviderConnections.mockResolvedValue([{ id: "bridge-1", provider: "chatgpt-web", isActive: true }]);
+beforeEach(() => {
+  vi.resetAllMocks();
+  mocks.getModelAliases.mockResolvedValue({});
+  mocks.getDisabledModels.mockResolvedValue({});
+  mocks.getCustomModels.mockResolvedValue([]);
+  mocks.getProviderConnections.mockImplementation(async ({ provider }) => provider === "chatgpt-web" ? [{ id: "one", provider, isActive: true }] : []);
+});
+const publicModels = async () => (await (await GET()).json()).models.filter(model => model.provider === "chatgpt-web");
+
+describe("GET /api/models runtime evidence", () => {
+  it("preserves dotted model IDs, reasoning, family and verified budgets", async () => {
+    mocks.getChatGptWebCatalog.mockResolvedValue(webCatalog());
+    expect(await publicModels()).toEqual([expect.objectContaining({
+      model: "chatgpt-web/gpt-5.6-sol", fullModel: "chatgpt-web/gpt-5.6-sol", routedModel: "cgw/chatgpt-web/gpt-5.6-sol",
+      supported_reasoning_levels: ["medium", "high"], default_reasoning_level: "medium", model_family: "5.6", legacy: false,
+      context_window: 128000, auto_compact_token_limit: 100000, max_output: 16000,
+      capabilities: expect.objectContaining({ native_responses: true, tools: false }),
+    })]);
   });
-
-  it("keeps the canonical chatgpt-web model namespace without duplicating its prefix", async () => {
-    mocks.getChatGptWebCatalog.mockResolvedValue({
-      stale: false,
-      models: [{ id: "chatgpt-web/high", name: "High", capabilities: { native_responses: true, reasoning: true, tools: true } }],
-    });
-
-    const response = await GET();
-    const model = (await response.json()).models.find((entry) => entry.provider === "chatgpt-web");
-
-    expect(model).toMatchObject({
-      model: "chatgpt-web/high",
-      fullModel: "chatgpt-web/high",
-      routedModel: "cgw/chatgpt-web/high",
-      caps: { reasoning: true, tools: true },
-    });
+  it("unions discoverable efforts and capabilities but uses minimum budgets", async () => {
+    mocks.getProviderConnections.mockImplementation(async ({ provider }) => provider === "chatgpt-web" ? [{ id: "one", provider }, { id: "two", provider }] : []);
+    mocks.getChatGptWebCatalog.mockResolvedValueOnce(webCatalog()).mockResolvedValueOnce(webCatalog([webModel({
+      supported_reasoning_levels: ["high", "xhigh"], default_reasoning_level: "high", context_window: 96000, auto_compact_token_limit: 80000, max_output: 8000,
+      capabilities: { native_responses: true, tools: true },
+    })]));
+    expect(await publicModels()).toEqual([expect.objectContaining({ supported_reasoning_levels: ["medium", "high", "xhigh"], context_window: 96000, auto_compact_token_limit: 80000, max_output: 8000, caps: expect.objectContaining({ reasoning: true, tools: true }) })]);
   });
-
-  it("keeps capability evidence available when another active bridge reports it", async () => {
-    mocks.getProviderConnections.mockResolvedValue([
-      { id: "bridge-1", provider: "chatgpt-web", isActive: true },
-      { id: "bridge-2", provider: "chatgpt-web", isActive: true },
-    ]);
-    mocks.getChatGptWebCatalog
-      .mockResolvedValueOnce({ stale: false, models: [{ id: "chatgpt-web/high", capabilities: { native_responses: true, reasoning: true } }] })
-      .mockResolvedValueOnce({ stale: false, models: [{ id: "chatgpt-web/high", capabilities: { native_responses: true, tools: true } }] });
-
-    const response = await GET();
-    const model = (await response.json()).models.find((entry) => entry.provider === "chatgpt-web");
-
-    expect(model.caps).toMatchObject({ reasoning: true, tools: true });
+  it("does not advertise stale, legacy, ultra or unsupported rows", async () => {
+    mocks.getChatGptWebCatalog.mockResolvedValue(webCatalog([webModel({ legacy: true }), webModel({ supported_reasoning_levels: ["ultra"] }), webModel({ capabilities: { reasoning: true } })]));
+    expect(await publicModels()).toEqual([]);
+    mocks.getChatGptWebCatalog.mockResolvedValue(webCatalog(undefined, { stale: true }));
+    expect(await publicModels()).toEqual([]);
   });
-
-  it("advertises generic-only live models", async () => {
-    mocks.getChatGptWebCatalog.mockResolvedValue({
-      stale: false,
-      models: [{ id: "chatgpt-web/generic", name: "Generic", capabilities: { generic_responses: true } }],
-    });
-
-    const response = await GET();
-    const model = (await response.json()).models.find((entry) => entry.model === "chatgpt-web/generic");
-
-    expect(model).toMatchObject({ fullModel: "chatgpt-web/generic", routedModel: "cgw/chatgpt-web/generic" });
-  });
-
-  it("does not infer capability support when a live row omits capability evidence", async () => {
-    mocks.getChatGptWebCatalog.mockResolvedValue({
-      stale: false,
-      models: [{ id: "chatgpt-web/high", name: "High" }],
-    });
-
-    const response = await GET();
-    const model = (await response.json()).models.find((entry) => entry.provider === "chatgpt-web");
-
-    expect(model).toBeUndefined();
+  it("does not invent a max output budget missing from one profile", async () => {
+    mocks.getProviderConnections.mockImplementation(async ({ provider }) => provider === "chatgpt-web" ? [{ id: "one", provider }, { id: "two", provider }] : []);
+    mocks.getChatGptWebCatalog.mockResolvedValueOnce(webCatalog()).mockResolvedValueOnce(webCatalog([webModel({ max_output: undefined })]));
+    expect((await publicModels())[0]).not.toHaveProperty("max_output");
   });
 });

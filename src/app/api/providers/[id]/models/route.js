@@ -16,8 +16,9 @@ import { resolveClineModels, resolveClinepassModels } from "open-sse/services/cl
 import { resolveEffectiveProviderModels } from "open-sse/services/alibabaTokenPlanModels.js";
 import {
   getChatGptWebCatalog,
-} from "open-sse/services/chatgptWebBridge.js";
+} from "open-sse/services/chatgptWebRuntimeClient.js";
 import { resolveCodexModels } from "open-sse/services/codexModels.js";
+import { mergeChatGptWebPublicModels } from "@/lib/providerNormalization";
 
 const GEMINI_CLI_MODELS_URL = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
 
@@ -541,12 +542,10 @@ export async function GET(request, { params }) {
           provider: connection.provider,
           connectionId: connection.id,
           // A retained catalog is diagnostic evidence only; stale rows must never be advertised.
-          models: catalog.stale ? [] : catalog.models.filter((model) => {
-            const capabilities = model?.capabilities;
-            return capabilities?.native_responses === true || capabilities?.generic_responses === true;
-          }),
+          models: mergeChatGptWebPublicModels([catalog]),
           stale: catalog.stale,
-          bridgeIdentity: catalog.bridgeIdentity,
+          profileId: catalog.profileId,
+          profileEpoch: catalog.profileEpoch,
           revision: catalog.revision,
           checkedAt: catalog.checkedAt,
         });

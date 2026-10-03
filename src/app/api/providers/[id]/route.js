@@ -5,8 +5,8 @@ import {
   updateProviderConnection,
   deleteProviderConnection,
 } from "@/models";
-import { invalidateChatGptWebCatalog, validateChatGptWebBridgeId } from "open-sse/services/chatgptWebBridge.js";
-import { sanitizeProviderSpecificData } from "@/lib/providerNormalization";
+import { invalidateChatGptWebCatalog, validateChatGptWebProfileId } from "open-sse/services/chatgptWebRuntimeClient.js";
+import { normalizeProviderSpecificData, sanitizeProviderSpecificData, validateChatGptWebConnectionInput } from "@/lib/providerNormalization";
 
 function normalizeProxyConfig(body = {}) {
   const hasAnyProxyField =
@@ -77,7 +77,7 @@ export async function GET(request, { params }) {
     delete result.accessToken;
     delete result.refreshToken;
     delete result.idToken;
-    result.providerSpecificData = sanitizeProviderSpecificData(result.providerSpecificData);
+    result.providerSpecificData = connection.provider === "chatgpt-web" ? { profileId: connection.providerSpecificData?.profileId } : sanitizeProviderSpecificData(result.providerSpecificData);
 
     return NextResponse.json({ connection: result });
   } catch (error) {
@@ -120,9 +120,11 @@ export async function PUT(request, { params }) {
     }
 
     let normalizedProviderSpecificData = providerSpecificData;
-    if (existing.provider === "chatgpt-web" && providerSpecificData !== undefined) {
+    if (existing.provider === "chatgpt-web") {
       try {
-        normalizedProviderSpecificData = { bridgeId: validateChatGptWebBridgeId(providerSpecificData?.bridgeId) };
+        validateChatGptWebConnectionInput(body);
+        const selector = providerSpecificData === undefined && body.profileId === undefined ? existing.providerSpecificData : normalizeProviderSpecificData(existing.provider, body, providerSpecificData);
+        normalizedProviderSpecificData = { profileId: validateChatGptWebProfileId(selector?.profileId) };
       } catch (error) {
         return NextResponse.json({ error: error.message }, { status: 400 });
       }
@@ -166,9 +168,13 @@ export async function PUT(request, { params }) {
         }
       }
     }
+    if (existing.provider === "chatgpt-web") updateData.providerSpecificData = normalizedProviderSpecificData;
 
     const updated = await updateProviderConnection(id, updateData);
-    if (existing.provider === "chatgpt-web") invalidateChatGptWebCatalog(id);
+    if (existing.provider === "chatgpt-web") {
+      invalidateChatGptWebCatalog(existing.providerSpecificData?.profileId);
+      if (updated.providerSpecificData?.profileId !== existing.providerSpecificData?.profileId) invalidateChatGptWebCatalog(updated.providerSpecificData?.profileId);
+    }
 
     // Hide sensitive fields
     const result = { ...updated };
@@ -195,7 +201,7 @@ export async function DELETE(request, { params }) {
     if (!deleted) {
       return NextResponse.json({ error: "Connection not found" }, { status: 404 });
     }
-    if (existing?.provider === "chatgpt-web") invalidateChatGptWebCatalog(id);
+    if (existing?.provider === "chatgpt-web") invalidateChatGptWebCatalog(existing.providerSpecificData?.profileId);
 
     return NextResponse.json({ message: "Connection deleted successfully" });
   } catch (error) {

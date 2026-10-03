@@ -39,6 +39,8 @@ const PUBLIC_API_PATHS = [
 const PUBLIC_PREFIXES = ["/v1", "/v1beta", "/api/v1", "/api/v1beta", "/codex", "/responses"];
 
 // Always require JWT token regardless of requireLogin setting
+const CGW_RUNTIME_ADMIN_PREFIX = "/api/providers/chatgpt-web/runtime";
+
 const ALWAYS_PROTECTED = [
   "/api/monitor/ready",
   "/api/shutdown",
@@ -48,6 +50,7 @@ const ALWAYS_PROTECTED = [
   "/api/oauth/cursor/auto-import",
   "/api/oauth/kiro/auto-import",
   "/api/oauth/zed/auto-import",
+  CGW_RUNTIME_ADMIN_PREFIX,
 ];
 
 // Require auth, but allow through if requireLogin is disabled
@@ -174,6 +177,14 @@ async function hasValidToken(request) {
   return false;
 }
 
+// Runtime administration never accepts API keys, machine tokens, or requireLogin=false.
+export async function authorizeChatGptWebRuntimeAdmin(request) {
+  const apiHost = process.env.API_HOST?.trim().toLowerCase();
+  const host = request.headers.get("host")?.split(":")[0].toLowerCase();
+  if (apiHost && host && (host === apiHost || host.endsWith(`.${apiHost}`))) return false;
+  return hasValidToken(request);
+}
+
 // Read settings directly from DB to avoid self-fetch deadlock in proxy
 async function loadSettings() {
   try {
@@ -227,6 +238,11 @@ export async function proxy(request) {
     if (!(await canAccessLocalOnlyRoute(request))) {
       return NextResponse.json({ error: "Local only: CLI token required" }, { status: 403 });
     }
+  }
+
+  if (pathname === CGW_RUNTIME_ADMIN_PREFIX || pathname.startsWith(`${CGW_RUNTIME_ADMIN_PREFIX}/`)) {
+    if (await authorizeChatGptWebRuntimeAdmin(request)) return NextResponse.next();
+    return NextResponse.json({ error: "Dashboard authentication required" }, { status: 401 });
   }
 
   // Always protected - require valid JWT or local CLI token (machineId-based)

@@ -1,37 +1,32 @@
-import { describe, expect, it, vi } from "vitest";
-
-const mocks = vi.hoisted(() => ({
-  getProviderConnectionById: vi.fn(),
-  getChatGptWebCatalog: vi.fn(),
-}));
-
-vi.mock("@/models", () => ({
-  getProviderConnectionById: mocks.getProviderConnectionById,
-}));
-vi.mock("open-sse/services/chatgptWebBridge.js", () => ({
-  getChatGptWebCatalog: mocks.getChatGptWebCatalog,
-  chatGptWebModelSupportsNativeResponses: (model) => model?.capabilities?.native_responses === true,
-}));
-
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { webModel, webCatalog } from "./chatgpt-web-fixtures.js";
+const mocks = vi.hoisted(() => ({ getProviderConnectionById: vi.fn(), getChatGptWebCatalog: vi.fn() }));
+vi.mock("@/models", () => ({ getProviderConnectionById: mocks.getProviderConnectionById }));
+vi.mock("open-sse/services/chatgptWebRuntimeClient.js", () => ({ getChatGptWebCatalog: mocks.getChatGptWebCatalog }));
 const { GET } = await import("../../src/app/api/providers/[id]/models/route.js");
-
-describe("GET /api/providers/[id]/models ChatGPT Web catalog", () => {
-  it("hides retained stale rows while preserving stale status", async () => {
-    mocks.getProviderConnectionById.mockResolvedValue({
-      id: "bridge-1",
-      provider: "chatgpt-web",
-      providerSpecificData: { bridgeId: "personal" },
-    });
-    mocks.getChatGptWebCatalog.mockResolvedValue({
-      stale: true,
-      models: [{ id: "chatgpt-web/high" }],
-    });
-
-    const response = await GET(new Request("http://localhost/api/providers/bridge-1/models"), {
-      params: Promise.resolve({ id: "bridge-1" }),
-    });
-
+const query = () => GET(new Request("http://localhost/api/providers/one/models"), { params: Promise.resolve({ id: "one" }) });
+beforeEach(() => {
+  vi.resetAllMocks();
+  mocks.getProviderConnectionById.mockResolvedValue({ id: "one", provider: "chatgpt-web", providerSpecificData: { profileId: "personal" } });
+});
+describe("profile catalog", () => {
+  it("preserves exact profile metadata and all native model evidence", async () => {
+    const catalog = webCatalog();
+    mocks.getChatGptWebCatalog.mockResolvedValue(catalog);
+    const response = await query();
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ models: [], stale: true });
+    expect(await response.json()).toMatchObject({ profileId: "personal", profileEpoch: "epoch-one", revision: "rev-one", models: [webModel()] });
+  });
+  it("hides stale and unsupported rows", async () => {
+    mocks.getChatGptWebCatalog.mockResolvedValue(webCatalog(undefined, { stale: true }));
+    expect(await (await query()).json()).toMatchObject({ models: [], stale: true });
+    mocks.getChatGptWebCatalog.mockResolvedValue(webCatalog([webModel({ legacy: true }), webModel({ capabilities: { reasoning: true } })]));
+    expect(await (await query()).json()).toMatchObject({ models: [], stale: false });
+  });
+  it("reports an unavailable profile rather than empty successful discovery", async () => {
+    mocks.getChatGptWebCatalog.mockRejectedValue(new Error("Profile login_required"));
+    const response = await query();
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ error: "Profile login_required", models: [] });
   });
 });

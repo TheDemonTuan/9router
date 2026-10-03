@@ -1,0 +1,154 @@
+{
+  "schemaVersion": 1,
+  "image": "ghcr.io/thedemontuan/9router-cgw-runtime",
+  "tagPolicy": "app git SHA; deployments must use resolved OCI digest",
+  "resolvedAt": "2026-10-02",
+  "upstream": {
+    "repository": "https://github.com/miuuyy/codex-chatgpt-web",
+    "revision": "fa2d2c6c24926078b46eedb2186f69f2e8d548d7",
+    "version": "6.1.3"
+  },
+  "base": {
+    "image": "docker.io/library/debian:bookworm-slim",
+    "indexDigest": "sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251",
+    "nativeManifests": {
+      "amd64": "sha256:f3034a6ec3c1205360777c4aae76234998866ad18806ae62b63a3f84ccad782b",
+      "arm64": "sha256:0c8bbb8e987a035fe1d9704eb2e571b7e9a836e1caa46345290674b45b69e417"
+    },
+    "registry": "https://registry-1.docker.io/v2/library/debian/manifests/",
+    "release": "Debian 12 (bookworm), glibc"
+  },
+  "debian": {
+    "snapshot": "20261001T000000Z",
+    "archives": {
+      "debian": "https://snapshot.debian.org/archive/debian/20261001T000000Z/",
+      "security": "https://snapshot.debian.org/archive/debian-security/20261001T000000Z/"
+    },
+    "chromiumVersion": "154.0.8037.57-1~deb12u1",
+    "packagePolicy": "Signed APT InRelease + hash-verified Packages from immutable snapshot; no live Debian mirrors. All transitive dependencies resolved from that snapshot.",
+    "amd64PackagesIndexSha256": {
+      "bookworm": "9e0b5aabb2465b3d2e7a7fe27f9913846277833f7a2826e7767acccff5b588c5",
+      "bookworm-security": "69451586618263dcefd35b13399c9cbab0097ad2c937a105c62711f23152d6e3"
+    },
+    "arm64SecurityPackagesIndexSha256": "cb957d537e83c4bacde6acb0621d72b60b7cbdf4db244d1c5143496eb7540293"
+  },
+  "bun": {
+    "version": "1.4.0",
+    "releaseApi": "https://api.github.com/repos/oven-sh/bun/releases/tags/bun-v1.4.0",
+    "revision": "34cbb9a40b4bd1bd767d134a7065e66c2432a676",
+    "licenseSource": "https://github.com/oven-sh/bun/blob/34cbb9a40b4bd1bd767d134a7065e66c2432a676/LICENSE.md",
+    "licenseSha256": "b9caf52728691b4057e371232c221a132883198be2f3d2ddf92c90404c984b1a",
+    "platforms": {
+      "amd64": {
+        "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-x64-baseline.zip",
+        "sha256": "184fb4595f0d401a217cf7c78c1bc430ba83314dab7a8b94805babbf7fa7097f",
+        "member": "bun-linux-x64-baseline/bun",
+        "binarySha256": "33d56b070be6a9e3da0ab013038b43d1645d0534ca811ecdba4472599117eb4b"
+      },
+      "arm64": {
+        "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-aarch64.zip",
+        "sha256": "4b1a332ee861983eb93bcfe6f770fff94e3e31b2c388bdaea3c8ed35e58eed0e",
+        "member": "bun-linux-aarch64/bun",
+        "binarySha256": "086c4121c8738a8e0f5ed730e8a461bc3973b4444e372ddb77aef9a747fa2ae9"
+      }
+    }
+  },
+  "tunnel": {
+    "version": "0.0.12",
+    "revision": "881c9a8fed7cccbe6607cd419863bbca506b8215",
+    "releaseApi": "https://api.github.com/repos/openai/tunnel-client/releases/tags/v0.0.12",
+    "closurePolicy": "Foreground full-client run embeds runtime; sibling cloudflared is its only bundled executable child. MCP child is package src/adapters/chatgpt-web/mcp-main.ts through runtime-owned entrypoint. Separate managed-runtime release variants are not used or downloaded.",
+    "closureEvidence": [
+      "https://github.com/openai/tunnel-client/blob/881c9a8fed7cccbe6607cd419863bbca506b8215/cmd/client/run_command.go",
+      "https://github.com/openai/tunnel-client/blob/881c9a8fed7cccbe6607cd419863bbca506b8215/Dockerfile",
+      "https://github.com/openai/tunnel-client/blob/881c9a8fed7cccbe6607cd419863bbca506b8215/pkg/cloudflared/runtime/supervisor.go"
+    ],
+    "cloudflared": {
+      "version": "2026.7.2",
+      "release_url": "https://github.com/cloudflare/cloudflared/releases/tag/2026.7.2",
+      "release_commit": "8679787525edc8575b2948a7c4a50b6292c6d426",
+      "module_path": "github.com/cloudflare/cloudflared",
+      "package_path": "github.com/cloudflare/cloudflared/cmd/cloudflared",
+      "module_version": "v0.0.0-20260715110107-8679787525ed",
+      "module_sum": "h1:ETvjMMv3sjWuilIWK/0upuYaZI2IX+xK3alCiDmXB+g=",
+      "go_mod_sum": "h1:4bn354lJpAv1wqGJhWWHQNjGzo/WFCkQ6uaLTUYmeqI=",
+      "build_time": "2026-07-15T13:30:00Z",
+      "security_patch_owner": "tunnel-client maintainers",
+      "security_update_policy": "Review every upstream cloudflared release and security advisory. Bump this manifest, verify the pinned Go module checksum through a proxy-only GOPROXY, rebuild every supported distribution, and rerun the cloudflared lifecycle and package tests for routine or emergency updates.",
+      "platforms": [
+        "linux/amd64",
+        "linux/arm64",
+        "darwin/amd64",
+        "darwin/arm64",
+        "windows/amd64",
+        "windows/arm64"
+      ]
+    },
+    "platforms": {
+      "amd64": {
+        "url": "https://github.com/openai/tunnel-client/releases/download/v0.0.12/tunnel-client-v0.0.12-linux-amd64.zip",
+        "sha256": "2bb693bd7b5cd28da7ce09cd9e309529dbb33b7cc9dc0058e62a064688f92c81",
+        "members": {
+          "tunnel-client": "ee9d4a75bc0b42f36f345aa96231e0db1ab00488122f34ebc99d6db055b6603e",
+          "cloudflared": "951c2f74537db2df88dbb2625817922506a9b6a8d9ef4ee344f11c07b53855ea",
+          "cloudflared-manifest.json": "149c1b5c0095ffab41c3986d620ca18c35373e05c5b6ca0bea88ac19f6d4a7a5",
+          "LICENSE": "f4c1d7ba32ef5bcf5cf03e2eefec5825ebafedf50fa330a36700a49c605c1ef4",
+          "NOTICE": "1364c020d86ecf948b78b7c655175032068203d13aece70fb0bfe112d7802dc2",
+          "tunnel-client-v0.0.12-linux-amd64-licenses.txt": "fbe3d5c7d3a6a14317915d4c058f97342c9a533654f533adcba3261acc821a33",
+          "tunnel-client-v0.0.12-linux-amd64.spdx.json": "f2c5548c7bff0aff2a3fbd00cf936cf96071d88110ec078837370f468c6b313d"
+        }
+      },
+      "arm64": {
+        "url": "https://github.com/openai/tunnel-client/releases/download/v0.0.12/tunnel-client-v0.0.12-linux-arm64.zip",
+        "sha256": "6813878a3edb82ebebb32fe5a859bc6327a81cce5bc7b635a2313174d26365d6",
+        "members": {
+          "tunnel-client": "0a48e6696de0df5951c013e40be81ce775e6644e209758c48795a0ecbda06406",
+          "cloudflared": "30c1ea9c477d4463e4d1c04b1ed69d8a5b79d1d0ab1b4205622e940056750373",
+          "cloudflared-manifest.json": "149c1b5c0095ffab41c3986d620ca18c35373e05c5b6ca0bea88ac19f6d4a7a5",
+          "LICENSE": "f4c1d7ba32ef5bcf5cf03e2eefec5825ebafedf50fa330a36700a49c605c1ef4",
+          "NOTICE": "1364c020d86ecf948b78b7c655175032068203d13aece70fb0bfe112d7802dc2",
+          "tunnel-client-v0.0.12-linux-arm64-licenses.txt": "2504135d0ddc2965429044fe06ea93d72582c3694f83b02eebe6cbc515dc9aaa",
+          "tunnel-client-v0.0.12-linux-arm64.spdx.json": "0c8c84a40e9b96d5c87d35ab650d6cb33671176d1cbb81846a1f52ed401bbed6"
+        }
+      }
+    }
+  },
+  "seccomp": {
+    "repository": "https://github.com/microsoft/playwright",
+    "revision": "e3950d9c140d007bd52853b45813c6274b24e36f",
+    "source": "utils/docker/seccomp_profile.json",
+    "sourceSha256": "cc3e61cabda6bbc1e53e54d27ba4d55a9d3be829b6dd1a596f4a7b31b1cc7849",
+    "licenseSha256": "45873d00a0dd243596deb4aa23b2493b3d1f0671921bf2538ea431d7380220eb",
+    "patches": [
+      "Return ENOSYS (38) for clone3 so glibc falls back to reviewed clone user-namespace rules. No allow-all action.",
+      "Allow chroot without an OCI capability condition: Chromium obtains CAP_SYS_CHROOT in its own user namespace after container startup; Docker otherwise filters out this syscall when cap_drop is ALL. Host capabilities remain dropped and kernel capability checks still apply."
+    ],
+    "review": {
+      "defaultAction": "SCMP_ACT_ERRNO",
+      "unconditionalNamespaceSyscalls": [
+        "clone",
+        "setns",
+        "unshare",
+        "chroot"
+      ],
+      "privilegedSyscalls": "mount/bpf/perf_event_open remain capability-conditioned; runtime drops ALL capabilities and forbids SYS_ADMIN. ptrace retains upstream minKernel restriction. Chromium applies its own renderer seccomp-BPF sandbox."
+    },
+    "packagedSha256": "382fb3c20e056bc5644ef96ed29668ae7e917cc05d21a87bbdb321c169edbbfe"
+  },
+  "actions": {
+    "actions/checkout": "3d3c42e5aac5ba805825da76410c181273ba90b1",
+    "oven-sh/setup-bun": "0c5077e51419868618aeaa5fe8019c62421857d6",
+    "docker/setup-buildx-action": "f87e5991a6d7451dcb8d9637bfbc97413f497069"
+  },
+  "releaseGates": {
+    "nativeArchitectures": [
+      "linux/amd64",
+      "linux/arm64"
+    ],
+    "emulationAllowed": false,
+    "chromiumSandboxRequired": true,
+    "runtimeDownloadAllowed": false,
+    "publicationEnabled": false,
+    "productionActivation": "Blocked until reviewed immutable platform release supports cgw, caller manifest/registry/action pins activate together, image security gate passes, and operator authorizes production."
+  }
+}

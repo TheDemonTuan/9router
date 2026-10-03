@@ -26,6 +26,7 @@ import { detectClientTool } from "open-sse/utils/clientDetector.js";
 import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy.js";
+import { assertChatGptWebAuthorityHeaderSize, chatGptWebAuthorityErrorResponse, chatGptWebAuthorityRequiredResponse, loadChatGptWebClientKeys, redactChatGptWebInternalHeaders, verifyChatGptWebAuthority } from "@/lib/chatgptWebAuthority.js";
 
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
 import {
@@ -36,13 +37,8 @@ import {
 import { stripModelContextMarker } from "open-sse/utils/modelMarkers.js";
 import {
   getChatGptWebCatalog,
-} from "open-sse/services/chatgptWebBridge.js";
-import {
-  loadChatGptWebPinnedConnection,
-  pinChatGptWebConnection,
-  withChatGptWebConversationLock,
-  resolveChatGptWebConversationKey,
-} from "open-sse/utils/sessionManager.js";
+} from "open-sse/services/chatgptWebRuntimeClient.js";
+import { getChatGptWebLegacyConversation } from "open-sse/utils/sessionManager.js";
 
 function readHeader(headers, name) {
   if (!headers || typeof headers !== "object") return null;
@@ -56,14 +52,18 @@ function getChatGptWebExplicitConnectionId(clientRawRequest) {
     || readHeader(clientRawRequest?.headers, "x-9router-connection-id");
 }
 
-function getChatGptWebConversationKey(clientRawRequest, body) {
-  return resolveChatGptWebConversationKey({ headers: clientRawRequest?.headers, body });
-}
 
 function withConnectionHeader(response, connectionId) {
   if (!response || !connectionId) return response;
   const headers = new Headers(response.headers);
   headers.set("x-9router-connection-id", String(connectionId));
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
+function withChatGptWebNoFallback(response) {
+  const headers = new Headers(response.headers);
+  headers.set("x-9router-no-fallback", "true");
+  headers.set("x-should-retry", "false");
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
@@ -141,12 +141,28 @@ async function loadChatGptWebComboCapabilities(models, bridgeCapability = "gener
 export async function handleChat(request, clientRawRequest = null, options = {}) {
   const preResponse = options?.preResponse || clientRawRequest?.preResponse || request?.preResponse || null;
   let body;
+  let rawBody;
+  let chatGptWebAuthority = null;
   try {
-    body = await request.json();
-  } catch {
+    rawBody = new Uint8Array(await request.arrayBuffer());
+    body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(rawBody));
+  } catch (error) {
+    if (error?.status === 431) return chatGptWebAuthorityErrorResponse(error);
     log.warn("CHAT", "Invalid JSON body");
     return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid JSON body");
   }
+
+  const cgwRequest = typeof body?.model === "string" && body.model.startsWith("cgw/");
+  if (cgwRequest) {
+    const key = extractApiKey(request);
+    if (!key || !await isValidApiKey(key)) return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Valid API key required for ChatGPT Web");
+    try {
+      assertChatGptWebAuthorityHeaderSize(request.headers);
+      chatGptWebAuthority = verifyChatGptWebAuthority({ rawBody, method: request.method,
+        path: new URL(request.url).pathname, headers: request.headers, clientKeys: await loadChatGptWebClientKeys() });
+    } catch (error) { return chatGptWebAuthorityErrorResponse(error); }
+  }
+  if (options.operation === "compact") body = { ...body, _compact: true };
 
   // Build clientRawRequest for logging (if not provided)
   if (!clientRawRequest) {
@@ -154,9 +170,10 @@ export async function handleChat(request, clientRawRequest = null, options = {})
     clientRawRequest = {
       endpoint: url.pathname,
       body,
-      headers: Object.fromEntries(request.headers.entries())
+      headers: redactChatGptWebInternalHeaders(request.headers)
     };
   }
+  clientRawRequest = { ...clientRawRequest, headers: redactChatGptWebInternalHeaders(clientRawRequest.headers) };
   // Claude Code marks a 1M-context request as `<model>[1m]`; the marker matches
   // no combo, alias or provider/model pair, so it must not reach resolution.
   // The capability travels in the anthropic-beta header, forwarded as-is.
@@ -224,13 +241,11 @@ export async function handleChat(request, clientRawRequest = null, options = {})
             const { tools, tool_choice, ...cleanBody } = clientRawRequest.body || {};
             cleanRawReq = { ...clientRawRequest, body: cleanBody };
           }
-          return handleSingleModelChat(b, m, cleanRawReq, request, apiKey, {
-            preResponse,
-            clientModel: modelStr,
-            effectiveModel: m,
-            routeReason: "combo",
-            ...meta
-          });
+          return handleSingleModelChat(b, m, cleanRawReq, request, apiKey, { chatGptWebAuthority, preResponse,
+          clientModel: modelStr,
+          effectiveModel: m,
+          routeReason: "combo",
+          ...meta });
         },
         log,
         comboName: modelStr,
@@ -246,13 +261,11 @@ export async function handleChat(request, clientRawRequest = null, options = {})
       body,
       models: augmentedModels,
       handleSingleModel: withCapacityAdapterStripping(
-        (b, m, meta = {}) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, {
-          preResponse,
-          clientModel: modelStr,
-          effectiveModel: m,
-          routeReason: "combo",
-          ...meta
-        }),
+        (b, m, meta = {}) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, { chatGptWebAuthority, preResponse,
+        clientModel: modelStr,
+        effectiveModel: m,
+        routeReason: "combo",
+        ...meta }),
         adapterAdded
       ),
       log,
@@ -261,6 +274,13 @@ export async function handleChat(request, clientRawRequest = null, options = {})
       comboStickyLimit,
       liveCapabilities,
       preResponse,
+    });
+  }
+
+  if (chatGptWebAuthority) {
+    // A signed Web model has an exact runtime/profile scope; capacity adapters may not substitute providers.
+    return handleSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, {
+      preResponse, chatGptWebAuthority, clientModel: modelStr, effectiveModel: modelStr, routeReason: "direct",
     });
   }
 
@@ -274,13 +294,11 @@ export async function handleChat(request, clientRawRequest = null, options = {})
       body,
       models: soloAugmented,
       handleSingleModel: withCapacityAdapterStripping(
-        (b, m, meta = {}) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, {
-          preResponse,
-          clientModel: modelStr,
-          effectiveModel: m,
-          routeReason: m !== modelStr ? "capacity-adapter" : "direct",
-          ...meta
-        }),
+        (b, m, meta = {}) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, { chatGptWebAuthority, preResponse,
+        clientModel: modelStr,
+        effectiveModel: m,
+        routeReason: m !== modelStr ? "capacity-adapter" : "direct",
+        ...meta }),
         adapterAdded
       ),
       log,
@@ -290,18 +308,16 @@ export async function handleChat(request, clientRawRequest = null, options = {})
     });
   }
 
-  return handleSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, {
-    preResponse,
-    clientModel: modelStr,
-    effectiveModel: modelStr,
-    routeReason: "direct",
-  });
+  return handleSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, { chatGptWebAuthority, preResponse,
+  clientModel: modelStr,
+  effectiveModel: modelStr,
+  routeReason: "direct", });
 }
 
 /**
  * Handle single model chat request
  */
-async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, { preResponse = null, clientModel = null, effectiveModel = null, routeReason = "direct", routeContext = null } = {}) {
+async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, { preResponse = null, clientModel = null, effectiveModel = null, routeReason = "direct", routeContext = null, chatGptWebAuthority = null } = {}) {
   const modelInfo = await getModelInfo(modelStr);
 
   // If provider is null, this might be a combo name - check and handle
@@ -330,13 +346,11 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
               const { tools, tool_choice, ...cleanBody } = clientRawRequest.body || {};
               cleanRawReq = { ...clientRawRequest, body: cleanBody };
             }
-            return handleSingleModelChat(b, m, cleanRawReq, request, apiKey, {
-              preResponse,
-              clientModel: modelStr,
-              effectiveModel: m,
-              routeReason: "combo",
-              ...meta
-            });
+            return handleSingleModelChat(b, m, cleanRawReq, request, apiKey, { chatGptWebAuthority, preResponse,
+            clientModel: modelStr,
+            effectiveModel: m,
+            routeReason: "combo",
+            ...meta });
           },
           log,
           comboName: modelStr,
@@ -352,13 +366,11 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         body,
         models: augmentedModels,
         handleSingleModel: withCapacityAdapterStripping(
-          (b, m, meta = {}) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, {
-            preResponse,
-            clientModel: modelStr,
-            effectiveModel: m,
-            routeReason: "combo",
-            ...meta
-          }),
+          (b, m, meta = {}) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, { chatGptWebAuthority, preResponse,
+          clientModel: modelStr,
+          effectiveModel: m,
+          routeReason: "combo",
+          ...meta }),
           adapterAdded
         ),
         log,
@@ -374,6 +386,9 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   }
 
   const { provider, model } = modelInfo;
+  if (provider === "chatgpt-web" && !chatGptWebAuthority) {
+    return chatGptWebAuthorityRequiredResponse();
+  }
 
   // Routing shown in the unified "▶" line (client model → provider/model)
 
@@ -383,10 +398,16 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   // Try with available accounts (fallback on errors)
   const excludeConnectionIds = new Set();
   const requiredCapabilities = detectRequiredCapabilities(body);
+  let nativeMetadata = body?.client_metadata?.["x-codex-turn-metadata"];
+  if (typeof nativeMetadata === "string") { try { nativeMetadata = JSON.parse(nativeMetadata); } catch { nativeMetadata = null; } }
+  const cgwCompaction = body?._compact === true || nativeMetadata?.request_kind === "compaction"
+    || (Array.isArray(body?.input) && body.input.some(item => item?.type === "compaction_trigger"));
+  if (provider === "chatgpt-web" && !cgwCompaction && Array.isArray(body?.tools) && body.tools.length) requiredCapabilities.add("tools");
   const bridgeCapability = bridgeCapabilityForRequest(clientRawRequest, body);
-  const conversationKey = provider === "chatgpt-web"
-    ? getChatGptWebConversationKey(clientRawRequest, body)
-    : null;
+  if (provider === "chatgpt-web" && await getChatGptWebLegacyConversation({ headers: clientRawRequest?.headers, body })) {
+    return new Response(JSON.stringify({ error: { type: "runtime_error", code: "legacy_conversation_unavailable", message: "Start a new canonical task after profile login; legacy socket conversations cannot resume", retryable: false } }),
+      { status: 409, headers: { "content-type": "application/json", "x-9router-no-fallback": "true" } });
+  }
   const explicitConnectionId = provider === "chatgpt-web"
     ? getChatGptWebExplicitConnectionId(clientRawRequest)
     : null;
@@ -400,23 +421,19 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     if (preResponse && (preResponse.remainingMs() <= 0 || preResponse.signal?.aborted)) {
       throw (preResponse.signal?.reason || createDeadlineError());
     }
-    const selectCredentials = async () => {
-      if (provider === "chatgpt-web") {
-        pinnedConnectionId = explicitConnectionId || await loadChatGptWebPinnedConnection(conversationKey);
-      }
-      const selected = await getProviderCredentials(provider, excludeConnectionIds, model, {
+    let credentials;
+    try {
+      credentials = await getProviderCredentials(provider, excludeConnectionIds, model, {
         requiredCapabilities,
-        ...(pinnedConnectionId ? { pinConnectionId: pinnedConnectionId } : {}),
-        ...(provider === "chatgpt-web" ? { bridgeCapability } : {}),
+        ...(explicitConnectionId ? { pinConnectionId: explicitConnectionId } : {}),
+        ...(provider === "chatgpt-web" ? { bridgeCapability: "native_responses", chatGptWebAuthority, chatGptWebReasoning: body.reasoning?.effort,
+          signal: preResponse?.signal || request?.signal } : {}),
       });
-      if (provider === "chatgpt-web" && conversationKey && selected?.connectionId) {
-        await pinChatGptWebConnection(conversationKey, selected.connectionId);
-      }
-      return selected;
-    };
-    const credentials = provider === "chatgpt-web" && conversationKey
-      ? await withChatGptWebConversationLock(conversationKey, selectCredentials)
-      : await selectCredentials();
+    } catch (error) {
+      if (provider !== "chatgpt-web") throw error;
+      return withChatGptWebNoFallback(Response.json({ error: { type: "runtime_error", code: "runtime_unavailable", message: "Durable ChatGPT Web profile binding is unavailable", retryable: false, submission_state: "not_sent" } }, { status: 503 }));
+    }
+    if (credentials?.chatGptWebBindingError) return withChatGptWebNoFallback(credentials.chatGptWebBindingError);
 
     if (credentials?.pinnedConnectionUnavailable) return bridgeContinuationError(pinnedConnectionId);
 
@@ -430,7 +447,8 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       }
       if (excludeConnectionIds.size === 0) {
         log.warn("AUTH", `No active credentials for provider: ${provider}`);
-        return errorResponse(HTTP_STATUS.NOT_FOUND, `No active credentials for provider: ${provider}`);
+        const unavailable = errorResponse(HTTP_STATUS.NOT_FOUND, `No active credentials for provider: ${provider}`);
+        return provider === "chatgpt-web" ? withChatGptWebNoFallback(unavailable) : unavailable;
       }
       log.warn("CHAT", "No more accounts available", { provider });
       if (provider === "codex" && codexCapabilityReasons.size > 0) {
@@ -448,6 +466,8 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
 
     // Account selection shown in the unified "▶" line (acc:...)
     const refreshedCredentials = await checkAndRefreshToken(provider, credentials);
+    if (provider === "chatgpt-web") refreshedCredentials.chatGptWebAuthority = chatGptWebAuthority;
+    if (provider === "chatgpt-web") refreshedCredentials.chatGptWebOriginalModel = clientRawRequest?.body?.model;
 
     // Ensure real project ID is available for providers that need it (P0 fix: cold miss)
     if ((provider === "antigravity" || provider === "gemini-cli") && !refreshedCredentials.projectId) {
@@ -574,9 +594,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     if (result.success) return withConnectionHeader(result.response, credentials.connectionId);
 
     const isBridgeCooldown = provider === "chatgpt-web"
-      && (result.status === HTTP_STATUS.RATE_LIMITED
-        || result.errorClass === "quota_exhausted"
-        || result.errorClass === "rate_limited");
+      && (result.errorClass === "quota_exhausted" || result.errorClass === "rate_limited");
     if (isBridgeCooldown) {
       try {
         await markAccountUnavailable(

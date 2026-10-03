@@ -1,131 +1,23 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  requestChatGptWebBridge,
-  resetChatGptWebTurnSlots,
-  sanitizeChatGptWebMaxConcurrency,
-} from "../../open-sse/services/chatgptWebBridge.js";
-
-const connection = { id: "bridge-concurrency", providerSpecificData: { bridgeId: "personal" } };
-
-function streamResponse() {
-  let controller;
-  const body = new ReadableStream({ start(value) { controller = value; } });
-  return { response: new Response(body, { status: 200 }), controller };
-}
-
-beforeEach(() => resetChatGptWebTurnSlots());
-afterEach(() => vi.restoreAllMocks());
-
-describe("ChatGPT Web per-connection concurrency", () => {
-  it("accepts five turns and returns structured provider_busy for the sixth", async () => {
-    const pending = [];
-    const fetchImpl = vi.fn(async () => {
-      const item = streamResponse();
-      pending.push(item);
-      return item.response;
-    });
-
-    const results = await Promise.all(Array.from({ length: 6 }, () => requestChatGptWebBridge(
-      connection,
-      "/v1/responses",
-      { method: "POST" },
-      { socketPath: "fixture", fetchImpl, turn: true },
-    )));
-
-    expect(fetchImpl).toHaveBeenCalledTimes(5);
-    expect(results.slice(0, 5).every((result) => result.status === 200)).toBe(true);
-    expect(results[5].status).toBe(503);
-    await expect(results[5].json()).resolves.toMatchObject({ error: { code: "provider_busy" } });
-
-    const reads = results.slice(0, 5).map((result) => result.text());
-    pending.forEach(({ controller }) => controller.close());
-    await Promise.all(reads);
-  });
-
-  it("shares the five-turn limit across connection rows using one bridge", async () => {
-    const pending = [];
-    const fetchImpl = vi.fn(async () => {
-      const item = streamResponse();
-      pending.push(item);
-      return item.response;
-    });
-    const sameBridge = (id) => ({ id, providerSpecificData: { bridgeId: "personal" } });
-
-    const results = await Promise.all(Array.from({ length: 6 }, (_, index) => requestChatGptWebBridge(
-      sameBridge(`connection-${index}`),
-      "/v1/responses",
-      { method: "POST" },
-      { socketPath: "fixture", fetchImpl, turn: true },
-    )));
-
-    expect(fetchImpl).toHaveBeenCalledTimes(5);
-    expect(results.filter((result) => result.status === 503)).toHaveLength(1);
-    pending.forEach(({ controller }) => controller.close());
-    await Promise.all(results.filter((result) => result.status === 200).map((result) => result.text()));
-  });
-
-  it("releases a slot after an error body is consumed", async () => {
-    const fetchImpl = vi.fn()
-      .mockResolvedValueOnce(new Response("busy", { status: 429 }))
-      .mockResolvedValueOnce(new Response("after"));
-
-    const error = await requestChatGptWebBridge(connection, "/v1/responses", {}, {
-      socketPath: "fixture", fetchImpl, turn: true,
-    });
-    expect(error.status).toBe(429);
-    await expect(error.text()).resolves.toBe("busy");
-
-    const after = await requestChatGptWebBridge(connection, "/v1/responses", {}, {
-      socketPath: "fixture", fetchImpl, turn: true,
-    });
-    expect(after.status).toBe(200);
-  });
-
-  it("releases a slot on EOF and body cancellation", async () => {
-    const first = streamResponse();
-    const fetchImpl = vi.fn()
-      .mockResolvedValueOnce(first.response)
-      .mockResolvedValueOnce(new Response("done"));
-
-    const held = await requestChatGptWebBridge(connection, "/v1/responses", {}, {
-      socketPath: "fixture", fetchImpl, turn: true,
-    });
-    const heldText = held.text();
-    first.controller.close();
-    expect(await heldText).toBe("");
-
-    const released = await requestChatGptWebBridge(connection, "/v1/responses", {}, {
-      socketPath: "fixture", fetchImpl, turn: true,
-    });
-    expect(released.status).toBe(200);
-
-    const cancellable = streamResponse();
-    fetchImpl.mockResolvedValueOnce(cancellable.response);
-    const cancelled = await requestChatGptWebBridge(connection, "/v1/responses", {}, {
-      socketPath: "fixture", fetchImpl, turn: true,
-    });
-    await cancelled.body.cancel("client closed");
-    fetchImpl.mockResolvedValueOnce(new Response("after"));
-    const afterCancel = await requestChatGptWebBridge(connection, "/v1/responses", {}, {
-      socketPath: "fixture", fetchImpl, turn: true,
-    });
-    expect(afterCancel.status).toBe(200);
-  });
-
-  it("does not leak slots on fetch errors and clamps catalog limits", async () => {
-    const fetchImpl = vi.fn()
-      .mockRejectedValueOnce(new Error("offline"))
-      .mockResolvedValueOnce(new Response("ok"));
-
-    await expect(requestChatGptWebBridge(connection, "/v1/responses", {}, {
-      socketPath: "fixture", fetchImpl, turn: true,
-    })).rejects.toThrow("offline");
-    expect(await (await requestChatGptWebBridge(connection, "/v1/responses", {}, {
-      socketPath: "fixture", fetchImpl, turn: true,
-    })).text()).toBe("ok");
-
-    expect(sanitizeChatGptWebMaxConcurrency(99)).toBe(5);
-    expect(sanitizeChatGptWebMaxConcurrency(0)).toBeNull();
-    expect(sanitizeChatGptWebMaxConcurrency("5")).toBeNull();
-  });
+import { afterEach, expect, it } from "vitest";
+import { createServer } from "node:http";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { getChatGptWebCatalog, invalidateChatGptWebCatalog } from "../../open-sse/services/chatgptWebRuntimeClient.js";
+const cleanup = [];
+afterEach(async () => { invalidateChatGptWebCatalog(); while (cleanup.length) await cleanup.pop()(); });
+it("duplicate DB connections share one profile fetch and one cancelled waiter cannot abort other waiters", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cgw-single-flight-")); const secret = join(root, "secret"); await writeFile(secret, "synthetic-secret".repeat(4));
+  const oldUrl = process.env.CHATGPT_WEB_RUNTIME_URL, oldSecret = process.env.CHATGPT_WEB_RUNTIME_TOKEN_FILE;
+  cleanup.push(async () => { if (oldUrl === undefined) delete process.env.CHATGPT_WEB_RUNTIME_URL; else process.env.CHATGPT_WEB_RUNTIME_URL = oldUrl; if (oldSecret === undefined) delete process.env.CHATGPT_WEB_RUNTIME_TOKEN_FILE; else process.env.CHATGPT_WEB_RUNTIME_TOKEN_FILE = oldSecret; await rm(root, { recursive: true, force: true }); });
+  let requests = 0, release;
+  const observed = new Promise(resolve => { release = resolve; });
+  const server = createServer((_request, response) => { requests++; release(); setTimeout(() => { response.setHeader("content-type", "application/json"); response.end(JSON.stringify({ protocolVersion: 1, profile_id: "fixture", profile_epoch: "epoch", catalog_revision: "revision", checked_at: new Date().toISOString(), max_concurrency: 5, models: [{ id: "chatgpt-web/gpt-5.6-sol", supported_reasoning_levels: ["high"], default_reasoning_level: "high", legacy: false, context_window: 90000, auto_compact_token_limit: 80000, capabilities: { native_responses: true } }] })); }, 30); });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve)); cleanup.push(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); }));
+  process.env.CHATGPT_WEB_RUNTIME_URL = `http://127.0.0.1:${server.address().port}`; process.env.CHATGPT_WEB_RUNTIME_TOKEN_FILE = secret;
+  const controller = new AbortController();
+  const cancelled = getChatGptWebCatalog({ id: "one", providerSpecificData: { profileId: "fixture" } }, { signal: controller.signal }).catch(error => error.name);
+  const surviving = getChatGptWebCatalog({ id: "two", providerSpecificData: { profileId: "fixture" } });
+  await observed; controller.abort();
+  expect(await cancelled).toBe("AbortError"); expect((await surviving).models[0].id).toBe("chatgpt-web/gpt-5.6-sol"); expect(requests).toBe(1);
 });
