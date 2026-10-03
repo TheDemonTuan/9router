@@ -23,6 +23,7 @@
 - **Headroom**: remove compressor, sidecar, dashboard/CLI controls, and retire persisted settings on upgrade and restore.
 
 ## Fixes
+- **CGW URI security**: override runtime `fast-uri` to 3.1.8 for the published URI authority/host fixes; remove the unused root `http-proxy-middleware` dependency and its production glob-parsing closure. Keep source and immutable-image Trivy gates enabled.
 - **MITM certificate security**: remove node-forge (CVE-2026-85393) from app/CLI dependencies and runtime packaging; use the existing selfsigned/native crypto certificate stack. Await first-use Root CA and SNI leaf generation, preserve trusted legacy PKCS#1 root PEMs without rotation, and gate certificate trust/hostname behavior plus exact-image dependency availability before deployment.
 - **Codex Responses same-wire**: bypass generic request normalization for non-native Responses→Codex requests while preserving reasoning summary/mode/context, ordered tool replay and opaque encrypted state. Keep Codex canonicalization/validation, native identity, token-saver fences and client response dialect handling unchanged; distinguish NATIVE, SAME-WIRE, TRANSLATE and NORMALIZE request logs.
 - **Dashboard Access**: verify Cloudflare Access JWT for `/dashboard` alongside existing signed sessions; invalid JWT redirects to login.

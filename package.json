@@ -28,7 +28,6 @@
     "chalk": "^5.6.2",
     "confbox": "^0.3.1",
     "express": "^5.2.1",
-    "http-proxy-middleware": "^3.0.7",
     "jose": "^6.2.12",
     "marked": "^18.0.14",
     "material-symbols": "^0.47.5",

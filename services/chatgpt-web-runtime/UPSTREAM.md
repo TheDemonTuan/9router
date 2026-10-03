@@ -10,6 +10,8 @@
 
 Upstream `src/<path>` is ported at `src/<path>` without mass renaming: native Responses parser/schema/state/reasoning/compaction, bridge/SSE, model catalog and browser adapter dependencies. Dependency versions begin from the frozen upstream Bun lock. CLI setup, updater, service installer, Codex config rewriting, native OpenAI passthrough, native catalog augmentation, Electron/launcher transport and billing estimates are excluded.
 
+Deployment security patch: override `fast-uri` to published `3.1.8` with its npm SHA-512 integrity rather than frozen `3.1.6`, addressing CVE-2026-84292/CVE-2026-84394 and the subsequent host-comparison patch. Upstream source remains frozen; dependency divergence is explicit and native tests/Trivy must pass before release.
+
 Adapted boundaries: `config.ts`, `server.ts`, `browser-login.ts`, `process.ts`, `tunnel.ts`, `adapters/chatgpt-web/index.ts`, `browser-worker.ts`, `thread-environment.ts`, `turn-execution.ts`, `conversation-key.ts`, `compaction-handoff.ts`, and `native-compaction-control.ts`.
 
 New remote-runtime responsibilities: `protocol.js`, `src/authority.ts`, `src/profiles.ts`, `src/runtime-state.ts`, `src/browser/manager.ts`, and `src/companion/`. The read-only `src/companion/codex-config-reader.ts` extracts upstream top-level assignment parsing; it has no config-writing API.
