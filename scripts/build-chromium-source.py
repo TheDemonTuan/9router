@@ -142,10 +142,12 @@ def build(args, lock, resources):
                  "  },")
     if args.arch == 'arm64':
         checked_replace(src / 'DEPS', gperf_old, gperf_new)
+        run(['git', '-C', str(src), '-c', 'user.name=cgw', '-c', 'user.email=cgw@local',
+             'commit', '-am', 'temp-bypass-gperf'], cwd=src, env=env)
     run([str(depot / 'gclient'), 'sync', '--nohooks', '--no-history',
          '--revision', 'src@' + lock['chromium']['git_commit']], cwd=args.workdir, env=env)
     if args.arch == 'arm64':
-        checked_replace(src / 'DEPS', gperf_new, gperf_old)
+        run(['git', '-C', str(src), 'reset', '--hard', lock['chromium']['git_commit']], cwd=src, env=env)
     verify_sha256(src / 'DEPS', lock['source_file_sha256']['DEPS'])
     run([str(depot / 'gclient'), 'revinfo', '--actual', '--output-json',
          str(args.workdir / 'dependency-revisions.json')], cwd=args.workdir, env=env)
