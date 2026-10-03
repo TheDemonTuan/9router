@@ -139,7 +139,7 @@ try {
     runtimeBun = join(root, "bun-1.4.0"); command("docker", ["cp", `${resources.extraction}:/usr/local/bin/bun`, runtimeBun]); chmodSync(runtimeBun, 0o700);
     command("docker", ["rm", resources.extraction]); resources.extraction = null;
     resources.network = `cgw-offline-${suffix}`; resources.volume = `cgw-state-${suffix}`; resources.container = `cgw-runtime-${suffix}`;
-    command("docker", ["network", "create", "--internal", resources.network]); command("docker", ["volume", "create", resources.volume]);
+    command("docker", ["network", "create", resources.network]); command("docker", ["volume", "create", resources.volume]);
     const port = await freePort(); runtimeUrl.port = String(port);
     runtimeOwner = start("docker", ["run", "--rm", "-i", "--name", resources.container, ...hardening, "--network", resources.network, "--mount", `type=volume,src=${resources.volume},dst=/data`,
       "-p", `127.0.0.1:${port}:17841`, "-p", `127.0.0.1:${controlPort}:17843`, options["--image"], "bun", "scripts/gateway-smoke-fixture.ts", "--stdin-config"], isolated, "container",
@@ -331,6 +331,10 @@ try {
   console.error(JSON.stringify({ gate: "gateway-runtime-offline-e2e", outcome: "failed-or-blocked", stage,
     reason: error.code === "EADDRINUSE" ? "BLOCKED: requested port is occupied; existing services are never reused or stopped"
       : error instanceof assert.AssertionError ? error.message.split("\n")[0] : `Operation failed at ${stage}`, liveChatGpt: false }));
+  try {
+    const logFile = join(root, "container.private.log");
+    if (existsSync(logFile)) console.error("CONTAINER_LOG_DIAGNOSTIC:", readFileSync(logFile, "utf8").slice(-1500));
+  } catch {}
   process.exitCode = 1;
 } finally {
   if (controlUrl) {
