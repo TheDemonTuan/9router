@@ -131,7 +131,7 @@
       ],
       "privilegedSyscalls": "mount/bpf/perf_event_open remain capability-conditioned; runtime drops ALL capabilities and forbids SYS_ADMIN. ptrace retains upstream minKernel restriction. Chromium applies its own renderer seccomp-BPF sandbox."
     },
-    "packagedSha256": "0672febfa3e04b0a36673dcc4c054e834b026d924d9a1d31593f4955109b1ba4"
+    "packagedSha256": "086592cbd3eba6884f8419040fdab738f1bcd1a64a19dec78f30ccbf54158c4d"
   },
   "actions": {
     "actions/checkout": "3d3c42e5aac5ba805825da76410c181273ba90b1",
