@@ -87,9 +87,4 @@ After removing unused root proxy dependencies and updating runtime fast-uri, [pu
 
 The old production gateway/engine/route remain active. Selected app configuration and a read-only SQLite backup were captured before provisioning new root-owned runtime token files and an empty client-key allowlist. The three production caller workflows remain paused to prevent new-manifest requests reaching the old host engine. CGW has not been started and no real ChatGPT/Codex credentials were provisioned.
 
-Per operator authorization to upgrade the security baseline:
-- Pinned Debian Chromium was upgraded to `154.0.8037.92-1~deb12u1`, eliminating all 62 fixable Chromium CVEs.
-- Upstream tunnel-client was upgraded to `v0.0.15` bundling cloudflared `2026.8.2`, eliminating 39 Go stdlib and dependency CVEs.
-- Internal SPDX JSON SBOMs were excluded from image filesystem layers, preserving human-readable license terms.
-- Unfixed Debian 12 vendor vulnerabilities (with no available upstream fixed version) and bundled tunnel Go dependencies under upstream investigation are explicitly declared and tracked in `.trivyignore.yaml`.
-- Source harness 6.1.3 logic, sandbox boundaries, and strict Trivy image gates remain fully enforced.
+The operator authorized upgrading OS/browser/tunnel assets while retaining the security gate. Commit `fc98dcef` incorrectly added 77 vulnerability exceptions and removed SPDX evidence; a suppressed scan is not evidence of remediation. Run [37131181060](https://github.com/TheDemonTuan/9router/actions/runs/37131181060) failed native image builds because Chromium `154.0.8037.92-1~deb12u1` is absent from the pinned snapshot. No deployment occurred. The exceptions are removed; release requires unsuppressed security scans, complete dependency provenance and native browser/harness checks.
