@@ -1,7 +1,7 @@
 name: ChatGPT Web runtime gates
 on:
   push:
-    branches: [feat/cgw-full-harness]
+    branches: [feat/cgw-full-harness, integrate/cgw-production, master]
   pull_request:
     paths:
       - services/chatgpt-web-runtime/**
@@ -91,6 +91,8 @@ jobs:
             unit/chatgpt-web-runtime-admin.test.js
       - name: Exercise real disposable Bun SQLite profile migration
         run: bun tests/integration/chatgpt-web-profile-migration-smoke.mjs
+      - name: Preserve current production regression contracts
+        run: bash .deploy/verify.sh
 
   native:
     needs: activation-fence
