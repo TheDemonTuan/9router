@@ -129,7 +129,9 @@ try {
     assert(command("docker", ["info", "--format", "{{.OSType}}"] ) === "linux", "BLOCKED: Docker server must be Linux");
     const arch = process.arch === "x64" ? "amd64" : "arm64";
     assert(command("docker", ["image", "inspect", "--format", "{{.Architecture}}", options["--image"]]) === arch, "BLOCKED: native image architecture mismatch");
-    const hardening = ["--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--security-opt", `seccomp=${join(runtimePackage, "security/seccomp.json")}`, "--shm-size", "1g",
+    const hardening = ["--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+      ...(process.platform === "linux" ? ["--security-opt", "apparmor=unconfined"] : []),
+      "--security-opt", `seccomp=${join(runtimePackage, "security/seccomp.json")}`, "--shm-size", "1g",
       "--tmpfs", "/tmp:rw,nosuid,nodev,size=512m,mode=1777", "--tmpfs", "/run:rw,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700"];
     command("docker", ["run", "--rm", ...hardening, "--network", "none", "--tmpfs", "/data:rw,nosuid,nodev,size=512m,uid=10001,gid=10001,mode=0700", options["--image"], "bun", "scripts/image-smoke.ts", "--arch", arch]);
     resources.extraction = `cgw-extract-${suffix}`;
