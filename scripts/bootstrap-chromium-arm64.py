@@ -93,16 +93,18 @@ def main():
         if revision != expected:
             raise RuntimeError(f'CGW_CHROMIUM_TOOLCHAIN_IDENTITY_MISMATCH: {name}')
         destination = Path(destination)
-        destination.mkdir(parents=True)
-        subprocess.run(['git', 'init', str(destination)], check=True)
-        subprocess.run(['git', '-C', str(destination), 'remote', 'add', 'origin', url], check=True)
-        subprocess.run(['git', '-C', str(destination), 'fetch', '--depth=1', '--no-tags',
-                        'origin', revision], check=True)
-        subprocess.run(['git', '-C', str(destination), 'checkout', '--detach', 'FETCH_HEAD'], check=True)
         if name == 'LLVM monorepo':
+            subprocess.run(['git', 'clone', '--filter=blob:none', '--no-checkout', url, str(destination)], check=True)
+            subprocess.run(['git', '-C', str(destination), 'checkout', '--detach', revision], check=True)
             for patch in inputs['llvm']['cherry_picks']:
-                subprocess.run(['git', '-C', str(destination), 'fetch', '--depth=1',
-                                'origin', patch], check=True)
+                subprocess.run(['git', '-C', str(destination), 'fetch', 'origin', patch], check=True)
+        else:
+            destination.mkdir(parents=True)
+            subprocess.run(['git', 'init', str(destination)], check=True)
+            subprocess.run(['git', '-C', str(destination), 'remote', 'add', 'origin', url], check=True)
+            subprocess.run(['git', '-C', str(destination), 'fetch', '--depth=1', '--no-tags',
+                            'origin', revision], check=True)
+            subprocess.run(['git', '-C', str(destination), 'checkout', '--detach', 'FETCH_HEAD'], check=True)
         os.chdir(destination)
 
     clang.CheckoutGitRepo = locked_checkout
