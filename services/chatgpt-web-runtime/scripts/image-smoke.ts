@@ -79,7 +79,7 @@ try {
   for (const pid of readdirSync("/proc").filter(name => /^\d+$/.test(name))) {
     let cmdline: string;
     try { cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf8"); } catch { continue; }
-    if (!cmdline.includes("/usr/lib/chromium/chromium")) continue;
+    if (!cmdline.includes("chromium")) continue;
     const flags = cmdline.split("\0");
     for (const forbidden of ["--no-sandbox", "--disable-namespace-sandbox", "--disable-seccomp-filter-sandbox"]) {
       assert(!flags.includes(forbidden), `Chromium sandbox weakened: ${forbidden}`);
