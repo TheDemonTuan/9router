@@ -91,6 +91,10 @@ def build(args, lock, resources):
              + args.arch + '&version=' + lock['depot_tools']['cipd_client_version'],
              cipd, lock['depot_tools']['cipd_digests']['linux-' + args.arch])
     cipd.chmod(0o755)
+    python_bin = depot / 'python-bin'
+    python_bin.mkdir(exist_ok=True)
+    if not (python_bin / 'python3').exists():
+        (python_bin / 'python3').symlink_to(sys.executable)
     env = dict(os.environ, PATH=str(depot) + os.pathsep + os.environ['PATH'],
                DEPOT_TOOLS_UPDATE='0', DEPOT_TOOLS_METRICS='0',
                CUSTOM_CIPD_CLIENT=str(cipd), DEPOT_TOOLS_COLLECT_METRICS='0')
@@ -162,9 +166,11 @@ def build(args, lock, resources):
     out.mkdir(parents=True)
     flags = dict(lock['build_flags'], target_cpu=cpu)
     (out / 'args.gn').write_text('\n'.join(k + ' = ' + json.dumps(v) for k, v in flags.items()) + '\n')
-    run([str(depot / 'gn'), 'gen', str(out), '--fail-on-unused-args'], cwd=src, env=env)
+    gn_bin = src / 'buildtools/linux64/gn'
+    run([str(gn_bin), 'gen', str(out), '--fail-on-unused-args'], cwd=src, env=env)
     jobs = max(1, min(os.cpu_count() or 1, resources['availableMemoryBytes'] // 2_000_000_000))
-    run([str(depot / 'autoninja'), '-C', str(out), '-j', str(jobs),
+    ninja_bin = src / 'third_party/ninja/ninja'
+    run([str(ninja_bin), '-C', str(out), '-j', str(jobs),
          'chrome/installer/linux:stable_deb'], cwd=src, env=env)
     package = out / f"chromium-browser-stable_{lock['chromium']['version']}-1_{args.arch}.deb"
     extract = args.workdir / 'package-extract'
