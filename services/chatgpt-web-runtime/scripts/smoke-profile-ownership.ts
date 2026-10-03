@@ -40,6 +40,8 @@ try {
   assert(profiles.length === 2, "Profile creation count mismatch");
   assert(runtime.profiles.physicalIdle(), "Physical idle was not observed for freshly initialized profiles");
   console.info(JSON.stringify({ gate: "smoke-profile-ownership", initialized: true, profiles: 2, profileConcurrency: true, physicalIdle: true, platform: process.platform, arch: process.arch }));
+} finally {
+  await runtime.close();
   rmSync(root, { recursive: true, force: true });
   for (const [key, value] of Object.entries(previous)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
 }
