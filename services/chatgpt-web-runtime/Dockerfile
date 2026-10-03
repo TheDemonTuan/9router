@@ -42,7 +42,7 @@ LABEL org.opencontainers.image.title="9Router ChatGPT Web Runtime" \
       org.opencontainers.image.version="6.1.3" \
       org.opencontainers.image.licenses="MIT AND Apache-2.0"
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      chromium=154.0.8037.57-1~deb12u1 chromium-common=154.0.8037.57-1~deb12u1 \
+      chromium=154.0.8037.92-1~deb12u1 chromium-common=154.0.8037.92-1~deb12u1 \
       tini xvfb openbox x11vnc xauth fonts-liberation fonts-noto-core fonts-noto-color-emoji \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 cgw \

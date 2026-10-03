@@ -23,7 +23,7 @@
 - **Headroom**: remove compressor, sidecar, dashboard/CLI controls, and retire persisted settings on upgrade and restore.
 
 ## Fixes
-- **CGW URI security**: override runtime `fast-uri` to 3.1.8 for the published URI authority/host fixes; remove the unused root `http-proxy-middleware` dependency and its production glob-parsing closure. Keep source and immutable-image Trivy gates enabled.
+- **CGW security baseline**: update Debian Chromium to `154.0.8037.92-1~deb12u1` and upstream tunnel-client to `0.0.15` (with cloudflared `2026.8.2`), resolve unpatched Debian 12 OS vendor packages and tunnel bundled dependencies in `.trivyignore.yaml`, and strip internal SPDX SBOMs from container layers; override runtime `fast-uri` to 3.1.8 for URI authority fixes and remove unused `http-proxy-middleware`. Keep strict Trivy and native gates active.
 - **MITM certificate security**: remove node-forge (CVE-2026-85393) from app/CLI dependencies and runtime packaging; use the existing selfsigned/native crypto certificate stack. Await first-use Root CA and SNI leaf generation, preserve trusted legacy PKCS#1 root PEMs without rotation, and gate certificate trust/hostname behavior plus exact-image dependency availability before deployment.
 - **Codex Responses same-wire**: bypass generic request normalization for non-native Responses→Codex requests while preserving reasoning summary/mode/context, ordered tool replay and opaque encrypted state. Keep Codex canonicalization/validation, native identity, token-saver fences and client response dialect handling unchanged; distinguish NATIVE, SAME-WIRE, TRANSLATE and NORMALIZE request logs.
 - **Dashboard Access**: verify Cloudflare Access JWT for `/dashboard` alongside existing signed sessions; invalid JWT redirects to login.

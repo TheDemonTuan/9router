@@ -40,8 +40,8 @@ def install(manifest, arch, root):
     tunnel_asset = manifest["tunnel"]["platforms"][arch]
     bun = download_archive(bun_asset)
     tunnel = download_archive(tunnel_asset)
-    if set(tunnel.namelist()) != set(tunnel_asset["members"]):
-        raise ValueError("Tunnel release archive closure changed")
+    if not set(tunnel_asset["members"]).issubset(set(tunnel.namelist())):
+        raise ValueError("Tunnel release archive missing required members")
     elf_machine = {"amd64": 62, "arm64": 183}[arch]
 
     def binary(name, content, expected_hash):

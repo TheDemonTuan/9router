@@ -30,7 +30,7 @@ export function loadProfileTunnelConfigs(file: string | undefined, dataDir: stri
   return configs;
 }
 
-export const TUNNEL_VERSION = "0.0.12";
+export const TUNNEL_VERSION = "0.0.15";
 export interface ProfileTunnelConfig {
   binaryPath: string; profileDir: string; profileName: string; tunnelId: string; runtimeKeyFile: string;
   mcpEntrypoint: string; healthAddress: string;

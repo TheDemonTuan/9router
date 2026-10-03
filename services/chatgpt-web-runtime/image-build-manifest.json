@@ -24,7 +24,7 @@
       "debian": "https://snapshot.debian.org/archive/debian/20261001T000000Z/",
       "security": "https://snapshot.debian.org/archive/debian-security/20261001T000000Z/"
     },
-    "chromiumVersion": "154.0.8037.57-1~deb12u1",
+    "chromiumVersion": "154.0.8037.92-1~deb12u1",
     "packagePolicy": "Signed APT InRelease + hash-verified Packages from immutable snapshot; no live Debian mirrors. All transitive dependencies resolved from that snapshot.",
     "amd64PackagesIndexSha256": {
       "bookworm": "9e0b5aabb2465b3d2e7a7fe27f9913846277833f7a2826e7767acccff5b588c5",
@@ -54,25 +54,25 @@
     }
   },
   "tunnel": {
-    "version": "0.0.12",
-    "revision": "881c9a8fed7cccbe6607cd419863bbca506b8215",
-    "releaseApi": "https://api.github.com/repos/openai/tunnel-client/releases/tags/v0.0.12",
+    "version": "0.0.15",
+    "revision": "a390c168ff1b2d14e73a95991c186c6aba3ff5a0",
+    "releaseApi": "https://api.github.com/repos/openai/tunnel-client/releases/tags/v0.0.15",
     "closurePolicy": "Foreground full-client run embeds runtime; sibling cloudflared is its only bundled executable child. MCP child is package src/adapters/chatgpt-web/mcp-main.ts through runtime-owned entrypoint. Separate managed-runtime release variants are not used or downloaded.",
     "closureEvidence": [
-      "https://github.com/openai/tunnel-client/blob/881c9a8fed7cccbe6607cd419863bbca506b8215/cmd/client/run_command.go",
-      "https://github.com/openai/tunnel-client/blob/881c9a8fed7cccbe6607cd419863bbca506b8215/Dockerfile",
-      "https://github.com/openai/tunnel-client/blob/881c9a8fed7cccbe6607cd419863bbca506b8215/pkg/cloudflared/runtime/supervisor.go"
+      "https://github.com/openai/tunnel-client/blob/a390c168ff1b2d14e73a95991c186c6aba3ff5a0/cmd/client/run_command.go",
+      "https://github.com/openai/tunnel-client/blob/a390c168ff1b2d14e73a95991c186c6aba3ff5a0/Dockerfile",
+      "https://github.com/openai/tunnel-client/blob/a390c168ff1b2d14e73a95991c186c6aba3ff5a0/pkg/cloudflared/runtime/supervisor.go"
     ],
     "cloudflared": {
-      "version": "2026.7.2",
-      "release_url": "https://github.com/cloudflare/cloudflared/releases/tag/2026.7.2",
-      "release_commit": "8679787525edc8575b2948a7c4a50b6292c6d426",
+      "version": "2026.8.2",
+      "release_url": "https://github.com/cloudflare/cloudflared/releases/tag/2026.8.2",
+      "release_commit": "733bfb939963e150dcf5c4faddb1603f744fbc98",
       "module_path": "github.com/cloudflare/cloudflared",
       "package_path": "github.com/cloudflare/cloudflared/cmd/cloudflared",
-      "module_version": "v0.0.0-20260715110107-8679787525ed",
-      "module_sum": "h1:ETvjMMv3sjWuilIWK/0upuYaZI2IX+xK3alCiDmXB+g=",
-      "go_mod_sum": "h1:4bn354lJpAv1wqGJhWWHQNjGzo/WFCkQ6uaLTUYmeqI=",
-      "build_time": "2026-07-15T13:30:00Z",
+      "module_version": "v0.0.0-20260814112252-733bfb939963",
+      "module_sum": "h1:bDpUfzzz9W6u6C9deKDAjpLwyiCV/DdOoJaEzG6I3RQ=",
+      "go_mod_sum": "h1:v97UyAHiewwyRGcpkuzO3d1Jbv4I8OBPuEjOAK5mZ08=",
+      "build_time": "2026-08-14T12:23:25Z",
       "security_patch_owner": "tunnel-client maintainers",
       "security_update_policy": "Review every upstream cloudflared release and security advisory. Bump this manifest, verify the pinned Go module checksum through a proxy-only GOPROXY, rebuild every supported distribution, and rerun the cloudflared lifecycle and package tests for routine or emergency updates.",
       "platforms": [
@@ -86,29 +86,27 @@
     },
     "platforms": {
       "amd64": {
-        "url": "https://github.com/openai/tunnel-client/releases/download/v0.0.12/tunnel-client-v0.0.12-linux-amd64.zip",
-        "sha256": "2bb693bd7b5cd28da7ce09cd9e309529dbb33b7cc9dc0058e62a064688f92c81",
+        "url": "https://github.com/openai/tunnel-client/releases/download/v0.0.15/tunnel-client-v0.0.15-linux-amd64.zip",
+        "sha256": "8c836dc5d68d68b663d9a5c5b28ff9fa780d9f7a3fffb1c306880b8f32fab5f1",
         "members": {
-          "tunnel-client": "ee9d4a75bc0b42f36f345aa96231e0db1ab00488122f34ebc99d6db055b6603e",
-          "cloudflared": "951c2f74537db2df88dbb2625817922506a9b6a8d9ef4ee344f11c07b53855ea",
-          "cloudflared-manifest.json": "149c1b5c0095ffab41c3986d620ca18c35373e05c5b6ca0bea88ac19f6d4a7a5",
+          "tunnel-client": "286769f6b1b1837e89896b4684a3ec59c919f860fa2bc159442e3839b6468711",
+          "cloudflared": "4e3f48f0bfa1fda6f86d055c60064e50f5d776ff8c0f3c773ae6083000ccd6e9",
+          "cloudflared-manifest.json": "80003d8a8f38d6a0bd74aabc096e9f99a6e8fad8ed4da699e26a8231fa453aa1",
           "LICENSE": "f4c1d7ba32ef5bcf5cf03e2eefec5825ebafedf50fa330a36700a49c605c1ef4",
           "NOTICE": "1364c020d86ecf948b78b7c655175032068203d13aece70fb0bfe112d7802dc2",
-          "tunnel-client-v0.0.12-linux-amd64-licenses.txt": "fbe3d5c7d3a6a14317915d4c058f97342c9a533654f533adcba3261acc821a33",
-          "tunnel-client-v0.0.12-linux-amd64.spdx.json": "f2c5548c7bff0aff2a3fbd00cf936cf96071d88110ec078837370f468c6b313d"
+          "tunnel-client-v0.0.15-linux-amd64-licenses.txt": "e7242105d50b6eb3e312fe625d1524bf91374bb74d3f605c89b2fb7caa60144f"
         }
       },
       "arm64": {
-        "url": "https://github.com/openai/tunnel-client/releases/download/v0.0.12/tunnel-client-v0.0.12-linux-arm64.zip",
-        "sha256": "6813878a3edb82ebebb32fe5a859bc6327a81cce5bc7b635a2313174d26365d6",
+        "url": "https://github.com/openai/tunnel-client/releases/download/v0.0.15/tunnel-client-v0.0.15-linux-arm64.zip",
+        "sha256": "c51bfd883fc22e3445494a03c0179875176564bde470661b308fd83af5d01abb",
         "members": {
-          "tunnel-client": "0a48e6696de0df5951c013e40be81ce775e6644e209758c48795a0ecbda06406",
-          "cloudflared": "30c1ea9c477d4463e4d1c04b1ed69d8a5b79d1d0ab1b4205622e940056750373",
-          "cloudflared-manifest.json": "149c1b5c0095ffab41c3986d620ca18c35373e05c5b6ca0bea88ac19f6d4a7a5",
+          "tunnel-client": "7764a78fc39ee04d1fc2ae74436df019d85de2a9d93de7c82030e14ef5ae93a0",
+          "cloudflared": "eca604d28f4cf8613f4901460102bb71faf3faf3996d62f6a65b663c209d9310",
+          "cloudflared-manifest.json": "80003d8a8f38d6a0bd74aabc096e9f99a6e8fad8ed4da699e26a8231fa453aa1",
           "LICENSE": "f4c1d7ba32ef5bcf5cf03e2eefec5825ebafedf50fa330a36700a49c605c1ef4",
           "NOTICE": "1364c020d86ecf948b78b7c655175032068203d13aece70fb0bfe112d7802dc2",
-          "tunnel-client-v0.0.12-linux-arm64-licenses.txt": "2504135d0ddc2965429044fe06ea93d72582c3694f83b02eebe6cbc515dc9aaa",
-          "tunnel-client-v0.0.12-linux-arm64.spdx.json": "0c8c84a40e9b96d5c87d35ab650d6cb33671176d1cbb81846a1f52ed401bbed6"
+          "tunnel-client-v0.0.15-linux-arm64-licenses.txt": "efa2249f1ffc65c77d11cb274d5219f3849fcc1692fc6691ba05e911c5604877"
         }
       }
     }

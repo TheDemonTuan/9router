@@ -48,8 +48,8 @@ function command(binary: string, argv: string[]) {
   return new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr);
 }
 assert.match(command("ldd", ["--version"]), /GLIBC|GNU libc/, "glibc required (not musl)");
-assert.match(command("tunnel-client", ["--version"]), /\b0\.0\.12\b/, "Pinned tunnel version mismatch");
-assert.match(command("cloudflared", ["--version"]), /\b2026\.7\.2\b/, "Pinned child version mismatch");
+assert.match(command("tunnel-client", ["--version"]), /\b0\.0\.15\b/, "Pinned tunnel version mismatch");
+assert.match(command("cloudflared", ["--version"]), /\b2026\.8\.2\b/, "Pinned child version mismatch");
 const chromiumVersion = command("/usr/bin/chromium", ["--version"]).trim();
 assert(chromiumVersion.includes(manifest.debian.chromiumVersion.split("-")[0]), "Pinned Chromium version mismatch");
 const root = mkdtempSync(join(tmpdir(), "cgw-image-smoke-"));
