@@ -131,7 +131,7 @@ jobs:
           bun install --frozen-lockfile
           bun run typecheck
           bun run test
-          bun build src/server.ts src/companion/main.ts --target bun --outdir "$RUNNER_TEMP/cgw-entrypoints"
+          bun build src/server.ts src/companion/main.ts --target bun --external playwright-core --outdir "$RUNNER_TEMP/cgw-entrypoints"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - name: Build and load native image without emulation or push
         env:
