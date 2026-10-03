@@ -1,0 +1,126 @@
+name: Chromium stable source build
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        type: choice
+        description: Native architecture (no QEMU)
+        options: [amd64, arm64]
+        default: amd64
+      publish_artifact:
+        type: boolean
+        description: Publish source artifact only after native smoke; never deploy runtime
+        default: false
+permissions:
+  contents: read
+  packages: write
+concurrency:
+  group: chromium-source-${{ github.ref }}-${{ inputs.arch }}
+  cancel-in-progress: false
+jobs:
+  native:
+    timeout-minutes: 360
+    runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    env:
+      ARCH: ${{ inputs.arch }}
+      PUBLISH: ${{ inputs.publish_artifact }}
+      REF_NAME: ${{ github.ref_name }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Enforce native and publication boundaries
+        run: |
+          set -euo pipefail
+          case "$ARCH:$(uname -m)" in amd64:x86_64|arm64:aarch64) ;; *) exit 1 ;; esac
+          if [[ "$PUBLISH" == true && "$REF_NAME" != "$DEFAULT_BRANCH" ]]; then
+            echo '::error::Source artifact publication requires explicit default-branch dispatch'
+            exit 1
+          fi
+      - name: Reclaim only unused hosted runner tool caches
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_ACTIONS" == true && "$RUNNER_ENVIRONMENT" == github-hosted ]]
+          df -h "$RUNNER_TEMP"
+          # This job needs none of these runner-provisioned toolkits. Never
+          # delete user state, Docker volumes, workspaces or production files.
+          sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost
+          if [[ -n "${AGENT_TOOLSDIRECTORY:-}" && "$AGENT_TOOLSDIRECTORY" == /opt/hostedtoolcache ]]; then
+            sudo rm -rf -- "$AGENT_TOOLSDIRECTORY"
+          fi
+          df -h "$RUNNER_TEMP"
+      - name: Measure documented native resource prerequisites
+        run: |
+          set -euo pipefail
+          python3 scripts/build-chromium-source.py --arch "$ARCH" --preflight-only --workdir "$RUNNER_TEMP/chromium-preflight"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Compile stable native browser and corresponding sources
+        run: |
+          set -euo pipefail
+          docker buildx build --load --platform "linux/$ARCH" --target builder \
+            -f scripts/Dockerfile.chromium-source -t cgw-chromium-builder:${{ github.sha }} .
+      - name: Prove compiled version and rootless sandbox DOM
+        run: |
+          set -euo pipefail
+          image=cgw-chromium-builder:${{ github.sha }}
+          security=(--rm --read-only --network none --user 10001:10001 --cap-drop ALL
+            --security-opt no-new-privileges:true
+            --security-opt "seccomp=$PWD/services/chatgpt-web-runtime/security/seccomp.json"
+            --shm-size 1g --tmpfs /tmp:rw,nosuid,nodev,size=256m,mode=1777 --env HOME=/tmp)
+          version=$(docker run "${security[@]}" --entrypoint /opt/chromium/chrome "$image" --version)
+          [[ "$version" == 'Chromium 154.0.8037.97' ]]
+          docker run "${security[@]}" --entrypoint /opt/chromium/chrome "$image" \
+            --headless --no-first-run --user-data-dir=/tmp/browser --dump-dom \
+            'data:text/html,<html><body><script>document.body.textContent="cgw-native-dom-ok"</script></body></html>' \
+            > "$RUNNER_TEMP/chromium-dom.html"
+          python3 -c 'from pathlib import Path; import os; assert "<body>cgw-native-dom-ok</body>" in Path(os.environ["RUNNER_TEMP"], "chromium-dom.html").read_text()'
+          # Runtime's image-smoke additionally verifies physical renderer
+          # Seccomp/namespace state; no browser artifact alone grants deploy.
+      - name: Package immutable browser and separate source OCI paths
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          tag="ghcr.io/$owner/9router-cgw-chromium:${{ github.sha }}-${ARCH}"
+          docker buildx build --load --platform "linux/$ARCH" --metadata-file "$RUNNER_TEMP/chromium-build-metadata.json" \
+            -f scripts/Dockerfile.chromium-source -t "$tag" .
+          echo "BUILT_IMAGE=$tag" >> "$GITHUB_ENV"
+      - name: Inspect actual scratch payload and bind binary/source hashes
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/chromium-evidence"
+          mkdir -p "$stage"
+          cid=$(docker create "$BUILT_IMAGE" /not-executed)
+          trap 'docker rm "$cid" >/dev/null' EXIT
+          docker cp "$cid:/opt/chromium/." "$stage/"
+          docker cp "$cid:/usr/local/share/chromium-source/source.tar.zst" "$stage/source.tar.zst"
+          python3 - "$stage" "$ARCH" <<'PY'
+          import hashlib, json, pathlib, sys
+          root=pathlib.Path(sys.argv[1]); architecture=sys.argv[2]
+          p=json.loads((root/'provenance.json').read_text())
+          assert p['version']=='154.0.8037.97' and p['architecture']==architecture
+          assert p['src_git_commit']=='b510e9d7cd3a2fbd78d0ddc42234103206c5f78d'
+          for file, entry in p['binaries'].items():
+              with (root/file).open('rb') as stream:
+                  assert hashlib.file_digest(stream,'sha256').hexdigest()==entry['sha256']
+          with (root/'source.tar.zst').open('rb') as stream:
+              assert hashlib.file_digest(stream,'sha256').hexdigest()==p['correspondingSource']['sha256']
+          for file in ['LICENSES.html','LICENSES.txt','sbom.spdx.json','license-metadata.txt']:
+              assert (root/file).stat().st_size > 0
+          assert json.loads((root/'sbom.spdx.json').read_text())['spdxVersion']=='SPDX-2.2'
+          print(json.dumps(p,indent=2))
+          PY
+      - name: Publish source artifact only when explicitly requested
+        if: ${{ inputs.publish_artifact }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
+          docker push "$BUILT_IMAGE"
+          ref=$(docker inspect --format='{{index .RepoDigests 0}}' "$BUILT_IMAGE")
+          [[ "$ref" == *@sha256:* ]]
+          printf '%s\n' "$ref" | tee "$RUNNER_TEMP/chromium-image-ref.txt"
+          echo "Source artifact: \`$ref\`" >> "$GITHUB_STEP_SUMMARY"
+          echo 'Runtime HIGH/CRITICAL unsuppressed scan and physical sandbox gates remain mandatory; no deployment performed.' >> "$GITHUB_STEP_SUMMARY"
