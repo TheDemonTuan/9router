@@ -1,2 +1,6 @@
 security/seccomp.json text eol=lf
 image-build-manifest.json text eol=lf
+scripts/*.py text eol=lf
+scripts/*.sh text eol=lf
+scripts/tunnel-build-lock/** text eol=lf
+LICENSES/tunnel-client/*.json text eol=lf

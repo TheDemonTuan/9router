@@ -1,0 +1,45 @@
+{
+  "sourceRevision": "a390c168ff1b2d14e73a95991c186c6aba3ff5a0",
+  "inputLockSha256": "e99226a1ded7b26487ba63811b2f3cf2fd02d7b06673281f4b5788492f61ff98",
+  "sources": {
+    "tunnel-client": {
+      "url": "https://codeload.github.com/openai/tunnel-client/zip/a390c168ff1b2d14e73a95991c186c6aba3ff5a0",
+      "sha256": "72138114d73c19b4d4704dc3590da5f35f9ea54aedf5e83a65443a73b422e0a1"
+    },
+    "cloudflared": {
+      "url": "https://proxy.golang.org/github.com/cloudflare/cloudflared/@v/v0.0.0-20260814112252-733bfb939963.zip",
+      "sha256": "014224d7950d8b55728494d938dadc0903c47ce063b237686d14a00763e75a2f"
+    }
+  },
+  "patchedDependencyMinimums": {
+    "tunnel-client": {
+      "go.opentelemetry.io/otel/sdk": "v1.43.0",
+      "golang.org/x/net": "v0.56.0"
+    },
+    "cloudflared": {
+      "golang.org/x/crypto": "v0.55.0",
+      "google.golang.org/grpc": "v1.83.2"
+    }
+  },
+  "toolchain": {
+    "version": "go1.27.1",
+    "metadataSource": "https://go.dev/dl/?mode=json",
+    "reviewSource": "https://go.dev/doc/devel/release#go1.27.1",
+    "automaticToolchainDownload": false,
+    "platforms": {
+      "amd64": {
+        "url": "https://go.dev/dl/go1.27.1.linux-amd64.tar.gz",
+        "sha256": "63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445"
+      },
+      "arm64": {
+        "url": "https://go.dev/dl/go1.27.1.linux-arm64.tar.gz",
+        "sha256": "3450b45a3f9ee8568792736a5c5e70a1f2e9b36c35a8f74958c03e51d7d92bec"
+      }
+    }
+  },
+  "generatedEvidence": [
+    "/usr/local/share/licenses/tunnel-client/tunnel-client.spdx.json",
+    "/usr/local/share/licenses/tunnel-client/cloudflared.spdx.json"
+  ],
+  "licenseReports": "The previous upstream released-binary license reports are obsolete. Native build regenerates licenses and SPDX from actual linked Go module metadata; no vulnerability metadata or linked dependency is suppressed."
+}

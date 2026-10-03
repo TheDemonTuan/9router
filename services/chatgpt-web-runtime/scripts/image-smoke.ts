@@ -27,20 +27,42 @@ const hostCpu = readFileSync("/proc/cpuinfo", "utf8");
 assert.match(hostCpu, arch === "amd64" ? /^cpu family\s*:/m : /^CPU architecture\s*:\s*8$/m,
   "Host CPU does not match native image architecture; emulation is not accepted");
 const manifest = JSON.parse(readFileSync(new URL("../image-build-manifest.json", import.meta.url), "utf8"));
+const build = manifest.tunnel.sourceBuild;
+const proof = JSON.parse(readFileSync(build.provenanceFile, "utf8"));
+assert.equal(proof.schemaVersion, 1);
+assert.equal(proof.architecture, `linux/${arch}`);
+assert.equal(proof.nativeBuild, true);
+assert.equal(proof.flavor, "full");
+assert.equal(proof.cgoEnabled, false);
+assert.match(proof.appRevision, /^[a-f0-9]{40}$/);
+assert.equal(proof.inputLockSha256, build.inputLockSha256);
+assert.equal(proof.buildHelperSha256, build.buildHelperSha256);
+assert.equal(proof.tunnelRevision, manifest.tunnel.revision);
+assert.equal(proof.cloudflaredRevision, manifest.tunnel.cloudflared.release_commit);
+assert.equal(proof.goVersion, manifest.buildToolchain.version);
+assert.equal(proof.goArchiveSha256, manifest.buildToolchain.platforms[arch].sha256);
+assert.deepEqual(proof.sourceArchives, build.sourceArchives);
+assert.deepEqual(proof.dependencyVersions, build.dependencyVersions);
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 for (const name of ["bun", "tunnel-client", "cloudflared"]) {
   const bytes = readFileSync(`/usr/local/bin/${name}`);
   assert.equal(bytes.subarray(0, 6).toString("hex"), "7f454c460201", `${name}: ELF64 little-endian required`);
   assert.equal(bytes.readUInt16LE(18), arch === "amd64" ? 62 : 183, `${name}: wrong ELF machine`);
   assert.equal(hash(bytes), name === "bun" ? manifest.bun.platforms[arch].binarySha256
-    : manifest.tunnel.platforms[arch].members[name], `${name}: installed binary checksum changed`);
+    : proof.files[`bin/${name}`], `${name}: installed binary checksum changed`);
 }
 assert.equal(hash(readFileSync(new URL("../security/seccomp.json", import.meta.url))), manifest.seccomp.packagedSha256,
   "Packaged seccomp profile changed without manifest review");
-for (const [name, expected] of Object.entries(manifest.tunnel.platforms[arch].members)) {
-  if (["tunnel-client", "cloudflared"].includes(name)) continue;
-  assert.equal(hash(readFileSync(`/usr/local/share/licenses/tunnel-client/${name}`)), expected,
-    `${name}: missing or changed license/SBOM provenance`);
+for (const [path, expected] of Object.entries(proof.files)) {
+  assert(!path.split("/").some(part => part === ".." || part === ""), "Unsafe build provenance path");
+  assert(path.startsWith("bin/") || path.startsWith("share/licenses/tunnel-client/"), "Unexpected build provenance path");
+  assert.equal(hash(readFileSync(`/usr/local/${path}`)), expected, `${path}: missing or changed build provenance`);
+}
+for (const path of build.sbomFiles) {
+  const sbom = JSON.parse(readFileSync(path, "utf8"));
+  assert.equal(sbom.spdxVersion, "SPDX-2.3");
+  assert(sbom.packages.some((pkg: { name: string; versionInfo: string }) => pkg.name === "stdlib"
+    && pkg.versionInfo === manifest.buildToolchain.version.slice(2)), "Go standard library omitted from SBOM");
 }
 function command(binary: string, argv: string[]) {
   const result = Bun.spawnSync([binary, ...argv], { stdout: "pipe", stderr: "pipe" });

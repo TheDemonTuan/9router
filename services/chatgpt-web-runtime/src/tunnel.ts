@@ -65,12 +65,24 @@ export class ProfileTunnel {
     if (process.platform !== "linux" || !architecture) throw new RuntimeStateError("connector_unavailable", "Tunnel requires a supported native Linux runtime", 503);
     const manifest = JSON.parse(readFileSync(join(import.meta.dir, "..", "image-build-manifest.json"), "utf8"));
     if (manifest.tunnel?.version !== TUNNEL_VERSION) throw new RuntimeStateError("connector_unavailable", "Tunnel pin manifest mismatch", 503);
-    const members = manifest.tunnel.platforms?.[architecture]?.members;
+    const build = manifest.tunnel.sourceBuild;
+    const licenses = join(dirname(this.config.binaryPath), "..", "share", "licenses", "tunnel-client");
+    const proof = JSON.parse(readFileSync(join(licenses, "build-provenance.json"), "utf8"));
+    if (!build || proof.schemaVersion !== 1 || proof.architecture !== `linux/${architecture}`
+      || proof.nativeBuild !== true || proof.flavor !== "full" || proof.cgoEnabled !== false
+      || proof.inputLockSha256 !== build.inputLockSha256 || proof.buildHelperSha256 !== build.buildHelperSha256
+      || proof.tunnelRevision !== manifest.tunnel.revision
+      || proof.cloudflaredRevision !== manifest.tunnel.cloudflared.release_commit
+      || proof.goVersion !== manifest.buildToolchain.version
+      || proof.goArchiveSha256 !== manifest.buildToolchain.platforms[architecture].sha256) {
+      throw new RuntimeStateError("connector_unavailable", "Pinned tunnel build provenance failed", 503);
+    }
     for (const member of ["tunnel-client", "cloudflared", "cloudflared-manifest.json"]) {
       const path = member === "tunnel-client" ? this.config.binaryPath : member === "cloudflared" ? join(dirname(this.config.binaryPath), member)
-        : join(dirname(this.config.binaryPath), "..", "share", "licenses", "tunnel-client", member);
+        : join(licenses, member);
+      const key = member === "cloudflared-manifest.json" ? `share/licenses/tunnel-client/${member}` : `bin/${member}`;
       const digest = createHash("sha256").update(readFileSync(path)).digest("hex");
-      if (!members || digest !== members[member]) throw new RuntimeStateError("connector_unavailable", "Pinned tunnel closure integrity failed", 503);
+      if (digest !== proof.files?.[key]) throw new RuntimeStateError("connector_unavailable", "Pinned tunnel closure integrity failed", 503);
     }
     mkdirSync(this.config.profileDir, { recursive: true, mode: 0o700 });
     chmodSync(this.config.profileDir, 0o700);

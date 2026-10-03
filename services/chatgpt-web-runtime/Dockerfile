@@ -24,6 +24,8 @@ ARG APP_REVISION
 RUN apt-get update && apt-get install -y --no-install-recommends python3 && rm -rf /var/lib/apt/lists/*
 COPY services/chatgpt-web-runtime/image-build-manifest.json /build/image-build-manifest.json
 COPY services/chatgpt-web-runtime/scripts/install-image-assets.py /build/install-image-assets.py
+COPY services/chatgpt-web-runtime/scripts/build-tunnel-assets.py /build/build-tunnel-assets.py
+COPY services/chatgpt-web-runtime/scripts/tunnel-build-lock/ /build/tunnel-build-lock/
 RUN python3 /build/install-image-assets.py --manifest /build/image-build-manifest.json \
     --arch "${TARGETARCH}" --revision "${APP_REVISION}" --output /assets \
     && test "$(/assets/bin/bun --version)" = '1.4.0'

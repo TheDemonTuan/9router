@@ -56,7 +56,6 @@
   "tunnel": {
     "version": "0.0.15",
     "revision": "a390c168ff1b2d14e73a95991c186c6aba3ff5a0",
-    "releaseApi": "https://api.github.com/repos/openai/tunnel-client/releases/tags/v0.0.15",
     "closurePolicy": "Foreground full-client run embeds runtime; sibling cloudflared is its only bundled executable child. MCP child is package src/adapters/chatgpt-web/mcp-main.ts through runtime-owned entrypoint. Separate managed-runtime release variants are not used or downloaded.",
     "closureEvidence": [
       "https://github.com/openai/tunnel-client/blob/a390c168ff1b2d14e73a95991c186c6aba3ff5a0/cmd/client/run_command.go",
@@ -73,41 +72,71 @@
       "module_sum": "h1:bDpUfzzz9W6u6C9deKDAjpLwyiCV/DdOoJaEzG6I3RQ=",
       "go_mod_sum": "h1:v97UyAHiewwyRGcpkuzO3d1Jbv4I8OBPuEjOAK5mZ08=",
       "build_time": "2026-08-14T12:23:25Z",
-      "security_patch_owner": "tunnel-client maintainers",
-      "security_update_policy": "Review every upstream cloudflared release and security advisory. Bump this manifest, verify the pinned Go module checksum through a proxy-only GOPROXY, rebuild every supported distribution, and rerun the cloudflared lifecycle and package tests for routine or emergency updates.",
+      "security_patch_owner": "9router CGW runtime image maintainers",
+      "security_update_policy": "Native rebuild from the pinned module source with committed patched go.mod/go.sum and checksum module graph; retain full binary Go metadata, generated SPDX and exact license texts; every architecture must pass the unsuppressed HIGH/CRITICAL image gate.",
+      "security_dependency_overrides": {
+        "golang.org/x/crypto": "v0.55.0",
+        "google.golang.org/grpc": "v1.83.2"
+      },
       "platforms": [
         "linux/amd64",
-        "linux/arm64",
-        "darwin/amd64",
-        "darwin/arm64",
-        "windows/amd64",
-        "windows/arm64"
+        "linux/arm64"
       ]
     },
-    "platforms": {
-      "amd64": {
-        "url": "https://github.com/openai/tunnel-client/releases/download/v0.0.15/tunnel-client-v0.0.15-linux-amd64.zip",
-        "sha256": "8c836dc5d68d68b663d9a5c5b28ff9fa780d9f7a3fffb1c306880b8f32fab5f1",
-        "members": {
-          "tunnel-client": "286769f6b1b1837e89896b4684a3ec59c919f860fa2bc159442e3839b6468711",
-          "cloudflared": "4e3f48f0bfa1fda6f86d055c60064e50f5d776ff8c0f3c773ae6083000ccd6e9",
-          "cloudflared-manifest.json": "80003d8a8f38d6a0bd74aabc096e9f99a6e8fad8ed4da699e26a8231fa453aa1",
-          "LICENSE": "f4c1d7ba32ef5bcf5cf03e2eefec5825ebafedf50fa330a36700a49c605c1ef4",
-          "NOTICE": "1364c020d86ecf948b78b7c655175032068203d13aece70fb0bfe112d7802dc2",
-          "tunnel-client-v0.0.15-linux-amd64-licenses.txt": "e7242105d50b6eb3e312fe625d1524bf91374bb74d3f605c89b2fb7caa60144f"
+    "distribution": "native patched source build, not upstream release binaries",
+    "sourceBuild": {
+      "inputLockPath": "scripts/tunnel-build-lock",
+      "inputLockSha256": "e99226a1ded7b26487ba63811b2f3cf2fd02d7b06673281f4b5788492f61ff98",
+      "buildHelper": "scripts/build-tunnel-assets.py",
+      "buildHelperSha256": "d1885e5c0951bf30ac5ba79ac9a0d66aeca4c87fd54fb9111d2869ee509efaf7",
+      "sourceArchives": {
+        "tunnel-client": {
+          "url": "https://codeload.github.com/openai/tunnel-client/zip/a390c168ff1b2d14e73a95991c186c6aba3ff5a0",
+          "sha256": "72138114d73c19b4d4704dc3590da5f35f9ea54aedf5e83a65443a73b422e0a1"
+        },
+        "cloudflared": {
+          "url": "https://proxy.golang.org/github.com/cloudflare/cloudflared/@v/v0.0.0-20260814112252-733bfb939963.zip",
+          "sha256": "014224d7950d8b55728494d938dadc0903c47ce063b237686d14a00763e75a2f"
         }
       },
-      "arm64": {
-        "url": "https://github.com/openai/tunnel-client/releases/download/v0.0.15/tunnel-client-v0.0.15-linux-arm64.zip",
-        "sha256": "c51bfd883fc22e3445494a03c0179875176564bde470661b308fd83af5d01abb",
-        "members": {
-          "tunnel-client": "7764a78fc39ee04d1fc2ae74436df019d85de2a9d93de7c82030e14ef5ae93a0",
-          "cloudflared": "eca604d28f4cf8613f4901460102bb71faf3faf3996d62f6a65b663c209d9310",
-          "cloudflared-manifest.json": "80003d8a8f38d6a0bd74aabc096e9f99a6e8fad8ed4da699e26a8231fa453aa1",
-          "LICENSE": "f4c1d7ba32ef5bcf5cf03e2eefec5825ebafedf50fa330a36700a49c605c1ef4",
-          "NOTICE": "1364c020d86ecf948b78b7c655175032068203d13aece70fb0bfe112d7802dc2",
-          "tunnel-client-v0.0.15-linux-arm64-licenses.txt": "efa2249f1ffc65c77d11cb274d5219f3849fcc1692fc6691ba05e911c5604877"
+      "flavor": "full",
+      "cgoEnabled": false,
+      "buildFlags": [
+        "-mod=readonly",
+        "-trimpath",
+        "-buildvcs=false"
+      ],
+      "dependencyVersions": {
+        "tunnel-client": {
+          "go.opentelemetry.io/otel/sdk": "v1.43.0",
+          "golang.org/x/net": "v0.56.0"
+        },
+        "cloudflared": {
+          "golang.org/x/crypto": "v0.55.0",
+          "google.golang.org/grpc": "v1.83.2"
         }
+      },
+      "provenanceFile": "/usr/local/share/licenses/tunnel-client/build-provenance.json",
+      "sbomFiles": [
+        "/usr/local/share/licenses/tunnel-client/tunnel-client.spdx.json",
+        "/usr/local/share/licenses/tunnel-client/cloudflared.spdx.json"
+      ],
+      "licensePolicy": "Generate exact upstream LICENSE/COPYING/NOTICE text and SHA256 evidence for every actually linked module and Go standard library; SPDX license conclusions stay NOASSERTION instead of inferred legal declarations."
+    }
+  },
+  "buildToolchain": {
+    "version": "go1.27.1",
+    "metadataSource": "https://go.dev/dl/?mode=json",
+    "reviewSource": "https://go.dev/doc/devel/release#go1.27.1",
+    "automaticToolchainDownload": false,
+    "platforms": {
+      "amd64": {
+        "url": "https://go.dev/dl/go1.27.1.linux-amd64.tar.gz",
+        "sha256": "63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445"
+      },
+      "arm64": {
+        "url": "https://go.dev/dl/go1.27.1.linux-arm64.tar.gz",
+        "sha256": "3450b45a3f9ee8568792736a5c5e70a1f2e9b36c35a8f74958c03e51d7d92bec"
       }
     }
   },

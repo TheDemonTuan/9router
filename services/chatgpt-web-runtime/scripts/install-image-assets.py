@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build-time only: install the release closure after archive and member verification."""
+"""Build-time only: verify Bun release and rebuild the complete pinned tunnel closure."""
 import argparse
 import hashlib
 import io
@@ -7,6 +7,7 @@ import json
 import pathlib
 import platform
 import re
+import runpy
 import urllib.request
 import zipfile
 
@@ -28,20 +29,17 @@ def download_archive(asset):
     return zipfile.ZipFile(io.BytesIO(data))
 
 
-def install(manifest, arch, root):
+def install(manifest, arch, root, revision):
     expected_machine = {"amd64": "x86_64", "arm64": "aarch64"}[arch]
     if platform.system() != "Linux" or platform.machine() != expected_machine:
         raise ValueError("Native Linux builder required; emulation/cross-build is not a release gate")
     binaries = root / "bin"
-    licenses = root / "share" / "licenses" / "tunnel-client"
     binaries.mkdir(parents=True, exist_ok=True)
-    licenses.mkdir(parents=True, exist_ok=True)
     bun_asset = manifest["bun"]["platforms"][arch]
-    tunnel_asset = manifest["tunnel"]["platforms"][arch]
     bun = download_archive(bun_asset)
-    tunnel = download_archive(tunnel_asset)
-    if not set(tunnel_asset["members"]).issubset(set(tunnel.namelist())):
-        raise ValueError("Tunnel release archive missing required members")
+    expected_members = {bun_asset["member"], str(pathlib.PurePosixPath(bun_asset["member"]).parent) + "/"}
+    if len(bun.namelist()) != len(expected_members) or set(bun.namelist()) != expected_members:
+        raise ValueError("Bun release archive differs from reviewed exact closure")
     elf_machine = {"amd64": 62, "arm64": 183}[arch]
 
     def binary(name, content, expected_hash):
@@ -53,18 +51,9 @@ def install(manifest, arch, root):
         destination.chmod(0o755)
 
     binary("bun", bun.read(bun_asset["member"]), bun_asset["binarySha256"])
-    for name, expected_hash in tunnel_asset["members"].items():
-        content = tunnel.read(name)
-        verify(content, expected_hash, name)
-        if name in ("tunnel-client", "cloudflared"):
-            binary(name, content, expected_hash)
-        else:
-            # Never extract paths selected by an archive or caller.
-            if pathlib.PurePosixPath(name).name != name:
-                raise ValueError("Unsafe release member path")
-            (licenses / name).write_bytes(content)
     bun.close()
-    tunnel.close()
+    builder = runpy.run_path(str(pathlib.Path(__file__).with_name("build-tunnel-assets.py")))
+    builder["build"](manifest, arch, root, revision)
 
 
 if __name__ == "__main__":
@@ -76,4 +65,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if not re.fullmatch(r"[a-f0-9]{40}", args.revision):
         parser.error("--revision must be the full app git SHA")
-    install(json.loads(args.manifest.read_text()), args.arch, args.output)
+    install(json.loads(args.manifest.read_text()), args.arch, args.output, args.revision)
