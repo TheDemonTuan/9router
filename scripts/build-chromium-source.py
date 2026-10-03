@@ -95,6 +95,13 @@ def build(args, lock, resources):
     python_bin.mkdir(exist_ok=True)
     if not (python_bin / 'python3').exists():
         (python_bin / 'python3').symlink_to(sys.executable)
+    if args.arch == 'arm64':
+        gclient_code = (depot / 'gclient.py').read_text()
+        target_str = '                for package in dep_value.get("packages", []):\n'
+        patch_str = ('                for package in dep_value.get("packages", []):\n'
+                     '                    if package.get("package", "").startswith("infra/3pp/tools/gperf/"): continue\n')
+        assert target_str in gclient_code, "gclient.py package loop signature mismatch"
+        (depot / 'gclient.py').write_text(gclient_code.replace(target_str, patch_str, 1))
     env = dict(os.environ, PATH=str(depot) + os.pathsep + os.environ['PATH'],
                DEPOT_TOOLS_UPDATE='0', DEPOT_TOOLS_METRICS='0',
                CUSTOM_CIPD_CLIENT=str(cipd), DEPOT_TOOLS_COLLECT_METRICS='0')
@@ -120,34 +127,8 @@ def build(args, lock, resources):
     cpu = 'x64' if args.arch == 'amd64' else 'arm64'
     config = 'solutions = ' + repr([solution]) + '\ntarget_os = ["linux"]\ntarget_os_only = True\ntarget_cpu = ' + repr([cpu]) + '\ntarget_cpu_only = True\n'
     (args.workdir / '.gclient').write_text(config)
-    gperf_old = ("  'src/third_party/gperf/cipd': {\n"
-                 "      'packages': [\n"
-                 "        {\n"
-                 "          'package': 'infra/3pp/tools/gperf/${{platform}}',\n"
-                 "          'version': 'version:3@3.2',\n"
-                 "        },\n"
-                 "      ],\n"
-                 "      'condition': 'host_os == \"linux\" and non_git_source',\n"
-                 "      'dep_type': 'cipd',\n"
-                 "  },")
-    gperf_new = ("  'src/third_party/gperf/cipd': {\n"
-                 "      'packages': [\n"
-                 "        {\n"
-                 "          'package': 'infra/3pp/tools/gperf/${{platform}}',\n"
-                 "          'version': 'version:3@3.2',\n"
-                 "        },\n"
-                 "      ],\n"
-                 "      'condition': 'False',\n"
-                 "      'dep_type': 'cipd',\n"
-                 "  },")
-    if args.arch == 'arm64':
-        checked_replace(src / 'DEPS', gperf_old, gperf_new)
-        run(['git', '-C', str(src), '-c', 'user.name=cgw', '-c', 'user.email=cgw@local',
-             'commit', '-am', 'temp-bypass-gperf'], cwd=src, env=env)
     run([str(depot / 'gclient'), 'sync', '--nohooks', '--no-history',
          '--revision', 'src@' + lock['chromium']['git_commit']], cwd=args.workdir, env=env)
-    if args.arch == 'arm64':
-        run(['git', '-C', str(src), 'reset', '--hard', lock['chromium']['git_commit']], cwd=src, env=env)
     verify_sha256(src / 'DEPS', lock['source_file_sha256']['DEPS'])
     run([str(depot / 'gclient'), 'revinfo', '--actual', '--output-json',
          str(args.workdir / 'dependency-revisions.json')], cwd=args.workdir, env=env)
