@@ -127,11 +127,12 @@
       "unconditionalNamespaceSyscalls": [
         "clone",
         "setns",
-        "unshare"
+        "unshare",
+        "chroot"
       ],
       "privilegedSyscalls": "mount/bpf/perf_event_open remain capability-conditioned; runtime drops ALL capabilities and forbids SYS_ADMIN. ptrace retains upstream minKernel restriction. Chromium applies its own renderer seccomp-BPF sandbox."
     },
-    "packagedSha256": "49433626b4c1d12c0a54f87e94d92a158f6b3e92155ac7347a1bcbffd50e5949"
+    "packagedSha256": "4e159a8bad30157ac2423b3428d7884f1d4b644e9f8a97c38e00ec5dcb44d2a1"
   },
   "actions": {
     "actions/checkout": "3d3c42e5aac5ba805825da76410c181273ba90b1",

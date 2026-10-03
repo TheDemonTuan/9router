@@ -654,12 +654,8 @@
       ],
       "action": "SCMP_ACT_ALLOW",
       "args": [],
-      "comment": "",
-      "includes": {
-        "caps": [
-          "CAP_SYS_CHROOT"
-        ]
-      },
+      "comment": "Allow chroot for Chromium user namespace sandbox",
+      "includes": {},
       "excludes": {}
     },
     {
