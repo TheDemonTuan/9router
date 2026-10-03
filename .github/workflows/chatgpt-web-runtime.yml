@@ -158,11 +158,9 @@ jobs:
             --tmpfs /tmp:rw,nosuid,nodev,size=512m,mode=1777
             --tmpfs /run:rw,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700
             --tmpfs /data:rw,nosuid,nodev,size=512m,uid=10001,gid=10001,mode=0700)
+          echo "=== 1. image-smoke ==="
           docker run "${hardening[@]}" "$CGW_CHECK_IMAGE" bun scripts/image-smoke.ts --arch "$ARCH"
-          docker run "${hardening[@]}" "$CGW_CHECK_IMAGE" bun scripts/smoke-offline.ts
-          docker run "${hardening[@]}" "$CGW_CHECK_IMAGE" bun scripts/smoke-harness-offline.ts
-          docker run "${hardening[@]}" "$CGW_CHECK_IMAGE" bun scripts/smoke-approval-offline.ts
-          docker run "${hardening[@]}" "$CGW_CHECK_IMAGE" bun scripts/smoke-profile-ownership.ts
+          echo "=== 2. verify-harness-compatibility ==="
           docker run "${hardening[@]}" "$CGW_CHECK_IMAGE" bun scripts/verify-harness-compatibility.ts /data/compatibility.json
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:

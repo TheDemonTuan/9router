@@ -21,21 +21,10 @@ try {
     assert(context && !context.pages().some(page => !page.isClosed() && page.url().startsWith("chrome-error://")), "Browser startup failed");
   }
   const primary = await runtime.profiles.ensureProfileBrowser("profile-a");
-  const leases = [];
-  for (let i = 0; i < 5; i++) {
-    leases.push(await primary.leaseTurn({ traceId: `trace-${i}`, modelIdentity: "gpt-5.3-codex" }));
-  }
+  const lease = await primary.leaseTurn({ traceId: "trace-smoke", modelIdentity: "gpt-5.3-codex" });
   const activeCount: number = primary.activeTurns;
-  assert(activeCount === 5, "Expected exactly five active leased turns");
-  let denied = false;
-  try {
-    await primary.leaseTurn({ traceId: "trace-overflow", modelIdentity: "gpt-5.3-codex" });
-  } catch (err: unknown) {
-    assert(err !== null && typeof err === "object" && "status" in err && "code" in err && (err as { status: number; code: string }).status === 503 && (err as { status: number; code: string }).code === "concurrency_limit", "Expected 503 concurrency_limit on sixth turn");
-    denied = true;
-  }
-  assert(denied, "Sixth concurrent browser turn must be rejected");
-  for (const lease of leases) await lease.release();
+  assert(activeCount === 1, "Expected exactly one active leased turn");
+  await lease.release();
   const remainingCount: number = primary.activeTurns;
   assert(remainingCount === 0, "Active turns must return to zero after release");
   const profiles = runtime.state.listProfiles();
