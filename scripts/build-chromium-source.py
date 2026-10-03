@@ -105,7 +105,7 @@ def build(args, lock, resources):
         # them with source-built native tools, not QEMU or mutable system Rust.
         custom = {p: None for p in ['src/third_party/llvm-build/Release+Asserts',
                   'src/third_party/rust-toolchain', 'src/third_party/llvm-libclang',
-                  'src/third_party/node/linux']}
+                  'src/third_party/node/linux', 'src/third_party/gperf/cipd']}
     solution = {'name': 'src', 'url': lock['chromium']['git_url'],
                 'deps_file': 'DEPS', 'managed': False, 'custom_deps': custom,
                 'custom_vars': {'checkout_configuration': 'small',
@@ -121,6 +121,11 @@ def build(args, lock, resources):
     verify_sha256(src / 'DEPS', lock['source_file_sha256']['DEPS'])
     run([str(depot / 'gclient'), 'revinfo', '--actual', '--output-json',
          str(args.workdir / 'dependency-revisions.json')], cwd=args.workdir, env=env)
+    if args.arch == 'arm64':
+        gperf_bin = src / 'third_party/gperf/cipd/bin'
+        gperf_bin.mkdir(parents=True, exist_ok=True)
+        if not (gperf_bin / 'gperf').exists():
+            (gperf_bin / 'gperf').symlink_to('/usr/bin/gperf')
     # Exact DEPS hash plus gclient's GCS hashes/CIPD instance IDs verify the
     # full dependency graph. Stock compiler identities are additionally checked.
     run([sys.executable, str(src / 'build/install-build-deps.py'), '--no-prompt',
