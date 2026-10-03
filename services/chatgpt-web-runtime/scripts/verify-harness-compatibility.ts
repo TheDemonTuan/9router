@@ -18,9 +18,9 @@ const gates = [
 ];
 try {
   for (const args of gates) {
-    const child = Bun.spawn([process.execPath, ...args], { cwd: resolve(import.meta.dir, ".."), env, stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    const child = Bun.spawn([process.execPath, ...args], { cwd: resolve(import.meta.dir, ".."), env, stdin: "ignore", stdout: "inherit", stderr: "inherit" });
     const timeout = setTimeout(() => child.kill("SIGTERM"), 10 * 60_000);
-    const [status, _stdout, _stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+    const status = await child.exited;
     clearTimeout(timeout);
     if (status !== 0) throw new Error(`Native compatibility gate failed: ${args[0]} (exit ${status}); no evidence was emitted`);
   }
