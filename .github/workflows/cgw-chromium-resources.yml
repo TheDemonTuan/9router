@@ -1,0 +1,31 @@
+name: CGW native Chromium resource probe
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 5
+    steps:
+      - name: Observe native source build capacity without mutation
+        run: |
+          set -euo pipefail
+          uname -m
+          free -b
+          df -B1 / /mnt
+          sudo du -sx -B1 /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" 2>/dev/null || true
+          python3 - <<'PY'
+          import os, platform, shutil
+          with open('/proc/meminfo') as stream:
+              memory = next(int(line.split()[1]) * 1024 for line in stream if line.startswith('MemTotal:'))
+          minimum = 140 if platform.machine() == 'aarch64' else 100
+          disk = shutil.disk_usage(os.environ['RUNNER_TEMP'])
+          print({'native': platform.machine(), 'ramBytes': memory, 'diskTotalBytes': disk.total, 'diskFreeBytes': disk.free, 'requiredDiskGiB': minimum, 'requiredRamGiB': 8})
+          if memory < 8 * 1024**3 or disk.total < minimum * 1024**3:
+              raise SystemExit('CGW_CHROMIUM_HOST_CAPACITY_INSUFFICIENT')
+          PY
