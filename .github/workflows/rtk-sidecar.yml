@@ -171,11 +171,11 @@ jobs:
     permissions:
       contents: read
       packages: read
-    uses: TheDemonTuan/vps-deploy/.github/workflows/security-trivy.yml@1f33d412b386989a35cc4fa664be8d9b3fa7b8a0
+    uses: TheDemonTuan/vps-deploy/.github/workflows/security-trivy.yml@f6d40a519c2bf8b0a19e3f9c714b737875052870
     with:
       app: 9router
       source-sha: ${{ github.sha }}
-      platform-ref: 1f33d412b386989a35cc4fa664be8d9b3fa7b8a0
+      platform-ref: f6d40a519c2bf8b0a19e3f9c714b737875052870
       config: .deploy/app.yml
       scan-mode: image
       image-ref: ${{ needs.manifest.outputs.image_ref }}
@@ -190,14 +190,14 @@ jobs:
     environment: production
     timeout-minutes: 17
     steps:
-      - uses: TheDemonTuan/vps-deploy/.github/actions/deploy@1f33d412b386989a35cc4fa664be8d9b3fa7b8a0
+      - uses: TheDemonTuan/vps-deploy/.github/actions/deploy@f6d40a519c2bf8b0a19e3f9c714b737875052870
         with:
           app: 9router
           host: oracle-main
           operation: deploy
           component: rtk
           source-sha: ${{ github.sha }}
-          platform-ref: 1f33d412b386989a35cc4fa664be8d9b3fa7b8a0
+          platform-ref: f6d40a519c2bf8b0a19e3f9c714b737875052870
           config: .deploy/app.yml
           image-ref: ${{ needs.manifest.outputs.image_ref }}
         env:
