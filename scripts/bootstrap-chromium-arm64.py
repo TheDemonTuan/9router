@@ -97,9 +97,9 @@ def main():
         if name in ('LLVM monorepo', 'Rust'):
             subprocess.run(['git', 'clone', '--filter=blob:none', '--no-checkout', url, str(destination)], check=True)
             subprocess.run(['git', '-C', str(destination), 'checkout', '--detach', revision], check=True)
-            patches = inputs['llvm']['cherry_picks'] if name == 'LLVM monorepo' else inputs['rust']['cherry_picks']
-            for patch in patches:
-                subprocess.run(['git', '-C', str(destination), 'fetch', 'origin', patch], check=True)
+            if name == 'LLVM monorepo':
+                for patch in inputs['llvm']['cherry_picks']:
+                    subprocess.run(['git', '-C', str(destination), 'fetch', 'origin', patch], check=True)
         else:
             destination.mkdir(parents=True)
             subprocess.run(['git', 'init', str(destination)], check=True)
