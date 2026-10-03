@@ -149,6 +149,7 @@ jobs:
           ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           hardening=(--rm --read-only --network none --cap-drop ALL --security-opt no-new-privileges:true
             --security-opt "seccomp=$PWD/services/chatgpt-web-runtime/security/seccomp.json" --shm-size 1g
             --tmpfs /tmp:rw,nosuid,nodev,size=512m,mode=1777
