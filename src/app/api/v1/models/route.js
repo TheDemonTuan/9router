@@ -28,7 +28,8 @@ import {
 import { isAlitpModelAvailableForEdition } from "open-sse/providers/alibabaTokenPlanCatalog.js";
 import {
   getChatGptWebCatalog,
-} from "open-sse/services/chatgptWebBridge.js";
+} from "open-sse/services/chatgptWebRuntimeClient.js";
+import { mergeChatGptWebPublicModels } from "@/lib/providerNormalization";
 
 // Qoder shares one live resolver across intl (qoder) and CN (qoder-cn); the
 // credentials carry the provider id so qoderModels picks the right region's
@@ -74,31 +75,11 @@ const LIVE_MODEL_RESOLVERS = {
   "chatgpt-web": async (conn, ctx) => {
     const connections = (ctx?.connections || []).filter((entry) => entry.provider === "chatgpt-web");
     const candidates = connections.length > 0 ? connections : [conn];
-    const merged = new Map();
-    await Promise.all(candidates.map(async (connection) => {
-      try {
-        const result = await getChatGptWebCatalog(connection);
-        if (result.stale) return;
-        for (const model of result.models || []) {
-          const liveCapabilities = model.capabilities || {};
-          if (liveCapabilities.native_responses !== true && liveCapabilities.generic_responses !== true) continue;
-          const existing = merged.get(model.id);
-          if (!existing) {
-            merged.set(model.id, model);
-            continue;
-          }
-          const capabilities = { ...(existing.capabilities || {}) };
-          for (const [key, value] of Object.entries(model.capabilities || {})) {
-            if (value === true) capabilities[key] = true;
-            else if (!(key in capabilities) && value === false) capabilities[key] = false;
-          }
-          merged.set(model.id, { ...existing, capabilities });
-        }
-      } catch {
-        // Offline/unknown connections contribute no public model evidence.
-      }
+    const catalogs = await Promise.all(candidates.map(async (connection) => {
+      try { return await getChatGptWebCatalog(connection); }
+      catch { return null; }
     }));
-    return { models: [...merged.values()] };
+    return { resolved: true, models: mergeChatGptWebPublicModels(catalogs) };
   },
   kiro: async (conn) => {
     const result = await resolveKiroModels({
@@ -661,6 +642,17 @@ export async function buildModelsList(kindFilter, options = {}) {
         };
         const staticModel = providerModels.find((m) => m.id === modelId);
         const liveMetadata = liveModelMetadataById.get(modelId);
+        if (providerId === "chatgpt-web") {
+          // Custom IDs and aliases do not substitute for verified profile evidence.
+          if (!liveMetadata) continue;
+          models.push({
+            ...liveMetadata,
+            ...model,
+            context_length: liveMetadata.context_window,
+            ...(liveMetadata.max_output !== undefined ? { max_completion_tokens: liveMetadata.max_output } : {}),
+          });
+          continue;
+        }
         if (providerId === "codex" && (liveMetadata || staticModel)) {
           const codexMetadata = liveMetadata || staticModel;
 
@@ -790,7 +782,7 @@ export async function buildModelsList(kindFilter, options = {}) {
   }
 
   const projectedModels = dedupedModels
-    .map((model) => projectPublicModel(model))
+    .map((model) => model.owned_by === "cgw" ? model : projectPublicModel(model))
     .filter(Boolean);
   const modelIds = new Set(projectedModels.map((model) => model.id));
   return projectedModels.filter((model) => !model.virtual || modelIds.has(model.base_model));

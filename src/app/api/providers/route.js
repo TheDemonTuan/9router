@@ -8,8 +8,8 @@ import {
 } from "@/models";
 import { APIKEY_PROVIDERS } from "@/shared/constants/config";
 import { AI_PROVIDERS, FREE_TIER_PROVIDERS, LOCAL_BRIDGE_PROVIDERS, WEB_COOKIE_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isCustomEmbeddingProvider } from "@/shared/constants/providers";
-import { normalizeProviderId, normalizeProviderSpecificData, sanitizeProviderSpecificData } from "@/lib/providerNormalization";
-import { validateChatGptWebBridgeId } from "open-sse/services/chatgptWebBridge.js";
+import { normalizeProviderId, normalizeProviderSpecificData, sanitizeProviderSpecificData, validateChatGptWebConnectionInput } from "@/lib/providerNormalization";
+import { validateChatGptWebProfileId } from "open-sse/services/chatgptWebRuntimeClient.js";
 
 export const dynamic = "force-dynamic";
 
@@ -70,7 +70,7 @@ export async function GET() {
       const safe = {
         ...c,
         name,
-        providerSpecificData: sanitizeProviderSpecificData(c.providerSpecificData),
+        providerSpecificData: c.provider === "chatgpt-web" ? { profileId: c.providerSpecificData?.profileId } : sanitizeProviderSpecificData(c.providerSpecificData),
       };
       delete safe.apiKey;
       delete safe.accessToken;
@@ -92,6 +92,10 @@ export async function POST(request) {
     const body = await request.json();
     const provider = normalizeProviderId(body.provider);
     const { apiKey, name, displayName, priority, globalPriority, defaultModel, testStatus } = body;
+    if (provider === "chatgpt-web") {
+      try { validateChatGptWebConnectionInput(body); }
+      catch (error) { return NextResponse.json({ error: error.message }, { status: 400 }); }
+    }
     const proxyConfig = normalizeProxyConfig(body);
     if (proxyConfig.error) {
       return NextResponse.json({ error: proxyConfig.error }, { status: 400 });
@@ -132,7 +136,7 @@ export async function POST(request) {
     let providerSpecificData = normalizeProviderSpecificData(provider, body, body.providerSpecificData);
     if (isLocalBridgeProvider) {
       try {
-        providerSpecificData = { bridgeId: validateChatGptWebBridgeId(providerSpecificData?.bridgeId) };
+        providerSpecificData = { profileId: validateChatGptWebProfileId(providerSpecificData?.profileId) };
       } catch (error) {
         return NextResponse.json({ error: error.message }, { status: 400 });
       }
@@ -173,7 +177,7 @@ export async function POST(request) {
       };
     }
 
-    const mergedProviderSpecificData = {
+    const mergedProviderSpecificData = provider === "chatgpt-web" ? providerSpecificData : {
       ...(providerSpecificData || {}),
       connectionProxyEnabled: proxyConfig.connectionProxyEnabled,
       connectionProxyUrl: proxyConfig.connectionProxyUrl,

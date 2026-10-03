@@ -1,0 +1,212 @@
+name: ChatGPT Web runtime gates
+on:
+  push:
+    branches: [feat/cgw-full-harness]
+  pull_request:
+    paths:
+      - services/chatgpt-web-runtime/**
+      - open-sse/services/chatgptWebRuntimeClient.js
+      - open-sse/executors/chatgpt-web.js
+      - src/lib/chatgptWebAuthority.js
+      - src/sse/**
+      - src/app/api/v1/**
+      - tests/integration/chatgpt-web-runtime-smoke.mjs
+      - .github/workflows/chatgpt-web-runtime.yml
+  workflow_dispatch:
+    inputs:
+      live_account:
+        type: boolean
+        default: false
+        description: Run operator-provisioned real-account gate on protected disposable staging ARM64
+      publish:
+        type: boolean
+        default: false
+        description: Reserved and fail-closed until reviewed immutable cgw platform activation
+      deploy:
+        type: boolean
+        default: false
+        description: Reserved and fail-closed until operator-authorized production activation
+permissions:
+  contents: read
+concurrency:
+  group: cgw-runtime-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  activation-fence:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Enforce no publication or deployment
+        env:
+          PUBLISH: ${{ inputs.publish || false }}
+          DEPLOY: ${{ inputs.deploy || false }}
+        run: |
+          set -euo pipefail
+          if [[ "$PUBLISH" == true || "$DEPLOY" == true ]]; then
+            echo 'Publication/deployment blocked: reviewed immutable platform release must support cgw, manifest/registry/all caller pins must activate together, and native/live/security/operator gates must pass.' >&2
+            exit 1
+          fi
+
+  gateway-contracts:
+    needs: activation-fence
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+      - name: Isolate gateway contract state
+        run: |
+          set -euo pipefail
+          state_home="$RUNNER_TEMP/cgw-gateway-contracts"
+          mkdir -p "$state_home/data"
+          printf 'HOME=%s\nUSERPROFILE=%s\nAPPDATA=%s\nDATA_DIR=%s/data\nCGW_DATA_DIR=%s/data\nENABLE_REQUEST_LOGS=false\nNEXT_TELEMETRY_DISABLED=1\n' "$state_home" "$state_home" "$state_home" "$state_home" "$state_home" >> "$GITHUB_ENV"
+      - name: Install frozen gateway and test dependencies
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          bun install --frozen-lockfile --cwd tests
+      - name: Exercise all affected CGW gateway and dashboard contracts
+        working-directory: tests
+        run: |
+          set -euo pipefail
+          bun run test --config vitest.config.js \
+            integration/chatgpt-web.test.js \
+            unit/chatgpt-web-concurrency.test.js \
+            unit/chatgpt-web-executor-capabilities.test.js \
+            unit/session-manager.test.js \
+            unit/chat-quota-handler.test.js \
+            unit/providers-chatgpt-web-crud.test.js \
+            unit/provider-validation-chatgpt-web.test.js \
+            unit/provider-models-chatgpt-web.test.js \
+            unit/models-route-chatgpt-web.test.js \
+            unit/v1-models-chatgpt-web.test.js \
+            unit/chatgpt-web-connection-test.test.js \
+            unit/force-stream-config.test.js \
+            unit/responses-native-forwarding.test.js \
+            unit/dashboard-guard.test.js \
+            unit/chatgpt-web-runtime-admin.test.js
+      - name: Exercise real disposable Bun SQLite profile migration
+        run: bun tests/integration/chatgpt-web-profile-migration-smoke.mjs
+
+  native:
+    needs: activation-fence
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      HTTP_PROXY: ''
+      HTTPS_PROXY: ''
+      ALL_PROXY: ''
+      ENABLE_REQUEST_LOGS: 'false'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.0
+      - name: Isolate offline state
+        shell: bash
+        run: |
+          set -euo pipefail
+          state_home="$RUNNER_TEMP/cgw-offline-home"
+          mkdir -p "$state_home/data"
+          printf 'HOME=%s\nUSERPROFILE=%s\nAPPDATA=%s\nDATA_DIR=%s/data\nCGW_DATA_DIR=%s/data\n' "$state_home" "$state_home" "$state_home" "$state_home" "$state_home" >> "$GITHUB_ENV"
+      - name: Check frozen runtime types, behavior and entrypoint closure
+        working-directory: services/chatgpt-web-runtime
+        run: |
+          set -euo pipefail
+          test "$(bun --version)" = 1.4.0
+          bun install --frozen-lockfile
+          bun run typecheck
+          bun run test
+          bun build src/server.ts src/companion/main.ts --target bun --outdir "$RUNNER_TEMP/cgw-entrypoints"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Build and load native image without emulation or push
+        env:
+          ARCH: ${{ matrix.arch }}
+          REVISION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          case "$ARCH:$(uname -m)" in amd64:x86_64|arm64:aarch64) ;; *) echo 'Native runner mismatch' >&2; exit 1;; esac
+          image="ghcr.io/thedemontuan/9router-cgw-runtime:${REVISION}-${ARCH}"
+          docker buildx build --load --platform "linux/$ARCH" --build-arg "APP_REVISION=$REVISION" \
+            -f services/chatgpt-web-runtime/Dockerfile -t "$image" .
+          echo "CGW_CHECK_IMAGE=$image" >> "$GITHUB_ENV"
+      - name: Prove physical sandbox, native binaries and actual browser HTTP fixture
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          hardening=(--rm --read-only --network none --cap-drop ALL --security-opt no-new-privileges:true
+            --security-opt "seccomp=$PWD/services/chatgpt-web-runtime/security/seccomp.json" --shm-size 1g
+            --tmpfs /tmp:rw,nosuid,nodev,size=512m,mode=1777
+            --tmpfs /run:rw,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700
+            --tmpfs /data:rw,nosuid,nodev,size=512m,uid=10001,gid=10001,mode=0700)
+          docker run "${hardening[@]}" "$CGW_CHECK_IMAGE" bun scripts/image-smoke.ts --arch "$ARCH"
+          docker run "${hardening[@]}" "$CGW_CHECK_IMAGE" bun scripts/smoke-offline.ts
+          docker run "${hardening[@]}" "$CGW_CHECK_IMAGE" bun scripts/smoke-harness-offline.ts
+          docker run "${hardening[@]}" "$CGW_CHECK_IMAGE" bun scripts/smoke-approval-offline.ts
+          docker run "${hardening[@]}" "$CGW_CHECK_IMAGE" bun scripts/smoke-profile-ownership.ts
+          docker run "${hardening[@]}" "$CGW_CHECK_IMAGE" bun scripts/verify-harness-compatibility.ts /data/compatibility.json
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+      - name: Build isolated gateway and exercise real companion HTTP cutover
+        run: |
+          set -euo pipefail
+          test "$(bun --version)" = 1.4.2
+          bun install --frozen-lockfile
+          bun install --frozen-lockfile --cwd tests
+          bun run build
+          bun tests/integration/chatgpt-web-runtime-smoke.mjs --image "$CGW_CHECK_IMAGE" --gateway-port 21127
+      # No registry login, push, account-state artifact upload, reusable old platform
+      # Trivy call, deploy action, or production manifest/pin mutation belongs here.
+
+  live-staging:
+    needs: [native, gateway-contracts]
+    if: github.event_name == 'workflow_dispatch' && inputs.live_account && github.ref_name == github.event.repository.default_branch
+    runs-on: [self-hosted, linux, ARM64, cgw-staging-disposable]
+    environment: staging
+    timeout-minutes: 60
+    env:
+      CGW_LIVE: '1'
+      CGW_STAGING_CONFIG_FILE: ${{ vars.CGW_STAGING_CONFIG_FILE }}
+      CGW_STAGING_PROFILE: ${{ vars.CGW_STAGING_PROFILE }}
+      ENABLE_REQUEST_LOGS: 'false'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.0
+      - name: Require operator-owned private staging prerequisites
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = aarch64
+          test "$(bun --version)" = 1.4.0
+          test -n "$CGW_STAGING_PROFILE"
+          test -n "$CGW_STAGING_CONFIG_FILE"
+          test -f "$CGW_STAGING_CONFIG_FILE"
+          test -r "$CGW_STAGING_CONFIG_FILE"
+          # Secret files/login/connector/Codex workspace are provisioned out of band
+          # on this disposable runner; never materialize them from PR input or artifacts.
+      - name: Exercise real account and local Codex harness
+        working-directory: services/chatgpt-web-runtime
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile
+          bun run smoke:live -- --profile "$CGW_STAGING_PROFILE"
+      # No account screenshots, browser/rollout state, keys, or private config uploads.

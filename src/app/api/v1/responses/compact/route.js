@@ -22,25 +22,9 @@ export async function OPTIONS() {
 
 /**
  * POST /v1/responses/compact - Compact conversation context
- * Reuses the same handleChat pipeline, signals compact via body._compact
+ * Preserves exact raw bytes for signature verification; compact is an internal operation option.
  */
 export async function POST(request) {
   await ensureInitialized();
-  let body;
-  try {
-    body = await request.json();
-  } catch {
-    return new Response(JSON.stringify({ error: { message: "Invalid JSON body", type: "invalid_request_error", code: "" } }), {
-      status: 400,
-      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
-    });
-  }
-  body._compact = true;
-  const newRequest = new Request(request.url, {
-    method: "POST",
-    headers: request.headers,
-    body: JSON.stringify(body),
-    signal: request.signal,
-  });
-  return await handleChat(newRequest);
+  return await handleChat(request, null, { operation: "compact" });
 }

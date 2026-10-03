@@ -1,241 +1,67 @@
-import { hostname } from "node:os";
-import {
-  chatGptWebModelSupportsNativeResponses,
-  getChatGptWebCatalog,
-  hasChatGptWebModel,
-  requestChatGptWebBridge,
-  sanitizeChatGptWebMaxConcurrency,
-} from "../services/chatgptWebBridge.js";
+import { createHash } from "node:crypto";
+import { getChatGptWebCatalog, requestChatGptWebRuntime, hasChatGptWebModel } from "../services/chatgptWebRuntimeClient.js";
 
-const FORWARDED_HEADERS = new Set([
-  "originator",
-  "user-agent",
-  "x-codex-turn-metadata",
-  "x-codex-client-version",
-  "x-codex-beta-features",
-]);
-const TERMINAL_BRIDGE_STATUSES = new Set([499, 409, 413, 424, 502]);
-const SAFE_RETRY_CODES = new Set([
-  "bridge_offline",
-  "provider_busy",
-  "service_unavailable",
-  "temporarily_unavailable",
-  "rate_limit_exceeded",
-  "rate_limited",
-  "concurrency_limit",
-]);
-const QUOTA_CODES = new Set(["usage_limit_reached", "insufficient_quota", "quota_exhausted"]);
-
-function normalizedErrorCode(value) {
-  return typeof value === "string" ? value.trim().toLowerCase() : "";
+const QUOTA_CODES = ["quota_exhausted", "usage_limit_reached", "insufficient_quota"];
+function runtimeError(status, code, message, submissionState = "not_sent") {
+  return Response.json({ error: { type: "runtime_error", code, message, retryable: false, submission_state: submissionState } },
+    { status, headers: { "x-9router-no-fallback": "true", "x-should-retry": "false", "x-9router-error-code": code } });
 }
-
-function safeRetryableBridgeError(status, code, message = "") {
-  if (TERMINAL_BRIDGE_STATUSES.has(status) || ![429, 503].includes(status)) return false;
-  if (QUOTA_CODES.has(normalizedErrorCode(code))) return false;
-  const normalizedCode = normalizedErrorCode(code);
-  const text = String(message).toLowerCase();
-  return !normalizedCode
-    || SAFE_RETRY_CODES.has(normalizedCode)
-    || /provider\s*busy|temporarily unavailable|too many requests|rate limit/.test(text);
+export function isChatGptWebRetryable(status, error) {
+  return error?.submission_state === "not_sent" && error.retryable === true && Number.isFinite(Number(error.retry_after)) && Number(error.retry_after) > 0
+    && (status === 429 && error.code === "rate_limited" || status === 503 && error.code === "temporarily_unavailable");
 }
-
-function safeResolvedModel(value) {
-  if (typeof value !== "string") return null;
-  const model = value.trim();
-  return model && model.length <= 128 && !/[\r\n]/.test(model) ? model : null;
-}
-
-function resolvedModelFromHeaders(headers) {
-  for (const name of ["x-9router-resolved-model", "x-resolved-model", "resolved-model"]) {
-    const value = safeResolvedModel(headers.get(name));
-    if (value) return value;
-  }
-  return null;
-}
-
-function bridgeError(status, code, message) {
-  const retryable = safeRetryableBridgeError(status, code);
-  const headers = {
-    "content-type": "application/json",
-    "x-9router-error-code": code,
-    "x-should-retry": String(retryable),
-    // A Web conversation cannot move to another browser profile mid-turn. The client may retry
-    // a retryable 429/503, but the router must not silently fail over this connection.
-    "x-9router-no-fallback": "true",
-  };
-  return new Response(JSON.stringify({ error: { type: "bridge_error", code, message, retryable } }), {
-    status,
-    headers,
-  });
-}
-
-function upstreamHeaders(rawHeaders = {}) {
-  const headers = new Headers({ "content-type": "application/json" });
-  for (const [name, value] of Object.entries(rawHeaders)) {
-    const lower = name.toLowerCase();
-    if (FORWARDED_HEADERS.has(lower) && typeof value === "string") headers.set(lower, value);
-  }
-  headers.set("x-9router-instance-id", `${hostname()}-${process.pid}`);
-  return headers;
-}
-
-function resetTimestamp(value, now = Date.now()) {
-  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
-    const ms = value < 1e12 ? value * 1000 : value;
-    return ms > now ? ms : null;
-  }
-  if (typeof value === "string" && value.trim()) {
-    const numeric = Number(value);
-    if (Number.isFinite(numeric)) return resetTimestamp(numeric, now);
-    const ms = Date.parse(value);
-    return Number.isFinite(ms) && ms > now ? ms : null;
-  }
-  return null;
-}
-
-function retryAfterTimestamp(value, now = Date.now()) {
-  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
-    return now + value * 1000;
-  }
-  if (typeof value === "string" && value.trim()) {
-    const numeric = Number(value);
-    if (Number.isFinite(numeric)) return retryAfterTimestamp(numeric, now);
-    const ms = Date.parse(value);
-    return Number.isFinite(ms) && ms > now ? ms : null;
-  }
-  return null;
-}
-
 export class ChatGPTWebExecutor {
-  constructor() {
-    this.provider = "chatgpt-web";
-    this.noAuth = true;
-  }
-
-  getProvider() {
-    return this.provider;
-  }
-
-  needsRefresh() {
-    return false;
-  }
-
-  async refreshCredentials() {
-    return null;
-  }
-
+  constructor() { this.provider = "chatgpt-web"; this.noAuth = true; }
+  getProvider() { return this.provider; }
+  needsRefresh() { return false; }
+  async refreshCredentials() { return null; }
   parseError(response, bodyText) {
-    let body = null;
-    try { body = JSON.parse(bodyText); } catch { /* use headers */ }
-    const error = body?.error && typeof body.error === "object" ? body.error : body || {};
-    const message = error.message || body?.message || bodyText || `HTTP ${response.status}`;
-    const code = error.code || response.headers.get("x-9router-error-code") || "";
-    const now = Date.now();
-    const resetsAtMs = resetTimestamp(
-      error.resets_at ?? error.reset_at ?? error.resetAt ?? body?.resets_at ?? body?.reset_at,
-      now,
-    )
-      || retryAfterTimestamp(error.resets_in_seconds ?? error.retry_after ?? body?.retry_after, now)
-      || resetTimestamp(response.headers.get("x-ratelimit-reset-at") || response.headers.get("x-ratelimit-reset"), now)
-      || retryAfterTimestamp(response.headers.get("retry-after"), now);
-    const resolvedModel = safeResolvedModel(error.resolved_model ?? error.resolvedModel ?? error.model)
-      || resolvedModelFromHeaders(response.headers);
-    return {
-      status: response.status,
-      message,
-      ...(resetsAtMs ? { resetsAtMs } : {}),
-      ...(error.type || error.error_type ? { type: error.type || error.error_type } : {}),
-      ...(code ? { code } : {}),
-      retryable: safeRetryableBridgeError(response.status, code, message) && error.retryable !== false,
-      ...(resolvedModel ? { resolvedModel } : {}),
-    };
+    let body; try { body = JSON.parse(bodyText); } catch { body = {}; }
+    const error = body?.error && typeof body.error === "object" ? body.error : {};
+    const reset = typeof error.resets_at === "number" ? (error.resets_at < 1e12 ? error.resets_at * 1000 : error.resets_at) : Date.parse(error.resets_at);
+    const resetEvidence = QUOTA_CODES.includes(error.code) || error.code === "rate_limited";
+    return { status: response.status, message: typeof error.message === "string" ? error.message : "ChatGPT Web runtime request failed",
+      code: typeof error.code === "string" ? error.code : "submission_unknown", type: "runtime_error",
+      errorClass: QUOTA_CODES.includes(error.code) ? "quota_exhausted" : error.code === "rate_limited" ? "rate_limited" : "runtime_error",
+      retryable: isChatGptWebRetryable(response.status, error), submissionState: error.submission_state || "unknown",
+      ...(resetEvidence && Number.isFinite(reset) && reset > Date.now() ? { resetsAtMs: reset } : {}),
+      ...(error.code === "rate_limited" && Number(error.retry_after) > 0 ? { resetsAtMs: Date.now() + Number(error.retry_after) * 1000 } : {}) };
   }
-
-  async execute({ model, body, credentials, signal, clientTool }) {
+  async execute({ model, body, credentials, signal }) {
+    const authority = credentials?.chatGptWebAuthority;
     const operation = body?._compact === true ? "compact" : "responses";
-    const outbound = { ...body, model };
-    delete outbound._compact;
-    // Normal browser turns use SSE; upstream compact returns unary JSON.
-    outbound.stream = operation === "compact" ? false : true;
-
+    const outbound = { ...body, model, stream: operation !== "compact" }; delete outbound._compact;
+    const result = response => ({ response, url: `cgw-runtime:/v1/${operation === "compact" ? "responses/compact" : "responses"}`,
+      headers: {}, transformedBody: outbound });
+    if (!authority) return result(runtimeError(400, "codex_authority_required", "Use the authenticated local Codex companion"));
+    if (authority.purpose !== operation) return result(runtimeError(400, "authority_purpose_mismatch", "Signed operation differs from runtime operation"));
     let catalog;
-    try {
-      catalog = await getChatGptWebCatalog(credentials, { signal });
-    } catch (error) {
-      return {
-        response: bridgeError(503, "bridge_offline", error.message),
-        url: "unix:/v1/web-models",
-        headers: {},
-        transformedBody: outbound,
-      };
-    }
-    const liveModel = catalog.models?.find((entry) => entry.id === model);
-    if (catalog.stale || !hasChatGptWebModel(catalog, model)) {
-      return {
-        response: bridgeError(409, catalog.stale ? "catalog_stale" : "model_unavailable", `Bridge has not verified model ${model}`),
-        url: "unix:/v1/web-models",
-        headers: {},
-        transformedBody: outbound,
-      };
-    }
-    const nativeOperation = clientTool === "codex" || operation === "compact";
-    const requiredCapability = nativeOperation ? "native_responses" : "generic_responses";
-    const capabilityVerified = nativeOperation
-      ? chatGptWebModelSupportsNativeResponses(liveModel)
-      : liveModel?.capabilities?.generic_responses === true;
-    if (!capabilityVerified) {
-      return {
-        response: bridgeError(400, "unsupported_capability", `${requiredCapability} is not verified for ${model}`),
-        url: "unix:/v1/web-models",
-        headers: {},
-        transformedBody: outbound,
-      };
-    }
-
-    const path = operation === "compact" ? "/v1/responses/compact" : "/v1/responses";
-    const headers = upstreamHeaders(credentials?.rawHeaders);
+    try { catalog = await getChatGptWebCatalog(credentials, { signal }); }
+    catch { return result(runtimeError(503, "runtime_unavailable", "Verified runtime profile catalog unavailable")); }
+    const row = catalog.models.find(row => row.id === model);
+    const effort = body.reasoning?.effort ?? row?.default_reasoning_level;
+    if (catalog.stale || !hasChatGptWebModel(catalog, model) || row?.capabilities?.native_responses !== true
+      || !row.supported_reasoning_levels.includes(effort)) return result(runtimeError(400, "model_version_unavailable", "Exact selected profile model/reasoning is not verified"));
+    if (credentials.chatGptWebProfileEpoch && credentials.chatGptWebProfileEpoch !== catalog.profileEpoch) return result(runtimeError(409, "profile_epoch_mismatch", "Bound account epoch changed"));
+    let compactMetadata = body?.client_metadata?.["x-codex-turn-metadata"];
+    if (typeof compactMetadata === "string") { try { compactMetadata = JSON.parse(compactMetadata); } catch { compactMetadata = null; } }
+    const compactTurn = operation === "compact" || compactMetadata?.request_kind === "compaction"
+      || (Array.isArray(body.input) && body.input.some(item => item?.type === "compaction_trigger"));
+    if (!compactTurn && Array.isArray(body.tools) && body.tools.length && row.capabilities.tools !== true) return result(runtimeError(400, "harness_unavailable", "Selected profile Full harness capability is not verified"));
+    const envelope = { protocolVersion: 1, profileId: catalog.profileId, profileEpoch: credentials.chatGptWebProfileEpoch || catalog.profileEpoch,
+      request: outbound, authority, originalModel: credentials.chatGptWebOriginalModel || `cgw/${model}`, effectiveModel: model, effectiveReasoning: effort,
+      transformedRequestSha256: createHash("sha256").update(JSON.stringify(outbound)).digest("hex") };
     let response;
-    try {
-      response = await requestChatGptWebBridge(credentials, path, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(outbound),
-        signal,
-      }, {
-        turn: true,
-        maxConcurrency: sanitizeChatGptWebMaxConcurrency(
-          credentials?.providerSpecificData?.maxConcurrency ?? catalog.maxConcurrency,
-        ),
-      });
-    } catch (error) {
-      response = bridgeError(signal?.aborted ? 499 : 502, signal?.aborted ? "client_cancelled" : "submission_unknown", error.message);
-    }
-
-    const responseHeaders = new Headers(response.headers);
+    try { response = await requestChatGptWebRuntime(credentials, operation === "compact" ? "/v1/responses/compact" : "/v1/responses", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(envelope), signal,
+    }); }
+    catch { return result(runtimeError(signal?.aborted ? 499 : 502, signal?.aborted ? "client_cancelled" : "submission_unknown", "Runtime transport did not settle; request was not retried", "unknown")); }
+    const headers = new Headers(response.headers); headers.set("x-9router-no-fallback", "true");
     if (!response.ok) {
-      // Consume wrapped error bodies so the per-connection turn slot releases before
-      // chatCore rebuilds or forwards the terminal response.
-      const bodyText = await response.text();
-      const parsed = this.parseError(response, bodyText);
-      const code = parsed.code || responseHeaders.get("x-9router-error-code") || "bridge_terminal_error";
-      const retryable = safeRetryableBridgeError(response.status, code)
-        && parsed.retryable !== false;
-      const resolvedModel = safeResolvedModel(parsed.resolvedModel) || resolvedModelFromHeaders(responseHeaders);
-      if (resolvedModel) responseHeaders.set("x-9router-resolved-model", resolvedModel);
-      if (parsed.resetsAtMs) responseHeaders.set("x-9router-retry-at", new Date(parsed.resetsAtMs).toISOString());
-      responseHeaders.set("x-9router-error-code", code);
-      responseHeaders.set("x-should-retry", String(retryable));
-      // Retryability is a client hint only; account fallback remains disabled for stateful Web turns.
-      responseHeaders.set("x-9router-no-fallback", "true");
-      response = new Response(bodyText, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: responseHeaders,
-      });
-    }
-    return { response, url: `unix:${path}`, headers: Object.fromEntries(headers), transformedBody: outbound };
+      const text = await response.text(); const parsed = this.parseError(response, text);
+      headers.set("x-should-retry", String(parsed.retryable)); headers.set("x-9router-error-code", parsed.code);
+      response = new Response(text, { status: response.status, headers });
+    } else response = new Response(response.body, { status: response.status, headers });
+    return result(response);
   }
 }
-
-export default ChatGPTWebExecutor;

@@ -60,11 +60,8 @@ export function normalizeProviderSpecificData(provider, body = {}, providerSpeci
     : {};
 
   if (provider === "chatgpt-web") {
-    const rawBridgeId = next.bridgeId ?? body.bridgeId;
-    if (typeof rawBridgeId === "string") {
-      const bridgeId = rawBridgeId.trim();
-      if (bridgeId) next.bridgeId = bridgeId;
-    }
+    const rawProfileId = next.profileId ?? body.profileId;
+    return { profileId: typeof rawProfileId === "string" ? rawProfileId.trim() : rawProfileId };
   }
 
   if (provider === "ollama-local") {
@@ -80,4 +77,52 @@ export function normalizeProviderSpecificData(provider, body = {}, providerSpeci
   }
 
   return Object.keys(next).length > 0 ? next : null;
+}
+
+export function validateChatGptWebConnectionInput(body) {
+  const allowed = new Set(["provider", "profileId", "providerSpecificData", "name", "displayName", "priority", "globalPriority", "defaultModel", "testStatus", "isActive", "lastError", "lastErrorAt", "id", "allowOverwrite", "overwrite"]);
+  for (const [key, value] of Object.entries(body)) {
+    if (!allowed.has(key) && !(key === "apiKey" && !value)) throw new Error(`ChatGPT Web connection does not accept ${key}; configure runtime settings and secrets with the operator runtime instead`);
+  }
+  if (body.providerSpecificData !== undefined && (!body.providerSpecificData || typeof body.providerSpecificData !== "object" || Array.isArray(body.providerSpecificData)
+    || Object.keys(body.providerSpecificData).some(key => key !== "profileId"))) {
+    throw new Error("ChatGPT Web providerSpecificData accepts only profileId");
+  }
+  if (body.profileId !== undefined && body.providerSpecificData?.profileId !== undefined
+    && body.profileId !== body.providerSpecificData.profileId) throw new Error("Conflicting ChatGPT Web profile selectors; provide only one profileId");
+}
+
+// Discovery is a union, not authorization. Execution rechecks the bound profile.
+export function mergeChatGptWebPublicModels(catalogs) {
+  const merged = new Map();
+  for (const catalog of catalogs) {
+    if (!catalog || catalog.stale) continue;
+    for (const model of catalog.models || []) {
+      if (model.legacy !== false || !Array.isArray(model.supported_reasoning_levels)
+        || model.supported_reasoning_levels.includes("ultra")
+        || (model.capabilities?.native_responses !== true && model.capabilities?.generic_responses !== true)) continue;
+      const existing = merged.get(model.id);
+      if (!existing) {
+        merged.set(model.id, { ...model, capabilities: { ...model.capabilities }, supported_reasoning_levels: [...model.supported_reasoning_levels] });
+        continue;
+      }
+      const capabilities = { ...existing.capabilities };
+      for (const [key, value] of Object.entries(model.capabilities)) {
+        if (value === true) capabilities[key] = true;
+        else if (!(key in capabilities) && value === false) capabilities[key] = false;
+      }
+      const combined = {
+        ...existing,
+        capabilities,
+        supported_reasoning_levels: [...new Set([...existing.supported_reasoning_levels, ...model.supported_reasoning_levels])],
+        context_window: Math.min(existing.context_window, model.context_window),
+        auto_compact_token_limit: Math.min(existing.auto_compact_token_limit, model.auto_compact_token_limit),
+      };
+      if (existing.max_output !== undefined && model.max_output !== undefined) combined.max_output = Math.min(existing.max_output, model.max_output);
+      else delete combined.max_output;
+      if (existing.model_family !== model.model_family) delete combined.model_family;
+      merged.set(model.id, combined);
+    }
+  }
+  return [...merged.values()];
 }

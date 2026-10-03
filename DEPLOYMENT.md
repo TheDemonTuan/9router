@@ -120,3 +120,57 @@ sudo -n /opt/vps-deploy/current/bin/deployctl status --app 9router --strict
 ```
 
 Kết quả mong đợi có `edge-traefik` và container slot active. Engine kiểm tra mount dynamic, network, middleware và route namespace dưới lock trước publish. Nếu mất kết nối hoặc trả `502`, dừng cutover, điều tra nguyên nhân; không tự tạo lại network hay nối shared `edge-traefik` bằng lệnh bỏ qua lỗi.
+
+## ChatGPT Web runtime: dashboard và desktop riêng
+
+Chỉ thao tác trên staging được operator cấp quyền; phần này không kích hoạt production deploy. Gateway phải được operator cấu hình runtime URL và hai token DATA/ADMIN riêng qua mounted files. Dashboard **không** nhận URL runtime, bearer, cookie ChatGPT hoặc mật khẩu VNC. `/api/providers/chatgpt-web/runtime/*` chỉ nhận dashboard JWT hoặc Cloudflare Access JWT đã xác minh, kể cả `requireLogin=false`; API key và CLI machine token không cấp quyền admin. Public API host vẫn chặn các route này; mutations yêu cầu cùng origin dashboard.
+
+1. Mở provider **ChatGPT Web**, chọn **Add connection** hoặc sửa connection. Nhập **Profile ID** canonical (1–64 ký tự chữ thường/số/hyphen, đầu/cuối là chữ/số); các connection cùng ID dùng chung browser và giới hạn 5 turns.
+2. Trong **Runtime profile**, chọn profile đã có hoặc bấm **Create profile**. Profile mới mặc định Browser-only, Retain, Temporary, Bigger Context/automatic approval tắt. **Start Login** chỉ dùng khi profile idle; CAPTCHA/2FA xử lý trực tiếp trên desktop riêng, không bypass.
+3. Khi Start Login/View Browser cấp lease, mở tunnel trên máy operator:
+
+   ```bash
+   ssh -N -L 17842:127.0.0.1:17842 <operator-host>
+   ```
+
+   Dùng native VNC client kết nối `localhost:17842`. Operator lấy mật khẩu lease từ file owner-only trong tmpfs `/run/cgw/login/` qua SSH/container access riêng; không gửi mật khẩu qua API/chat/dashboard. Một lease tối đa 15 phút, chỉ một profile được xem cùng lúc. Không public noVNC, screenshot/DOM export, CDP hay Playwright server. **View Browser** xem desktop/tab đang có để Allow once, không restart turn đang chạy.
+4. Sau login, chủ động bấm **Run browser smoke** để kiểm chứng, xem state/models/reasoning/connector diagnostics rồi **Test connection** và **Save connection**. Poll khi panel mở chỉ đọc diagnostics; không tự gửi model/tool request. Smoke có thể gửi model turn thật và chỉ chạy khi operator bấm.
+5. Full yêu cầu tunnel và connector **Codex Native2** được operator provision và runtime xác minh; mode không được bật thành công khi prerequisites bị từ chối. **Run harness diagnostics** không thay thế staging E2E có companion/Codex thực thi harmless fixture ở máy người dùng; UI không tuyên bố local-tool E2E nếu chưa có observation đó.
+6. Settings lưu tại sidecar bằng expected revision; khi active hoặc revision conflict, refresh và review trước khi áp dụng lại. **New each turn** chỉ đổi conversation giữa human turns, không đổi tool-result rounds. **Saved** có thể áp dụng Memory/custom instructions. Bigger Context chỉ cho routes hỗ trợ multipart, tăng latency/tổng context chứ không tăng per-message limit. Automatic approval chỉ hiển thị Full, chỉ Allow once đúng connector; outer Codex sandbox/approval policy vẫn giữ nguyên.
+
+Đóng panel dừng polling và abort các HTTP observers của UI; lease desktop vẫn do runtime hết hạn/đóng, không tự xóa browser profile. Restart/login maintenance không được ngắt profile đang có turns. Drain/quiesce/resume thuộc lifecycle operator có operation fence matching; không sử dụng dashboard health poll hoặc `readyz=200` để thay deployment gate.
+
+### Companion trên máy Codex và activation gate
+
+Gateway chỉ nhận native CGW qua companion loopback có public key đã provision. Runtime giữ browser/tunnel/broker, không thực thi shell hoặc tool của Codex. Operator tạo Ed25519 keypair bằng Bun `1.4.0` trong package runtime:
+
+```bash
+bun run companion:keygen /private/cgw-client.pem /private/cgw-client.pub.pem
+CGW_COMPANION_CONFIG_FILE=/private/cgw-companion.json bun run companion
+```
+
+Companion config là operator-owned JSON với `gatewayUrl` (HTTPS, trừ fixture loopback), `apiKeyFile`, `privateKeyFile`, `keyId`, `clientId`, `codexHome` và `listenPort:17840`. Provision public PEM vào gateway `CHATGPT_WEB_CLIENT_KEYS_FILE` dạng `{"version":1,"clients":[{"clientId":"trusted-client","keyId":"trusted-key","publicKeyPem":"<public PEM>","enabled":true}]}` qua kênh riêng authenticated. Không gửi private key, API key, cookies hoặc `auth.json` qua chat. Disable record để revoke request mới; companion không rewrite Codex config của người dùng.
+
+Người dùng tự đặt trong Codex `config.toml`:
+
+```toml
+model_provider = "openai"
+openai_base_url = "http://127.0.0.1:17840/v1"
+model = "cgw/chatgpt-web/gpt-5.6-sol"
+model_reasoning_effort = "high"
+
+[features]
+multi_agent = true
+multi_agent_v2 = false
+
+[agents]
+max_depth = 2
+```
+
+Model/effort phải có evidence của selected profile, không lấy union catalog làm authorization. Interrupt hook gọi `bun run companion:interrupt --thread-id <native-thread-id> --turn-id <native-turn-id>` với cùng private companion config; disconnect stream chỉ detach observer, không tự replay Send hoặc cancel owner.
+
+Offline gates dùng `services/chatgpt-web-runtime/scripts/smoke-offline.ts`, `smoke-harness-offline.ts`, `smoke-approval-offline.ts` và `tests/integration/chatgpt-web-runtime-smoke.mjs`. ChatGPT DOM và outer observer ở các smoke này là synthetic; không gọi đó là tài khoản ChatGPT/Codex live E2E. Native image gate phải chạy Linux amd64/arm64 không emulation, UID10001, sandbox/seccomp thật; thiếu Docker/host user namespaces là blocker, không thêm `--no-sandbox`.
+
+Private staging cần ARM64 disposable host/SSH, tài khoản có model/developer-mode/write-action permission, Native2 tunnel workspace, Read+Use runtime key, compatible Codex, public key allowlist và gateway API key, tất cả qua private files. `CGW_LIVE=1 CGW_STAGING_CONFIG_FILE=/private/staging.json bun run smoke:live -- --profile <staging-profile>` chạy real Codex trong home/workspace mới, giữ sandbox workspace-write và on-request approvals. Thiếu prerequisite phải fail, không skip thành pass. Live fixture kiểm local patch/test và child/grandchild lineage; các manual compaction/multipart/progress/approval/fault/blue-green/runtime-upgrade cases trong approved matrix vẫn phải được ghi nhận riêng.
+
+Production `.deploy/app.yml` và existing workflow pins giữ nguyên. Chỉ sau reviewed immutable platform release có component `cgw` và operator authorization mới activate manifest/registry/all caller pins cùng SHA, rồi installer check/adopt theo platform. Không publish/deploy tự động từ phiên implementation này.

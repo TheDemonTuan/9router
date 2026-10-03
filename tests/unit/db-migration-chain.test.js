@@ -98,3 +98,65 @@ describe("Schema migrations", () => {
     expect(idx).toContain("idx_pn_type");
   });
 });
+
+describe("ChatGPT Web profile migration", () => {
+  async function fixture() {
+    const { getAdapter } = await import("@/lib/db/driver.js");
+    const { default: migration } = await import("@/lib/db/migrations/005-chatgpt-web-runtime-profiles.js");
+    const db = await getAdapter();
+    const connection = (id, providerSpecificData, provider = "chatgpt-web") => db.run(
+      "INSERT INTO providerConnections(id, provider, authType, isActive, data, createdAt, updatedAt) VALUES(?, ?, 'bridge', 1, ?, 'fixture', 'fixture')",
+      [id, provider, JSON.stringify({ providerSpecificData })],
+    );
+    const row = id => {
+      const persisted = db.get("SELECT data, isActive FROM providerConnections WHERE id = ?", [id]);
+      return { ...JSON.parse(persisted.data), isActive: persisted.isActive };
+    };
+    return { db, migration, connection, row };
+  }
+
+  it("converts valid selectors, removes duplicate runtime settings and leaves non-CGW rows intact", async () => {
+    const { db, migration, connection, row } = await fixture();
+    connection("old", { bridgeId: "personal", mode: "full", cookie: "old-private" });
+    connection("new", { profileId: "new-profile", useSavedChats: true });
+    connection("other", { bridgeId: "unrelated", baseUrl: "https://example.test" }, "ollama-local");
+    db.transaction(() => migration.up(db));
+    expect(row("old")).toEqual({ providerSpecificData: { profileId: "personal" }, isActive: 1 });
+    expect(row("new")).toEqual({ providerSpecificData: { profileId: "new-profile" }, isActive: 1 });
+    expect(row("other")).toEqual({ providerSpecificData: { bridgeId: "unrelated", baseUrl: "https://example.test" }, isActive: 1 });
+  });
+
+  it("deactivates invalid or conflicting selectors instead of guessing an account", async () => {
+    const { db, migration, connection, row } = await fixture();
+    connection("conflict", { profileId: "new", bridgeId: "old" });
+    connection("invalid", { bridgeId: "../escape" });
+    connection("missing", {});
+    db.transaction(() => migration.up(db));
+    for (const id of ["conflict", "invalid", "missing"]) {
+      expect(row(id)).toMatchObject({ isActive: 0, providerSpecificData: {}, testStatus: "error", errorCode: "cgw_profile_migration_required", lastError: expect.any(String) });
+    }
+  });
+
+  it("preserves legacy keys and lastUsed as terminal tombstones and is idempotent", async () => {
+    const { db, migration, connection } = await fixture();
+    connection("old", { bridgeId: "personal" });
+    db.run("INSERT INTO kv(scope, key, value) VALUES('chatgptWebPins', ?, ?)", ["exact-thread-key", JSON.stringify({ connectionId: "old", lastUsed: 12345 })]);
+    db.transaction(() => migration.up(db));
+    const snapshot = () => ({ connections: db.all("SELECT * FROM providerConnections ORDER BY id"), pins: db.all("SELECT * FROM kv ORDER BY scope, key") });
+    const once = snapshot();
+    db.transaction(() => migration.up(db));
+    expect(snapshot()).toEqual(once);
+    expect(db.all("SELECT * FROM kv WHERE scope = 'chatgptWebPins'")).toEqual([]);
+    expect(JSON.parse(db.get("SELECT value FROM kv WHERE scope = 'chatgptWebLegacyPins' AND key = 'exact-thread-key'").value)).toEqual({ status: "legacy_unavailable", lastUsed: 12345 });
+  });
+
+  it("rolls back converted connections and pins if a later persisted pin is malformed", async () => {
+    const { db, migration, connection, row } = await fixture();
+    connection("old", { bridgeId: "personal", mode: "full" });
+    db.run("INSERT INTO kv(scope, key, value) VALUES('chatgptWebPins', 'broken', 'not-json')");
+    expect(() => db.transaction(() => migration.up(db))).toThrow();
+    expect(row("old")).toEqual({ providerSpecificData: { bridgeId: "personal", mode: "full" }, isActive: 1 });
+    expect(db.all("SELECT * FROM kv WHERE scope = 'chatgptWebLegacyPins'")).toEqual([]);
+    expect(db.get("SELECT value FROM kv WHERE scope = 'chatgptWebPins' AND key = 'broken'").value).toBe("not-json");
+  });
+});

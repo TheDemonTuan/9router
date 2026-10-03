@@ -3,10 +3,6 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import {
   clearSessionStore,
   deriveSessionId,
-  getChatGptWebPinnedConnection,
-  pinChatGptWebConnection,
-  withChatGptWebConversationLock,
-  resolveChatGptWebConversationKey,
   resolveContinuationId,
   resolveSessionId,
   resolveSessionIdentity,
@@ -192,58 +188,6 @@ describe("resolveSessionId", () => {
   });
 });
 
-describe("ChatGPT Web conversation routing", () => {
-  it("uses explicit session, Responses, and Codex thread identifiers only", () => {
-    expect(resolveChatGptWebConversationKey({ headers: { "x-session-id": "session-1" }, body: {} }))
-      .toBe("session:session-1");
-    expect(resolveChatGptWebConversationKey({ body: { previous_response_id: "resp-1" } }))
-      .toBe("previous_response_id:resp-1");
-    expect(resolveChatGptWebConversationKey({ body: { client_metadata: { thread_id: "thread-1" } } }))
-      .toBe("thread:thread-1");
-    expect(resolveChatGptWebConversationKey({
-      headers: { "x-codex-turn-metadata": JSON.stringify({ thread_id: "codex-thread-1", turn_id: "turn-1" }) },
-      body: {},
-    })).toBe("thread:codex-thread-1");
-  });
-
-  it("does not use assistant text, metadata user, or request IDs", () => {
-    const body = { metadata: { user_id: "user-1" }, messages: [{ role: "assistant", content: "x".repeat(100) }] };
-    expect(resolveChatGptWebConversationKey({ headers: { "x-client-request-id": "request-1" }, body })).toBeNull();
-  });
-
-  it("expires ChatGPT Web pins after the session TTL", async () => {
-    vi.useFakeTimers();
-    try {
-      await pinChatGptWebConnection("conversation-1", "connection-1");
-      vi.advanceTimersByTime(2 * 60 * 60 * 1000 + 1);
-      expect(getChatGptWebPinnedConnection("conversation-1")).toBeNull();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("serializes concurrent first-turn pin selection", async () => {
-    const order = [];
-    let releaseFirst;
-    const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
-    const first = withChatGptWebConversationLock("conversation-race", async () => {
-      order.push("first-start");
-      await firstGate;
-      order.push("first-end");
-      return "connection-1";
-    });
-    const second = withChatGptWebConversationLock("conversation-race", async () => {
-      order.push("second");
-      return "connection-2";
-    });
-    await Promise.resolve();
-    expect(order).toEqual(["first-start"]);
-    releaseFirst();
-    await expect(first).resolves.toBe("connection-1");
-    await expect(second).resolves.toBe("connection-2");
-    expect(order).toEqual(["first-start", "first-end", "second"]);
-  });
-});
 
 describe("resolveContinuationId", () => {
   it("keeps continuation id stable for the same Kiro session", () => {

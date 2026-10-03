@@ -5,7 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import Image from "next/image";
 import { getProviderIconSrc, markProviderIconMissing } from "@/shared/utils/providerIcon";
-import { Card, Button, Badge, Input, Modal, CardSkeleton, OAuthModal, KiroOAuthWrapper, CursorAuthModal, ZedAuthModal, XiaomiMimoAuthModal, IFlowCookieModal, GitLabAuthModal, Toggle, Select, EditConnectionModal, NoAuthProxyCard, ConfirmModal, AddChatGPTWebBridgeModal } from "@/shared/components";
+import { Card, Button, Badge, Input, Modal, CardSkeleton, OAuthModal, KiroOAuthWrapper, CursorAuthModal, ZedAuthModal, XiaomiMimoAuthModal, IFlowCookieModal, GitLabAuthModal, Toggle, Select, EditConnectionModal, NoAuthProxyCard, ConfirmModal, AddChatGPTWebRuntimeModal } from "@/shared/components";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, LOCAL_BRIDGE_PROVIDERS, WEB_COOKIE_PROVIDERS, getProviderAlias, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS } from "@/shared/constants/providers";
 import { getModelsByProviderId, getModelKind } from "@/shared/constants/models";
 import { getThinkingLevels } from "open-sse/providers/thinkingLevels.js";
@@ -50,7 +50,7 @@ export default function ProviderDetailPage() {
   const [showXiaomiMimoModal, setShowXiaomiMimoModal] = useState(false);
   const [showIFlowCookieModal, setShowIFlowCookieModal] = useState(false);
   const [showAddApiKeyModal, setShowAddApiKeyModal] = useState(false);
-  const [showBridgeModal, setShowBridgeModal] = useState(false);
+  const [showRuntimeModal, setShowRuntimeModal] = useState(false);
   const [addConnectionError, setAddConnectionError] = useState("");
   const [showBulkImportCodex, setShowBulkImportCodex] = useState(false);
   const [showBulkImportGrokCli, setShowBulkImportGrokCli] = useState(false);
@@ -134,7 +134,7 @@ export default function ProviderDetailPage() {
   const triggerAddConnection = () => {
     if (providerId === "chatgpt-web") {
       setSelectedConnection(null);
-      setShowBridgeModal(true);
+      setShowRuntimeModal(true);
       return;
     }
     if (isOAuth) {
@@ -177,9 +177,9 @@ export default function ProviderDetailPage() {
   const activeCodexConnections = providerId === "codex"
     ? connections.filter((item) => item.isActive !== false && item.id)
     : [];
-  const models = providerId === "codex"
+  const models = providerId === "chatgpt-web" ? liveModels : providerId === "codex"
     ? (activeCodexConnections.length > 0 ? (codexCatalogResolved ? liveModels : []) : staticModels)
-    : (providerId === "cursor" || providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web") && liveModels.length > 0
+    : (providerId === "cursor" || providerId === "zed" || providerId === "alitp-intl") && liveModels.length > 0
       ? liveModels
       : staticModels;
   const providerAlias = getProviderAlias(providerId);
@@ -525,13 +525,25 @@ export default function ProviderDetailPage() {
       const merged = new Map();
       for (const { ok, data } of results) {
         if (ok && !data?.stale && Array.isArray(data?.models)) {
-          for (const model of data.models) if (model?.id && !merged.has(model.id)) merged.set(model.id, model);
+          for (const model of data.models) {
+            if (!model?.id) continue;
+            const previous = merged.get(model.id);
+            if (!previous) merged.set(model.id, model);
+            else if (providerId === "chatgpt-web") {
+              const efforts = [...new Set([...(previous.supported_reasoning_levels || []), ...(model.supported_reasoning_levels || [])])];
+              const limits = {};
+              for (const key of ["context_window", "auto_compact_token_limit"]) {
+                if (Number.isFinite(previous[key]) && Number.isFinite(model[key])) limits[key] = Math.min(previous[key], model[key]);
+              }
+              merged.set(model.id, { ...previous, ...limits, supported_reasoning_levels: efforts });
+            }
+          }
         }
       }
       if (merged.size) setLiveModels([...merged.values()]);
       else setLiveModels([]);
       const warning = results.map((r) => r.data?.warning || (r.data?.stale
-        ? "Showing stale bridge catalog; routing remains disabled until refresh succeeds."
+        ? "A stale runtime catalog is not used for routing; refresh must succeed first."
         : null)).find(Boolean);
       if ((providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web") && warning) setLiveModelsError(warning);
       if (providerId === "zed" && !merged.size) setLiveModelsError(warning || "Zed returned no live models.");
@@ -1300,7 +1312,7 @@ export default function ProviderDetailPage() {
                 }}
                 onEdit={() => {
                   setSelectedConnection(conn);
-                  if (providerId === "chatgpt-web") setShowBridgeModal(true);
+                  if (providerId === "chatgpt-web") setShowRuntimeModal(true);
                   else setShowEditModal(true);
                 }}
                 onDelete={() => handleDelete(conn.id)}
@@ -2216,13 +2228,13 @@ export default function ProviderDetailPage() {
           setShowAddApiKeyModal(false);
         }}
       />
-      <AddChatGPTWebBridgeModal
-        key={`chatgpt-web-bridge-${showBridgeModal ? "open" : "closed"}-${selectedConnection?.id || "new"}`}
-        isOpen={showBridgeModal}
+      <AddChatGPTWebRuntimeModal
+        key={`chatgpt-web-runtime-${showRuntimeModal ? "open" : "closed"}-${selectedConnection?.id || "new"}`}
+        isOpen={showRuntimeModal}
         connection={selectedConnection}
         onSaved={fetchConnections}
         onClose={() => {
-          setShowBridgeModal(false);
+          setShowRuntimeModal(false);
           setSelectedConnection(null);
         }}
       />
