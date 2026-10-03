@@ -93,10 +93,11 @@ def main():
         if revision != expected:
             raise RuntimeError(f'CGW_CHROMIUM_TOOLCHAIN_IDENTITY_MISMATCH: {name}')
         destination = Path(destination)
-        if name == 'LLVM monorepo':
+        if name in ('LLVM monorepo', 'Rust'):
             subprocess.run(['git', 'clone', '--filter=blob:none', '--no-checkout', url, str(destination)], check=True)
             subprocess.run(['git', '-C', str(destination), 'checkout', '--detach', revision], check=True)
-            for patch in inputs['llvm']['cherry_picks']:
+            patches = inputs['llvm']['cherry_picks'] if name == 'LLVM monorepo' else inputs['rust']['cherry_picks']
+            for patch in patches:
                 subprocess.run(['git', '-C', str(destination), 'fetch', 'origin', patch], check=True)
         else:
             destination.mkdir(parents=True)
