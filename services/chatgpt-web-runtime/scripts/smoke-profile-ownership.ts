@@ -25,7 +25,8 @@ try {
   for (let i = 0; i < 5; i++) {
     leases.push(await primary.leaseTurn({ traceId: `trace-${i}`, modelIdentity: "gpt-5.3-codex" }));
   }
-  assert(primary.activeTurns === 5, "Expected exactly five active leased turns");
+  const activeCount: number = primary.activeTurns;
+  assert(activeCount === 5, "Expected exactly five active leased turns");
   let denied = false;
   try {
     await primary.leaseTurn({ traceId: "trace-overflow", modelIdentity: "gpt-5.3-codex" });
@@ -35,7 +36,8 @@ try {
   }
   assert(denied, "Sixth concurrent browser turn must be rejected");
   for (const lease of leases) await lease.release();
-  assert(primary.activeTurns === 0, "Active turns must return to zero after release");
+  const remainingCount: number = primary.activeTurns;
+  assert(remainingCount === 0, "Active turns must return to zero after release");
   const profiles = runtime.state.listProfiles();
   assert(profiles.length === 2, "Profile creation count mismatch");
   assert(runtime.profiles.physicalIdle(), "Physical idle was not observed for freshly initialized profiles");
