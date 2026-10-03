@@ -93,6 +93,7 @@ def main():
         if revision != expected:
             raise RuntimeError(f'CGW_CHROMIUM_TOOLCHAIN_IDENTITY_MISMATCH: {name}')
         destination = Path(destination)
+        os.chdir(src)
         if name in ('LLVM monorepo', 'Rust'):
             subprocess.run(['git', 'clone', '--filter=blob:none', '--no-checkout', url, str(destination)], check=True)
             subprocess.run(['git', '-C', str(destination), 'checkout', '--detach', revision], check=True)
@@ -127,8 +128,8 @@ def main():
     # Reclaim only this build's intermediate object files before Rust stage2.
     if not (install / 'bin/llvm-config').is_file():
         raise RuntimeError('CGW_CHROMIUM_NATIVE_LLVM_INSTALL_INCOMPLETE')
+    os.chdir(src)
     shutil.rmtree(src / 'third_party/native-llvm-build')
-
     # Native snapshot libssl-dev/ncurses-dev are linked using the native host
     # root, not AMD64 OpenSSL/CMake/CIPD or a mismatched Bullseye host sysroot.
     # XPy substitutes DEBIAN_SYSROOT in the existing host-config template.
@@ -136,8 +137,7 @@ def main():
     rust.DownloadDebianSysroot = lambda *_args, **_kwargs: '/'
     rust.AddCMakeToPath = lambda: None
     rust.RUST_HOST_LLVM_INSTALL_DIR = str(install)
-    rust.RUST_HOST_LLVM_BUILD_DIR = str(src / 'third_party/native-llvm-build')
-
+    rust.RUST_HOST_LLVM_BUILD_DIR = str(install)
     def native_openssl():
         os.environ['OPENSSL_DIR'] = '/usr'
         os.environ['OPENSSL_LIB_DIR'] = '/usr/lib/aarch64-linux-gnu'
@@ -164,8 +164,8 @@ def main():
     bindgen = importlib.import_module('build_bindgen')
     if not (src / 'third_party/rust-toolchain/bin/rustc').is_file():
         raise RuntimeError('CGW_CHROMIUM_NATIVE_RUST_INSTALL_INCOMPLETE')
+    os.chdir(src)
     shutil.rmtree(rust.RUST_BUILD_DIR)
-    bindgen.CheckoutGitRepo = locked_checkout
     bindgen.RUST_HOST_LLVM_INSTALL_DIR = str(install)
     bindgen.DownloadDebianSysroot = lambda *_args, **_kwargs: '/'
     bindgen.FetchNcurseswLibrary = lambda: None
@@ -202,6 +202,7 @@ def main():
         if header[:4] != b'\x7fELF' or int.from_bytes(header[18:20], 'little') != 183:
             raise RuntimeError(f'CGW_CHROMIUM_NATIVE_TOOLCHAIN_ARCH_MISMATCH: {binary}')
     # Preserve source/vendor inputs, but not object files or transient cargo caches.
+    os.chdir(src)
     for owned in [src / 'third_party/native-crubit-build',
                   src / 'third_party/native-gnrt-build',
                   Path(bindgen.BINDGEN_HOST_BUILD_DIR),
