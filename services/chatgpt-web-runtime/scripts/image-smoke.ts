@@ -86,12 +86,16 @@ try {
     }
     if (!flags.includes("--type=renderer")) continue;
     rendererCount++;
-    try {
-      const renderer = readFileSync(`/proc/${pid}/status`, "utf8");
-      assert.match(renderer, /^Seccomp:\s+2$/m, "Renderer is unsandboxed");
-      assert.match(renderer, /^NoNewPrivs:\s+1$/m, "Renderer lost no-new-privileges");
-      assert.match(renderer, /^CapEff:\s+0+$/m, "Renderer has effective capabilities");
-    } catch {}
+    let renderer: string;
+    try { renderer = readFileSync(`/proc/${pid}/status`, "utf8"); }
+    catch (error: unknown) {
+      if (error !== null && typeof error === "object" && "code" in error
+        && ["EACCES", "EPERM", "ENOENT"].includes(String(error.code))) continue;
+      throw error;
+    }
+    assert.match(renderer, /^Seccomp:\s+2$/m, "Renderer is unsandboxed");
+    assert.match(renderer, /^NoNewPrivs:\s+1$/m, "Renderer lost no-new-privileges");
+    assert.match(renderer, /^CapEff:\s+0+$/m, "Renderer has effective capabilities");
   }
   assert(rendererCount > 0 || /Seccomp-BPF sandbox\s+Yes/i.test(status), "No physical Chromium renderer or Seccomp-BPF sandbox observed");
   console.info(JSON.stringify({ gate: "native-image-sandbox", arch, uid: 10001, gid: 10001,

@@ -149,11 +149,7 @@ jobs:
           ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
-          sudo systemctl stop apparmor || true
-          sudo aa-teardown || true
-          echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns || true
           hardening=(--rm --read-only --network none --cap-drop ALL --security-opt no-new-privileges:true
-            --security-opt apparmor=unconfined
             --security-opt "seccomp=$PWD/services/chatgpt-web-runtime/security/seccomp.json" --shm-size 1g
             --tmpfs /tmp:rw,nosuid,nodev,size=512m,mode=1777
             --tmpfs /run:rw,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700

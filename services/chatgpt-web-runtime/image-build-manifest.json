@@ -120,7 +120,8 @@
     "sourceSha256": "cc3e61cabda6bbc1e53e54d27ba4d55a9d3be829b6dd1a596f4a7b31b1cc7849",
     "licenseSha256": "45873d00a0dd243596deb4aa23b2493b3d1f0671921bf2538ea431d7380220eb",
     "patches": [
-      "Return ENOSYS (38) for clone3 so glibc falls back to reviewed clone user-namespace rules. No allow-all action."
+      "Return ENOSYS (38) for clone3 so glibc falls back to reviewed clone user-namespace rules. No allow-all action.",
+      "Allow chroot without an OCI capability condition: Chromium obtains CAP_SYS_CHROOT in its own user namespace after container startup; Docker otherwise filters out this syscall when cap_drop is ALL. Host capabilities remain dropped and kernel capability checks still apply."
     ],
     "review": {
       "defaultAction": "SCMP_ACT_ERRNO",
@@ -132,7 +133,7 @@
       ],
       "privilegedSyscalls": "mount/bpf/perf_event_open remain capability-conditioned; runtime drops ALL capabilities and forbids SYS_ADMIN. ptrace retains upstream minKernel restriction. Chromium applies its own renderer seccomp-BPF sandbox."
     },
-    "packagedSha256": "4e159a8bad30157ac2423b3428d7884f1d4b644e9f8a97c38e00ec5dcb44d2a1"
+    "packagedSha256": "382fb3c20e056bc5644ef96ed29668ae7e917cc05d21a87bbdb321c169edbbfe"
   },
   "actions": {
     "actions/checkout": "3d3c42e5aac5ba805825da76410c181273ba90b1",

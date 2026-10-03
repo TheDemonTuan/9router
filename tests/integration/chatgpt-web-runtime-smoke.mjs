@@ -130,7 +130,6 @@ try {
     const arch = process.arch === "x64" ? "amd64" : "arm64";
     assert(command("docker", ["image", "inspect", "--format", "{{.Architecture}}", options["--image"]]) === arch, "BLOCKED: native image architecture mismatch");
     const hardening = ["--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
-      ...(process.platform === "linux" ? ["--security-opt", "apparmor=unconfined"] : []),
       "--security-opt", `seccomp=${join(runtimePackage, "security/seccomp.json")}`, "--shm-size", "1g",
       "--tmpfs", "/tmp:rw,nosuid,nodev,size=512m,mode=1777", "--tmpfs", "/run:rw,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700"];
     command("docker", ["run", "--rm", ...hardening, "--network", "none", "--tmpfs", "/data:rw,nosuid,nodev,size=512m,uid=10001,gid=10001,mode=0700", options["--image"], "bun", "scripts/image-smoke.ts", "--arch", arch]);
@@ -331,10 +330,6 @@ try {
   console.error(JSON.stringify({ gate: "gateway-runtime-offline-e2e", outcome: "failed-or-blocked", stage,
     reason: error.code === "EADDRINUSE" ? "BLOCKED: requested port is occupied; existing services are never reused or stopped"
       : error instanceof assert.AssertionError ? error.message.split("\n")[0] : `Operation failed at ${stage}`, liveChatGpt: false }));
-  try {
-    const logFile = join(root, "container.private.log");
-    if (existsSync(logFile)) console.error("CONTAINER_LOG_DIAGNOSTIC:", readFileSync(logFile, "utf8").slice(-1500));
-  } catch {}
   process.exitCode = 1;
 } finally {
   if (controlUrl) {
