@@ -146,6 +146,7 @@
   },
   "build_flags": {
     "is_official_build": true,
+    "chrome_pgo_phase": 0,
     "is_debug": false,
     "symbol_level": 0,
     "blink_symbol_level": 0,
