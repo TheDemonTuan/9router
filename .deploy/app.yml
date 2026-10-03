@@ -12,3 +12,5 @@ route:
   timeout_seconds: 30
 rtk:
   image: ghcr.io/thedemontuan/rtk-sidecar
+cgw:
+  image: ghcr.io/thedemontuan/9router-cgw-runtime

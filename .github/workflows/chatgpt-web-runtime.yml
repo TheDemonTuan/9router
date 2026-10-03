@@ -21,11 +21,11 @@ on:
       publish:
         type: boolean
         default: false
-        description: Reserved and fail-closed until reviewed immutable cgw platform activation
+        description: Publish a native evidence-bearing ARM64 image after offline and security gates
       deploy:
         type: boolean
         default: false
-        description: Reserved and fail-closed until operator-authorized production activation
+        description: Deploy the scanned immutable runtime after operator bootstrap/enrollment
 permissions:
   contents: read
 concurrency:
@@ -36,16 +36,18 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
-      - name: Enforce no publication or deployment
+      - name: Enforce explicit default-branch activation
         env:
           PUBLISH: ${{ inputs.publish || false }}
           DEPLOY: ${{ inputs.deploy || false }}
+          REF_NAME: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           if [[ "$PUBLISH" == true || "$DEPLOY" == true ]]; then
-            echo 'Publication/deployment blocked: reviewed immutable platform release must support cgw, manifest/registry/all caller pins must activate together, and native/live/security/operator gates must pass.' >&2
-            exit 1
+            [[ "$REF_NAME" == "$DEFAULT_BRANCH" ]] || { echo 'Publication and deployment require the default branch' >&2; exit 1; }
           fi
+          [[ "$DEPLOY" != true || "$PUBLISH" == true ]] || { echo 'Deploy requires this run to publish and scan its immutable image' >&2; exit 1; }
 
   gateway-contracts:
     needs: activation-fence
@@ -210,3 +212,71 @@ jobs:
           bun install --frozen-lockfile
           bun run smoke:live -- --profile "$CGW_STAGING_PROFILE"
       # No account screenshots, browser/rollout state, keys, or private config uploads.
+
+  security-source:
+    name: Trivy CGW source gate
+    needs: [native, gateway-contracts]
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref_name == github.event.repository.default_branch
+    permissions:
+      contents: read
+      packages: read
+    uses: TheDemonTuan/vps-deploy/.github/workflows/security-trivy.yml@1f33d412b386989a35cc4fa664be8d9b3fa7b8a0
+    with:
+      app: 9router
+      source-sha: ${{ github.sha }}
+      platform-ref: 1f33d412b386989a35cc4fa664be8d9b3fa7b8a0
+      config: .deploy/app.yml
+      scan-mode: source
+
+  publish:
+    name: Publish verified native CGW image
+    needs: security-source
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref_name == github.event.repository.default_branch
+    permissions:
+      contents: read
+      packages: write
+    uses: TheDemonTuan/vps-deploy/.github/workflows/build-docker.yml@1f33d412b386989a35cc4fa664be8d9b3fa7b8a0
+    with:
+      app: 9router
+      component: cgw
+      source-sha: ${{ github.sha }}
+      platform-ref: 1f33d412b386989a35cc4fa664be8d9b3fa7b8a0
+      config: .deploy/app.yml
+
+  security-image:
+    name: Trivy immutable CGW image gate
+    needs: publish
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref_name == github.event.repository.default_branch
+    permissions:
+      contents: read
+      packages: read
+    uses: TheDemonTuan/vps-deploy/.github/workflows/security-trivy.yml@1f33d412b386989a35cc4fa664be8d9b3fa7b8a0
+    with:
+      app: 9router
+      source-sha: ${{ github.sha }}
+      platform-ref: 1f33d412b386989a35cc4fa664be8d9b3fa7b8a0
+      config: .deploy/app.yml
+      scan-mode: image
+      image-ref: ${{ needs.publish.outputs.image-ref }}
+      platform: linux/arm64
+
+  deploy-runtime:
+    name: Deploy scanned immutable CGW runtime
+    needs: [publish, security-image]
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && inputs.deploy && github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-24.04
+    environment: production
+    timeout-minutes: 34
+    steps:
+      - uses: TheDemonTuan/vps-deploy/.github/actions/deploy@1f33d412b386989a35cc4fa664be8d9b3fa7b8a0
+        with:
+          app: 9router
+          host: oracle-main
+          operation: deploy
+          component: cgw
+          source-sha: ${{ github.sha }}
+          platform-ref: 1f33d412b386989a35cc4fa664be8d9b3fa7b8a0
+          config: .deploy/app.yml
+          image-ref: ${{ needs.publish.outputs.image-ref }}
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
