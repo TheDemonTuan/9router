@@ -120,8 +120,32 @@ def build(args, lock, resources):
     cpu = 'x64' if args.arch == 'amd64' else 'arm64'
     config = 'solutions = ' + repr([solution]) + '\ntarget_os = ["linux"]\ntarget_os_only = True\ntarget_cpu = ' + repr([cpu]) + '\ntarget_cpu_only = True\n'
     (args.workdir / '.gclient').write_text(config)
+    gperf_old = ("  'src/third_party/gperf/cipd': {\n"
+                 "      'packages': [\n"
+                 "        {\n"
+                 "          'package': 'infra/3pp/tools/gperf/${{platform}}',\n"
+                 "          'version': 'version:3@3.2',\n"
+                 "        },\n"
+                 "      ],\n"
+                 "      'condition': 'host_os == \"linux\" and non_git_source',\n"
+                 "      'dep_type': 'cipd',\n"
+                 "  },")
+    gperf_new = ("  'src/third_party/gperf/cipd': {\n"
+                 "      'packages': [\n"
+                 "        {\n"
+                 "          'package': 'infra/3pp/tools/gperf/${{platform}}',\n"
+                 "          'version': 'version:3@3.2',\n"
+                 "        },\n"
+                 "      ],\n"
+                 "      'condition': 'False',\n"
+                 "      'dep_type': 'cipd',\n"
+                 "  },")
+    if args.arch == 'arm64':
+        checked_replace(src / 'DEPS', gperf_old, gperf_new)
     run([str(depot / 'gclient'), 'sync', '--nohooks', '--no-history',
          '--revision', 'src@' + lock['chromium']['git_commit']], cwd=args.workdir, env=env)
+    if args.arch == 'arm64':
+        checked_replace(src / 'DEPS', gperf_new, gperf_old)
     verify_sha256(src / 'DEPS', lock['source_file_sha256']['DEPS'])
     run([str(depot / 'gclient'), 'revinfo', '--actual', '--output-json',
          str(args.workdir / 'dependency-revisions.json')], cwd=args.workdir, env=env)
