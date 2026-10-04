@@ -4,7 +4,7 @@
  * Usage: bun tests/integration/chatgpt-web-runtime-smoke.mjs
  *   --runtime-url http://127.0.0.1:17841 --gateway-port 21127
  *   --runtime-bun /absolute/path/to/bun-1.4.0 --chromium /absolute/path/to/chromium
- * Or: --image cgw-runtime:check --gateway-port 21127 (native Linux Docker only).
+ * Or: --image cgw-runtime:check --browser-dir /private/pinned/chrome --gateway-port 21127 (native Linux Docker only).
  * Requires gateway Bun 1.4.2, runtime dependencies installed with its frozen lock,
  * and an existing gateway build. When BUILD_ID is absent, isolated Next dev builds
  * are used and explicitly reported. No account, production DB, Codex auth or live
@@ -22,7 +22,7 @@ import { createServer } from "node:net";
 const options = {};
 for (let index = 2; index < process.argv.length; index += 2) {
   const key = process.argv[index];
-  assert(["--runtime-url", "--gateway-port", "--image", "--runtime-bun", "--chromium"].includes(key), "Unknown smoke flag");
+  assert(["--runtime-url", "--gateway-port", "--image", "--browser-dir", "--runtime-bun", "--chromium"].includes(key), "Unknown smoke flag");
   assert(process.argv[index + 1] && !process.argv[index + 1].startsWith("--"), "Smoke flag requires a value");
   assert(!Object.hasOwn(options, key), "Duplicate smoke flag"); options[key] = process.argv[index + 1];
 }
@@ -129,9 +129,11 @@ try {
     assert(command("docker", ["info", "--format", "{{.OSType}}"] ) === "linux", "BLOCKED: Docker server must be Linux");
     const arch = process.arch === "x64" ? "amd64" : "arm64";
     assert(command("docker", ["image", "inspect", "--format", "{{.Architecture}}", options["--image"]]) === arch, "BLOCKED: native image architecture mismatch");
+    assert(options["--browser-dir"] && existsSync(join(options["--browser-dir"], "chrome")), "BLOCKED: --image requires privately provisioned --browser-dir");
     const hardening = ["--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
       "--security-opt", `seccomp=${join(runtimePackage, "security/seccomp.json")}`, "--shm-size", "1g",
-      "--tmpfs", "/tmp:rw,nosuid,nodev,size=512m,mode=1777", "--tmpfs", "/run:rw,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700"];
+      "--tmpfs", "/tmp:rw,nosuid,nodev,size=512m,mode=1777", "--tmpfs", "/run:rw,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700",
+      "--mount", `type=bind,src=${resolve(options["--browser-dir"])},dst=/opt/cgw-browser,readonly`];
     command("docker", ["run", "--rm", ...hardening, "--network", "none", "--tmpfs", "/data:rw,nosuid,nodev,size=512m,uid=10001,gid=10001,mode=0700", options["--image"], "bun", "scripts/image-smoke.ts", "--arch", arch]);
     resources.extraction = `cgw-extract-${suffix}`;
     command("docker", ["create", "--name", resources.extraction, options["--image"]]);

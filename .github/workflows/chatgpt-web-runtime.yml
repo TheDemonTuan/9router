@@ -135,6 +135,7 @@ jobs:
           bun install --frozen-lockfile
           bun run typecheck
           bun run test
+          python3 -B -m unittest discover -s tests -p install_browser_test.py
           bun build src/server.ts src/companion/main.ts --target bun --external playwright-core --outdir "$RUNNER_TEMP/cgw-entrypoints"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - name: Build and load native image without emulation or push
@@ -148,6 +149,15 @@ jobs:
           docker buildx build --load --platform "linux/$ARCH" --build-arg "APP_REVISION=$REVISION" \
             -f services/chatgpt-web-runtime/Dockerfile -t "$image" .
           echo "CGW_CHECK_IMAGE=$image" >> "$GITHUB_ENV"
+      - name: Provision official Chrome privately from pinned Google download
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          browser="$RUNNER_TEMP/cgw-browser"
+          python3 services/chatgpt-web-runtime/scripts/install-browser.py \
+            --manifest services/chatgpt-web-runtime/image-build-manifest.json --arch "$ARCH" --output "$browser"
+          echo "CGW_BROWSER_DIR=$browser" >> "$GITHUB_ENV"
       - name: Prove physical sandbox, native binaries and actual browser HTTP fixture
         env:
           ARCH: ${{ matrix.arch }}
@@ -157,7 +167,8 @@ jobs:
             --security-opt "seccomp=$PWD/services/chatgpt-web-runtime/security/seccomp.json" --shm-size 1g
             --tmpfs /tmp:rw,nosuid,nodev,size=512m,mode=1777
             --tmpfs /run:rw,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700
-            --tmpfs /data:rw,nosuid,nodev,size=512m,uid=10001,gid=10001,mode=0700)
+            --tmpfs /data:rw,nosuid,nodev,size=512m,uid=10001,gid=10001,mode=0700
+            --mount "type=bind,src=$CGW_BROWSER_DIR,dst=/opt/cgw-browser,readonly")
           echo "=== 1. image-smoke ==="
           docker run "${hardening[@]}" "$CGW_CHECK_IMAGE" bun scripts/image-smoke.ts --arch "$ARCH"
           echo "=== 2. verify-harness-compatibility ==="
@@ -172,18 +183,20 @@ jobs:
           bun install --frozen-lockfile
           bun install --frozen-lockfile --cwd tests
           bun run build
-          bun tests/integration/chatgpt-web-runtime-smoke.mjs --image "$CGW_CHECK_IMAGE" --gateway-port 21127
+          bun tests/integration/chatgpt-web-runtime-smoke.mjs --image "$CGW_CHECK_IMAGE" --browser-dir "$CGW_BROWSER_DIR" --gateway-port 21127
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: TheDemonTuan/vps-deploy
           ref: f6d40a519c2bf8b0a19e3f9c714b737875052870
           path: platform
           persist-credentials: false
-      - name: Scan complete native browser image without suppression
+      - name: Scan runtime and privately mounted browser without suppression
         run: |
           set -euo pipefail
           sudo bash platform/scripts/install-trivy.sh /usr/local/bin
           trivy image --scanners vuln --ignorefile /dev/null --severity HIGH,CRITICAL --exit-code 1 "$CGW_CHECK_IMAGE"
+          trivy sbom --ignorefile /dev/null --severity HIGH,CRITICAL --exit-code 1 "$CGW_BROWSER_DIR/browser.spdx.json"
+          trivy fs --scanners vuln --ignorefile /dev/null --severity HIGH,CRITICAL --exit-code 1 "$CGW_BROWSER_DIR"
       # No registry login, push, account-state artifact upload, reusable old platform
       # Trivy call, deploy action, or production manifest/pin mutation belongs here.
 

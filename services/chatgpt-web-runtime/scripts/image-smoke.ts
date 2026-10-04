@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium } from "playwright-core";
 import type { BrowserContext } from "playwright-core";
+import "./verify-browser";
 
 // Run INSIDE the built image under the same cap/seccomp/no-new-privileges policy as staging.
 // This is a native Chromium/packaging gate, not live ChatGPT or outer Codex tool E2E.
@@ -18,7 +19,7 @@ assert.equal(process.getuid?.(), 10001, "Runtime must not run as root");
 assert.equal(process.getgid?.(), 10001, "Runtime group mismatch");
 assert.equal(Bun.version, "1.4.0", "Bun baseline changed");
 assert.equal(readFileSync("/proc/1/comm", "utf8").trim(), "tini", "Tini must own PID 1");
-assert.match(readFileSync("/etc/os-release", "utf8"), /VERSION_ID="13"/, "Debian 13 required");
+assert.match(readFileSync("/etc/os-release", "utf8"), /VERSION_ID="24.04"/, "Ubuntu 24.04 required");
 const processStatus = readFileSync("/proc/self/status", "utf8");
 assert.match(processStatus, /^NoNewPrivs:\s+1$/m, "Docker no-new-privileges required");
 assert.match(processStatus, /^CapEff:\s+0+$/m, "Docker cap_drop ALL required");
@@ -72,8 +73,15 @@ function command(binary: string, argv: string[]) {
 assert.match(command("ldd", ["--version"]), /GLIBC|GNU libc/, "glibc required (not musl)");
 assert.match(command("tunnel-client", ["--version"]), /\b0\.0\.15\b/, "Pinned tunnel version mismatch");
 assert.match(command("cloudflared", ["--version"]), /\b2026\.8\.2\b/, "Pinned child version mismatch");
-const chromiumVersion = command("/usr/bin/chromium", ["--version"]).trim();
-assert(chromiumVersion.includes(manifest.debian.chromiumVersion.split("-")[0]), "Pinned Chromium version mismatch");
+const browser = manifest.browser;
+const browserRoot = browser.installRoot;
+const browserProof = JSON.parse(readFileSync(join(browserRoot, ".cgw-chrome.json"), "utf8"));
+for (const [path, checksum] of Object.entries(browserProof.files)) {
+  assert(path && !path.startsWith("/") && !path.includes("\\") && !path.split("/").some(part => !part || part === "." || part === ".."), "Unsafe browser provenance path");
+  assert.equal(hash(readFileSync(join(browserRoot, path))), checksum, `Private Chrome file changed: ${path}`);
+}
+const chromiumVersion = command(process.env.CGW_CHROMIUM_EXECUTABLE!, ["--version"]).trim();
+assert(chromiumVersion.includes(browser.version), "Pinned Chrome version mismatch");
 const root = mkdtempSync(join(tmpdir(), "cgw-image-smoke-"));
 const fixture = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response(
   '<!doctype html><html><body><button id="send">Send</button><p id="answer"></p><script>'
@@ -84,7 +92,7 @@ let context: BrowserContext | undefined;
 try {
   // Failure on an unsupported host is intentional. Never retry with a weaker sandbox.
   context = await chromium.launchPersistentContext(root, {
-    executablePath: "/usr/bin/chromium", chromiumSandbox: true, headless: true,
+    executablePath: process.env.CGW_CHROMIUM_EXECUTABLE, chromiumSandbox: true, headless: true,
   });
   const page = await context.newPage();
   await page.goto(`http://127.0.0.1:${fixture.port}`);
@@ -101,7 +109,7 @@ try {
   for (const pid of readdirSync("/proc").filter(name => /^\d+$/.test(name))) {
     let cmdline: string;
     try { cmdline = readFileSync(`/proc/${pid}/cmdline`, "utf8"); } catch { continue; }
-    if (!cmdline.includes("chromium")) continue;
+    if (!cmdline.includes(process.env.CGW_CHROMIUM_EXECUTABLE!)) continue;
     const flags = cmdline.split("\0");
     for (const forbidden of ["--no-sandbox", "--disable-namespace-sandbox", "--disable-seccomp-filter-sandbox"]) {
       assert(!flags.includes(forbidden), `Chromium sandbox weakened: ${forbidden}`);

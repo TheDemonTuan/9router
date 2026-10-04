@@ -100,3 +100,20 @@ A prior native stable Chromium source-build attempt did not produce a verified b
 ## Prebuilt browser cutover (2026-10-04)
 
 The runtime keeps upstream `playwright-core` and the configured browser executable. Browser installation uses Debian's prebuilt Chromium `154.0.8037.92-1~deb13u1` on native AMD64 and ARM64, not a custom browser build or a pre-release fallback. The Debian 13 base is digest-pinned; packages come from the signed `20261003T000000Z` snapshot. Both security package indexes were checked and contain that exact Chromium version. Native sandbox, actual gateway/browser/MCP fixtures and unsuppressed complete-image HIGH/CRITICAL scans remain required. No combined-image success or production activation is claimed before those checks finish.
+
+[Native prebuilt run 37187413833](https://github.com/TheDemonTuan/9router/actions/runs/37187413833), commit `cf0425b4`, built both architectures and passed runtime typecheck/57 tests, rootless sandbox DOM, browser/MCP/approval/profile fixtures, and production-mode gateway/runtime HTTP E2E. Gateway contracts passed 160 tests; preserved production regressions passed 1083 Vitest tests and the separate Bun/smoke checks. The workflow failed the unsuppressed complete-image scan: each Debian 13 image contains 91 HIGH and 1 CRITICAL OS-package findings, including libxml2 `CVE-2026-6653`. No publication, production activation, live ChatGPT, real Codex or outbound tunnel E2E was performed by this run.
+
+The [Debian tracker for CVE-2026-6653](https://security-tracker.debian.org/tracker/CVE-2026-6653) marks the current trixie libxml2 package vulnerable; the published fixed package is in unstable, not stable. Its `no-dsa (Minor issue)` disposition does not mean fixed or unaffected. A stable snapshot refresh cannot currently clear this finding. The previously verified Ubuntu closure cannot simply install Bookworm Chromium: its package dependencies include `libjpeg62-turbo` and `libdav1d6`, whereas Noble supplies different library packages/ABIs. No forced package dependencies, ABI aliases, scanner suppression or browser source-build fallback is used.
+
+## Operator-approved private Chrome (2026-10-04)
+
+The operator approved using official Google Chrome rather than building Chromium. The runtime image contains the patched, signed Ubuntu 24.04 closure and the ported Playwright runtime, but no Chrome payload. `scripts/install-browser.py` downloads Chrome for Testing `154.0.8037.92` directly from Google's pinned URLs on the native CI/VPS host. It verifies archive SHA256, executable SHA256 and ELF architecture, rejects unsafe archive members, preserves the original payload/license files, and atomically provisions a new immutable directory. It does not replace an existing bundle. Its provenance records every file and a Chrome-version SPDX document; Google's terms apply, not this package's MIT license.
+
+Every browser gate mounts that private directory read-only at `/opt/cgw-browser`; production uses version-bound host directories outside account state. Startup rejects a missing/mismatched executable, and image smoke verifies bundle file hashes, actual browser version and physical sandbox. Runtime-image scanning and private browser SPDX/filesystem scanning remain unsuppressed HIGH/CRITICAL gates. Neither CI artifacts nor public OCI layers contain the Chrome binary. This cutover is not a production or private-account pass until its real gates finish.
+
+Provision a private native fixture from the app checkout:
+
+```sh
+python3 services/chatgpt-web-runtime/scripts/install-browser.py --manifest services/chatgpt-web-runtime/image-build-manifest.json --arch arm64 --output /private/cgw-browser
+bun tests/integration/chatgpt-web-runtime-smoke.mjs --image cgw-runtime:check --browser-dir /private/cgw-browser --gateway-port 21127
+```
