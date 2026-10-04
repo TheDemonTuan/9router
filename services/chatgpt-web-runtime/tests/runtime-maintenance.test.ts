@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -9,6 +9,8 @@ import { startRuntime } from "../src/server";
 import { closeBrowserManagers } from "../src/browser/manager";
 import type { RuntimeConfig } from "../src/config";
 import type { AuthorityClaims } from "../src/authority";
+import type { BrowserContext } from "playwright-core";
+import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
 
 function fixtureConfig(dataDir: string): RuntimeConfig {
   return { dataDir, host: "127.0.0.1", port: 0, chromiumExecutable: join(dataDir, "absent-chromium"),
@@ -44,6 +46,35 @@ describe("durable maintenance lifecycle", () => {
       state.admit({ ...claim("after-init"), turnId: "new-turn" }, "one", profile.epoch, "model", false);
       expect(state.acceptedRequestCount()).toBe(2);
     } finally { state.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("resume accepts signed-out profiles but keeps admission fenced on unexpected probe failure", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cgw-maint-signed-out-"));
+    const state = new RuntimeState(root);
+    const original = state.createProfile("one");
+    const profiles = new RuntimeProfiles(fixtureConfig(root), state);
+    const manager = profiles.manager("one");
+    const browser = spyOn(profiles, "ensureProfileBrowser").mockResolvedValue(manager);
+    const context = spyOn(manager, "ensureContext").mockResolvedValue({} as BrowserContext);
+    const probe = spyOn(profiles, "probe").mockRejectedValue(new ChatGptWebAdapterError("Signed out", {
+      status: 409, errorType: "runtime_error", code: "login_required", retryable: false,
+    }));
+    try {
+      state.drain("signed-out-upgrade"); state.quiesce("signed-out-upgrade");
+      await state.resume("signed-out-upgrade", () => profiles.initialize());
+      expect(state.fence()).toBeNull();
+      expect(profiles.status("one")).toMatchObject({ state: "login_required", lastError: "login_required", models: [] });
+      expect(profiles.ready("one")).toBe(false);
+      expect(state.profile("one").revision).toBe(original.revision);
+      probe.mockRejectedValue(new Error("Unexpected browser probe failure"));
+      state.drain("broken-upgrade"); state.quiesce("broken-upgrade");
+      await expect(state.resume("broken-upgrade", () => profiles.initialize())).rejects.toThrow("Unexpected browser probe failure");
+      expect(state.fence()).toEqual({ operationId: "broken-upgrade", state: "quiesced" });
+      expect(profiles.ready("one")).toBe(false);
+    } finally {
+      probe.mockRestore(); context.mockRestore(); browser.mockRestore();
+      await profiles.close(); state.close(); rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("malformed durable fences and missing schema tables fail closed rather than reset", () => {

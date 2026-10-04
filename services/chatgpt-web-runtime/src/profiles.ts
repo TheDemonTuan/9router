@@ -67,7 +67,7 @@ export class RuntimeProfiles {
         await this.probe(profile.profileId, true, true);
       } catch (error) {
         this.invalidate(profile.profileId, error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : "profile_probe_failed");
-        if (!(error instanceof RuntimeStateError) || !["login_required", "session_expired", "model_version_unavailable", "harness_compatibility_unverified"].includes(error.code)) throw error;
+        if (!(error instanceof RuntimeStateError || error instanceof ChatGptWebAdapterError) || !["login_required", "session_expired", "model_version_unavailable", "harness_compatibility_unverified"].includes(error.code || "")) throw error;
       }
     }
   }
