@@ -26,10 +26,10 @@
   "browser": {
     "distribution": "google-chrome-for-testing",
     "version": "154.0.8037.92",
-    "installRoot": "/opt/cgw-browser",
+    "installRoot": "/opt/cgw-browser/154.0.8037.92",
     "terms": "https://www.google.com/chrome/terms/",
     "metadataSource": "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json",
-    "distributionPolicy": "Operator-approved direct private download from Google; no browser payload is redistributed in the public runtime image. Provision outside the running runtime and mount read-only.",
+    "distributionPolicy": "Operator-approved direct download from Google by the same public runtime image's Docker browser-init service; no browser payload in OCI layers or artifacts. Provision an immutable version directory in a Docker-managed cache volume and mount the cache read-only in runtime.",
     "platforms": {
       "amd64": {
         "url": "https://storage.googleapis.com/chrome-for-testing-public/154.0.8037.92/linux64/chrome-linux64.zip",

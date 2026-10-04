@@ -4,7 +4,7 @@
  * Usage: bun tests/integration/chatgpt-web-runtime-smoke.mjs
  *   --runtime-url http://127.0.0.1:17841 --gateway-port 21127
  *   --runtime-bun /absolute/path/to/bun-1.4.0 --chromium /absolute/path/to/chromium
- * Or: --image cgw-runtime:check --browser-dir /private/pinned/chrome --gateway-port 21127 (native Linux Docker only).
+ * Or: --image cgw-runtime:check --browser-volume 9router-cgw-browser --gateway-port 21127 (native Linux Docker only).
  * Requires gateway Bun 1.4.2, runtime dependencies installed with its frozen lock,
  * and an existing gateway build. When BUILD_ID is absent, isolated Next dev builds
  * are used and explicitly reported. No account, production DB, Codex auth or live
@@ -22,7 +22,7 @@ import { createServer } from "node:net";
 const options = {};
 for (let index = 2; index < process.argv.length; index += 2) {
   const key = process.argv[index];
-  assert(["--runtime-url", "--gateway-port", "--image", "--browser-dir", "--runtime-bun", "--chromium"].includes(key), "Unknown smoke flag");
+  assert(["--runtime-url", "--gateway-port", "--image", "--browser-volume", "--runtime-bun", "--chromium"].includes(key), "Unknown smoke flag");
   assert(process.argv[index + 1] && !process.argv[index + 1].startsWith("--"), "Smoke flag requires a value");
   assert(!Object.hasOwn(options, key), "Duplicate smoke flag"); options[key] = process.argv[index + 1];
 }
@@ -36,7 +36,7 @@ const runtimeUrl = new URL(options["--runtime-url"] || "http://127.0.0.1:17841")
 assert(runtimeUrl.protocol === "http:" && runtimeUrl.hostname === "127.0.0.1" && runtimeUrl.pathname === "/" && runtimeUrl.port && !runtimeUrl.search && !runtimeUrl.hash && !runtimeUrl.username && !runtimeUrl.password, "Runtime fixture URL must be exact loopback HTTP with port");
 const root = mkdtempSync(join(tmpdir(), "9router-cgw-gateway-"));
 const children = [], logFiles = [], devDirectories = [];
-const resources = { container: null, extraction: null, network: null, volume: null };
+const resources = { container: null, probe: null, extraction: null, network: null, volume: null };
 const suffix = randomUUID().replaceAll("-", "");
 const previousEnvironment = { ...process.env };
 let stage = "prerequisites";
@@ -129,12 +129,16 @@ try {
     assert(command("docker", ["info", "--format", "{{.OSType}}"] ) === "linux", "BLOCKED: Docker server must be Linux");
     const arch = process.arch === "x64" ? "amd64" : "arm64";
     assert(command("docker", ["image", "inspect", "--format", "{{.Architecture}}", options["--image"]]) === arch, "BLOCKED: native image architecture mismatch");
-    assert(options["--browser-dir"] && existsSync(join(options["--browser-dir"], "chrome")), "BLOCKED: --image requires privately provisioned --browser-dir");
-    const hardening = ["--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+    const browserVolume = options["--browser-volume"];
+    assert(browserVolume && /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(browserVolume), "BLOCKED: --image requires a provisioned Docker --browser-volume");
+    assert(command("docker", ["volume", "inspect", "--format", "{{.Name}}", browserVolume]) === browserVolume, "BLOCKED: browser volume missing");
+    const hardening = ["--read-only", "--cpus", "1.0", "--memory", "2g", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
       "--security-opt", `seccomp=${join(runtimePackage, "security/seccomp.json")}`, "--shm-size", "1g",
       "--tmpfs", "/tmp:rw,nosuid,nodev,size=512m,mode=1777", "--tmpfs", "/run:rw,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700",
-      "--mount", `type=bind,src=${resolve(options["--browser-dir"])},dst=/opt/cgw-browser,readonly`];
-    command("docker", ["run", "--rm", ...hardening, "--network", "none", "--tmpfs", "/data:rw,nosuid,nodev,size=512m,uid=10001,gid=10001,mode=0700", options["--image"], "bun", "scripts/image-smoke.ts", "--arch", arch]);
+      "--mount", `type=volume,src=${browserVolume},dst=/opt/cgw-browser,readonly`];
+    resources.probe = `cgw-sandbox-${suffix}`;
+    command("docker", ["run", "--rm", "--name", resources.probe, ...hardening, "--network", "none", "--tmpfs", "/data:rw,nosuid,nodev,size=512m,uid=10001,gid=10001,mode=0700", options["--image"], "bun", "scripts/image-smoke.ts", "--arch", arch]);
+    resources.probe = null;
     resources.extraction = `cgw-extract-${suffix}`;
     command("docker", ["create", "--name", resources.extraction, options["--image"]]);
     runtimeBun = join(root, "bun-1.4.0"); command("docker", ["cp", `${resources.extraction}:/usr/local/bin/bun`, runtimeBun]); chmodSync(runtimeBun, 0o700);
@@ -356,7 +360,7 @@ try {
     }
   }
   let cleanupFailed = false;
-  for (const [resource, args] of [[resources.container, ["rm", "-f"]], [resources.extraction, ["rm", "-f"]], [resources.network, ["network", "rm"]], [resources.volume, ["volume", "rm"]]]) if (resource) {
+  for (const [resource, args] of [[resources.container, ["rm", "-f"]], [resources.probe, ["rm", "-f"]], [resources.extraction, ["rm", "-f"]], [resources.network, ["network", "rm"]], [resources.volume, ["volume", "rm"]]]) if (resource) {
     const result = spawnSync("docker", [...args, resource], { stdio: "ignore", timeout: 30000 });
     if (outcome && (resource === resources.network || resource === resources.volume) && result.status !== 0) cleanupFailed = true;
   }

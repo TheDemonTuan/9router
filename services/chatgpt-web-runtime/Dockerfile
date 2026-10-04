@@ -1,4 +1,4 @@
-# Native-only Ubuntu 24.04/glibc runtime. Chrome is privately provisioned, never published in this image.
+# Native-only Ubuntu 24.04/glibc runtime. Docker browser-init provisions Chrome into a volume, never this image.
 # Build from the app root with --build-arg APP_REVISION=<40-hex SHA>.
 FROM ubuntu:noble@sha256:a853f94d226358a79c740cfc7bce0c289748f3fe3488d921d038ccd752c61b60 AS ubuntu
 ARG TARGETARCH
@@ -7,7 +7,7 @@ ADD --checksum=sha256:6bac2a01979e210d9eac1d4d56747ec709ea60654744d66705dc3c36e7
     https://snapshot.ubuntu.com/ubuntu/20261003T000000Z/pool/main/c/ca-certificates/ca-certificates_20260601~24.04.1_all.deb \
     /build/ca-certificates.deb
 RUN sh /build/install-ubuntu-snapshot.sh --ca-bootstrap /build/ca-certificates.deb --arch "${TARGETARCH}" \
-      tini xvfb openbox x11vnc xauth fonts-liberation fonts-noto-core fonts-noto-color-emoji \
+      python3 tini xvfb openbox x11vnc xauth fonts-liberation fonts-noto-core fonts-noto-color-emoji \
       libasound2t64 libatk1.0-0t64 libatk-bridge2.0-0t64 libatspi2.0-0t64 libcairo2 libcups2t64 \
       libdbus-1-3 libdrm2 libexpat1 libfontconfig1 libgbm1 libgcc-s1 libglib2.0-0t64 libgtk-3-0t64 \
       libnspr4 libnss3 libpango-1.0-0 libstdc++6 libudev1 libx11-6 libxcb1 libxcomposite1 \
@@ -17,7 +17,6 @@ RUN sh /build/install-ubuntu-snapshot.sh --ca-bootstrap /build/ca-certificates.d
 FROM ubuntu AS assets
 ARG TARGETARCH
 ARG APP_REVISION
-RUN apt-get update && apt-get install -y --no-install-recommends python3 && rm -rf /var/lib/apt/lists/*
 COPY services/chatgpt-web-runtime/image-build-manifest.json /build/image-build-manifest.json
 COPY services/chatgpt-web-runtime/scripts/install-image-assets.py /build/install-image-assets.py
 COPY services/chatgpt-web-runtime/scripts/build-tunnel-assets.py /build/build-tunnel-assets.py
@@ -41,7 +40,8 @@ LABEL org.opencontainers.image.title="9Router ChatGPT Web Runtime" \
       org.opencontainers.image.licenses="MIT AND Apache-2.0"
 RUN groupadd --gid 10001 cgw \
     && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin cgw \
-    && install -d -o 10001 -g 10001 -m 0700 /data /run/cgw /home/cgw
+    && install -d -o 10001 -g 10001 -m 0700 /data /run/cgw /home/cgw \
+    && install -d -o 10001 -g 10001 -m 0755 /opt/cgw-browser
 COPY --from=assets /assets/bin/ /usr/local/bin/
 COPY --from=assets /assets/share/licenses/ /usr/local/share/licenses/
 WORKDIR /opt/cgw
@@ -55,7 +55,7 @@ COPY services/chatgpt-web-runtime/LICENSE ./LICENSE
 COPY services/chatgpt-web-runtime/LICENSES/ ./LICENSES/
 COPY services/chatgpt-web-runtime/image-build-manifest.json ./image-build-manifest.json
 COPY services/chatgpt-web-runtime/security/seccomp.json ./security/seccomp.json
-ENV HOME=/home/cgw CGW_DATA_DIR=/data CGW_PORT=17841 CGW_CHROMIUM_EXECUTABLE=/opt/cgw-browser/chrome \
+ENV HOME=/home/cgw CGW_DATA_DIR=/data CGW_PORT=17841 CGW_CHROMIUM_EXECUTABLE=/opt/cgw-browser/154.0.8037.92/chrome \
     XDG_CACHE_HOME=/tmp/cgw-cache XDG_CONFIG_HOME=/tmp/cgw-config XDG_RUNTIME_DIR=/run/cgw \
     PATH=/usr/local/bin:/usr/bin:/bin
 USER 10001:10001

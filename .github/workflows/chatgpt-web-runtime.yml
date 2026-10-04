@@ -110,6 +110,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     env:
       HTTP_PROXY: ''
+      ARCH: ${{ matrix.arch }}
       HTTPS_PROXY: ''
       ALL_PROXY: ''
       ENABLE_REQUEST_LOGS: 'false'
@@ -135,7 +136,6 @@ jobs:
           bun install --frozen-lockfile
           bun run typecheck
           bun run test
-          python3 -B -m unittest discover -s tests -p install_browser_test.py
           bun build src/server.ts src/companion/main.ts --target bun --external playwright-core --outdir "$RUNNER_TEMP/cgw-entrypoints"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - name: Build and load native image without emulation or push
@@ -149,30 +149,43 @@ jobs:
           docker buildx build --load --platform "linux/$ARCH" --build-arg "APP_REVISION=$REVISION" \
             -f services/chatgpt-web-runtime/Dockerfile -t "$image" .
           echo "CGW_CHECK_IMAGE=$image" >> "$GITHUB_ENV"
-      - name: Provision official Chrome privately from pinned Google download
+      - name: Prove browserless image and installer boundaries inside Docker
+        run: |
+          set -euo pipefail
+          docker run --rm --name "cgw-browserless-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}" --read-only --network none --cpus 0.5 --memory 1g --cap-drop ALL --security-opt no-new-privileges:true \
+            --tmpfs /tmp:rw,nosuid,nodev,size=512m,mode=1777 \
+            --tmpfs /run:rw,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700 \
+            "$CGW_CHECK_IMAGE" sh -c 'python3 -c '\''from pathlib import Path; import os; p = Path("/opt/cgw-browser"); assert not list(p.iterdir()); assert p.stat().st_uid == p.stat().st_gid == os.getuid() == 10001'\'' && python3 -B -m unittest discover -s tests -p install_browser_test.py'
+      - name: Provision pinned Chrome in an owned Docker cache volume
         env:
           ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
-          browser="$RUNNER_TEMP/cgw-browser"
-          python3 services/chatgpt-web-runtime/scripts/install-browser.py \
-            --manifest services/chatgpt-web-runtime/image-build-manifest.json --arch "$ARCH" --output "$browser"
-          echo "CGW_BROWSER_DIR=$browser" >> "$GITHUB_ENV"
+          volume="cgw-browser-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}"
+          init="cgw-browser-init-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}"
+          printf 'CGW_BROWSER_VOLUME=%s\nCGW_INIT_CONTAINER=%s\n' "$volume" "$init" >> "$GITHUB_ENV"
+          docker volume create "$volume"
+          docker run --rm --name "$init" --user 10001:10001 --read-only --cpus 0.5 --memory 1g \
+            --cap-drop ALL --security-opt no-new-privileges:true \
+            --tmpfs /tmp:rw,nosuid,nodev,size=512m,mode=1777 \
+            --tmpfs /run:rw,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700 \
+            --mount "type=volume,src=$volume,dst=/opt/cgw-browser" \
+            "$CGW_CHECK_IMAGE" python3 scripts/install-browser.py --manifest image-build-manifest.json
       - name: Prove physical sandbox, native binaries and actual browser HTTP fixture
         env:
           ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
-          hardening=(--rm --read-only --network none --cap-drop ALL --security-opt no-new-privileges:true
+          hardening=(--rm --read-only --network none --cpus 1.0 --memory 2g --cap-drop ALL --security-opt no-new-privileges:true
             --security-opt "seccomp=$PWD/services/chatgpt-web-runtime/security/seccomp.json" --shm-size 1g
             --tmpfs /tmp:rw,nosuid,nodev,size=512m,mode=1777
             --tmpfs /run:rw,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700
             --tmpfs /data:rw,nosuid,nodev,size=512m,uid=10001,gid=10001,mode=0700
-            --mount "type=bind,src=$CGW_BROWSER_DIR,dst=/opt/cgw-browser,readonly")
+            --mount "type=volume,src=$CGW_BROWSER_VOLUME,dst=/opt/cgw-browser,readonly")
           echo "=== 1. image-smoke ==="
-          docker run "${hardening[@]}" "$CGW_CHECK_IMAGE" bun scripts/image-smoke.ts --arch "$ARCH"
+          docker run --name "cgw-image-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}" "${hardening[@]}" "$CGW_CHECK_IMAGE" bun scripts/image-smoke.ts --arch "$ARCH"
           echo "=== 2. verify-harness-compatibility ==="
-          docker run "${hardening[@]}" "$CGW_CHECK_IMAGE" bun scripts/verify-harness-compatibility.ts /data/compatibility.json
+          docker run --name "cgw-compatibility-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}" "${hardening[@]}" "$CGW_CHECK_IMAGE" bun scripts/verify-harness-compatibility.ts /data/compatibility.json
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.2
@@ -183,21 +196,37 @@ jobs:
           bun install --frozen-lockfile
           bun install --frozen-lockfile --cwd tests
           bun run build
-          bun tests/integration/chatgpt-web-runtime-smoke.mjs --image "$CGW_CHECK_IMAGE" --browser-dir "$CGW_BROWSER_DIR" --gateway-port 21127
+          bun tests/integration/chatgpt-web-runtime-smoke.mjs --image "$CGW_CHECK_IMAGE" --browser-volume "$CGW_BROWSER_VOLUME" --gateway-port 21127
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: TheDemonTuan/vps-deploy
           ref: 4b1e1692006df83c93da05ea9e7bf285ccf94138
           path: platform
           persist-credentials: false
-      - name: Scan runtime and privately mounted browser without suppression
+      - name: Scan browserless runtime and Docker browser metadata without suppression
         run: |
           set -euo pipefail
           sudo bash platform/scripts/install-trivy.sh /usr/local/bin
           trivy image --scanners vuln --ignorefile /dev/null --severity HIGH,CRITICAL --exit-code 1 "$CGW_CHECK_IMAGE"
           sudo bash platform/scripts/install-grype.sh /usr/local/bin
-          python3 platform/scripts/scan-private-browser.py --sbom "$CGW_BROWSER_DIR/browser.spdx.json" \
+          docker run --rm --name "cgw-browser-metadata-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}" --read-only --network none --cpus 0.5 --memory 1g --cap-drop ALL --security-opt no-new-privileges:true \
+            --tmpfs /tmp:rw,nosuid,nodev,size=512m,mode=1777 \
+            --tmpfs /run:rw,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700 \
+            --mount "type=volume,src=$CGW_BROWSER_VOLUME,dst=/opt/cgw-browser,readonly" \
+            "$CGW_CHECK_IMAGE" bun -e 'const manifest = await Bun.file("image-build-manifest.json").json(); process.stdout.write(await Bun.file(manifest.browser.installRoot + "/browser.spdx.json").text())' > "$RUNNER_TEMP/browser.spdx.json"
+          python3 platform/scripts/scan-browser.py --sbom "$RUNNER_TEMP/browser.spdx.json" \
             --report "$RUNNER_TEMP/grype-browser.json"
+      - name: Clean only this native job's owned Docker resources
+        if: always()
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          docker rm -f "cgw-browser-init-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}" \
+            "cgw-browserless-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}" \
+            "cgw-browser-metadata-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}" \
+            "cgw-image-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}" \
+            "cgw-compatibility-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}" 2>/dev/null || true
+          if [[ -n "${CGW_BROWSER_VOLUME:-}" ]]; then docker volume rm "$CGW_BROWSER_VOLUME"; fi
       # No registry login, push, account-state artifact upload, reusable old platform
       # Trivy call, deploy action, or production manifest/pin mutation belongs here.
 

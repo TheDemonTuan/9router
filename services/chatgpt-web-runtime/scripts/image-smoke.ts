@@ -78,7 +78,7 @@ const browserRoot = browser.installRoot;
 const browserProof = JSON.parse(readFileSync(join(browserRoot, ".cgw-chrome.json"), "utf8"));
 for (const [path, checksum] of Object.entries(browserProof.files)) {
   assert(path && !path.startsWith("/") && !path.includes("\\") && !path.split("/").some(part => !part || part === "." || part === ".."), "Unsafe browser provenance path");
-  assert.equal(hash(readFileSync(join(browserRoot, path))), checksum, `Private Chrome file changed: ${path}`);
+  assert.equal(hash(readFileSync(join(browserRoot, path))), checksum, `Chrome file changed: ${path}`);
 }
 const chromiumVersion = command(process.env.CGW_CHROMIUM_EXECUTABLE!, ["--version"]).trim();
 assert(chromiumVersion.includes(browser.version), "Pinned Chrome version mismatch");

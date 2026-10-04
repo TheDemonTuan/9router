@@ -4,7 +4,7 @@ import { lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const manifest = JSON.parse(readFileSync(new URL("../image-build-manifest.json", import.meta.url), "utf8"));
-assert.equal(process.platform, "linux", "Private Chrome requires native Linux");
+assert.equal(process.platform, "linux", "Chrome requires native Linux");
 const arch = process.arch === "x64" ? "amd64" : process.arch;
 assert(["amd64", "arm64"].includes(arch), "Unsupported Chrome architecture");
 const browser = manifest.browser;
@@ -26,4 +26,4 @@ const binary = readFileSync(binaryPath);
 assert.equal(binary.subarray(0, 6).toString("hex"), "7f454c460201", "Native ELF64 Chrome required");
 assert.equal(binary.readUInt16LE(18), arch === "amd64" ? 62 : 183, "Wrong Chrome machine architecture");
 assert.equal(createHash("sha256").update(binary).digest("hex"), asset.binarySha256, "Chrome binary checksum changed");
-console.info(JSON.stringify({ gate: "private-browser-identity", architecture: arch, version: browser.version }));
+console.info(JSON.stringify({ gate: "browser-identity", architecture: arch, version: browser.version }));

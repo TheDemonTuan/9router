@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Provision operator-approved Chrome privately; never add its payload to an image."""
+"""Provision pinned Chrome in the Docker browser cache; never add its payload to an image."""
 import argparse
 import hashlib
 import json
@@ -14,8 +14,11 @@ import zipfile
 
 
 def sha256(path):
+    digest = hashlib.sha256()
     with path.open('rb') as stream:
-        return hashlib.file_digest(stream, 'sha256').hexdigest()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def check_binary(path, arch, expected):
@@ -95,8 +98,15 @@ def unpack(archive, destination, asset, arch):
         raise ValueError('CGW_BROWSER_NOT_EXECUTABLE')
 
 
+def native_arch():
+    arch = {'x86_64': 'amd64', 'aarch64': 'arm64'}.get(platform.machine())
+    if platform.system() != 'Linux' or arch is None:
+        raise ValueError('CGW_BROWSER_NATIVE_LINUX_REQUIRED')
+    return arch
+
+
 def install(browser, arch, output):
-    if platform.system() != 'Linux' or platform.machine() != {'amd64': 'x86_64', 'arm64': 'aarch64'}[arch]:
+    if arch != native_arch():
         raise ValueError('CGW_BROWSER_NATIVE_LINUX_REQUIRED')
     output = Path(os.path.abspath(output))
     if output.exists() or output.is_symlink():
@@ -121,9 +131,9 @@ def install(browser, arch, output):
         payload.mkdir(mode=0o755)
         unpack(archive, payload, asset, arch)
         sbom = {'spdxVersion': 'SPDX-2.3', 'dataLicense': 'CC0-1.0', 'SPDXID': 'SPDXRef-DOCUMENT',
-                'name': 'Private Google Chrome for Testing',
+                'name': 'Google Chrome for Testing',
                 'documentNamespace': 'https://9router.local/browser/' + asset['sha256'],
-                'creationInfo': {'creators': ['Tool: 9router-private-browser-installer'], 'created': '2026-10-04T00:00:00Z'},
+                'creationInfo': {'creators': ['Tool: 9router-browser-installer'], 'created': '2026-10-04T00:00:00Z'},
                 'packages': [{'name': 'Google Chrome', 'SPDXID': 'SPDXRef-Chrome', 'versionInfo': browser['version'],
                     'downloadLocation': asset['url'], 'filesAnalyzed': False,
                     'checksums': [{'algorithm': 'SHA256', 'checksumValue': asset['sha256']}],
@@ -145,11 +155,18 @@ def install(browser, arch, output):
         payload.rename(output)
 
 
-if __name__ == '__main__':
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--manifest', required=True, type=Path)
-    parser.add_argument('--arch', required=True, choices=('amd64', 'arm64'))
-    parser.add_argument('--output', required=True, type=Path)
-    args = parser.parse_args()
-    install(json.loads(args.manifest.read_text(encoding='utf-8'))['browser'], args.arch, args.output)
-    print(json.dumps({'gate': 'private-chrome-provisioned', 'architecture': args.arch, 'path': str(args.output)}))
+    parser.add_argument('--arch', choices=('amd64', 'arm64'))
+    parser.add_argument('--output', type=Path)
+    args = parser.parse_args(argv)
+    browser = json.loads(args.manifest.read_text(encoding='utf-8'))['browser']
+    arch = args.arch or native_arch()
+    output = args.output or Path(browser['installRoot'])
+    install(browser, arch, output)
+    print(json.dumps({'gate': 'browser-provisioned', 'architecture': arch, 'path': str(output)}))
+
+
+if __name__ == '__main__':
+    main()
