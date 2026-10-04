@@ -45,11 +45,11 @@ jobs:
     permissions:
       contents: read
       packages: read
-    uses: TheDemonTuan/vps-deploy/.github/workflows/security-trivy.yml@f6d40a519c2bf8b0a19e3f9c714b737875052870
+    uses: TheDemonTuan/vps-deploy/.github/workflows/security-trivy.yml@4b1e1692006df83c93da05ea9e7bf285ccf94138
     with:
       app: 9router
       source-sha: ${{ github.sha }}
-      platform-ref: f6d40a519c2bf8b0a19e3f9c714b737875052870
+      platform-ref: 4b1e1692006df83c93da05ea9e7bf285ccf94138
       config: .deploy/app.yml
       scan-mode: source
 
@@ -61,11 +61,11 @@ jobs:
     permissions:
       contents: read
       packages: write
-    uses: TheDemonTuan/vps-deploy/.github/workflows/build-docker.yml@f6d40a519c2bf8b0a19e3f9c714b737875052870
+    uses: TheDemonTuan/vps-deploy/.github/workflows/build-docker.yml@4b1e1692006df83c93da05ea9e7bf285ccf94138
     with:
       app: 9router
       source-sha: ${{ github.sha }}
-      platform-ref: f6d40a519c2bf8b0a19e3f9c714b737875052870
+      platform-ref: 4b1e1692006df83c93da05ea9e7bf285ccf94138
       config: .deploy/app.yml
 
   security-image:
@@ -74,11 +74,11 @@ jobs:
     permissions:
       contents: read
       packages: read
-    uses: TheDemonTuan/vps-deploy/.github/workflows/security-trivy.yml@f6d40a519c2bf8b0a19e3f9c714b737875052870
+    uses: TheDemonTuan/vps-deploy/.github/workflows/security-trivy.yml@4b1e1692006df83c93da05ea9e7bf285ccf94138
     with:
       app: 9router
       source-sha: ${{ github.sha }}
-      platform-ref: f6d40a519c2bf8b0a19e3f9c714b737875052870
+      platform-ref: 4b1e1692006df83c93da05ea9e7bf285ccf94138
       config: .deploy/app.yml
       scan-mode: image
       image-ref: ${{ needs.build.outputs.image-ref }}
@@ -93,14 +93,14 @@ jobs:
     environment: production
     timeout-minutes: 17
     steps:
-      - uses: TheDemonTuan/vps-deploy/.github/actions/deploy@f6d40a519c2bf8b0a19e3f9c714b737875052870
+      - uses: TheDemonTuan/vps-deploy/.github/actions/deploy@4b1e1692006df83c93da05ea9e7bf285ccf94138
         with:
           app: 9router
           host: oracle-main
           operation: deploy
           component: app
           source-sha: ${{ github.sha }}
-          platform-ref: f6d40a519c2bf8b0a19e3f9c714b737875052870
+          platform-ref: 4b1e1692006df83c93da05ea9e7bf285ccf94138
           config: .deploy/app.yml
           image-ref: ${{ needs.build.outputs.image-ref }}
         env:
