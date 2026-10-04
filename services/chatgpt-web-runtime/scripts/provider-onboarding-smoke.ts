@@ -1,6 +1,8 @@
 import { strict as assert } from "node:assert";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { networkInterfaces } from "node:os";
+import { connect } from "node:net";
 import { startRuntime } from "../src/server";
 import type { BrowserTurnLease } from "../src/browser/manager";
 
@@ -82,6 +84,15 @@ try {
   const resumedLease = await resumed.json();
   assert.equal(resumedLease.loginId, loginLease.loginId);
   assert.equal(resumedLease.profileId, id);
+  const privateAddress = Object.values(networkInterfaces()).flat().find(item => item && !item.internal && item.family === "IPv4")?.address;
+  assert(privateAddress, "Owned Docker network address required");
+  const exposed = await new Promise<boolean>(resolve => {
+    const socket = connect({ host: privateAddress, port: 5900 });
+    socket.once("connect", () => { socket.destroy(); resolve(true); });
+    socket.once("error", () => { socket.destroy(); resolve(false); });
+    socket.setTimeout(1000, () => { socket.destroy(); resolve(false); });
+  });
+  assert.equal(exposed, false, "Private VNC must refuse nonloopback connections");
   const account = runtime.profiles.manager(id);
   const accountPage = await account.maintenancePage();
   // Fullscreen removes Openbox/Chrome decorations from fixture coordinates; real
@@ -130,7 +141,7 @@ try {
   await page.screenshot({ path: join(proof, "provider-connected-ready.png"), fullPage: true });
   writeFileSync(join(proof, "result.json"), JSON.stringify({ gate: "provider-onboarding-ui", automaticProfile: true,
     providerConnectionPersisted: true, actualEmbeddedRfb: true, keyboardAndPointerForwarded: true,
-    readyAfterBrowserSignIn: true, liveCatalog: true, closedViewerRejected: true, sameLeaseResume: true, distinctProfiles: true, liveChatGpt: false }));
+    readyAfterBrowserSignIn: true, liveCatalog: true, closedViewerRejected: true, sameLeaseResume: true, distinctProfiles: true, loopbackOnlyVnc: true, liveChatGpt: false }));
   console.log("CGW_PROVIDER_ONBOARDING_SMOKE_OK");
 } catch (error) {
   console.error("CGW_PROVIDER_ONBOARDING_SMOKE_FAILED", error);

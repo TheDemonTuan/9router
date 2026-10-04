@@ -306,7 +306,7 @@ export class RuntimeProfiles {
     const directory = "/run/cgw/login"; mkdirSync(directory, { recursive: true, mode: 0o700 }); chmodSync(directory, 0o700);
     const passwordFile = join(directory, `${loginId}.password`);
     writeFileSync(passwordFile, `${password}\n`, { flag: "wx", mode: 0o600 });
-    const child = spawn("x11vnc", ["-display", `:${display.number}`, "-rfbport", "5900", "-passwdfile", passwordFile, "-forever", "-shared", "-noxdamage"], { stdio: "ignore", shell: false });
+    const child = spawn("x11vnc", ["-display", `:${display.number}`, "-rfbport", "5900", "-localhost", "-passwdfile", passwordFile, "-forever", "-shared", "-noxdamage"], { stdio: "ignore", shell: false });
     try {
       await new Promise<void>((resolve, reject) => { child.once("error", reject); child.once("spawn", resolve); });
       const deadline = Date.now() + 10_000;
