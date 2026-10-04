@@ -187,7 +187,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: TheDemonTuan/vps-deploy
-          ref: f6d40a519c2bf8b0a19e3f9c714b737875052870
+          ref: 4b1e1692006df83c93da05ea9e7bf285ccf94138
           path: platform
           persist-credentials: false
       - name: Scan runtime and privately mounted browser without suppression
@@ -195,8 +195,9 @@ jobs:
           set -euo pipefail
           sudo bash platform/scripts/install-trivy.sh /usr/local/bin
           trivy image --scanners vuln --ignorefile /dev/null --severity HIGH,CRITICAL --exit-code 1 "$CGW_CHECK_IMAGE"
-          trivy sbom --ignorefile /dev/null --severity HIGH,CRITICAL --exit-code 1 "$CGW_BROWSER_DIR/browser.spdx.json"
-          trivy fs --scanners vuln --ignorefile /dev/null --severity HIGH,CRITICAL --exit-code 1 "$CGW_BROWSER_DIR"
+          sudo bash platform/scripts/install-grype.sh /usr/local/bin
+          python3 platform/scripts/scan-private-browser.py --sbom "$CGW_BROWSER_DIR/browser.spdx.json" \
+            --report "$RUNNER_TEMP/grype-browser.json"
       # No registry login, push, account-state artifact upload, reusable old platform
       # Trivy call, deploy action, or production manifest/pin mutation belongs here.
 
