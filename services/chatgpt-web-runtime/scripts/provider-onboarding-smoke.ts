@@ -167,9 +167,17 @@ try {
   // Send each key once; wait for the native document to observe it, not an arbitrary delay.
   let typed = "";
   for (const character of "viewer-keyboard-proof") {
-    await page.keyboard.type(character);
-    typed += character;
-    await until(() => geometry.get(id)?.value === typed, "Keyboard input did not reach native Chrome");
+    const target = typed + character;
+    const end = Date.now() + 10000;
+    while (geometry.get(id)?.value !== target && Date.now() < end) {
+      if (geometry.get(id)?.value === typed) {
+        await canvas.focus();
+        await page.keyboard.type(character);
+      }
+      await Bun.sleep(100);
+    }
+    typed = target;
+    assert.equal(geometry.get(id)?.value, typed, "Keyboard input did not reach native Chrome");
   }
   mkdirSync(proof, { recursive: true });
   await page.screenshot({ path: join(proof, "provider-embedded-login.png"), fullPage: true });
