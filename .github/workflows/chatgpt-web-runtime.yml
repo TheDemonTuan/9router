@@ -206,6 +206,7 @@ jobs:
           bun run build
           bun tests/integration/chatgpt-web-runtime-smoke.mjs --image "$CGW_CHECK_IMAGE" --browser-volume "$CGW_BROWSER_VOLUME" --gateway-port 21127
       - name: Exercise Add Connection and embedded browser login
+        id: onboarding
         run: |
           set -euo pipefail
           gateway="cgw-onboarding-gateway:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}"
@@ -214,6 +215,7 @@ jobs:
             --runtime-image "$CGW_CHECK_IMAGE" --browser-volume "$CGW_BROWSER_VOLUME" \
             --proof-dir "$RUNNER_TEMP/cgw-onboarding-proof"
       - name: Preserve synthetic provider onboarding visual proof
+        if: ${{ !cancelled() && (steps.onboarding.outcome == 'success' || steps.onboarding.outcome == 'failure') }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: cgw-provider-onboarding-${{ matrix.arch }}
