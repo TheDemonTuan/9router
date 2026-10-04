@@ -62,8 +62,6 @@ try {
     "--mount", `type=volume,src=${flags["--browser-volume"]},dst=/opt/cgw-browser,readonly`,
     "-v", `${proofs}:/proof:Z`, "-e", "CGW_ONBOARDING_GATEWAY=http://127.0.0.1:20128", "-e", "CGW_ONBOARDING_PROOF_DIR=/proof",
     flags["--runtime-image"], "bun", "scripts/provider-onboarding-smoke.ts"], 180000);
-  command(["run", "--rm", "--network", "none", "--user", "10001:10001", "--read-only", "--cap-drop", "ALL", "-v", `${proofs}:/proof:Z`,
-    "--entrypoint", "bun", flags["--runtime-image"], "-e", "const fs=require('node:fs');for(const name of fs.readdirSync('/proof'))fs.chmodSync('/proof/'+name,0o644);"]);
   result = JSON.parse(readFileSync(join(proofs, "result.json"), "utf8"));
   assert.equal(result.gate, "provider-onboarding-ui");
   if (flags["--proof-dir"]) {
