@@ -421,7 +421,8 @@ export class RuntimeProfiles {
         throw error;
       }
     })();
-    viewer.completing = operation.finally(() => { if (viewer.completing) viewer.completing = undefined; });
+    viewer.completing = operation;
+    void operation.finally(() => { if (viewer.completing === operation) viewer.completing = undefined; }).catch(() => {});
     return operation;
   }
   private async stopViewerChild(child: ChildProcess): Promise<void> {

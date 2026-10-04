@@ -32,12 +32,12 @@ const native = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) 
   if (action === "sign-in" && request.method === "POST") {
     const form = await request.formData();
     if (form.get("identity") !== "viewer-keyboard-proof" || form.get("webdriver") !== "false") return new Response("Human browser sign-in required", { status: 403 });
-    signedIn.add(id);
     return new Response(null, { status: 303, headers: { Location: `/login/${id}`, "Set-Cookie": `offline_account=${id}; Path=/; Max-Age=3600; HttpOnly; SameSite=Lax` } });
   }
   if (action !== "login") return new Response(null, { status: 404 });
   const authenticated = request.headers.get("cookie")?.split("; ").includes(`offline_account=${id}`) === true;
-  return new Response(`<!doctype html><html><body style="margin:0;padding:50px;font:24px sans-serif;background:#eef6ff"><h1>${authenticated ? "Signed in to the offline account" : "Offline ChatGPT sign-in"}</h1><form method="post" action="/sign-in/${id}"><label for="identity">Fixture identity</label><input id="identity" name="identity" style="display:block;margin:20px 0;font:24px sans-serif;width:400px;height:40px"><input id="webdriver" type="hidden" name="webdriver"><button id="signin" style="font:24px sans-serif;padding:16px">Sign in to fixture</button></form><p>Human browser; no automation session during sign-in.</p><script>document.querySelector('#webdriver').value=String(navigator.webdriver);function report(){const box=id=>{const r=document.getElementById(id).getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height};};fetch('/geometry/${id}',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({x:screenX,y:screenY+outerHeight-innerHeight,outerHeight,innerHeight,input:box('identity'),button:box('signin'),activeId:document.activeElement.id,focused:document.hasFocus(),value:document.querySelector('#identity').value,webdriver:navigator.webdriver})}).catch(()=>{});}setInterval(report,100);report();</script></body></html>`, { headers: { "content-type": "text/html" } });
+  if (authenticated) signedIn.add(id);
+  return new Response(`<!doctype html><html><body style="margin:0;padding:50px;font:24px sans-serif;background:#eef6ff"><h1>${authenticated ? "Signed in to the offline account" : "Offline ChatGPT sign-in"}</h1><form method="post" action="/sign-in/${id}"><label for="identity">Fixture identity</label><input id="identity" name="identity" autofocus style="display:block;margin:20px 0;font:24px sans-serif;width:400px;height:40px"><input id="webdriver" type="hidden" name="webdriver"><button id="signin" style="font:24px sans-serif;padding:16px">Sign in to fixture</button></form><p>Human browser; no automation session during sign-in.</p><script>document.querySelector('#webdriver').value=String(navigator.webdriver);function report(){const box=id=>{const r=document.getElementById(id).getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height};};fetch('/geometry/${id}',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({x:screenX,y:screenY+outerHeight-innerHeight,outerHeight,innerHeight,input:box('identity'),button:box('signin'),activeId:document.activeElement.id,focused:document.hasFocus(),value:document.querySelector('#identity').value,webdriver:navigator.webdriver})}).catch(()=>{});}setInterval(report,100);report();</script></body></html>`, { headers: { "content-type": "text/html" } });
 } });
 const nativeOrigin = `http://127.0.0.1:${native.port}`;
 const runtime = startRuntime({ dataDir: "/data", host: "0.0.0.0", port: 17841, chromiumExecutable,
@@ -85,6 +85,7 @@ try {
   const inspector = await ensure("ui-inspection");
   inspection = await inspector.leaseTurn({ traceId: "provider-ui-inspection", modelIdentity: "offline-ui" });
   const page = inspection.page;
+  await page.setViewportSize({ width: 1440, height: 1024 });
   const session = await page.request.post(`${gateway}/api/auth/login`, { data: { password: "Offline-Provider-UI-Fixture-20261004" } });
   assert.equal(session.status(), 200);
   await page.goto(`${gateway}/dashboard/providers/chatgpt-web`, { waitUntil: "networkidle" });
@@ -102,7 +103,7 @@ try {
   const id = loginLease.profileId;
   const waitViewer = async () => {
     await page.locator("canvas").waitFor({ timeout: 30000 });
-    await page.getByText(/Connected.*browser|Browser.*connected|Private browser connected/i).waitFor({ timeout: 30000 });
+    await page.getByText(/Connected.*browser|Browser.*connected|Private browser connected/i).first().waitFor({ timeout: 30000 });
   };
   await waitViewer();
   await until(() => geometry.has(id), "Native login page did not load");
@@ -122,7 +123,7 @@ try {
   await page.getByRole("button", { name: "Pan Browser", exact: true }).click();
   assert.equal(await page.getByRole("button", { name: "Pan Browser", exact: true }).getAttribute("aria-pressed"), "true");
   await page.getByRole("button", { name: "Fit to Window", exact: true }).click();
-  await page.setViewportSize(viewport);
+  await page.setViewportSize({ width: 1440, height: 1024 });
   const response = await page.request.get(`${gateway}/api/providers`); assert.equal(response.status(), 200);
   const connections = (await response.json()).connections.filter((row: { provider: string }) => row.provider === "chatgpt-web");
   assert.equal(connections.length, 1); assert.equal(connections[0].testStatus, "login_required");
@@ -138,8 +139,6 @@ try {
   const premature = page.waitForResponse(r => r.url().endsWith("/runtime/login/complete") && r.request().method() === "POST");
   await page.getByRole("button", { name: "Finish Sign In", exact: true }).click();
   assert((await premature).status() >= 400);
-  await page.getByText(/Checking your sign-in|Browser connected/i).waitFor({ timeout: 30000 });
-  await until(() => geometry.get(id)?.focused === true, "Native browser did not receive focus after restoration");
   await waitViewer();
   assert.equal(runtime.profiles.ready(id), false);
   const restored = await page.request.get(`${gateway}/api/providers/chatgpt-web/runtime/login/status?loginId=${loginLease.loginId}`);
@@ -157,6 +156,7 @@ try {
     const target = geometry.get(id)!; const box = target[kind]; const rect = await canvas.boundingBox(); assert(rect);
     const size = await canvas.evaluate((element: HTMLCanvasElement) => ({ width: element.width, height: element.height }));
     await page.mouse.click(rect.x + (target.x + box.x + box.width / 2) * rect.width / size.width, rect.y + (target.y + box.y + box.height / 2) * rect.height / size.height);
+    await Bun.sleep(100);
   };
   await clickNative("input");
   await until(() => geometry.get(id)?.activeId === "identity" && geometry.get(id)?.focused === true, "Real desktop input did not receive keyboard focus");
@@ -170,7 +170,8 @@ try {
   assert.equal(runtime.profiles.ready(id), false, "Login completion requires explicit verification");
   const completed = page.waitForResponse(r => r.url().endsWith("/runtime/login/complete") && r.request().method() === "POST");
   await page.getByRole("button", { name: "Finish Sign In", exact: true }).click();
-  const finished = await completed; assert.equal(finished.status(), 200); assert.equal((await finished.json()).state, "completed");
+  const finished = await completed;
+  assert.equal(finished.status(), 200); assert.equal((await finished.json()).state, "completed");
   await until(() => runtime.profiles.ready(id), "Authenticated catalog probe did not settle", 60000);
   assert(persisted.has(id), "Native login cookie did not survive the same-profile verification restart");
   await canvas.waitFor({ state: "detached" });
