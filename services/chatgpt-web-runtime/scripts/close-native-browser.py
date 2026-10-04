@@ -4,7 +4,7 @@ import ctypes
 import sys
 
 
-def close_windows(display_name, target_pids):
+def close_windows(display_name, pid):
     x11 = ctypes.CDLL("libX11.so.6")
     window = ctypes.c_ulong
     atom = ctypes.c_ulong
@@ -35,8 +35,6 @@ def close_windows(display_name, target_pids):
     if not display:
         return 0
     try:
-        import os
-        cardinal = x11.XInternAtom(display, b"CARDINAL", False)
         pid_atom = x11.XInternAtom(display, b"_NET_WM_PID", False)
         protocols = x11.XInternAtom(display, b"WM_PROTOCOLS", False)
         delete = x11.XInternAtom(display, b"WM_DELETE_WINDOW", False)
@@ -46,18 +44,10 @@ def close_windows(display_name, target_pids):
             current = pending.pop()
             actual_type, actual_format = atom(), ctypes.c_int()
             items, after, data = ctypes.c_ulong(), ctypes.c_ulong(), pointer()
-            result = x11.XGetWindowProperty(display, current, pid_atom, 0, 1, False, 0, ctypes.byref(actual_type), ctypes.byref(actual_format), ctypes.byref(items), ctypes.byref(after), ctypes.byref(data))
-            owned = False
+            result = x11.XGetWindowProperty(display, current, pid_atom, 0, 1, False, 6, ctypes.byref(actual_type), ctypes.byref(actual_format), ctypes.byref(items), ctypes.byref(after), ctypes.byref(data))
             try:
-                if result == 0 and actual_format.value == 32 and items.value >= 1 and data.value:
-                    win_pid = ctypes.cast(data, ctypes.POINTER(ctypes.c_ulong))[0]
-                    if win_pid in target_pids:
-                        owned = True
-                    else:
-                        try:
-                            owned = os.getpgid(win_pid) in target_pids
-                        except OSError:
-                            pass
+                owned = result == 0 and actual_type.value == 6 and actual_format.value == 32 and items.value == 1 and data.value and ctypes.cast(data, ctypes.POINTER(ctypes.c_ulong))[0] == pid
+            finally:
                 if data.value:
                     x11.XFree(data)
             if owned:
@@ -69,7 +59,6 @@ def close_windows(display_name, target_pids):
                 event.client.format = 32
                 event.client.data.l[0] = delete
                 if x11.XSendEvent(display, current, False, 0, ctypes.byref(event)):
-                    x11.XFlush(display)
                     closed += 1
                 continue
             root, parent, children, count = window(), window(), ctypes.POINTER(window)(), ctypes.c_uint()
@@ -86,9 +75,9 @@ def close_windows(display_name, target_pids):
 
 
 if __name__ == "__main__":
-    pids = {int(arg) for arg in sys.argv[2:] if int(arg) > 1}
-    if not pids:
+    pid = int(sys.argv[2])
+    if pid <= 1:
         raise ValueError("An owned browser PID is required")
-    closed = close_windows(sys.argv[1], pids)
+    closed = close_windows(sys.argv[1], pid)
     print(closed)
     sys.exit(0 if closed else 1)

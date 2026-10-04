@@ -74,13 +74,11 @@ export class NativeBrowserProcess {
     }
   }
 
-  private requestWindowClose(owned: readonly OwnedNativeProcess[]): Promise<boolean> {
+  private requestWindowClose(): Promise<boolean> {
     if (!this.grouped || !this.display || !this.running) return Promise.resolve(false);
-    const pids = [...new Set([this.child.pid, ...owned.map(p => p.pid)].filter((p): p is number => typeof p === "number" && p > 1))].map(String);
-    if (!pids.length) return Promise.resolve(false);
-    const helper = spawn("python3", [join(import.meta.dir, "../../scripts/close-native-browser.py"), this.display, ...pids], { stdio: "ignore", shell: false });
+    const helper = spawn("python3", [join(import.meta.dir, "../../scripts/close-native-browser.py"), this.display, String(this.child.pid)], { stdio: "ignore", shell: false });
     const { promise, resolve } = Promise.withResolvers<boolean>();
-    const timer = setTimeout(() => { helper.kill("SIGKILL"); }, 5000);
+    const timer = setTimeout(() => { helper.kill("SIGKILL"); }, 2000);
     helper.once("error", () => { clearTimeout(timer); resolve(false); });
     helper.once("exit", code => { clearTimeout(timer); resolve(code === 0); });
     return promise;
@@ -92,12 +90,11 @@ export class NativeBrowserProcess {
     this.closing = (async () => {
       // SIGTERM can exit Chrome without saving recently issued cookies. Ask the
       // exact owned desktop windows to close normally before escalating signals.
+      const requested = await this.requestWindowClose();
       let owned = this.liveProcesses();
-      const requested = await this.requestWindowClose(owned);
-      owned = this.liveProcesses();
       let deadline = Date.now() + (requested ? 5000 : 0);
       while (owned.length && Date.now() < deadline) { await Bun.sleep(25); owned = this.liveProcesses(); }
-      if (owned.length) this.signal("SIGTERM", owned);
+      if (owned.length) this.signal("SIGTERM");
       deadline = Date.now() + 2000;
       while (owned.length && Date.now() < deadline) { await Bun.sleep(25); owned = this.liveProcesses(); }
       deadline = Date.now() + 2000;
