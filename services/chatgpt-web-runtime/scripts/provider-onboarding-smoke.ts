@@ -151,7 +151,6 @@ try {
   const canvas = page.locator("canvas");
   await canvas.click();
   await until(() => geometry.get(id)?.focused === true, "Native browser did not receive focus");
-  await page.getByRole("button", { name: "Actual Size", exact: true }).click();
   const clickNative = async (kind: "input" | "button") => {
     const target = geometry.get(id)!; const box = target[kind]; const rect = await canvas.boundingBox(); assert(rect);
     const size = await canvas.evaluate((element: HTMLCanvasElement) => ({ width: element.width, height: element.height }));
@@ -160,11 +159,11 @@ try {
   };
   await clickNative("input");
   await until(() => geometry.get(id)?.activeId === "identity" && geometry.get(id)?.focused === true, "Real desktop input did not receive keyboard focus");
+  await canvas.focus();
   await page.keyboard.type("viewer-keyboard-proof");
   await until(() => geometry.get(id)?.value === "viewer-keyboard-proof", "Keyboard input did not reach native Chrome");
   mkdirSync(proof, { recursive: true });
   await page.screenshot({ path: join(proof, "provider-embedded-login.png"), fullPage: true });
-  await page.getByRole("button", { name: "Fit to Window", exact: true }).click();
   await clickNative("button");
   await until(() => signedIn.has(id), "Native human sign-in form did not accept input");
   assert.equal(runtime.profiles.ready(id), false, "Login completion requires explicit verification");

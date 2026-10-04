@@ -163,7 +163,7 @@ export default function ChatGPTWebViewer({ connectionName, loginId, profileId, e
         {!fit && <Button size="sm" variant="secondary" aria-label="Pan Browser" aria-pressed={panning} disabled={verifying} onClick={() => setPanning(value => !value)}>Pan</Button>}
         <Button variant="secondary" aria-label="Back to Connection" onClick={onClose}>Back to Connection</Button>
       </header>
-      <div ref={viewport} data-browser-viewport tabIndex={0} role="region" aria-label="Interactive private ChatGPT browser" aria-describedby={helpId} onFocus={event => { if (event.target === viewport.current) rfbRef.current?.focus(); }} className="min-h-0 w-full flex-1 overflow-hidden bg-black" />
+      <div ref={viewport} data-browser-viewport tabIndex={0} role="region" aria-label="Interactive private ChatGPT browser" aria-describedby={helpId} onFocus={() => rfbRef.current?.focus()} onPointerDown={() => rfbRef.current?.focus()} className="min-h-0 w-full flex-1 overflow-hidden bg-black" />
       {verifying && <div className="pointer-events-none absolute inset-x-0 top-1/2 text-center text-sm text-white">Checking your sign-in…</div>}
       <p id={helpId} className="sr-only">Keyboard and pointer input stay in this private browser. Clipboard is not automatically shared. Use Back to Connection to close this workspace without ending the session. Browser Escape does not close this workspace. Actual Size shows readable full-size text with scrollbars; use Pan on touch screens to move around, then turn Pan off to interact.</p>
     </div>,
