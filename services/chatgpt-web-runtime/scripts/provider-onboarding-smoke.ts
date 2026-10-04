@@ -138,6 +138,8 @@ try {
   const premature = page.waitForResponse(r => r.url().endsWith("/runtime/login/complete") && r.request().method() === "POST");
   await page.getByRole("button", { name: "Finish Sign In", exact: true }).click();
   assert((await premature).status() >= 400);
+  await page.getByText(/Checking your sign-in|Browser connected/i).waitFor({ timeout: 30000 });
+  await until(() => geometry.get(id)?.focused === true, "Native browser did not receive focus after restoration");
   await waitViewer();
   assert.equal(runtime.profiles.ready(id), false);
   const restored = await page.request.get(`${gateway}/api/providers/chatgpt-web/runtime/login/status?loginId=${loginLease.loginId}`);
