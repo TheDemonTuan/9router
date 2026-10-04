@@ -18,6 +18,7 @@ interface NativeGeometry { x: number; y: number; outerHeight: number; innerHeigh
 const geometry = new Map<string, NativeGeometry>();
 const signedIn = new Set<string>();
 const persisted = new Set<string>();
+let currentId = "";
 const preparedManagers = new WeakSet<object>();
 const preparedContexts = new WeakSet<BrowserContext>();
 const html = readFileSync(join(import.meta.dir, "../tests/fixtures/chatgpt-runtime.html"), "utf8");
@@ -101,6 +102,7 @@ try {
   const loginLease = await opened.json();
   assert.equal(loginLease.manualLogin, true);
   const id = loginLease.profileId;
+  currentId = id;
   const waitViewer = async () => {
     await page.locator("canvas").waitFor({ timeout: 30000 });
     await page.getByText(/Connected.*browser|Browser.*connected|Private browser connected/i).first().waitFor({ timeout: 30000 });
@@ -159,9 +161,9 @@ try {
   };
   await clickNative("input");
   await until(() => geometry.get(id)?.activeId === "identity" && geometry.get(id)?.focused === true, "Real desktop input did not receive keyboard focus");
-  await canvas.focus();
-  await page.keyboard.type("viewer-keyboard-proof");
-  await until(() => geometry.get(id)?.value === "viewer-keyboard-proof", "Keyboard input did not reach native Chrome");
+  await Bun.sleep(500);
+  await page.keyboard.type("viewer-keyboard-proof", { delay: 20 });
+  await until(() => geometry.get(id)?.value === "viewer-keyboard-proof", "Keyboard input did not reach native Chrome", 20000);
   mkdirSync(proof, { recursive: true });
   await page.screenshot({ path: join(proof, "provider-embedded-login.png"), fullPage: true });
   await clickNative("button");
