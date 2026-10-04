@@ -167,13 +167,15 @@ def main():
     os.chdir(src)
     shutil.rmtree(rust.RUST_BUILD_DIR)
     bindgen.RUST_HOST_LLVM_INSTALL_DIR = str(install)
+    bindgen.RustTargetTriple = lambda: 'aarch64-unknown-linux-gnu'
     bindgen.DownloadDebianSysroot = lambda *_args, **_kwargs: '/'
     bindgen.FetchNcurseswLibrary = lambda: None
     original_cargo = bindgen.RunCargo
-
     def locked_cargo(command):
         if command[0] in ('build', 'test') and '--locked' not in command:
             command = [*command, '--locked']
+        if '-v' not in command and '--verbose' not in command:
+            command = [*command, '-v']
         return original_cargo(command)
 
     bindgen.RunCargo = locked_cargo
