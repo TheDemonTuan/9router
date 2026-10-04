@@ -10,7 +10,7 @@ const cache = new Map();
 const dispatcher = new Agent();
 const CAPABILITY_KEYS = ["text", "vision", "reasoning", "tools", "search", "compact", "native_responses", "generic_responses", "mcp_tools", "exec", "subagents", "computer_use", "browser_tool", "streaming"];
 const DATA_PATHS = ["/healthz", "/readyz", "/v1/web-models", "/v1/thread-bindings/resolve", "/v1/responses", "/v1/responses/compact", "/v1/interrupt-turn"];
-const ADMIN_PATHS = ["/admin/profiles", "/admin/login/start", "/admin/login/status", "/admin/browser/view", "/admin/browser/restart", "/admin/smoke", "/admin/drain", "/admin/quiesce", "/admin/resume", "/admin/interrupt-turn"];
+const ADMIN_PATHS = ["/admin/profiles", "/admin/login/start", "/admin/login/status", "/admin/login/session", "/admin/login/close", "/admin/browser/view", "/admin/browser/restart", "/admin/smoke", "/admin/drain", "/admin/quiesce", "/admin/resume", "/admin/interrupt-turn"];
 export const CHATGPT_WEB_MAX_CONCURRENCY = MAX_BROWSER_TURNS;
 export function validateChatGptWebProfileId(value) { return validateProfileId(value); }
 export function sanitizeChatGptWebMaxConcurrency(value) { return value === MAX_BROWSER_TURNS ? MAX_BROWSER_TURNS : null; }
@@ -31,7 +31,7 @@ async function token(admin) {
 async function runtimeRequest(path, init, options, admin, profileId) {
   const url = new URL(path, "http://internal.invalid");
   const allowed = admin ? ADMIN_PATHS.includes(url.pathname) || /^\/admin\/profiles\/[a-z0-9-]+$/.test(url.pathname) : DATA_PATHS.includes(url.pathname);
-  if (!allowed || url.origin !== "http://internal.invalid" || url.hash || url.search && !(admin && url.pathname === "/admin/login/status")) throw new Error("Unsupported internal runtime endpoint");
+  if (!allowed || url.origin !== "http://internal.invalid" || url.hash || url.search && !(admin && ["/admin/login/status", "/admin/login/session"].includes(url.pathname))) throw new Error("Unsupported internal runtime endpoint");
   const headers = new Headers(init.headers);
   for (const name of [...headers.keys()]) if (name.startsWith("x-cgw-") || name === "x-9router-cgw-attestation" || name === "authorization" || name === "x-codex-turn-metadata") headers.delete(name);
   headers.set("authorization", `Bearer ${await token(admin)}`);

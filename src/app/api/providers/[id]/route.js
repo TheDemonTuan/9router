@@ -6,6 +6,8 @@ import {
   deleteProviderConnection,
 } from "@/models";
 import { invalidateChatGptWebCatalog, validateChatGptWebProfileId } from "open-sse/services/chatgptWebRuntimeClient.js";
+import { authorizeChatGptWebRuntimeAdmin } from "@/dashboardGuard";
+import { ensureChatGptWebRuntimeProfile } from "@/lib/chatgptWebProfileProvisioning";
 import { normalizeProviderSpecificData, sanitizeProviderSpecificData, validateChatGptWebConnectionInput } from "@/lib/providerNormalization";
 
 function normalizeProxyConfig(body = {}) {
@@ -120,6 +122,7 @@ export async function PUT(request, { params }) {
     }
 
     let normalizedProviderSpecificData = providerSpecificData;
+    let profileChanged = false;
     if (existing.provider === "chatgpt-web") {
       try {
         validateChatGptWebConnectionInput(body);
@@ -127,6 +130,17 @@ export async function PUT(request, { params }) {
         normalizedProviderSpecificData = { profileId: validateChatGptWebProfileId(selector?.profileId) };
       } catch (error) {
         return NextResponse.json({ error: error.message }, { status: 400 });
+      }
+      profileChanged = normalizedProviderSpecificData.profileId !== existing.providerSpecificData?.profileId;
+      if (profileChanged) {
+        if (!await authorizeChatGptWebRuntimeAdmin(request)) {
+          return NextResponse.json({ error: "Dashboard authentication required" }, { status: 401 });
+        }
+        try {
+          await ensureChatGptWebRuntimeProfile(normalizedProviderSpecificData.profileId, request.signal);
+        } catch {
+          return NextResponse.json({ error: "Runtime unavailable or profile creation failed. The connection was not changed; the request was not retried." }, { status: 502 });
+        }
       }
     }
 
@@ -137,7 +151,9 @@ export async function PUT(request, { params }) {
     if (defaultModel !== undefined) updateData.defaultModel = defaultModel;
     if (isActive !== undefined) updateData.isActive = isActive;
     if (apiKey && existing.authType === "apikey") updateData.apiKey = apiKey;
-    if (testStatus !== undefined) updateData.testStatus = testStatus;
+    if (existing.provider === "chatgpt-web") {
+      if (profileChanged) updateData.testStatus = "login_required";
+    } else if (testStatus !== undefined) updateData.testStatus = testStatus;
     if (lastError !== undefined) updateData.lastError = lastError;
     if (lastErrorAt !== undefined) updateData.lastErrorAt = lastErrorAt;
 

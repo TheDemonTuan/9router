@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import {
   getProviderConnections,
@@ -10,6 +11,8 @@ import { APIKEY_PROVIDERS } from "@/shared/constants/config";
 import { AI_PROVIDERS, FREE_TIER_PROVIDERS, LOCAL_BRIDGE_PROVIDERS, WEB_COOKIE_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isCustomEmbeddingProvider } from "@/shared/constants/providers";
 import { normalizeProviderId, normalizeProviderSpecificData, sanitizeProviderSpecificData, validateChatGptWebConnectionInput } from "@/lib/providerNormalization";
 import { validateChatGptWebProfileId } from "open-sse/services/chatgptWebRuntimeClient.js";
+import { authorizeChatGptWebRuntimeAdmin } from "@/dashboardGuard";
+import { ensureChatGptWebRuntimeProfile } from "@/lib/chatgptWebProfileProvisioning";
 
 export const dynamic = "force-dynamic";
 
@@ -93,6 +96,9 @@ export async function POST(request) {
     const provider = normalizeProviderId(body.provider);
     const { apiKey, name, displayName, priority, globalPriority, defaultModel, testStatus } = body;
     if (provider === "chatgpt-web") {
+      if (!await authorizeChatGptWebRuntimeAdmin(request)) {
+        return NextResponse.json({ error: "Dashboard authentication required" }, { status: 401 });
+      }
       try { validateChatGptWebConnectionInput(body); }
       catch (error) { return NextResponse.json({ error: error.message }, { status: 400 }); }
     }
@@ -136,7 +142,8 @@ export async function POST(request) {
     let providerSpecificData = normalizeProviderSpecificData(provider, body, body.providerSpecificData);
     if (isLocalBridgeProvider) {
       try {
-        providerSpecificData = { profileId: validateChatGptWebProfileId(providerSpecificData?.profileId) };
+        const selector = providerSpecificData?.profileId;
+        providerSpecificData = { profileId: validateChatGptWebProfileId(selector === undefined ? `cgw-${randomUUID()}` : selector) };
       } catch (error) {
         return NextResponse.json({ error: error.message }, { status: 400 });
       }
@@ -187,6 +194,19 @@ export async function POST(request) {
     if (proxyPoolId !== null) {
       mergedProviderSpecificData.proxyPoolId = proxyPoolId;
     }
+    if (provider === "chatgpt-web") {
+      // Bridge connections are not name-deduplicated by the repository. Refuse
+      // an accidental duplicate before allocating a persistent browser profile.
+      const existing = (await getProviderConnections({ provider })).find(item => item.name === connectionName);
+      if (existing) {
+        return NextResponse.json({ error: `A ChatGPT Web connection named "${connectionName}" already exists. Edit the existing connection instead.`, code: "PROVIDER_NAME_CONFLICT", existingId: existing.id, existingName: existing.name }, { status: 409 });
+      }
+      try {
+        await ensureChatGptWebRuntimeProfile(providerSpecificData.profileId, request.signal);
+      } catch {
+        return NextResponse.json({ error: "Runtime unavailable or profile creation failed. No connection was saved; the request was not retried." }, { status: 502 });
+      }
+    }
 
     const newConnection = await createProviderConnection({
       provider,
@@ -198,7 +218,7 @@ export async function POST(request) {
       defaultModel: defaultModel || null,
       providerSpecificData: mergedProviderSpecificData,
       isActive: true,
-      testStatus: testStatus || "unknown",
+      testStatus: provider === "chatgpt-web" ? "login_required" : testStatus || "unknown",
       // POST with an id is an explicit edit of that connection; without one, a
       // name collision is refused rather than silently overwriting a key. #4311
       allowOverwrite: body.id ? true : (body.allowOverwrite === true || body.overwrite === true),
@@ -210,7 +230,7 @@ export async function POST(request) {
     delete result.accessToken;
     delete result.refreshToken;
     delete result.idToken;
-    result.providerSpecificData = sanitizeProviderSpecificData(result.providerSpecificData);
+    result.providerSpecificData = provider === "chatgpt-web" ? { profileId: result.providerSpecificData?.profileId } : sanitizeProviderSpecificData(result.providerSpecificData);
 
     return NextResponse.json({ connection: result }, { status: 201 });
   } catch (error) {

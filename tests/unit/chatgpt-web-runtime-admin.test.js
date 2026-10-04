@@ -7,6 +7,8 @@ vi.mock("next/server", () => ({ NextResponse: { json: (body, init) => Response.j
 const { GET, POST, PATCH } = await import("../../src/app/api/providers/chatgpt-web/runtime/[...action]/route.js");
 const settings = { mode: "browser-only", experimentalBiggerContext: false, experimentalFreshConversationPerTurn: false, useSavedChats: false, autoApproveToolCalls: false, connectorName: "Codex Native2" };
 const fixture = () => ({ profileId: "personal", revision: 3, settings: { ...settings }, state: "ready", activeTurns: 0, maxConcurrency: 5, connectorReady: false, lastError: null, models: [{ id: "chatgpt-web/gpt-5.6-sol", display_name: "GPT-5.6 Sol", supported_reasoning_levels: ["medium", "high"], default_reasoning_level: "high", model_family: "5.6", context_window: 100000 }] });
+const loginId = "aabbccdd-1234-4567-89ab-0123456789ab";
+const lease = () => ({ loginId, profileId: "personal", expiresAt: new Date(Date.now() + 600000).toISOString(), state: "waiting" });
 const context = action => ({ params: Promise.resolve({ action: action.split("/") }) });
 function request(action, method = "GET", body, headers = {}) {
   return new Request(`https://admin.example.test/api/providers/chatgpt-web/runtime/${action}`, { method, headers: { host: "admin.example.test", origin: "https://admin.example.test", "content-type": "application/json", ...headers }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
@@ -31,7 +33,7 @@ describe("ChatGPT Web runtime admin boundaries", () => {
     expect((await POST(request("profiles", "POST", { profileId: "personal" }, { "sec-fetch-site": "cross-site" }), context("profiles"))).status).toBe(403);
     expect(mocks.admin).not.toHaveBeenCalled();
   });
-  it.each(["browser/view", "browser/restart", "login/start", "smoke", "drain"])("GET %s never mutates runtime state", async action => {
+  it.each(["browser/view", "browser/restart", "login/start", "login/close", "smoke", "drain"])("GET %s never mutates runtime state", async action => {
     expect((await GET(request(action), context(action))).status).toBe(405);
     expect(mocks.admin).not.toHaveBeenCalled();
   });
@@ -70,14 +72,39 @@ describe("ChatGPT Web runtime admin boundaries", () => {
     expect(data.profiles[0].models[0].model_family).toBe("5.6");
     expect(JSON.stringify(data)).not.toMatch(/cookie-secret|bearer-secret|raw-private-diagnostic/);
   });
-  it("returns SSH native VNC instructions without passwords, CDP endpoints, or arbitrary runtime instructions", async () => {
-    mocks.admin.mockImplementation(async () => Response.json({ loginId: "lease-1", expiresAt: "2030-01-01T00:15:00.000Z", password: "vnc-secret", cdpUrl: "ws://private", instructions: "Bearer runtime-secret" }));
+  it("returns viewer identity/state without passwords, CDP endpoints, or arbitrary instructions", async () => {
+    const value = lease();
+    mocks.admin.mockImplementation(async () => Response.json({ ...value, password: "vnc-secret", cdpUrl: "ws://private", instructions: "Bearer runtime-secret" }));
     const response = await POST(request("browser/view", "POST", { profileId: "personal" }), context("browser/view"));
     expect(response.status).toBe(200);
-    const data = await response.json();
-    expect(data.instructions).toContain("ssh -L 17842");
-    expect(data.instructions).toContain("native VNC");
-    expect(JSON.stringify(data)).not.toMatch(/vnc-secret|runtime-secret|ws:\/\/private/);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual(value);
+  });
+  it("returns the ephemeral VNC password only from the authenticated no-store session boundary", async () => {
+    const value = { ...lease(), password: "fixtureVncPassword" };
+    mocks.admin.mockResolvedValue(Response.json({ ...value, runtimeToken: "private-token" }));
+    const response = await GET(request(`login/session?loginId=${loginId}`), context("login/session"));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual(value);
+    mocks.authorize.mockResolvedValue(false);
+    expect((await GET(request(`login/session?loginId=${loginId}`), context("login/session"))).status).toBe(401);
+  });
+  it.each(["completed", "expired", "closed", "error"])("preserves terminal %s status without exposing password", async state => {
+    const value = { ...lease(), state };
+    mocks.admin.mockResolvedValue(Response.json({ ...value, password: "fixtureVncPassword" }));
+    expect(await (await GET(request(`login/status?loginId=${loginId}`), context("login/status"))).json()).toEqual(value);
+    expect((await GET(request(`login/session?loginId=${loginId}`), context("login/session"))).status).toBe(502);
+  });
+  it("rejects mismatched and expired sessions and closes only an exact lease", async () => {
+    for (const value of [{ ...lease(), loginId: "00000000-0000-4000-8000-000000000000" }, { ...lease(), expiresAt: "2000-01-01T00:00:00.000Z" }]) {
+      mocks.admin.mockResolvedValue(Response.json({ ...value, password: "fixtureVncPassword" }));
+      expect((await GET(request(`login/session?loginId=${loginId}`), context("login/session"))).status).toBe(502);
+    }
+    const value = { ...lease(), state: "closed" };
+    mocks.admin.mockResolvedValue(Response.json(value));
+    expect(await (await POST(request("login/close", "POST", { loginId }), context("login/close"))).json()).toEqual(value);
+    expect((await POST(request("login/close", "POST", { loginId, profileId: "other" }), context("login/close"))).status).toBe(400);
   });
   it("requires a single bounded loginId query and rejects foreign query options", async () => {
     for (const suffix of ["?loginId=a&loginId=b", "?loginId=a&url=https://evil.test", "?loginId=../escape", ""]) {

@@ -30,7 +30,8 @@ export interface WebModelRow {
 interface ProfileProbe {
   revision: number; epoch: string; capabilities: ChatGptWebAccountCapabilities; checkedAt: string; models: WebModelRow[]; catalogRevision: string;
 }
-interface ViewerLease { loginId: string; profileId: string; expiresAt: number; child: ChildProcess; timer: Timer; passwordFile: string; }
+interface ViewerLease { loginId: string; profileId: string; expiresAt: number; child: ChildProcess; timer: Timer; passwordFile: string; password: string; transports: Set<() => void>; }
+interface ViewerStatus { loginId: string; profileId: string; expiresAt: string; state: "waiting" | "completed" | "expired" | "error" | "closed"; }
 export class RuntimeProfiles {
   private readonly probes = new Map<string, ProfileProbe>();
   private readonly errors = new Map<string, string>();
@@ -278,6 +279,11 @@ export class RuntimeProfiles {
     atomicWriteFile(join(this.config.dataDir, "profiles", profileId, "state", "harness-evidence.json"), JSON.stringify({ protocolVersion: 1, profileEpoch: profile.epoch, verifiedAt: new Date().toISOString(), connector: true }));
   }
   async startViewer(profileId: string, login: boolean, traceId?: string): Promise<unknown> {
+    if (!login && this.viewer?.profileId === profileId && !traceId) {
+      const loginId = this.viewer.loginId;
+      this.viewerSession(loginId);
+      return this.viewerStatus(loginId);
+    }
     if (this.viewer || this.viewerStarting || this.viewerClosing) throw new RuntimeStateError("viewer_busy", "A private profile viewer lease already exists");
     this.viewerStarting = true;
     try { return await this.openViewer(profileId, login, traceId); }
@@ -316,12 +322,12 @@ export class RuntimeProfiles {
         if (!listening) await Bun.sleep(50);
       }
     } catch (error) {
-      if (child.pid && child.exitCode === null && child.signalCode === null) { const exited = once(child, "exit"); child.kill("SIGTERM"); await exited; }
+      await this.stopViewerChild(child);
       unlinkSync(passwordFile); throw error;
     }
     const expiresAt = Date.now() + 15 * 60_000;
     const timer = setTimeout(() => { void this.closeViewer("expired").catch(() => {}); }, expiresAt - Date.now());
-    this.viewer = { loginId, profileId, expiresAt, child, timer, passwordFile };
+    this.viewer = { loginId, profileId, expiresAt, child, timer, passwordFile, password, transports: new Set() };
     child.once("exit", () => { if (this.viewer?.loginId === loginId) void this.closeViewer("error").catch(() => {}); });
     if (login) {
       const poll = async () => {
@@ -335,21 +341,54 @@ export class RuntimeProfiles {
       };
       setTimeout(() => { void poll(); }, 3000).unref();
     }
-    return { loginId, expiresAt: new Date(expiresAt).toISOString(), instructions: "Use operator SSH: ssh -L 17842:127.0.0.1:17842 <operator-host>; connect native VNC to localhost:17842. Retrieve the lease password privately from /run/cgw/login; never paste it into the dashboard." };
+    return this.viewerStatus(loginId);
   }
-  viewerStatus(loginId: string): unknown {
-    if (this.viewer?.loginId === loginId) return { loginId, profileId: this.viewer.profileId, expiresAt: new Date(this.viewer.expiresAt).toISOString(), state: "waiting" };
+  viewerStatus(loginId: string): ViewerStatus {
+    if (this.viewer?.loginId === loginId && !this.viewerClosing) {
+      if (this.viewer.expiresAt <= Date.now() || this.state.fence() || this.viewer.child.exitCode !== null || this.viewer.child.signalCode !== null) {
+        const terminal = this.state.fence() ? "closed" : this.viewer.expiresAt <= Date.now() ? "expired" : "error";
+        void this.closeViewer(terminal).catch(() => {});
+      } else return { loginId, profileId: this.viewer.profileId, expiresAt: new Date(this.viewer.expiresAt).toISOString(), state: "waiting" };
+    }
     if (this.lastViewer?.loginId === loginId) return { ...this.lastViewer };
     throw new RuntimeStateError("login_not_found", "Viewer lease not found", 404);
+  }
+  viewerSession(loginId: string) {
+    const status = this.viewerStatus(loginId);
+    if (status.state !== "waiting" || !this.viewer || this.viewerClosing || this.state.fence()) throw new RuntimeStateError("login_not_found", "Active viewer lease required", 404);
+    return { ...status, state: "waiting" as const, password: this.viewer.password };
+  }
+  attachViewerTransport(loginId: string, close: () => void): () => void {
+    this.viewerSession(loginId);
+    const viewer = this.viewer!;
+    viewer.transports.add(close);
+    return () => { viewer.transports.delete(close); };
+  }
+  async closeViewerLease(loginId: string): Promise<unknown> {
+    this.viewerStatus(loginId);
+    if (this.viewer?.loginId === loginId) await this.closeViewer();
+    return this.viewerStatus(loginId);
+  }
+  private async stopViewerChild(child: ChildProcess): Promise<void> {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    const exited = once(child, "exit");
+    const force = setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    }, 2000);
+    try { child.kill("SIGTERM"); await exited; }
+    finally { clearTimeout(force); }
   }
   closeViewer(state: "completed" | "expired" | "error" | "closed" = "closed"): Promise<void> {
     if (this.viewerClosing) return this.viewerClosing;
     const viewer = this.viewer; if (!viewer) return Promise.resolve();
     clearTimeout(viewer.timer);
+    this.lastViewer = { loginId: viewer.loginId, profileId: viewer.profileId, expiresAt: new Date(viewer.expiresAt).toISOString(), state };
+    for (const close of viewer.transports) close();
+    viewer.transports.clear();
+    viewer.password = "";
     this.viewerClosing = (async () => {
-      if (viewer.child.exitCode === null && viewer.child.signalCode === null) { const exited = once(viewer.child, "exit"); viewer.child.kill("SIGTERM"); await exited; }
+      await this.stopViewerChild(viewer.child);
       if (existsSync(viewer.passwordFile)) unlinkSync(viewer.passwordFile);
-      this.lastViewer = { loginId: viewer.loginId, profileId: viewer.profileId, expiresAt: new Date(viewer.expiresAt).toISOString(), state };
       if (this.viewer === viewer) this.viewer = undefined;
     })().finally(() => { this.viewerClosing = undefined; });
     return this.viewerClosing;

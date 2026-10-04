@@ -91,6 +91,11 @@ jobs:
             unit/responses-native-forwarding.test.js \
             unit/dashboard-guard.test.js \
             unit/chatgpt-web-runtime-admin.test.js
+      - name: Exercise binary viewer authorization and transport on Node and Bun
+        run: |
+          set -euo pipefail
+          node --test tests/unit/chatgpt-web-viewer-proxy.test.cjs
+          bun test tests/unit/chatgpt-web-viewer-proxy.test.cjs
       - name: Exercise real disposable Bun SQLite profile migration
         run: bun tests/integration/chatgpt-web-profile-migration-smoke.mjs
       - name: Preserve current production regression contracts
@@ -200,6 +205,21 @@ jobs:
           bun install --frozen-lockfile --cwd tests
           bun run build
           bun tests/integration/chatgpt-web-runtime-smoke.mjs --image "$CGW_CHECK_IMAGE" --browser-volume "$CGW_BROWSER_VOLUME" --gateway-port 21127
+      - name: Exercise Add Connection and embedded browser login
+        run: |
+          set -euo pipefail
+          gateway="cgw-onboarding-gateway:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}"
+          docker build -f Dockerfile -t "$gateway" .
+          bun tests/integration/chatgpt-web-onboarding-smoke.mjs --gateway-image "$gateway" \
+            --runtime-image "$CGW_CHECK_IMAGE" --browser-volume "$CGW_BROWSER_VOLUME" \
+            --proof-dir "$RUNNER_TEMP/cgw-onboarding-proof"
+      - name: Preserve synthetic provider onboarding visual proof
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cgw-provider-onboarding-${{ matrix.arch }}
+          path: ${{ runner.temp }}/cgw-onboarding-proof
+          if-no-files-found: error
+          retention-days: 7
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: TheDemonTuan/vps-deploy

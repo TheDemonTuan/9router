@@ -1,6 +1,7 @@
 import { cpSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { createRequire } from "node:module";
 
 export function copyStandaloneAssets({ projectRoot = process.cwd(), distDir = process.env.NEXT_DIST_DIR || ".next" } = {}) {
   if (process.env.NEXT_TRACING_ROOT_MODE === "workspace") {
@@ -36,6 +37,15 @@ export function copyStandaloneAssets({ projectRoot = process.cwd(), distDir = pr
   if (existsSync(serverWrapperSource)) {
     cpSync(serverWrapperSource, serverWrapperDestination, { force: true });
     console.log(`[standalone-assets] Copied custom-server.js to ${serverWrapperDestination}`);
+  }
+  const viewerProxySource = resolve(projectRoot, "chatgpt-web-viewer-proxy.cjs");
+  if (existsSync(viewerProxySource)) {
+    cpSync(viewerProxySource, resolve(standaloneDir, "chatgpt-web-viewer-proxy.cjs"), { force: true });
+    // The custom server is outside Next's import graph. ws has no required
+    // dependencies; copy its package explicitly rather than trusting tracing.
+    const require = createRequire(resolve(projectRoot, "package.json"));
+    const wsDirectory = dirname(require.resolve("ws/package.json"));
+    cpSync(wsDirectory, resolve(standaloneDir, "node_modules", "ws"), { recursive: true, force: true });
   }
 }
 

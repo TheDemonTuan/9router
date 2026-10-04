@@ -1,36 +1,38 @@
-# ChatGPT Web bridge (`cgw`)
+# ChatGPT Web runtime (`cgw`)
 
-`chatgpt-web` is an opt-in local bridge provider. It routes native Codex Responses requests through a separately supervised `codex-chatgpt-web` browser process on the same Linux host.
+`chatgpt-web` routes native Responses requests through the separately supervised Docker browser runtime. The gateway stores a profile selector; the runtime owns browser authentication, profile state, model evidence and retained turns. The old Unix-socket bridge transport is removed.
+
+## Add a connection
+
+1. Open **Providers → ChatGPT Web → Add Connection** and enter a connection name.
+2. Select **Add Connection and Sign In**. The gateway provisions a distinct `cgw-<UUID>` runtime profile, saves the connection as `login_required`, and opens the private browser inside the same dialog.
+3. Sign in to ChatGPT in the embedded browser. Keyboard and pointer input use the authenticated same-origin WebSocket; no SSH, external VNC client, pasted browser cookie or manual viewer password is required.
+4. The runtime verifies authentication and available model/reasoning routes before reporting readiness. A saved connection remains visible if login startup fails; use **Start Login** after resolving the runtime error rather than creating another account.
+
+**Close viewer** disconnects the displayed browser without ending its lease. **View Browser** resumes the exact active same-profile lease. **End Login** revokes credentials and transports and settles the owned VNC process. Completed, expired, closed and error leases do not automatically reconnect. A new lease expires after fifteen minutes.
+
+**Advanced: choose an existing profile** changes only the connection draft until saved. Existing profile settings, revision and browser epoch are preserved; changing a selector resets the connection to `login_required`. Runtime failures do not partially save the selector change.
 
 ## Security contract
 
-- 9router connects through a Unix socket under `CHATGPT_WEB_BRIDGE_SOCKET_ROOT`; it never accepts a socket path from a client and never falls back to HTTP.
-- The bridge socket must be owned by the bridge user and the 9router container group. Keep the directory `0750` and socket `0660`.
-- The socket exposes only `/healthz`, `/v1/web-models`, `/v1/responses`, and `/v1/responses/compact`. Admin, native Codex passthrough, browser, filesystem, search, and image routes stay off this transport.
-- Discovery is web-only and does not require Codex OAuth. Unknown browser readiness is reported as `unknown`; it is never promoted to ready by a successful liveness check.
-- 9router stores only the bridge ID. Do not enter cookies, ChatGPT tokens, launcher control tokens, or raw socket paths in the dashboard.
+- Configure `CHATGPT_WEB_RUNTIME_URL`, `CHATGPT_WEB_RUNTIME_TOKEN_FILE` and the separate `CHATGPT_WEB_RUNTIME_ADMIN_TOKEN_FILE` through the operator deployment. Never enter these tokens in the dashboard.
+- Profile mutations and viewer access require a verified dashboard administrator session even when ordinary dashboard login is disabled. API keys and forwarding headers cannot substitute for that session.
+- Viewer upgrades require the exact same origin; remote access requires HTTPS. HTTP is limited to loopback development peers. Only the configured runtime and its owned loopback VNC listener are reachable.
+- Only the authenticated, no-store session endpoint exposes the ephemeral VNC password to noVNC. Status/start/close responses contain no password or operator instructions. The client never places credentials in WebSocket URLs or automatically transfers the clipboard.
+- Runtime/browser images run non-root with read-only filesystems, bounded resources and the Chromium sandbox. The approved Chrome archive is provisioned by Docker into a read-only browser volume, not embedded in the public runtime image.
 
-## Provisioning
+## Models, authority and limits
 
-1. Pin and install the bridge release separately. Run it as a non-root graphical-session user.
-2. Create `/run/9router-chatgpt-web/` with group ownership shared by the bridge and 9router container. Configure the bridge socket as `<bridge-id>.sock`.
-3. Resolve the numeric group before deployment: `getent group <bridge-group>` on the host, then confirm the same GID is present in the router container with `docker exec 9router-blue id`. Set that numeric value as `CHATGPT_WEB_SOCKET_GID`; never assume the bridge user's primary GID. Start both router slots with `docker-compose.prod.yml` plus `docker-compose.chatgpt-web.yml`.
-4. Verify `stat -c '%A %U %G %a' /run/9router-chatgpt-web/<bridge-id>.sock` reports `0660` and the configured shared group. Add the `ChatGPT Web` connection from the dashboard, enter only the provisioned bridge ID, run `Test connection`, then save.
+Models and capabilities require current connection-scoped browser evidence. Empty, malformed, offline and expired catalogs do not become static fallback models. Native model IDs use `chatgpt-web/*` and are selected as `cgw/chatgpt-web/*`.
 
-## Models and limits
+The browser runtime owns at most five active browser turns per profile and retained tool turns. Fusion and blind account/combo retries are disabled for native `cgw` requests. A disconnect after dispatch is terminal because submission status cannot be safely retried.
 
-Models are advertised only from the bridge catalog. Empty, malformed, offline, and expired catalogs do not become static fallback models. Native model IDs use the `chatgpt-web/*` namespace and are selected in 9router as `cgw/chatgpt-web/*`.
+Native requests require provisioned signed companion authority from the Codex machine. Full MCP/tool capabilities additionally require verified build evidence and the provisioned Native2 connector/tunnel; browser login alone does not enable Full mode. Compact is a separate `/v1/responses/compact` operation; Luna routes reject unsupported standalone compaction.
 
-Capabilities are connection-scoped live evidence. Routing, account selection, `/v1/models`, dashboard pickers, and combo ordering use only fresh catalog fields; omitted capability fields remain unsupported, and a stale or offline connection contributes no model or capability evidence.
+## Deployment, recovery and verification
 
-The browser runtime owns the maximum five active tabs and retained tool turns. Fusion and blind account/combo retries are disabled for native `cgw` requests. A disconnect after dispatch is terminal because submission status is not safely retryable.
+The runtime/browser lifecycle is independent of gateway blue-green slots. Production release gates build and scan the immutable runtime before explicit publication/deployment; account state remains in operator-owned volumes. Never replace that state or silently repin a conversation after account/profile loss.
 
-Compact is a separate `/v1/responses/compact` operation. Luna routes reject standalone Codex compaction when the bridge contract says rolling checkpoints are authoritative.
+If the runtime is offline, disable the connection or remove `cgw` from combos. Do not silently switch a stateful native conversation to another provider. Start a new task after profile/login loss unless the runtime proves a valid continuation.
 
-## Deployment and recovery
-
-The bridge/browser lifecycle is independent of 9router blue-green slots. The optional compose override mounts the same socket directory into both slots. `deploy.sh` polls `/api/health` for `active_requests` before stopping the old slot; a drain timeout leaves that slot running instead of cutting an SSE or tool turn.
-
-If the bridge is offline, disable the connection or remove `cgw` from combos. Do not silently switch a stateful native conversation to `cx` or another provider. Start a new task after profile/login loss unless the bridge reports a valid continuation.
-
-Generic Chat Completions, generic Claude, image generation, search, encrypted native-to-Web subagent payloads, and unverified resolved-model claims are unsupported until their separate live compatibility gates pass.
+The native CI onboarding gate runs `tests/integration/chatgpt-web-onboarding-smoke.mjs` with isolated gateway/runtime containers and an offline intercepted ChatGPT fixture. It proves name-only creation, distinct profiles, exact lease resume, actual noVNC keyboard/pointer forwarding, verified catalog readiness, terminal session rejection and owned-resource cleanup. Its screenshots contain synthetic accounts only; this gate does not claim real ChatGPT account compatibility.

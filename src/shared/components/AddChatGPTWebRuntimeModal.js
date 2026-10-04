@@ -9,63 +9,74 @@ import ChatGPTWebRuntimePanel from "./ChatGPTWebRuntimePanel";
 
 const PROFILE_ID = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 export default function AddChatGPTWebRuntimeModal({ isOpen, connection, onClose, onSaved }) {
-  const [name, setName] = useState(connection?.name || "ChatGPT Web VPS");
-  const [profileId, setProfileId] = useState(connection?.providerSpecificData?.profileId || "personal");
-  const [checking, setChecking] = useState(false);
+  const [savedConnection, setSavedConnection] = useState(connection || null);
+  const [name, setName] = useState(connection?.name || "ChatGPT Web");
+  const [profileId, setProfileId] = useState(connection?.providerSpecificData?.profileId || "");
   const [saving, setSaving] = useState(false);
-  const [result, setResult] = useState(null);
+  const [autoStartLogin, setAutoStartLogin] = useState(false);
+  const [uncertain, setUncertain] = useState(false);
   const [error, setError] = useState("");
   const controller = useRef(null);
+  const savingRef = useRef(false);
   useEffect(() => {
     const current = new AbortController(); controller.current = current;
     return () => current.abort();
-  }, [isOpen, profileId]);
-  const payload = () => ({ provider: "chatgpt-web", name: name.trim(), providerSpecificData: { profileId: profileId.trim() } });
-  const testConnection = async () => {
-    const current = controller.current;
-    setChecking(true); setError(""); setResult(null);
-    try {
-      const response = await fetch("/api/providers/validate", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload()), signal: current.signal });
-      const data = await response.json();
-      if (current.signal.aborted) return;
-      if (!response.ok || !data.valid) throw new Error("Profile is not ready. Check the runtime profile diagnostics below.");
-      setResult({ modelCount: Array.isArray(data.models) ? data.models.length : 0 });
-    } catch {
-      if (!current.signal.aborted) setError("Profile is not ready or validation is unavailable. Check the runtime diagnostics below.");
-    } finally {
-      if (!current.signal.aborted) setChecking(false);
-    }
-  };
+  }, [isOpen]);
+  const close = () => { if (!savingRef.current) onClose(); };
   const save = async () => {
     const current = controller.current;
-    setSaving(true); setError("");
+    if (!current || current.signal.aborted || savingRef.current || uncertain) return;
+    savingRef.current = true; setSaving(true); setError("");
+    const editing = !!savedConnection;
+    let rejected = false;
     try {
-      const response = await fetch(connection ? `/api/providers/${connection.id}` : "/api/providers", { method: connection ? "PUT" : "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(connection ? { name: name.trim(), providerSpecificData: { profileId: profileId.trim() } } : payload()), signal: current.signal });
-      if (!response.ok) throw new Error("Failed to save connection.");
+      const payload = editing ? { name: name.trim(), providerSpecificData: { profileId: profileId.trim() } } : { provider: "chatgpt-web", name: name.trim() };
+      if (editing && profileId.trim() !== savedConnection.providerSpecificData?.profileId) payload.testStatus = "login_required";
+      const response = await fetch(editing ? `/api/providers/${savedConnection.id}` : "/api/providers", { method: editing ? "PUT" : "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload), signal: current.signal });
+      rejected = !response.ok;
+      const data = await response.json();
+      if (!response.ok) {
+        if (!editing && response.status >= 500) setUncertain(true);
+        throw new Error(typeof data.error === "string" ? data.error : "Failed to save connection.");
+      }
+      if (!data.connection?.id || !PROFILE_ID.test(data.connection.providerSpecificData?.profileId || "")) {
+        if (!editing) setUncertain(true);
+        throw new Error("The save response was incomplete. Close and refresh connections before trying again.");
+      }
       if (current.signal.aborted) return;
-      onSaved(); onClose();
-    } catch {
-      if (!current.signal.aborted) setError("Failed to save connection. The request was not retried; refresh connections before trying again.");
+      setSavedConnection(data.connection);
+      setProfileId(data.connection.providerSpecificData.profileId);
+      setAutoStartLogin(!editing);
+      onSaved();
+    } catch (cause) {
+      if (!current.signal.aborted) {
+        if (!editing && !rejected) setUncertain(true);
+        setError(cause.message || "Failed to save connection. The request was not retried; refresh connections before trying again.");
+      }
     } finally {
+      savingRef.current = false;
       if (!current.signal.aborted) setSaving(false);
     }
   };
-  const selectProfile = value => { setProfileId(value); setResult(null); setError(""); setChecking(false); setSaving(false); };
+  const hasChanges = !!savedConnection && (name.trim() !== savedConnection.name || profileId.trim() !== savedConnection.providerSpecificData?.profileId);
   return (
-    <Modal isOpen={isOpen} onClose={onClose} size="xl" title={connection ? "Edit ChatGPT Web Runtime" : "Add ChatGPT Web Runtime"}>
+    <Modal isOpen={isOpen} onClose={close} size="xl" title={savedConnection ? "ChatGPT Web Connection" : "Add ChatGPT Web Connection"}>
       <div className="space-y-4">
-        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-text-muted">Unofficial browser runtime. 9router stores only the Profile ID; runtime URL, tokens, ChatGPT cookies, and browser credentials are operator-managed and never entered here.</div>
-        <Input label="Connection name" value={name} onChange={event => setName(event.target.value)} autoFocus disabled={checking || saving} />
-        <Input label="Profile ID" value={profileId} onChange={event => selectProfile(event.target.value)} placeholder="personal" disabled={checking || saving} />
-        <p className="text-xs text-text-muted">A canonical account slot: 1–64 lowercase letters, digits, or hyphens, beginning and ending with a letter or digit. Multiple connections with the same Profile ID share the same browser and five-turn limit.</p>
-        {result && <div role="status" className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm">Profile validation passed. Verified models: {result.modelCount}.</div>}
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-text-muted">Unofficial browser integration. Add a connection to create a private browser profile automatically, then sign in here. 9Router never asks for your ChatGPT password or cookies.</div>
+        <Input label="Connection name" id="chatgpt-web-connection-name" aria-label="Connection name" value={name} onChange={event => setName(event.target.value)} autoFocus disabled={saving || uncertain} />
+        {savedConnection && <details className="space-y-2">
+          <summary className="cursor-pointer text-sm text-text-muted">Advanced profile selection</summary>
+          <Input label="Selected profile ID" aria-label="Selected profile ID" value={profileId} readOnly disabled={saving} />
+          <p className="text-xs text-text-muted">Choose an existing profile below, then save to switch. Connections using the same profile share its browser, settings, and five-turn limit.</p>
+        </details>}
+        {savedConnection && <p role="status" className="rounded-lg bg-surface-2 p-3 text-sm">Connection saved. Profile: <span className="break-all">{savedConnection.providerSpecificData.profileId}</span>. {autoStartLogin ? "Login required until browser verification completes. If login cannot start, the saved connection remains available to reopen." : "Use Start Login or View Browser below to sign in or resume."}</p>}
         {error && <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-400">{error}</div>}
+        {uncertain && <p role="status" className="text-sm text-amber-500">The save was not retried. Close this dialog and refresh the connection list before adding again to avoid duplicate profiles.</p>}
         <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-          <Button variant="secondary" onClick={onClose}>Close</Button>
-          <Button variant="secondary" onClick={testConnection} loading={checking} disabled={saving || !PROFILE_ID.test(profileId.trim())}>Test connection</Button>
-          <Button onClick={save} loading={saving} disabled={checking || !name.trim() || !PROFILE_ID.test(profileId.trim())}>Save connection</Button>
+          <Button variant="secondary" onClick={close} disabled={saving}>Close</Button>
+          {(!savedConnection || hasChanges) && <Button aria-label={savedConnection ? "Save connection" : "Add Connection and Sign In"} onClick={save} loading={saving} disabled={uncertain || !name.trim() || (!!savedConnection && !PROFILE_ID.test(profileId.trim()))}>{savedConnection ? "Save connection" : "Add Connection & Sign In"}</Button>}
         </div>
-        {isOpen && <ChatGPTWebRuntimePanel key={profileId.trim()} profileId={profileId.trim()} onProfileSelected={selectProfile} onChanged={() => { setResult(null); onSaved(); }} />}
+        {isOpen && savedConnection && <ChatGPTWebRuntimePanel key={savedConnection.providerSpecificData.profileId} profileId={savedConnection.providerSpecificData.profileId} selectedProfileId={profileId} autoStartLogin={autoStartLogin} onProfileSelected={setProfileId} onChanged={onSaved} />}
       </div>
     </Modal>
   );

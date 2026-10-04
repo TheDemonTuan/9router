@@ -4,6 +4,7 @@ import type { Server } from "bun";
 import { RuntimeSingletonLock } from "./process";
 import { RuntimeState, RuntimeStateError } from "./runtime-state";
 import { RuntimeProfiles } from "./profiles";
+import { ViewerTransport, LOGIN_ID_PATTERN, VIEWER_MAX_MESSAGE, VIEWER_MAX_BUFFER } from "./viewer-transport";
 import { loadRuntimeConfig, providerConfig, tokenMatches } from "./config";
 import type { RuntimeConfig } from "./config";
 import { loadProfileTunnelConfigs } from "./tunnel";
@@ -64,7 +65,8 @@ export function validateRuntimeEnvelope(value: unknown, headerProfile: string | 
     request, authority, originalModel: envelope.originalModel, effectiveModel: envelope.effectiveModel,
     effectiveReasoning: envelope.effectiveReasoning, transformedRequestSha256 };
 }
-export interface RuntimeService { server: Server<undefined>; state: RuntimeState; profiles: RuntimeProfiles; initialized: Promise<void>; close(): Promise<void>; }
+interface ViewerData { loginId: string; transport?: ViewerTransport; }
+export interface RuntimeService { server: Server<ViewerData>; state: RuntimeState; profiles: RuntimeProfiles; initialized: Promise<void>; close(): Promise<void>; }
 export function startRuntime(config: RuntimeConfig): RuntimeService {
   const singleton = new RuntimeSingletonLock(config.dataDir);
   let state: RuntimeState;
@@ -96,7 +98,7 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
     const code = typed ? error.code : "runtime_request_failed";
     const status = typed ? error.status : 500;
     return Response.json({ error: { type: "runtime_error", code, message: typed ? error.message : "Runtime request failed",
-      retryable: false, submission_state: typed ? "not_sent" : "unknown" } }, { status, headers: { "x-9router-no-fallback": "true" } });
+      retryable: false, submission_state: typed ? "not_sent" : "unknown" } }, { status, headers: { "x-9router-no-fallback": "true", "Cache-Control": "no-store" } });
   };
   const handleResponse = async (request: Request, compact: boolean): Promise<Response> => {
     const envelope = validateRuntimeEnvelope(await readJsonRequestBody(request), request.headers.get("x-cgw-profile-id"), compact);
@@ -199,18 +201,28 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
     return Response.json({ output: buildCompactV1Output(extractCompactUserMessages(envelope.request.input), summary) });
     });
   };
-  const server = Bun.serve({ hostname: config.host, port: config.port, idleTimeout: 0, maxRequestBodySize: 128 * 1024 * 1024 + 16_384,
-    async fetch(request) {
+  const server = Bun.serve<ViewerData>({ hostname: config.host, port: config.port, idleTimeout: 0, maxRequestBodySize: 128 * 1024 * 1024 + 16_384,
+    async fetch(request, server) {
       const url = new URL(request.url), path = url.pathname;
       const admin = path.startsWith("/admin/");
       const authorization = request.headers.get("authorization");
       const livenessAdmin = request.method === "GET" && path === "/healthz" && tokenMatches(authorization, config.adminToken);
-      if (!livenessAdmin && !tokenMatches(authorization, admin ? config.adminToken : config.runtimeToken)) return new Response(null, { status: 401 });
+      if (!livenessAdmin && !tokenMatches(authorization, admin ? config.adminToken : config.runtimeToken)) return new Response(null, { status: 401, headers: { "Cache-Control": "no-store" } });
       try {
         if (admin && state.fence() && request.method !== "GET" && !["/admin/drain", "/admin/quiesce", "/admin/resume", "/admin/interrupt-turn"].includes(path)) {
           throw new RuntimeStateError("runtime_draining", "Admin profile mutations denied while drained", 503);
         }
         if (!["/admin/drain", "/admin/quiesce", "/admin/resume", "/admin/interrupt-turn", "/healthz", "/admin/profiles", "/readyz"].includes(path)) await initialized;
+        if (admin && ["/admin/login/session", "/admin/login/status", "/admin/login/viewer"].includes(path)) {
+          const ids = url.searchParams.getAll("loginId");
+          if (request.method !== "GET" || ids.length !== 1 || !LOGIN_ID_PATTERN.test(ids[0]!) || [...url.searchParams.keys()].some(key => key !== "loginId")) throw new RuntimeStateError("invalid_login", "Exact login ID required", 400);
+          const loginId = ids[0]!;
+          if (path === "/admin/login/status") return Response.json(profiles.viewerStatus(loginId), { headers: { "Cache-Control": "no-store" } });
+          const session = profiles.viewerSession(loginId);
+          if (path === "/admin/login/session") return Response.json(session, { headers: { "Cache-Control": "no-store" } });
+          if (!server.upgrade(request, { data: { loginId }, headers: { "Cache-Control": "no-store" } })) return new Response(null, { status: 426, headers: { "Cache-Control": "no-store" } });
+          return;
+        }
         if (request.method === "GET" && path === "/healthz") return Response.json({ service: SERVICE_NAME, protocolVersion: PROTOCOL_VERSION,
           version: VERSION, upstreamRevision: UPSTREAM_REVISION, draining: !!state.fence(), ...activity() });
         if (request.method === "GET" && path === "/readyz") {
@@ -274,8 +286,11 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
             stateSchemaVersion: 1, operationFence: state.fence(), acceptedRequestCount: state.acceptedRequestCount(),
             physicalIdle: !hasPhysicalWork() && profiles.physicalIdle(), physicalSettlement: chatGptTurnSessions.physicalWorkCount(),
           });
-          if (request.method === "GET" && path === "/admin/login/status") return Response.json(profiles.viewerStatus(url.searchParams.get("loginId") || ""));
           const body = record(await readJsonRequestBody(request));
+          if (request.method === "POST" && path === "/admin/login/close") {
+            if (typeof body.loginId !== "string" || !LOGIN_ID_PATTERN.test(body.loginId) || Object.keys(body).length !== 1) throw new RuntimeStateError("invalid_login", "Exact login ID required", 400);
+            return await lifecycle(async () => Response.json(await profiles.closeViewerLease(body.loginId as string), { headers: { "Cache-Control": "no-store" } }));
+          }
           if (request.method === "POST" && path === "/admin/profiles") { state.createProfile(validateProfileId(body.profileId)); return Response.json(profiles.status(body.profileId as string)); }
           const profilePatch = /^\/admin\/profiles\/([a-z0-9-]+)$/.exec(path);
           if (request.method === "PATCH" && profilePatch) return Response.json(await profiles.patch(profilePatch[1]!, Number(body.revision), body.settings));
@@ -292,7 +307,7 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
               if (matches.length !== 1 || !matches[0]?.traceId) throw new RuntimeStateError("viewer_target_unavailable", "Exact profile turn is unavailable or ambiguous");
               traceId = matches[0].traceId;
             }
-            return Response.json(await profiles.startViewer(profileId, path.endsWith("/start"), traceId));
+            return await lifecycle(async () => Response.json(await profiles.startViewer(profileId, path.endsWith("/start"), traceId), { headers: { "Cache-Control": "no-store" } }));
           }
           if (request.method === "POST" && path === "/admin/browser/restart") {
             const manager = profiles.manager(validateProfileId(body.profileId)); if (!manager.isIdle) throw new RuntimeStateError("profile_active", "Browser restart requires idle profile");
@@ -304,7 +319,11 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
             if (body.kind === "harness") await profiles.harnessSmoke(profileId); else await profiles.probe(profileId);
             return Response.json({ profile: profiles.status(profileId), outerToolE2eVerified: false });
           }
-          if (request.method === "POST" && path === "/admin/drain") return await lifecycle(async () => Response.json(state.drain(String(body.operationId || ""))));
+          if (request.method === "POST" && path === "/admin/drain") return await lifecycle(async () => {
+            const result = state.drain(String(body.operationId || ""));
+            await profiles.closeViewer();
+            return Response.json(result);
+          });
           if (request.method === "POST" && path === "/admin/quiesce") return await lifecycle(async () => {
             state.assertFenceOwner(String(body.operationId || ""));
             await initialized.catch(() => {});
@@ -328,6 +347,16 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
         return new Response(null, { status: 404 });
       } catch (error) { return errorResponse(error); }
     },
+    websocket: {
+      maxPayloadLength: VIEWER_MAX_MESSAGE, backpressureLimit: VIEWER_MAX_BUFFER, closeOnBackpressureLimit: true,
+      open(ws) {
+        try { ws.data.transport = new ViewerTransport(ws, profiles, ws.data.loginId); }
+        catch { ws.close(1008, "Viewer lease ended"); }
+      },
+      message(ws, data) { ws.data.transport?.message(data); },
+      drain(ws) { ws.data.transport?.drain(); },
+      close(ws) { ws.data.transport?.close(); },
+    },
   });
   let closing: Promise<void> | undefined;
   const close = () => {
@@ -336,6 +365,7 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
     if (!state.fence()) state.drain(`shutdown-${randomUUIDForShutdown()}`);
     closing = lifecycle(async () => {
       await initialized.catch(() => {});
+      await profiles.closeViewer();
       while (hasPhysicalWork()) await Bun.sleep(50);
       await profiles.close(); await closeTurnBrokers(); closeResponseState(); state.close(); await server.stop(); singleton.close();
     });
