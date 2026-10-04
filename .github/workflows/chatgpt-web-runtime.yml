@@ -173,6 +173,17 @@ jobs:
           bun install --frozen-lockfile --cwd tests
           bun run build
           bun tests/integration/chatgpt-web-runtime-smoke.mjs --image "$CGW_CHECK_IMAGE" --gateway-port 21127
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: TheDemonTuan/vps-deploy
+          ref: f6d40a519c2bf8b0a19e3f9c714b737875052870
+          path: platform
+          persist-credentials: false
+      - name: Scan complete native browser image without suppression
+        run: |
+          set -euo pipefail
+          sudo bash platform/scripts/install-trivy.sh /usr/local/bin
+          trivy image --scanners vuln --ignorefile /dev/null --severity HIGH,CRITICAL --exit-code 1 "$CGW_CHECK_IMAGE"
       # No registry login, push, account-state artifact upload, reusable old platform
       # Trivy call, deploy action, or production manifest/pin mutation belongs here.
 

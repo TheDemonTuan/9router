@@ -18,7 +18,7 @@ assert.equal(process.getuid?.(), 10001, "Runtime must not run as root");
 assert.equal(process.getgid?.(), 10001, "Runtime group mismatch");
 assert.equal(Bun.version, "1.4.0", "Bun baseline changed");
 assert.equal(readFileSync("/proc/1/comm", "utf8").trim(), "tini", "Tini must own PID 1");
-assert.match(readFileSync("/etc/os-release", "utf8"), /VERSION_ID="12"/, "Debian 12 required");
+assert.match(readFileSync("/etc/os-release", "utf8"), /VERSION_ID="13"/, "Debian 13 required");
 const processStatus = readFileSync("/proc/self/status", "utf8");
 assert.match(processStatus, /^NoNewPrivs:\s+1$/m, "Docker no-new-privileges required");
 assert.match(processStatus, /^CapEff:\s+0+$/m, "Docker cap_drop ALL required");

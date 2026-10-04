@@ -1,21 +1,23 @@
-# Native-only Debian 12/glibc image. Build from the app root with --build-arg APP_REVISION=<40-hex SHA>.
+# Native-only Debian 13/glibc image. Build from the app root with --build-arg APP_REVISION=<40-hex SHA>.
 # Digest, snapshot, binary checksums, licenses and security provenance: image-build-manifest.json.
-FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 AS debian
+FROM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a AS debian
 RUN rm -f /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources \
     && printf '%s\n' \
-      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20261001T000000Z/ bookworm main' \
-      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20261001T000000Z/ bookworm-updates main' \
-      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20261001T000000Z/ bookworm-security main' \
+      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20261003T000000Z/ trixie main' \
+      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20261003T000000Z/ trixie-updates main' \
+      'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20261003T000000Z/ trixie-security main' \
       > /etc/apt/sources.list
 # The slim base lacks CA roots; bootstrap them from the identical signed snapshot over HTTP.
 # APT verifies signed InRelease/Packages/package hashes; no trusted=yes or unauthenticated install.
 RUN printf '%s\n' \
-      'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20261001T000000Z/ bookworm main' \
+      'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20261003T000000Z/ trixie main' \
       > /etc/apt/sources.list.d/bootstrap.list \
     && apt-get update -o Dir::Etc::sourcelist=sources.list.d/bootstrap.list -o Dir::Etc::sourceparts=- \
     && apt-get install -y --no-install-recommends \
       -o Dir::Etc::sourcelist=sources.list.d/bootstrap.list -o Dir::Etc::sourceparts=- ca-certificates \
     && rm /etc/apt/sources.list.d/bootstrap.list \
+    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get dist-upgrade -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 FROM debian AS assets
@@ -44,7 +46,7 @@ LABEL org.opencontainers.image.title="9Router ChatGPT Web Runtime" \
       org.opencontainers.image.version="6.1.3" \
       org.opencontainers.image.licenses="MIT AND Apache-2.0"
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      chromium=154.0.8037.92-1~deb12u1 chromium-common=154.0.8037.92-1~deb12u1 \
+      chromium=154.0.8037.92-1~deb13u1 chromium-common=154.0.8037.92-1~deb13u1 \
       tini xvfb openbox x11vnc xauth fonts-liberation fonts-noto-core fonts-noto-color-emoji \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 cgw \

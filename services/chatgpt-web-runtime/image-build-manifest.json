@@ -2,35 +2,35 @@
   "schemaVersion": 1,
   "image": "ghcr.io/thedemontuan/9router-cgw-runtime",
   "tagPolicy": "app git SHA; deployments must use resolved OCI digest",
-  "resolvedAt": "2026-10-02",
+  "resolvedAt": "2026-10-04",
   "upstream": {
     "repository": "https://github.com/miuuyy/codex-chatgpt-web",
     "revision": "fa2d2c6c24926078b46eedb2186f69f2e8d548d7",
     "version": "6.1.3"
   },
   "base": {
-    "image": "docker.io/library/debian:bookworm-slim",
-    "indexDigest": "sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251",
+    "image": "docker.io/library/debian:trixie-slim",
+    "indexDigest": "sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a",
     "nativeManifests": {
-      "amd64": "sha256:f3034a6ec3c1205360777c4aae76234998866ad18806ae62b63a3f84ccad782b",
-      "arm64": "sha256:0c8bbb8e987a035fe1d9704eb2e571b7e9a836e1caa46345290674b45b69e417"
+      "amd64": "sha256:7792b1f7702a86946cd518db72b6a407302c3e9bc1635634368b878189e8221c",
+      "arm64": "sha256:da496358bd6934d2bd6a563a33176a2e50eff5490c54b4ac6fb051b69fef4071"
     },
     "registry": "https://registry-1.docker.io/v2/library/debian/manifests/",
-    "release": "Debian 12 (bookworm), glibc"
+    "release": "Debian 13 (trixie), glibc"
   },
   "debian": {
-    "snapshot": "20261001T000000Z",
+    "snapshot": "20261003T000000Z",
     "archives": {
-      "debian": "https://snapshot.debian.org/archive/debian/20261001T000000Z/",
-      "security": "https://snapshot.debian.org/archive/debian-security/20261001T000000Z/"
+      "debian": "https://snapshot.debian.org/archive/debian/20261003T000000Z/",
+      "security": "https://snapshot.debian.org/archive/debian-security/20261003T000000Z/"
     },
-    "chromiumVersion": "154.0.8037.92-1~deb12u1",
+    "chromiumVersion": "154.0.8037.92-1~deb13u1",
     "packagePolicy": "Signed APT InRelease + hash-verified Packages from immutable snapshot; no live Debian mirrors. All transitive dependencies resolved from that snapshot.",
     "amd64PackagesIndexSha256": {
-      "bookworm": "9e0b5aabb2465b3d2e7a7fe27f9913846277833f7a2826e7767acccff5b588c5",
-      "bookworm-security": "69451586618263dcefd35b13399c9cbab0097ad2c937a105c62711f23152d6e3"
+      "trixie": "7778d3e3f303b7ddb8ce0fe7c8d57473a076c6bf2e8f241f75421d2396352498",
+      "trixie-security": "f90ac42ac57137087348d3011e70aebb255492bd087b39e57c5a7eceabff3e8a"
     },
-    "arm64SecurityPackagesIndexSha256": "cb957d537e83c4bacde6acb0621d72b60b7cbdf4db244d1c5143496eb7540293"
+    "arm64SecurityPackagesIndexSha256": "39b0ee2b71ff634b5101bd4b6a30c4e62fc30af800814f1439ddccd7ce23b8a3"
   },
   "bun": {
     "version": "1.4.0",
