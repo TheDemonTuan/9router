@@ -95,7 +95,7 @@ export class NativeBrowserProcess {
       let owned = this.liveProcesses();
       const requested = await this.requestWindowClose(owned);
       owned = this.liveProcesses();
-      let deadline = Date.now() + (requested ? 7000 : 3000);
+      let deadline = Date.now() + (requested ? 5000 : 0);
       while (owned.length && Date.now() < deadline) { await Bun.sleep(25); owned = this.liveProcesses(); }
       if (owned.length) this.signal("SIGTERM", owned);
       deadline = Date.now() + 2000;
