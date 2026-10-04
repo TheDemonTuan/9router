@@ -152,19 +152,22 @@ jobs:
       - name: Prove browserless image and installer boundaries inside Docker
         run: |
           set -euo pipefail
+          volume="cgw-browser-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}"
+          echo "CGW_BROWSER_VOLUME=$volume" >> "$GITHUB_ENV"
+          docker volume create "$volume"
           docker run --rm --name "cgw-browserless-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}" --read-only --network none --cpus 0.5 --memory 1g --cap-drop ALL --security-opt no-new-privileges:true \
             --tmpfs /tmp:rw,nosuid,nodev,size=512m,mode=1777 \
             --tmpfs /run:rw,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700 \
+            --env TMPDIR=/opt/cgw-browser --mount "type=volume,src=$volume,dst=/opt/cgw-browser" \
             "$CGW_CHECK_IMAGE" sh -c 'python3 -c '\''from pathlib import Path; import os; p = Path("/opt/cgw-browser"); assert not list(p.iterdir()); assert p.stat().st_uid == p.stat().st_gid == os.getuid() == 10001'\'' && python3 -B -m unittest discover -s tests -p install_browser_test.py'
       - name: Provision pinned Chrome in an owned Docker cache volume
         env:
           ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
-          volume="cgw-browser-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}"
+          volume="$CGW_BROWSER_VOLUME"
           init="cgw-browser-init-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}"
-          printf 'CGW_BROWSER_VOLUME=%s\nCGW_INIT_CONTAINER=%s\n' "$volume" "$init" >> "$GITHUB_ENV"
-          docker volume create "$volume"
+          echo "CGW_INIT_CONTAINER=$init" >> "$GITHUB_ENV"
           docker run --rm --name "$init" --user 10001:10001 --read-only --cpus 0.5 --memory 1g \
             --cap-drop ALL --security-opt no-new-privileges:true \
             --tmpfs /tmp:rw,nosuid,nodev,size=512m,mode=1777 \
@@ -200,7 +203,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: TheDemonTuan/vps-deploy
-          ref: 09841520ba30445a6df6861d8f4e8b9da2349adb
+          ref: 3a31f12ce0c9e2aec4590f5c397692e60b595491
           path: platform
           persist-credentials: false
       - name: Scan browserless runtime and Docker browser metadata without suppression
@@ -274,11 +277,11 @@ jobs:
     permissions:
       contents: read
       packages: read
-    uses: TheDemonTuan/vps-deploy/.github/workflows/security-trivy.yml@09841520ba30445a6df6861d8f4e8b9da2349adb
+    uses: TheDemonTuan/vps-deploy/.github/workflows/security-trivy.yml@3a31f12ce0c9e2aec4590f5c397692e60b595491
     with:
       app: 9router
       source-sha: ${{ github.sha }}
-      platform-ref: 09841520ba30445a6df6861d8f4e8b9da2349adb
+      platform-ref: 3a31f12ce0c9e2aec4590f5c397692e60b595491
       config: .deploy/app.yml
       scan-mode: source
 
@@ -289,12 +292,12 @@ jobs:
     permissions:
       contents: read
       packages: write
-    uses: TheDemonTuan/vps-deploy/.github/workflows/build-docker.yml@09841520ba30445a6df6861d8f4e8b9da2349adb
+    uses: TheDemonTuan/vps-deploy/.github/workflows/build-docker.yml@3a31f12ce0c9e2aec4590f5c397692e60b595491
     with:
       app: 9router
       component: cgw
       source-sha: ${{ github.sha }}
-      platform-ref: 09841520ba30445a6df6861d8f4e8b9da2349adb
+      platform-ref: 3a31f12ce0c9e2aec4590f5c397692e60b595491
       config: .deploy/app.yml
 
   security-image:
@@ -304,11 +307,11 @@ jobs:
     permissions:
       contents: read
       packages: read
-    uses: TheDemonTuan/vps-deploy/.github/workflows/security-trivy.yml@09841520ba30445a6df6861d8f4e8b9da2349adb
+    uses: TheDemonTuan/vps-deploy/.github/workflows/security-trivy.yml@3a31f12ce0c9e2aec4590f5c397692e60b595491
     with:
       app: 9router
       source-sha: ${{ github.sha }}
-      platform-ref: 09841520ba30445a6df6861d8f4e8b9da2349adb
+      platform-ref: 3a31f12ce0c9e2aec4590f5c397692e60b595491
       config: .deploy/app.yml
       scan-mode: image
       image-ref: ${{ needs.publish.outputs.image-ref }}
@@ -322,14 +325,14 @@ jobs:
     environment: production
     timeout-minutes: 34
     steps:
-      - uses: TheDemonTuan/vps-deploy/.github/actions/deploy@09841520ba30445a6df6861d8f4e8b9da2349adb
+      - uses: TheDemonTuan/vps-deploy/.github/actions/deploy@3a31f12ce0c9e2aec4590f5c397692e60b595491
         with:
           app: 9router
           host: oracle-main
           operation: deploy
           component: cgw
           source-sha: ${{ github.sha }}
-          platform-ref: 09841520ba30445a6df6861d8f4e8b9da2349adb
+          platform-ref: 3a31f12ce0c9e2aec4590f5c397692e60b595491
           config: .deploy/app.yml
           image-ref: ${{ needs.publish.outputs.image-ref }}
         env:
