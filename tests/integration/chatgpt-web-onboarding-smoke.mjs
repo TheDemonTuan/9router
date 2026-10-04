@@ -17,6 +17,9 @@ assert(process.platform === "linux", "Native Linux Docker required");
 for (const key of ["--gateway-image", "--runtime-image", "--browser-volume"]) assert(flags[key], `${key} required`);
 const root = mkdtempSync(join(tmpdir(), "cgw-onboarding-"));
 const proofs = join(root, "proofs"); mkdirSync(proofs); chmodSync(root, 0o755); chmodSync(proofs, 0o777);
+const secrets = join(root, "secrets"); mkdirSync(secrets); chmodSync(secrets, 0o755);
+writeFileSync(join(secrets, "admin-token"), "offline-viewer-admin-token".repeat(4));
+writeFileSync(join(secrets, "data-token"), "offline-viewer-data-token".repeat(4));
 const suffix = randomUUID().replaceAll("-", "");
 const network = `cgw-onboarding-${suffix}`, gateway = `cgw-onboarding-gateway-${suffix}`, runtime = `cgw-onboarding-browser-${suffix}`;
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -38,15 +41,17 @@ try {
   const arch = process.arch === "arm64" ? "arm64" : process.arch === "x64" ? "amd64" : null;
   assert(arch && command(["info", "--format", "{{.OSType}}"] ) === "linux", "Native Docker platform required");
   for (const image of [flags["--gateway-image"], flags["--runtime-image"]]) assert.equal(command(["image", "inspect", "--format", "{{.Architecture}}", image]), arch);
+  // Reproduce the operator's root:10001/0640 mounts, not UID-owned tmp tokens.
+  command(["run", "--rm", "--network", "none", "--read-only", "--user", "0:0", "--cap-drop", "ALL", "--cap-add", "CHOWN", "--cap-add", "FOWNER",
+    "-v", `${secrets}:/secrets:Z`, "--entrypoint", "/bin/sh", flags["--gateway-image"], "-c", "chown 0:10001 /secrets/* && chmod 0640 /secrets/*"]);
   command(["network", "create", "--internal", network]); createdNetwork = true;
-  command(["run", "-d", "--name", gateway, "--network", network, "--user", "1000:1000", "--read-only", "--cap-drop", "ALL",
+  command(["run", "-d", "--name", gateway, "--network", network, "--group-add", "10001", "--read-only", "--cap-drop", "ALL", "--cap-add", "SETUID", "--cap-add", "SETGID",
     "--security-opt", "no-new-privileges:true", "--cpus", "1", "--memory", "2g", "--tmpfs", "/tmp:rw,nosuid,nodev,mode=1777",
     "--tmpfs", "/app/data:rw,nosuid,nodev,size=256m,uid=1000,gid=1000,mode=0700",
     "--tmpfs", "/app/data-home:rw,nosuid,nodev,size=64m,uid=1000,gid=1000,mode=0700",
     "-e", "INITIAL_PASSWORD=Offline-Provider-UI-Fixture-20261004", "-e", "CHATGPT_WEB_RUNTIME_URL=http://127.0.0.1:17841",
-    "-e", "CHATGPT_WEB_RUNTIME_ADMIN_TOKEN_FILE=/tmp/admin-token", "-e", "CHATGPT_WEB_RUNTIME_TOKEN_FILE=/tmp/data-token",
-    "-e", "ENABLE_REQUEST_LOGS=false", "--entrypoint", "/bin/sh", flags["--gateway-image"], "-c",
-    "printf '%s' 'offline-viewer-admin-tokenoffline-viewer-admin-tokenoffline-viewer-admin-tokenoffline-viewer-admin-token' > /tmp/admin-token; printf '%s' 'offline-viewer-data-tokenoffline-viewer-data-tokenoffline-viewer-data-tokenoffline-viewer-data-token' > /tmp/data-token; exec bun custom-server.js"]);
+    "-v", `${secrets}:/run/cgw-secrets:ro,Z`, "-e", "CHATGPT_WEB_RUNTIME_ADMIN_TOKEN_FILE=/run/cgw-secrets/admin-token", "-e", "CHATGPT_WEB_RUNTIME_TOKEN_FILE=/run/cgw-secrets/data-token",
+    "-e", "ENABLE_REQUEST_LOGS=false", flags["--gateway-image"]]);
   createdGateway = true;
   command(["exec", gateway, "bun", "-e", "const end=Date.now()+30000;for(;;){try{const r=await fetch('http://127.0.0.1:20128/api/health');if(r.ok)break;}catch{}if(Date.now()>end)process.exit(1);await Bun.sleep(200);}"], 45000);
   command(["run", "--rm", "--name", runtime, "--network", `container:${gateway}`, "--read-only", "--cap-drop", "ALL",

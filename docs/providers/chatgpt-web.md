@@ -16,6 +16,7 @@
 ## Security contract
 
 - Configure `CHATGPT_WEB_RUNTIME_URL`, `CHATGPT_WEB_RUNTIME_TOKEN_FILE` and the separate `CHATGPT_WEB_RUNTIME_ADMIN_TOKEN_FILE` through the operator deployment. Never enter these tokens in the dashboard.
+- Mount both runtime tokens with the same operator-controlled group and mode `0640`. The gateway entrypoint keeps UID `1000` and uses the data token's group as its primary GID when dropping privileges; `su-exec` otherwise discards Docker supplementary groups. Token files remain read-only and are never copied or made world-readable.
 - Profile mutations and viewer access require a verified dashboard administrator session even when ordinary dashboard login is disabled. API keys and forwarding headers cannot substitute for that session.
 - Viewer upgrades require the exact same origin; remote access requires HTTPS. HTTP is limited to loopback development peers. Only the configured runtime and its owned loopback VNC listener are reachable.
 - Only the authenticated, no-store session endpoint exposes the ephemeral VNC password to noVNC. Status/start/close responses contain no password or operator instructions. The client never places credentials in WebSocket URLs or automatically transfers the clipboard.
