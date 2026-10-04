@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 
 interface OwnedNativeProcess { pid: number; grouped: boolean; }
 
@@ -8,7 +9,7 @@ interface OwnedNativeProcess { pid: number; grouped: boolean; }
 export class NativeBrowserProcess {
   private stopping = false;
   private closing?: Promise<void>;
-  private constructor(readonly child: ChildProcess, private readonly grouped: boolean, private readonly owner: string) {}
+  private constructor(readonly child: ChildProcess, private readonly grouped: boolean, private readonly owner: string, private readonly display?: string) {}
 
   static async launch(executable: string, directory: string, display: string | undefined, startUrl: string,
     onUnexpectedExit?: () => void): Promise<NativeBrowserProcess> {
@@ -18,7 +19,7 @@ export class NativeBrowserProcess {
       `--user-data-dir=${directory}`, "--no-first-run", "--no-default-browser-check",
       "--window-size=1280,900", startUrl,
     ], { env: { ...process.env, CGW_NATIVE_BROWSER_OWNER: owner.slice(owner.indexOf("=") + 1), ...(display ? { DISPLAY: display } : {}) }, stdio: "ignore", shell: false, detached: grouped });
-    const owned = new NativeBrowserProcess(child, grouped, owner);
+    const owned = new NativeBrowserProcess(child, grouped, owner, display);
     child.once("exit", () => { if (!owned.stopping) onUnexpectedExit?.(); });
     try {
       await new Promise<void>((resolve, reject) => { child.once("error", reject); child.once("spawn", resolve); });
@@ -73,14 +74,28 @@ export class NativeBrowserProcess {
     }
   }
 
+  private requestWindowClose(): Promise<boolean> {
+    if (!this.grouped || !this.display || !this.running) return Promise.resolve(false);
+    const helper = spawn("python3", [join(import.meta.dir, "../../scripts/close-native-browser.py"), this.display, String(this.child.pid)], { stdio: "ignore", shell: false });
+    const { promise, resolve } = Promise.withResolvers<boolean>();
+    const timer = setTimeout(() => { helper.kill("SIGKILL"); }, 2000);
+    helper.once("error", () => { clearTimeout(timer); resolve(false); });
+    helper.once("exit", code => { clearTimeout(timer); resolve(code === 0); });
+    return promise;
+  }
+
   close(): Promise<void> {
     if (this.closing) return this.closing;
     this.stopping = true;
     this.closing = (async () => {
-      // First allow Chrome itself to flush this exact persistent profile gracefully.
-      this.signal("SIGTERM");
-      let deadline = Date.now() + 2000;
+      // SIGTERM can exit Chrome without saving recently issued cookies. Ask the
+      // exact owned desktop windows to close normally before escalating signals.
+      const requested = await this.requestWindowClose();
       let owned = this.liveProcesses();
+      let deadline = Date.now() + (requested ? 5000 : 0);
+      while (owned.length && Date.now() < deadline) { await Bun.sleep(25); owned = this.liveProcesses(); }
+      if (owned.length) this.signal("SIGTERM");
+      deadline = Date.now() + 2000;
       while (owned.length && Date.now() < deadline) { await Bun.sleep(25); owned = this.liveProcesses(); }
       deadline = Date.now() + 2000;
       while (owned.length && Date.now() < deadline) {
