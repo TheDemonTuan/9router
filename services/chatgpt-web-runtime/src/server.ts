@@ -287,9 +287,9 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
             physicalIdle: !hasPhysicalWork() && profiles.physicalIdle(), physicalSettlement: chatGptTurnSessions.physicalWorkCount(),
           });
           const body = record(await readJsonRequestBody(request));
-          if (request.method === "POST" && path === "/admin/login/close") {
+          if (request.method === "POST" && ["/admin/login/close", "/admin/login/complete"].includes(path)) {
             if (typeof body.loginId !== "string" || !LOGIN_ID_PATTERN.test(body.loginId) || Object.keys(body).length !== 1) throw new RuntimeStateError("invalid_login", "Exact login ID required", 400);
-            return await lifecycle(async () => Response.json(await profiles.closeViewerLease(body.loginId as string), { headers: { "Cache-Control": "no-store" } }));
+            return await lifecycle(async () => Response.json(path.endsWith("/complete") ? await profiles.completeLogin(body.loginId as string) : await profiles.closeViewerLease(body.loginId as string), { headers: { "Cache-Control": "no-store" } }));
           }
           if (request.method === "POST" && path === "/admin/profiles") { state.createProfile(validateProfileId(body.profileId)); return Response.json(profiles.status(body.profileId as string)); }
           const profilePatch = /^\/admin\/profiles\/([a-z0-9-]+)$/.exec(path);

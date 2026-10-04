@@ -22,7 +22,7 @@ async function fixture(resistTermination = false) {
   await once(child, "spawn"); await once(child.stdout!, "data");
   // This fixture seeds a lease without starting its production expiry timer.
   const timer = undefined as unknown as Timer;
-  const lease = { loginId, profileId: "personal", expiresAt: Date.now() + 600000, child, passwordFile, password: "fixtureVncPassword", timer, transports: new Set<() => void>() };
+  const lease = { loginId, profileId: "personal", expiresAt: Date.now() + 600000, manualLogin: false, child, passwordFile, password: "fixtureVncPassword", timer, transports: new Set<() => void>() };
   // A real child-backed lease isolates lifecycle boundaries from Chromium/login.
   const internals = runtime.profiles as unknown as { viewer: typeof lease };
   internals.viewer = lease;
@@ -43,7 +43,7 @@ describe("authenticated ephemeral runtime viewer leases", () => {
       expect((await f.admin(path, undefined, "wrong-bearer")).status).toBe(401);
       const response = await f.admin(path);
       expect(response.headers.get("cache-control")).toBe("no-store");
-      expect(await response.json()).toEqual({ loginId, profileId: "personal", expiresAt: new Date(f.lease.expiresAt).toISOString(), state: "waiting", password: "fixtureVncPassword" });
+      expect(await response.json()).toEqual({ loginId, profileId: "personal", expiresAt: new Date(f.lease.expiresAt).toISOString(), manualLogin: false, state: "waiting", password: "fixtureVncPassword" });
       expect(await (await f.admin(`/admin/login/status?loginId=${loginId}`)).json()).not.toHaveProperty("password");
       for (const suffix of ["bad", `${loginId}&loginId=${loginId}`, `${loginId}&target=evil`]) expect((await f.admin(`/admin/login/session?loginId=${suffix}`)).status).toBe(400);
       expect((await f.admin("/admin/login/session?loginId=00000000-0000-4000-8000-000000000000")).status).toBe(404);
@@ -56,6 +56,20 @@ describe("authenticated ephemeral runtime viewer leases", () => {
       expect(await close.json()).toMatchObject({ loginId, state: "closed" });
       expect((await f.admin(path)).status).toBe(404);
       expect(f.lease.password).toBe("");
+    } finally { await f.close(); }
+  });
+  test("complete requires admin auth, a canonical exact ID, and a human rather than approval lease", async () => {
+    const f = await fixture();
+    try {
+      expect((await f.admin("/admin/login/complete", { loginId }, f.config.runtimeToken.toString())).status).toBe(401);
+      for (const body of [{ loginId: "invalid" }, { loginId, profileId: "other" }, {}]) expect((await f.admin("/admin/login/complete", body)).status).toBe(400);
+      expect((await f.admin("/admin/login/complete", { loginId: "00000000-0000-4000-8000-000000000000" })).status).toBe(404);
+      const response = await f.admin("/admin/login/complete", { loginId });
+      expect(response.status).toBe(400);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(f.runtime.profiles.viewerStatus(loginId)).toMatchObject({ manualLogin: false, state: "waiting" });
+      expect(f.lease.child.exitCode).toBeNull();
+      expect(f.lease.password).toBe("fixtureVncPassword");
     } finally { await f.close(); }
   });
 

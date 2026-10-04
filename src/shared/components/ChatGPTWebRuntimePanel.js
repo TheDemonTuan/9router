@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import PropTypes from "prop-types";
 import Button from "./Button";
+import Input from "./Input";
 import Select from "./Select";
 import Toggle from "./Toggle";
 import ChatGPTWebViewer from "./ChatGPTWebViewer";
@@ -14,17 +15,21 @@ async function request(action, init, signal) {
   const response = await fetch(`${BASE}/${action}`, { cache: "no-store", ...init, signal });
   const data = await response.json();
   if (!response.ok) {
-    const error = new Error(data.error?.message || "Runtime action failed.");
+    const error = new Error(typeof data.error === "string" ? data.error : data.error?.message || "Runtime action failed.");
     error.status = response.status;
     throw error;
   }
   return data;
 }
 
-const leaseNotice = state => ({ completed: "Login completed. Browser verification is ready.", expired: "Private browser lease expired. Start a new login to continue.", closed: "Private browser lease closed.", error: "Login verification failed. Review profile diagnostics and start a new login." }[state] || "Private browser session ended.");
+const leaseNotice = state => ({ completed: "Signed in. Connection is ready.", expired: "Browser session expired. Open a new session to continue.", closed: "Browser session ended.", error: "Sign-in verification failed. Open a new session to try again." }[state] || "Browser session ended.");
+const LEASE_STATES = new Set(["waiting", "completed", "expired", "closed", "error"]);
+function validLease(value, profileId, loginId) {
+  return value?.profileId === profileId && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value.loginId || "") && (!loginId || value.loginId === loginId) && typeof value.manualLogin === "boolean" && LEASE_STATES.has(value.state) && Number.isFinite(Date.parse(value.expiresAt));
+}
 
-// Mounted only inside an open modal. Polling never sends a model or tool request.
-export default function ChatGPTWebRuntimePanel({ profileId, selectedProfileId = profileId, onProfileSelected, onChanged, autoStartLogin = false }) {
+// Profile/status reads never send a model or tool request. Human sign-in is verified only on request.
+export default function ChatGPTWebRuntimePanel({ connectionName, profileId, selectedProfileId = profileId, onProfileSelected, onChanged, onViewerOpenChange, autoStartLogin = false }) {
   const [profiles, setProfiles] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState("");
@@ -43,10 +48,16 @@ export default function ChatGPTWebRuntimePanel({ profileId, selectedProfileId = 
   const dirtyRef = useRef(false);
   const profile = profiles.find(item => item.profileId === profileId);
 
+  useEffect(() => {
+    onViewerOpenChange(viewerOpen);
+    return () => onViewerOpenChange(false);
+  }, [viewerOpen, onViewerOpenChange]);
   const endViewer = useCallback(state => {
     const current = leaseRef.current;
-    if (current) { const ended = { ...current, state }; leaseRef.current = ended; setLease(ended); }
-    setViewerOpen(false); setNotice(leaseNotice(state));
+    if (current) { const ended = { ...current, state, manualLogin: false }; leaseRef.current = ended; setLease(ended); }
+    setViewerOpen(false);
+    setError(state === "error" ? leaseNotice(state) : "");
+    setNotice(state === "error" ? "" : leaseNotice(state));
   }, []);
   useEffect(() => {
     const controller = new AbortController();
@@ -71,17 +82,19 @@ export default function ChatGPTWebRuntimePanel({ profileId, selectedProfileId = 
             } else {
               try {
                 const status = await request(`login/status?loginId=${encodeURIComponent(activeLease.loginId)}`, {}, controller.signal);
-                if (!controller.signal.aborted && leaseRef.current?.loginId === activeLease.loginId) {
-                  if (status.profileId !== profileId || status.loginId !== activeLease.loginId) throw new Error("Private viewer session changed. Start a new login.");
+                if (!controller.signal.aborted && !busyRef.current && leaseRef.current === activeLease) {
+                  if (!validLease(status, profileId, activeLease.loginId)) throw new Error("Private viewer session changed. Open a new session.");
                   leaseRef.current = status; setLease(status);
-                  if (status.state !== "waiting") { setViewerOpen(false); setNotice(leaseNotice(status.state)); onChanged(); }
+                  if (status.state !== "waiting") { endViewer(status.state); onChanged(); }
                 }
               } catch (cause) {
-                if ([404, 410].includes(cause.status) && !controller.signal.aborted) endViewer("closed");
+                if (controller.signal.aborted || busyRef.current || leaseRef.current !== activeLease) return;
+                if ([404, 410].includes(cause.status)) endViewer("closed");
                 else throw cause;
               }
             }
           }
+          if (!busyRef.current && current?.state === "draining" && leaseRef.current?.state === "waiting") endViewer("closed");
         }
       } catch (cause) {
         if (!controller.signal.aborted) setError(cause.message);
@@ -99,20 +112,44 @@ export default function ChatGPTWebRuntimePanel({ profileId, selectedProfileId = 
     try {
       const data = await request(action, { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) }, controller.signal);
       if (controller.signal.aborted) return;
-      if (data.loginId) {
-        if (data.profileId !== profileId) throw new Error("Private browser session does not match this connection.");
-        leaseRef.current = data; setLease(data); setViewerOpen(data.state === "waiting");
+      if (["login/start", "login/complete", "login/close", "browser/view"].includes(action)) {
+        if (!validLease(data, profileId, body.loginId) || (action === "login/complete" && data.state === "waiting" && !data.manualLogin)) throw new Error("Private browser session does not match this connection.");
+        leaseRef.current = data; setLease(data);
+        if (action === "login/complete") setViewerOpen(previous => previous && data.state === "waiting");
+        else setViewerOpen(data.state === "waiting");
+        if (action === "login/complete" && data.state === "waiting") setError("Sign-in is not verified yet. Continue in the browser, then choose Finish Sign In again.");
       }
       const updated = data.profile || (data.profileId && data.settings ? data : null);
       if (updated) {
         setProfiles(previous => [...previous.filter(item => item.profileId !== updated.profileId), updated]);
         if (updated.profileId === profileId) { setDraft(updated.settings); baseRevision.current = updated.revision; dirtyRef.current = false; setDirty(false); }
       }
-      setNotice(data.message || (data.loginId ? (data.state === "waiting" ? "Private browser opened below. Sign in; verification runs automatically." : leaseNotice(data.state)) : `${label} completed.`));
+      setNotice(data.message || (data.loginId ? (data.state === "waiting" ? "" : leaseNotice(data.state)) : `${label} completed.`));
       onChanged();
     } catch (cause) {
       if (!controller.signal.aborted) {
         setError(cause.message);
+        if (action === "login/complete") {
+          // A rejected verification may have restored the human browser. Read this exact lease once,
+          // after the explicit action; never silently submit another verification.
+          try {
+            const status = await request(`login/status?loginId=${encodeURIComponent(body.loginId)}`, {}, controller.signal);
+            if (controller.signal.aborted) return;
+            if (!validLease(status, profileId, body.loginId) || (status.state === "waiting" && !status.manualLogin)) throw new Error("Invalid sign-in session status.");
+            leaseRef.current = status; setLease(status);
+            setViewerOpen(previous => previous && status.state === "waiting");
+            if (status.state !== "waiting") {
+              setNotice(leaseNotice(status.state));
+              setError(status.state === "completed" ? "" : `${leaseNotice(status.state)} ${cause.message}`);
+            }
+            onChanged();
+          } catch (statusError) {
+            if (!controller.signal.aborted) {
+              if ([404, 410].includes(statusError.status)) endViewer("closed");
+              else { setViewerOpen(false); setError(`${cause.message} Could not confirm the browser session. Open Browser to check it before trying again.`); }
+            }
+          }
+        }
         // Rejected Full mode or revision conflict never appears as a successful setting.
         if (method === "PATCH") {
           dirtyRef.current = false; setDirty(false);
@@ -123,7 +160,7 @@ export default function ChatGPTWebRuntimePanel({ profileId, selectedProfileId = 
     } finally {
       if (!controller.signal.aborted) { busyRef.current = false; setBusy(""); }
     }
-  }, [onChanged, profile, profileId]);
+  }, [onChanged, profile, profileId, endViewer]);
   useEffect(() => {
     if (!autoStartLogin || autoStarted.current) return;
     const timer = setTimeout(() => {
@@ -142,47 +179,59 @@ export default function ChatGPTWebRuntimePanel({ profileId, selectedProfileId = 
   const active = (profile?.activeTurns || 0) > 0;
   const disabled = !!busy || fenced;
   const biggerSupported = profile?.models.some(model => !model.legacy && BIGGER_CONTEXT_ROUTES.has(model.id)) === true;
+  const waiting = lease?.state === "waiting";
+  const needsLogin = !waiting && ["unconfigured", "login_required", "error"].includes(profile?.state);
+  const openBrowser = () => {
+    if (waiting && Date.parse(lease.expiresAt) <= Date.now()) { endViewer("expired"); return; }
+    if (waiting) { setError(""); setNotice(""); setViewerOpen(true); }
+    else void act(needsLogin ? "login/start" : "browser/view", { profileId }, needsLogin ? "Start login" : "View browser");
+  };
+  const finishLogin = () => {
+    const current = leaseRef.current;
+    if (current?.state !== "waiting" || !current.manualLogin) return;
+    if (Date.parse(current.expiresAt) <= Date.now()) { endViewer("expired"); return; }
+    void act("login/complete", { loginId: current.loginId }, "Finish Sign In");
+  };
+  const humanStatus = error || notice || (busy === "Finish Sign In" ? "Checking your sign-in…" : waiting && lease.manualLogin ? "Sign in in the browser, then choose Finish Sign In." : waiting ? "Browser session is open." : ({ ready: "Connected and ready.", probing: "Checking your sign-in…", draining: "Connection temporarily unavailable.", waiting_for_chatgpt_tool_approval: "Open Browser to approve the active prompt.", error: "Sign-in needs attention. Try Sign In or see Advanced." }[profile?.state] || (!loaded ? "Opening connection…" : profile ? "Sign in to connect your account." : "Connection unavailable. See Advanced or contact the operator.")));
 
   return (
-    <section aria-label="Runtime profile" className="space-y-4 border-t border-border pt-4">
-      <div className="flex items-center justify-between gap-2">
-        <h3 className="font-medium">Runtime profile</h3>
+    <section aria-label="ChatGPT Web connection" className="space-y-4 border-t border-border pt-4">
+      <p role={error ? "alert" : "status"} className={`text-sm ${error ? "text-red-400" : "text-text-muted"}`}>{humanStatus}</p>
+      <Button aria-label={needsLogin ? "Sign In" : "Open Browser"} disabled={disabled || (!profile && !waiting) || (needsLogin && active)} loading={busy === "Start login" || busy === "View browser"} onClick={openBrowser}>{needsLogin ? "Sign In" : "Open Browser"}</Button>
+      {viewerOpen && waiting && <ChatGPTWebViewer key={lease.loginId} connectionName={connectionName} loginId={lease.loginId} profileId={profileId} expiresAt={lease.expiresAt} manualLogin={lease.manualLogin} verifying={busy === "Finish Sign In"} error={error} onFinish={finishLogin} onClose={() => setViewerOpen(false)} onEnded={endViewer} />}
+      <details className="space-y-4">
+        <summary className="cursor-pointer text-sm text-text-muted">Advanced</summary>
+        <Input label="Selected profile ID" aria-label="Selected profile ID" value={selectedProfileId} readOnly />
+        {!!profiles.length && <Select label="Existing profiles" value={selectedProfileId} options={profiles.map(item => ({ value: item.profileId, label: `${item.profileId} — ${item.state.replaceAll("_", " ")}` }))} onChange={event => onProfileSelected(event.target.value)} disabled={!!busy} hint="Selecting changes the connection draft only. Save the connection above to switch profiles. Shared profiles share browser settings and the five-turn limit." />}
         <Button size="sm" variant="secondary" disabled={!!busy} onClick={() => setRefresh(value => value + 1)}>Refresh</Button>
-      </div>
-      {!!profiles.length && <details><summary className="cursor-pointer text-sm text-text-muted">Advanced: choose an existing profile</summary><Select label="Existing profiles" value={selectedProfileId} options={profiles.map(item => ({ value: item.profileId, label: `${item.profileId} — ${item.state.replaceAll("_", " ")}` }))} onChange={event => onProfileSelected(event.target.value)} disabled={!!busy} hint="Selecting changes the connection draft only. Save the connection above to switch profiles." /></details>}
-      {error && <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-400">{error}</div>}
-      {notice && <div role="status" className="rounded-lg bg-surface-2 p-3 text-sm">{notice}</div>}
-      {!loaded && !error && <p role="status" className="text-sm text-text-muted">Loading runtime profiles…</p>}
-      {loaded && !profile && <p role="status" className="text-sm text-text-muted">The saved runtime profile is unavailable. Refresh or contact the operator; no replacement profile will be created silently.</p>}
-      {profile && <>
+        {loaded && !profile && <p className="text-sm text-text-muted">The saved runtime profile is unavailable. Refresh or contact the operator; no replacement profile will be created silently.</p>}
+        {profile && <>
         <div className="rounded-lg bg-surface-2 p-3 text-sm space-y-1">
           <p>State: <strong>{profile.state.replaceAll("_", " ")}</strong></p>
           <p>Active browser turns: {profile.activeTurns} / 5 · Settings revision: {profile.revision}</p>
           <p>Native2 connector / tunnel: {profile.connectorReady ? "ready" : "not ready"}</p>
           {profile.lastError && <p role="status" className="text-amber-500">{profile.lastError.message}</p>}
-          {profile.state === "waiting_for_chatgpt_tool_approval" && <p role="status">Open View Browser and approve the exact active connector prompt once before the approval timeout.</p>}
+          {profile.state === "waiting_for_chatgpt_tool_approval" && <p>Open Browser and approve the exact active connector prompt once before the approval timeout.</p>}
         </div>
         <div className="space-y-2">
           <h4 className="text-sm font-medium">Verified models and reasoning efforts</h4>
           {profile.models.length ? <ul className="space-y-2 text-sm">{profile.models.map(model => <li key={model.id} className="rounded-lg bg-surface-2 p-2">
             <p>{model.display_name}{model.legacy ? " (legacy)" : ""}</p>
             <p className="text-xs text-text-muted break-all">{model.id} · Efforts: {model.supported_reasoning_levels.join(", ")} · Default: {model.default_reasoning_level || "unknown"}{model.model_family ? ` · Family: ${model.model_family}` : ""}{model.context_window ? ` · Context: ${model.context_window.toLocaleString()}` : ""}</p>
-          </li>)}</ul> : <p className="text-sm text-text-muted">No verified models yet. Sign in below; the runtime verifies the browser automatically.</p>}
+          </li>)}</ul> : <p className="text-sm text-text-muted">No verified models yet. Sign in in the browser, then choose Finish Sign In to verify your account.</p>}
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button size="sm" variant="secondary" disabled={disabled || active || lease?.state === "waiting"} loading={busy === "Start login"} onClick={() => act("login/start", { profileId }, "Start login")}>Start Login</Button>
-          <Button size="sm" variant="secondary" disabled={disabled} loading={busy === "View browser"} onClick={() => lease?.state === "waiting" ? setViewerOpen(true) : act("browser/view", { profileId }, "View browser")}>View Browser</Button>
-          <Button size="sm" variant="secondary" disabled={disabled || active} loading={busy === "Restart browser"} onClick={() => act("browser/restart", { profileId }, "Restart browser")}>Restart Browser</Button>
+          <Button size="sm" variant="secondary" disabled={disabled || active || waiting} loading={busy === "Start login"} onClick={() => act("login/start", { profileId }, "Start login")}>Start Login</Button>
+          <Button size="sm" variant="secondary" disabled={disabled} loading={busy === "View browser"} onClick={() => waiting ? setViewerOpen(true) : act("browser/view", { profileId }, "View browser")}>View Browser</Button>
+          <Button size="sm" variant="secondary" disabled={disabled || active || waiting} loading={busy === "Restart browser"} onClick={() => act("browser/restart", { profileId }, "Restart browser")}>Restart Browser</Button>
         </div>
         <p className="text-xs text-text-muted">Login and restart require an idle profile. View Browser opens the existing private desktop for approvals, without restarting active turns.</p>
         {lease && <div role="status" className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm space-y-2">
           <p>Private browser: {lease.state} · Expires: {new Date(lease.expiresAt).toLocaleString()}</p>
           {lease.state === "waiting" && <div className="flex flex-wrap gap-2">
-            {viewerOpen && <Button size="sm" variant="secondary" onClick={() => setViewerOpen(false)}>Close viewer</Button>}
             <Button size="sm" variant="secondary" disabled={!!busy} loading={busy === "End login"} onClick={() => act("login/close", { loginId: lease.loginId }, "End login")}>End Login</Button>
           </div>}
         </div>}
-        {viewerOpen && lease?.state === "waiting" && <ChatGPTWebViewer key={lease.loginId} loginId={lease.loginId} profileId={profileId} expiresAt={lease.expiresAt} onEnded={endViewer} />}
         <div className="space-y-4">
           <Select label="Harness mode" value={draft.mode} options={[{ value: "browser-only", label: "Browser-only" }, { value: "full", label: "Full — verified Native2 connector required" }]} onChange={event => change("mode", event.target.value)} disabled={disabled || active} hint="Full is enabled only after the runtime accepts the provisioned tunnel and connector prerequisites." />
           <Toggle label="Bigger Context" checked={draft.experimentalBiggerContext} onChange={value => change("experimentalBiggerContext", value)} disabled={disabled || active || !biggerSupported} description="Supported Sol/Pro routes only. Multipart staging increases latency and total context, not the per-message limit. Luna does not use multipart." />
@@ -200,7 +249,8 @@ export default function ChatGPTWebRuntimePanel({ profileId, selectedProfileId = 
           </div>
         </div>
       </>}
+      </details>
     </section>
   );
 }
-ChatGPTWebRuntimePanel.propTypes = { profileId: PropTypes.string.isRequired, selectedProfileId: PropTypes.string, onProfileSelected: PropTypes.func.isRequired, onChanged: PropTypes.func.isRequired, autoStartLogin: PropTypes.bool };
+ChatGPTWebRuntimePanel.propTypes = { connectionName: PropTypes.string.isRequired, profileId: PropTypes.string.isRequired, selectedProfileId: PropTypes.string, onProfileSelected: PropTypes.func.isRequired, onChanged: PropTypes.func.isRequired, onViewerOpenChange: PropTypes.func.isRequired, autoStartLogin: PropTypes.bool };

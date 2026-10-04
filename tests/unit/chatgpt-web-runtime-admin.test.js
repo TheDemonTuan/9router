@@ -8,7 +8,7 @@ const { GET, POST, PATCH } = await import("../../src/app/api/providers/chatgpt-w
 const settings = { mode: "browser-only", experimentalBiggerContext: false, experimentalFreshConversationPerTurn: false, useSavedChats: false, autoApproveToolCalls: false, connectorName: "Codex Native2" };
 const fixture = () => ({ profileId: "personal", revision: 3, settings: { ...settings }, state: "ready", activeTurns: 0, maxConcurrency: 5, connectorReady: false, lastError: null, models: [{ id: "chatgpt-web/gpt-5.6-sol", display_name: "GPT-5.6 Sol", supported_reasoning_levels: ["medium", "high"], default_reasoning_level: "high", model_family: "5.6", context_window: 100000 }] });
 const loginId = "aabbccdd-1234-4567-89ab-0123456789ab";
-const lease = () => ({ loginId, profileId: "personal", expiresAt: new Date(Date.now() + 600000).toISOString(), state: "waiting" });
+const lease = () => ({ loginId, profileId: "personal", expiresAt: new Date(Date.now() + 600000).toISOString(), state: "waiting", manualLogin: true });
 const context = action => ({ params: Promise.resolve({ action: action.split("/") }) });
 function request(action, method = "GET", body, headers = {}) {
   return new Request(`https://admin.example.test/api/providers/chatgpt-web/runtime/${action}`, { method, headers: { host: "admin.example.test", origin: "https://admin.example.test", "content-type": "application/json", ...headers }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
@@ -33,7 +33,7 @@ describe("ChatGPT Web runtime admin boundaries", () => {
     expect((await POST(request("profiles", "POST", { profileId: "personal" }, { "sec-fetch-site": "cross-site" }), context("profiles"))).status).toBe(403);
     expect(mocks.admin).not.toHaveBeenCalled();
   });
-  it.each(["browser/view", "browser/restart", "login/start", "login/close", "smoke", "drain"])("GET %s never mutates runtime state", async action => {
+  it.each(["browser/view", "browser/restart", "login/start", "login/complete", "login/close", "smoke", "drain"])("GET %s never mutates runtime state", async action => {
     expect((await GET(request(action), context(action))).status).toBe(405);
     expect(mocks.admin).not.toHaveBeenCalled();
   });
@@ -105,6 +105,15 @@ describe("ChatGPT Web runtime admin boundaries", () => {
     mocks.admin.mockResolvedValue(Response.json(value));
     expect(await (await POST(request("login/close", "POST", { loginId }), context("login/close"))).json()).toEqual(value);
     expect((await POST(request("login/close", "POST", { loginId, profileId: "other" }), context("login/close"))).status).toBe(400);
+  });
+  it("rejects unverifiable sign-in modes and completion responses for a different lease", async () => {
+    for (const manualLogin of [undefined, null, "true", 1]) {
+      mocks.admin.mockResolvedValue(Response.json({ ...lease(), manualLogin }));
+      expect((await POST(request("login/start", "POST", { profileId: "personal" }), context("login/start"))).status).toBe(502);
+    }
+    mocks.admin.mockResolvedValue(Response.json({ ...lease(), loginId: "00000000-0000-4000-8000-000000000000", state: "completed", manualLogin: false }));
+    expect((await POST(request("login/complete", "POST", { loginId }), context("login/complete"))).status).toBe(502);
+    expect((await POST(request("login/complete", "POST", { loginId, profileId: "other" }), context("login/complete"))).status).toBe(400);
   });
   it("requires a single bounded loginId query and rejects foreign query options", async () => {
     for (const suffix of ["?loginId=a&loginId=b", "?loginId=a&url=https://evil.test", "?loginId=../escape", ""]) {

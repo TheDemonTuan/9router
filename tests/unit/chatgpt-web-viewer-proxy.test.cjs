@@ -19,7 +19,7 @@ async function fixture() {
   const runtime = originalCreateServer((req, res) => { res.writeHead(404).end(); });
   const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
   const backendSockets = new Set(); const browserSockets = new Set();
-  let runtimeHeaders; let selfHeaders; let lease = { loginId, profileId: "personal", expiresAt: new Date(Date.now() + 600000).toISOString(), state: "waiting", password: "fixtureVncPassword" };
+  let runtimeHeaders; let selfHeaders; let lease = { loginId, profileId: "personal", expiresAt: new Date(Date.now() + 600000).toISOString(), manualLogin: false, state: "waiting", password: "fixtureVncPassword" };
   runtime.on("upgrade", (req, socket, head) => {
     runtimeHeaders = req.headers;
     if (req.url !== `/admin/login/viewer?loginId=${loginId}` || req.headers.authorization !== `Bearer ${token}`) { socket.end("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n"); return; }

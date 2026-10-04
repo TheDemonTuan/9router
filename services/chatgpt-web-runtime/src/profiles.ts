@@ -21,6 +21,7 @@ import { harnessBuildCompatible } from "./harness-compatibility";
 import { ChatGptBrowserWorker } from "./adapters/chatgpt-web/browser-worker";
 import { TurnBroker } from "./adapters/chatgpt-web/turn-broker";
 import { defaultBrokerEndpoint, atomicWriteFile } from "./config";
+import { ChatGptWebAdapterError } from "./adapters/chatgpt-web/adapter-error";
 
 export interface WebModelRow {
   id: string; display_name: string; supported_reasoning_levels: string[]; default_reasoning_level: string;
@@ -30,8 +31,12 @@ export interface WebModelRow {
 interface ProfileProbe {
   revision: number; epoch: string; capabilities: ChatGptWebAccountCapabilities; checkedAt: string; models: WebModelRow[]; catalogRevision: string;
 }
-interface ViewerLease { loginId: string; profileId: string; expiresAt: number; child: ChildProcess; timer: Timer; passwordFile: string; password: string; transports: Set<() => void>; }
-interface ViewerStatus { loginId: string; profileId: string; expiresAt: string; state: "waiting" | "completed" | "expired" | "error" | "closed"; }
+interface ViewerLease {
+  loginId: string; profileId: string; expiresAt: number; manualLogin: boolean;
+  manager?: BrowserManager; completing?: Promise<ViewerStatus>; revoked?: boolean;
+  child: ChildProcess; timer: Timer; passwordFile: string; password: string; transports: Set<() => void>;
+}
+interface ViewerStatus { loginId: string; profileId: string; expiresAt: string; manualLogin: boolean; state: "waiting" | "completed" | "expired" | "error" | "closed"; }
 export class RuntimeProfiles {
   private readonly probes = new Map<string, ProfileProbe>();
   private readonly errors = new Map<string, string>();
@@ -39,9 +44,11 @@ export class RuntimeProfiles {
   private readonly displays = new Map<string, { number: number; child: ChildProcess; wm: ChildProcess }>();
   private viewer?: ViewerLease;
   private viewerClosing?: Promise<void>;
-  private lastViewer?: { loginId: string; profileId: string; expiresAt: string; state: "completed" | "expired" | "error" | "closed" };
+  private lastViewer?: ViewerStatus;
   private readonly displayStarts = new Map<string, Promise<void>>();
   private viewerStarting = false;
+  private viewerStart?: Promise<unknown>;
+  private viewerGeneration = 0;
   private nextDisplay = 100;
   private readonly approvalWaits = new Map<string, { traceId: string; promptInstance: string }>();
   private readonly harnessEvidence = new Map<string, { epoch: string; connector: boolean }>();
@@ -76,7 +83,7 @@ export class RuntimeProfiles {
     }
   }
   physicalIdle(): boolean {
-    return !this.viewerStarting && this.displayStarts.size === 0 && this.state.listProfiles().every(profile => browserProfileWork(profile.profileId).idle);
+    return !this.viewerStarting && !this.viewerClosing && !this.viewer?.completing && this.displayStarts.size === 0 && this.state.listProfiles().every(profile => browserProfileWork(profile.profileId).idle);
   }
   invalidate(profileId: string, code: string): void {
     this.probes.delete(profileId);
@@ -134,7 +141,7 @@ export class RuntimeProfiles {
     }
   }
   ready(profileId: string): boolean {
-    if (this.state.fence()) return false;
+    if (this.state.fence() || this.viewer?.profileId === profileId && this.viewer.manualLogin || this.viewerStarting) return false;
     let profile;
     try { profile = this.state.profile(profileId); } catch { return false; }
     const probe = this.probes.get(profileId);
@@ -142,6 +149,7 @@ export class RuntimeProfiles {
       && (profile.settings.mode !== "full" || this.fullReady(profileId));
   }
   evidence(profileId: string): ProfileProbe {
+    if (this.viewer?.profileId === profileId && this.viewer.manualLogin) throw new RuntimeStateError("login_required", "Finish human sign-in before model operations");
     const profile = this.state.profile(profileId);
     const probe = this.probes.get(profileId);
     if (!probe || probe.epoch !== profile.epoch || probe.revision !== profile.revision || probe.models.length === 0) throw new RuntimeStateError("login_required", "Profile requires a live authenticated session and model probe");
@@ -153,25 +161,19 @@ export class RuntimeProfiles {
     return { protocolVersion: PROTOCOL_VERSION, profile_id: profileId, profile_epoch: profile.epoch,
       catalog_revision: evidence.catalogRevision, checked_at: evidence.checkedAt, max_concurrency: MAX_BROWSER_TURNS, models: evidence.models };
   }
-  async probe(profileId: string, navigate = true, initializing = false): Promise<ProfileProbe> {
+  async probe(profileId: string, navigate = true, initializing = false, manualManager?: BrowserManager, assertLease?: () => void): Promise<ProfileProbe> {
     if (this.state.fence() && !initializing) throw new RuntimeStateError("runtime_draining", "Profile probe mutations denied while drained", 503);
     await this.ensureDisplay(profileId);
-    const manager = this.manager(profileId);
+    assertLease?.();
+    const manager = manualManager ?? this.manager(profileId);
     this.probes.delete(profileId);
     try {
       const result = await manager.maintenance("session probe", async () => {
         const profile = this.state.profile(profileId);
-        if (profile.epoch !== manager.profileEpoch) throw new RuntimeStateError("profile_revision_conflict", "Stale browser epoch probe discarded");
+        if (!manualManager && profile.epoch !== manager.profileEpoch) throw new RuntimeStateError("profile_revision_conflict", "Stale browser epoch probe discarded");
         const page = await manager.maintenancePage();
         if (navigate) await page.goto(chatGptNewChatUrl(profile.settings.useSavedChats), { waitUntil: "domcontentloaded", timeout: 60_000 });
         const evidence = await probeBrowserLoginSession(page, this.state.accountSalt, profile.settings.useSavedChats);
-        const current = this.state.observeAccount(profileId, evidence.accountFingerprint, profile.revision);
-        if (current.epoch !== profile.epoch) {
-          this.harnessEvidence.delete(profileId);
-          await this.tunnels.get(profileId)?.stop(); this.tunnels.delete(profileId);
-          await TurnBroker.forSocket(defaultBrokerEndpoint(join(this.config.dataDir, "profiles", profileId))).close();
-          await manager.discardRetained();
-        }
         const models: WebModelRow[] = [];
         for (const candidate of availableChatGptWebModelRoutes(evidence.capabilities)) {
           if (candidate.interactionMode !== "automatic") continue;
@@ -196,9 +198,9 @@ export class RuntimeProfiles {
             } catch { continue; }
             finally { await page.keyboard.press("Escape").catch(() => {}); }
           }
-          const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, { ...evidence.capabilities, experimentalBiggerContext: current.settings.experimentalBiggerContext });
-          const full = current.settings.mode === "full" && harnessBuildCompatible()
-            && this.harnessEvidence.get(profileId)?.epoch === current.epoch && await this.tunnels.get(profileId)?.ready() === true;
+          const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, { ...evidence.capabilities, experimentalBiggerContext: profile.settings.experimentalBiggerContext });
+          const full = profile.accountFingerprint === evidence.accountFingerprint && profile.settings.mode === "full" && harnessBuildCompatible()
+            && this.harnessEvidence.get(profileId)?.epoch === profile.epoch && await this.tunnels.get(profileId)?.ready() === true;
           models.push({ id: route.slug, display_name: route.displayName,
             supported_reasoning_levels: [...chatGptWebRouteEfforts(route, evidence.capabilities)], default_reasoning_level: route.codexEffort,
             ...(route.modelFamily ? { model_family: route.modelFamily } : {}), legacy: route.legacy === true,
@@ -208,12 +210,23 @@ export class RuntimeProfiles {
               tools: full, mcp_tools: full, exec: full, subagents: full, computer_use: false, browser_tool: false } });
         }
         if (!models.length) throw new RuntimeStateError("model_version_unavailable", "Authenticated profile has no verified model route");
+        assertLease?.();
+        if (this.state.fence() && !initializing) throw new RuntimeStateError("runtime_draining", "Profile probe mutations denied while drained", 503);
+        const current = this.state.observeAccount(profileId, evidence.accountFingerprint, profile.revision);
+        if (current.epoch !== profile.epoch) {
+          this.harnessEvidence.delete(profileId);
+          await this.tunnels.get(profileId)?.stop(); this.tunnels.delete(profileId);
+          await TurnBroker.forSocket(defaultBrokerEndpoint(join(this.config.dataDir, "profiles", profileId))).close();
+          await manager.discardRetained();
+        }
+        assertLease?.();
+        if (this.state.fence() && !initializing) throw new RuntimeStateError("runtime_draining", "Profile probe mutations denied while drained", 503);
         const probe: ProfileProbe = { revision: current.revision, epoch: current.epoch, capabilities: evidence.capabilities,
           checkedAt: evidence.checkedAt, models, catalogRevision: randomUUID() };
         this.probes.set(profileId, probe); this.errors.delete(profileId);
         return probe;
-      });
-      if (result.epoch !== manager.profileEpoch) await manager.close();
+      }, manualManager !== undefined);
+      if (result.epoch !== manager.profileEpoch && !manualManager) await manager.close();
       return result;
     } catch (error) {
       const code = error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : "profile_probe_failed";
@@ -279,39 +292,49 @@ export class RuntimeProfiles {
     atomicWriteFile(join(this.config.dataDir, "profiles", profileId, "state", "harness-evidence.json"), JSON.stringify({ protocolVersion: 1, profileEpoch: profile.epoch, verifiedAt: new Date().toISOString(), connector: true }));
   }
   async startViewer(profileId: string, login: boolean, traceId?: string): Promise<unknown> {
-    if (!login && this.viewer?.profileId === profileId && !traceId) {
+    if (this.viewer?.profileId === profileId && !traceId && (!login || this.viewer.manualLogin)) {
       const loginId = this.viewer.loginId;
       this.viewerSession(loginId);
       return this.viewerStatus(loginId);
     }
     if (this.viewer || this.viewerStarting || this.viewerClosing) throw new RuntimeStateError("viewer_busy", "A private profile viewer lease already exists");
     this.viewerStarting = true;
-    try { return await this.openViewer(profileId, login, traceId); }
-    finally { this.viewerStarting = false; }
+    const operation = this.openViewer(profileId, login, traceId, this.viewerGeneration);
+    this.viewerStart = operation;
+    try { return await operation; }
+    finally { this.viewerStarting = false; if (this.viewerStart === operation) this.viewerStart = undefined; }
   }
-  private async openViewer(profileId: string, login: boolean, traceId?: string): Promise<unknown> {
+  private async openViewer(profileId: string, login: boolean, traceId: string | undefined, generation: number): Promise<unknown> {
     if (this.state.fence()) throw new RuntimeStateError("runtime_draining", "Viewer maintenance denied while drained", 503);
     await this.ensureDisplay(profileId);
     const manager = this.manager(profileId);
     if (login && !manager.isIdle) throw new RuntimeStateError("profile_active", "Login cannot interrupt active browser turns");
-    if (login) await manager.maintenance("login", async () => {
-      const page = await manager.maintenancePage();
-      await page.goto(chatGptNewChatUrl(this.state.profile(profileId).settings.useSavedChats), { waitUntil: "domcontentloaded" });
-    });
+    const assertStarting = () => {
+      if (this.state.fence() || generation !== this.viewerGeneration) throw new RuntimeStateError("runtime_draining", "Viewer startup was revoked", 503);
+    };
+    assertStarting();
     if (login) this.invalidate(profileId, "login_required");
     if (!login) await manager.focusTurn(traceId);
     const display = this.displays.get(profileId);
     if (!display) throw new RuntimeStateError("private_viewer_unavailable", "Private VNC requires the Linux runtime", 503);
     const loginId = randomUUID(), password = randomBytes(18).toString("base64url");
-    const directory = "/run/cgw/login"; mkdirSync(directory, { recursive: true, mode: 0o700 }); chmodSync(directory, 0o700);
-    const passwordFile = join(directory, `${loginId}.password`);
-    writeFileSync(passwordFile, `${password}\n`, { flag: "wx", mode: 0o600 });
-    const child = spawn("x11vnc", ["-display", `:${display.number}`, "-rfbport", "5900", "-localhost", "-passwdfile", passwordFile, "-forever", "-shared", "-noxdamage"], { stdio: "ignore", shell: false });
+    let child: ChildProcess | undefined;
+    let passwordFile: string | undefined;
     try {
-      await new Promise<void>((resolve, reject) => { child.once("error", reject); child.once("spawn", resolve); });
+      if (login) await manager.startManualLogin(chatGptNewChatUrl(this.state.profile(profileId).settings.useSavedChats), () => {
+        if (this.viewer?.loginId === loginId) void this.closeViewer("error").catch(() => {});
+        else if (this.viewerStarting) this.viewerGeneration++;
+      });
+      assertStarting();
+      const directory = "/run/cgw/login"; mkdirSync(directory, { recursive: true, mode: 0o700 }); chmodSync(directory, 0o700);
+      passwordFile = join(directory, `${loginId}.password`);
+      writeFileSync(passwordFile, `${password}\n`, { flag: "wx", mode: 0o600 });
+      child = spawn("x11vnc", ["-display", `:${display.number}`, "-rfbport", "5900", "-localhost", "-passwdfile", passwordFile, "-forever", "-shared", "-noxdamage"], { stdio: "ignore", shell: false });
+      await new Promise<void>((resolve, reject) => { child!.once("error", reject); child!.once("spawn", resolve); });
       const deadline = Date.now() + 10_000;
       let listening = false;
       while (!listening) {
+        assertStarting();
         if (child.exitCode !== null || child.signalCode !== null || Date.now() >= deadline) throw new RuntimeStateError("private_viewer_unavailable", "Owned VNC listener did not become ready", 503);
         listening = await new Promise<boolean>(resolve => {
           const socket = connect({ host: "127.0.0.1", port: 5900 });
@@ -321,41 +344,33 @@ export class RuntimeProfiles {
         });
         if (!listening) await Bun.sleep(50);
       }
+      assertStarting();
     } catch (error) {
-      await this.stopViewerChild(child);
-      unlinkSync(passwordFile); throw error;
+      const results = await Promise.allSettled([child ? this.stopViewerChild(child) : Promise.resolve(), login ? manager.endManualLogin() : Promise.resolve()]);
+      if (passwordFile && existsSync(passwordFile)) unlinkSync(passwordFile);
+      const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+      if (failed) throw failed.reason;
+      throw error;
     }
     const expiresAt = Date.now() + 15 * 60_000;
     const timer = setTimeout(() => { void this.closeViewer("expired").catch(() => {}); }, expiresAt - Date.now());
-    this.viewer = { loginId, profileId, expiresAt, child, timer, passwordFile, password, transports: new Set() };
-    child.once("exit", () => { if (this.viewer?.loginId === loginId) void this.closeViewer("error").catch(() => {}); });
-    if (login) {
-      const poll = async () => {
-        if (this.viewer?.loginId !== loginId || this.state.fence()) return;
-        try {
-          await this.probe(profileId, false);
-          if (this.viewer?.loginId === loginId) await this.closeViewer("completed");
-        } catch {
-          if (this.viewer?.loginId === loginId) setTimeout(() => { void poll(); }, 3000).unref();
-        }
-      };
-      setTimeout(() => { void poll(); }, 3000).unref();
-    }
+    this.viewer = { loginId, profileId, expiresAt, manualLogin: login, ...(login ? { manager } : {}), child: child!, timer, passwordFile: passwordFile!, password, transports: new Set() };
+    child!.once("exit", () => { if (this.viewer?.loginId === loginId) void this.closeViewer("error").catch(() => {}); });
     return this.viewerStatus(loginId);
   }
   viewerStatus(loginId: string): ViewerStatus {
-    if (this.viewer?.loginId === loginId && !this.viewerClosing) {
+    if (this.viewer?.loginId === loginId && !this.viewer.revoked && !this.viewerClosing) {
       if (this.viewer.expiresAt <= Date.now() || this.state.fence() || this.viewer.child.exitCode !== null || this.viewer.child.signalCode !== null) {
         const terminal = this.state.fence() ? "closed" : this.viewer.expiresAt <= Date.now() ? "expired" : "error";
         void this.closeViewer(terminal).catch(() => {});
-      } else return { loginId, profileId: this.viewer.profileId, expiresAt: new Date(this.viewer.expiresAt).toISOString(), state: "waiting" };
+      } else return { loginId, profileId: this.viewer.profileId, expiresAt: new Date(this.viewer.expiresAt).toISOString(), manualLogin: this.viewer.manualLogin, state: "waiting" };
     }
     if (this.lastViewer?.loginId === loginId) return { ...this.lastViewer };
     throw new RuntimeStateError("login_not_found", "Viewer lease not found", 404);
   }
   viewerSession(loginId: string) {
     const status = this.viewerStatus(loginId);
-    if (status.state !== "waiting" || !this.viewer || this.viewerClosing || this.state.fence()) throw new RuntimeStateError("login_not_found", "Active viewer lease required", 404);
+    if (status.state !== "waiting" || !this.viewer || this.viewerClosing || this.viewer.completing || this.state.fence()) throw new RuntimeStateError("login_not_found", "Active viewer lease required", 404);
     return { ...status, state: "waiting" as const, password: this.viewer.password };
   }
   attachViewerTransport(loginId: string, close: () => void): () => void {
@@ -369,33 +384,97 @@ export class RuntimeProfiles {
     if (this.viewer?.loginId === loginId) await this.closeViewer();
     return this.viewerStatus(loginId);
   }
+  completeLogin(loginId: string): Promise<ViewerStatus> {
+    const status = this.viewerSession(loginId);
+    const viewer = this.viewer!;
+    if (!status.manualLogin || !viewer.manager) return Promise.reject(new RuntimeStateError("invalid_login", "Exact waiting human sign-in lease required", 400));
+    if (viewer.completing) return Promise.reject(new RuntimeStateError("profile_active", "Human sign-in verification is already running"));
+    // No existing or new viewer transport may control the automated verification surface.
+    for (const close of viewer.transports) { try { close(); } catch { /* Revoke every sink. */ } }
+    viewer.transports.clear();
+    const assertLease = () => {
+      if (this.viewer !== viewer || viewer.revoked || this.viewerClosing || this.state.fence() || viewer.expiresAt <= Date.now()) throw new RuntimeStateError("login_not_found", "Human sign-in lease was revoked", 404);
+    };
+    const manager = viewer.manager;
+    const operation = (async () => {
+      try {
+        await manager.verifyManualLogin(async () => {
+          assertLease();
+          return this.probe(viewer.profileId, true, false, manager, assertLease);
+        });
+        assertLease();
+        await this.closeViewer("completed");
+        return this.viewerStatus(loginId);
+      } catch (error) {
+        if (this.viewer === viewer && !viewer.revoked && !this.viewerClosing && !this.state.fence() && viewer.expiresAt > Date.now()) {
+          try {
+            await manager.restoreManualLogin(chatGptNewChatUrl(this.state.profile(viewer.profileId).settings.useSavedChats), () => {
+              if (this.viewer === viewer) void this.closeViewer("error").catch(() => {});
+            });
+            assertLease();
+          } catch (restoreError) {
+            await this.closeViewer("error");
+            throw restoreError;
+          }
+        } else if (this.viewer === viewer) await this.closeViewer(this.state.fence() ? "closed" : "expired");
+        if (error instanceof ChatGptWebAdapterError) throw new RuntimeStateError(error.code || "profile_probe_failed", error.message, error.status);
+        throw error;
+      }
+    })();
+    viewer.completing = operation;
+    void operation.finally(() => { if (viewer.completing === operation) viewer.completing = undefined; }).catch(() => {});
+    return operation;
+  }
   private async stopViewerChild(child: ChildProcess): Promise<void> {
-    if (child.exitCode !== null || child.signalCode !== null) return;
-    const exited = once(child, "exit");
-    const force = setTimeout(() => {
-      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-    }, 2000);
-    try { child.kill("SIGTERM"); await exited; }
-    finally { clearTimeout(force); }
+    if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
+    await new Promise<void>((resolve, reject) => {
+      let timer: Timer | undefined;
+      const finish = (error?: Error) => {
+        clearTimeout(timer);
+        child.off("exit", exited); child.off("error", failed);
+        if (error) reject(error); else resolve();
+      };
+      const exited = () => finish();
+      const failed = (error: Error) => finish(error);
+      child.once("exit", exited); child.once("error", failed);
+      timer = setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+          timer = setTimeout(() => finish(new Error("Owned VNC process did not settle")), 2000);
+        } catch (error) { finish(error instanceof Error ? error : new Error("Owned VNC termination failed")); }
+      }, 2000);
+      try { child.kill("SIGTERM"); }
+      catch (error) { finish(error instanceof Error ? error : new Error("Owned VNC termination failed")); }
+    });
   }
   closeViewer(state: "completed" | "expired" | "error" | "closed" = "closed"): Promise<void> {
     if (this.viewerClosing) return this.viewerClosing;
-    const viewer = this.viewer; if (!viewer) return Promise.resolve();
+    this.viewerGeneration++;
+    const viewer = this.viewer;
+    if (!viewer) {
+      if (!this.viewerStart) return Promise.resolve();
+      this.viewerClosing = this.viewerStart.then(() => undefined, () => undefined).finally(() => { this.viewerClosing = undefined; });
+      return this.viewerClosing;
+    }
     clearTimeout(viewer.timer);
-    this.lastViewer = { loginId: viewer.loginId, profileId: viewer.profileId, expiresAt: new Date(viewer.expiresAt).toISOString(), state };
-    for (const close of viewer.transports) close();
+    viewer.revoked = true;
+    this.lastViewer = { loginId: viewer.loginId, profileId: viewer.profileId, expiresAt: new Date(viewer.expiresAt).toISOString(), manualLogin: viewer.manualLogin, state };
+    for (const close of viewer.transports) { try { close(); } catch { /* Every transport must be revoked even if one sink has failed. */ } }
     viewer.transports.clear();
     viewer.password = "";
     this.viewerClosing = (async () => {
-      await this.stopViewerChild(viewer.child);
+      const results = await Promise.allSettled([this.stopViewerChild(viewer.child), viewer.manualLogin ? viewer.manager!.endManualLogin() : Promise.resolve()]);
+      const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected").map(result => result.reason);
+      if (failures.length) throw new AggregateError(failures, "Viewer physical processes failed to settle");
       if (existsSync(viewer.passwordFile)) unlinkSync(viewer.passwordFile);
       if (this.viewer === viewer) this.viewer = undefined;
     })().finally(() => { this.viewerClosing = undefined; });
     return this.viewerClosing;
   }
   async close(): Promise<void> {
+    await this.closeViewer();
     await Promise.all(this.displayStarts.values());
-    await this.closeViewer(); await closeBrowserManagers();
+    await closeBrowserManagers();
     await Promise.all([...this.tunnels.values()].map(tunnel => tunnel.stop())); this.tunnels.clear();
     for (const display of this.displays.values()) {
       for (const child of [display.wm, display.child]) if (child.exitCode === null && child.signalCode === null) { const exited = once(child, "exit"); child.kill("SIGTERM"); await exited; }

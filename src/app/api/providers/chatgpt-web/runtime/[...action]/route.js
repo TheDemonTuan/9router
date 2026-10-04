@@ -16,7 +16,7 @@ const ERROR_MESSAGES = {
   profile_active: "Wait for all profile turns to settle before changing settings, logging in, or restarting.",
   connector_unavailable: "Full mode requires an operator-provisioned, verified Native2 connector and tunnel.",
   action_not_allowed: "The account or workspace does not permit this connector action.",
-  login_required: "Sign in using the embedded private browser. Login is verified automatically.",
+  login_required: "Sign in using the private browser, then choose Finish Sign In to verify your account.",
   login_not_found: "The private viewer lease has ended.",
   profile_not_found: "Create this runtime profile first.",
   profile_exists: "This runtime profile already exists. Refresh to manage it.",
@@ -72,8 +72,8 @@ function profile(value) {
   }) };
 }
 function viewer(value, session = false) {
-  if (!record(value) || typeof value.loginId !== "string" || !LOGIN_ID.test(value.loginId) || !PROFILE_ID.test(value.profileId || "") || typeof value.expiresAt !== "string" || !Number.isFinite(Date.parse(value.expiresAt)) || !["waiting", "completed", "expired", "closed", "error"].includes(value.state)) throw new Error("invalid_runtime_response");
-  const result = { loginId: value.loginId, profileId: value.profileId, expiresAt: value.expiresAt, state: value.state };
+  if (!record(value) || typeof value.loginId !== "string" || !LOGIN_ID.test(value.loginId) || !PROFILE_ID.test(value.profileId || "") || typeof value.manualLogin !== "boolean" || typeof value.expiresAt !== "string" || !Number.isFinite(Date.parse(value.expiresAt)) || !["waiting", "completed", "expired", "closed", "error"].includes(value.state)) throw new Error("invalid_runtime_response");
+  const result = { loginId: value.loginId, profileId: value.profileId, expiresAt: value.expiresAt, state: value.state, manualLogin: value.manualLogin };
   if (session) {
     if (value.state !== "waiting" || Date.parse(value.expiresAt) <= Date.now() || typeof value.password !== "string" || !/^[a-zA-Z0-9_-]{8,128}$/.test(value.password)) throw new Error("invalid_runtime_response");
     result.password = value.password;
@@ -86,7 +86,7 @@ function output(action, method, data) {
     return { profiles: data.profiles.map(profile) };
   }
   if (action === "profiles" || action.startsWith("profiles/") || action === "browser/restart") return profile(data);
-  if (["login/start", "login/status", "login/session", "login/close", "browser/view"].includes(action)) return viewer(data, action === "login/session");
+  if (["login/start", "login/complete", "login/status", "login/session", "login/close", "browser/view"].includes(action)) return viewer(data, action === "login/session");
   if (action === "smoke") {
     return { profile: profile(data.profile), outerToolE2eVerified: data.outerToolE2eVerified === true, message: data.outerToolE2eVerified === true ? "Companion-observed tool smoke verified." : "Runtime diagnostic completed. This is not proof of local Codex tool execution; the companion staging gate is still required." };
   }
@@ -118,7 +118,7 @@ async function handle(request, context) {
   const { action: segments } = await context.params;
   if (!Array.isArray(segments) || segments.length > 2) return fail(404, "unknown_action", "Unknown runtime action.");
   const action = segments.join("/");
-  const allowed = { profiles: ["GET", "POST"], "login/start": ["POST"], "login/status": ["GET"], "login/session": ["GET"], "login/close": ["POST"], "browser/view": ["POST"], "browser/restart": ["POST"], smoke: ["POST"], drain: ["POST"], quiesce: ["POST"], resume: ["POST"], "interrupt-turn": ["POST"] };
+  const allowed = { profiles: ["GET", "POST"], "login/start": ["POST"], "login/complete": ["POST"], "login/status": ["GET"], "login/session": ["GET"], "login/close": ["POST"], "browser/view": ["POST"], "browser/restart": ["POST"], smoke: ["POST"], drain: ["POST"], quiesce: ["POST"], resume: ["POST"], "interrupt-turn": ["POST"] };
   const patch = segments.length === 2 && segments[0] === "profiles" && PROFILE_ID.test(segments[1]);
   const methods = patch ? ["PATCH"] : Object.hasOwn(allowed, action) ? allowed[action] : null;
   if (!methods) return fail(404, "unknown_action", "Unknown runtime action.");
@@ -141,7 +141,7 @@ async function handle(request, context) {
         if (!exactKeys(body, ["operationId"]) || typeof body.operationId !== "string" || !ID.test(body.operationId)) throw new Error("invalid_operation");
       } else if (action === "interrupt-turn") {
         if (!exactKeys(body, ["clientId", "threadId", "turnId"]) || [body.clientId, body.threadId, body.turnId].some(id => typeof id !== "string" || !ID.test(id))) throw new Error("invalid_identity");
-      } else if (action === "login/close") {
+      } else if (["login/close", "login/complete"].includes(action)) {
         if (!exactKeys(body, ["loginId"]) || typeof body.loginId !== "string" || !LOGIN_ID.test(body.loginId)) throw new Error("invalid_login");
       } else {
         const extra = action === "smoke" ? ["kind"] : [];
@@ -154,7 +154,7 @@ async function handle(request, context) {
     return fail(error.message === "body_too_large" ? 413 : 400, "invalid_admin_request", "Invalid runtime action parameters.");
   }
   try {
-    const response = await requestChatGptWebRuntimeAdmin(`/admin/${action}${suffix}`, { method: request.method, ...(body ? { headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {}), signal: request.signal }, { timeoutMs: action === "smoke" ? 120000 : 70000 });
+    const response = await requestChatGptWebRuntimeAdmin(`/admin/${action}${suffix}`, { method: request.method, ...(body ? { headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {}), signal: request.signal }, { timeoutMs: ["smoke", "login/complete"].includes(action) ? 120000 : 70000 });
     const data = await readJson(response, 262144);
     if (!response.ok) {
       const code = typeof data?.error?.code === "string" && Object.hasOwn(ERROR_MESSAGES, data.error.code) ? data.error.code : "runtime_error";
@@ -162,7 +162,7 @@ async function handle(request, context) {
       return fail(response.status >= 400 && response.status <= 599 ? response.status : 502, code, message);
     }
     const result = output(action, request.method, data);
-    if (["login/status", "login/session", "login/close"].includes(action) && result.loginId !== (body?.loginId || url.searchParams.get("loginId"))) throw new Error("invalid_runtime_response");
+    if (["login/status", "login/session", "login/close", "login/complete"].includes(action) && result.loginId !== (body?.loginId || url.searchParams.get("loginId"))) throw new Error("invalid_runtime_response");
     return NextResponse.json(result, { headers: { "Cache-Control": "no-store" } });
   } catch {
     return fail(502, "runtime_unavailable", "Runtime unavailable or returned invalid diagnostics. No action was retried.");

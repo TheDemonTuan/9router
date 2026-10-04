@@ -14,6 +14,7 @@ export default function AddChatGPTWebRuntimeModal({ isOpen, connection, onClose,
   const [profileId, setProfileId] = useState(connection?.providerSpecificData?.profileId || "");
   const [saving, setSaving] = useState(false);
   const [autoStartLogin, setAutoStartLogin] = useState(false);
+  const [viewerOpen, setViewerOpen] = useState(false);
   const [uncertain, setUncertain] = useState(false);
   const [error, setError] = useState("");
   const controller = useRef(null);
@@ -60,23 +61,17 @@ export default function AddChatGPTWebRuntimeModal({ isOpen, connection, onClose,
   };
   const hasChanges = !!savedConnection && (name.trim() !== savedConnection.name || profileId.trim() !== savedConnection.providerSpecificData?.profileId);
   return (
-    <Modal isOpen={isOpen} onClose={close} size="xl" title={savedConnection ? "ChatGPT Web Connection" : "Add ChatGPT Web Connection"}>
+    <Modal isOpen={isOpen} onClose={close} suspended={viewerOpen} size="xl" title={savedConnection ? "ChatGPT Web Connection" : "Add ChatGPT Web Connection"}>
       <div className="space-y-4">
-        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-text-muted">Unofficial browser integration. Add a connection to create a private browser profile automatically, then sign in here. 9Router never asks for your ChatGPT password or cookies.</div>
+        {!savedConnection && <p className="text-sm text-text-muted">Create a connection, then sign in in its private browser. 9Router never asks for your password or cookies.</p>}
         <Input label="Connection name" id="chatgpt-web-connection-name" aria-label="Connection name" value={name} onChange={event => setName(event.target.value)} autoFocus disabled={saving || uncertain} />
-        {savedConnection && <details className="space-y-2">
-          <summary className="cursor-pointer text-sm text-text-muted">Advanced profile selection</summary>
-          <Input label="Selected profile ID" aria-label="Selected profile ID" value={profileId} readOnly disabled={saving} />
-          <p className="text-xs text-text-muted">Choose an existing profile below, then save to switch. Connections using the same profile share its browser, settings, and five-turn limit.</p>
-        </details>}
-        {savedConnection && <p role="status" className="rounded-lg bg-surface-2 p-3 text-sm">Connection saved. Profile: <span className="break-all">{savedConnection.providerSpecificData.profileId}</span>. {autoStartLogin ? "Login required until browser verification completes. If login cannot start, the saved connection remains available to reopen." : "Use Start Login or View Browser below to sign in or resume."}</p>}
         {error && <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-400">{error}</div>}
         {uncertain && <p role="status" className="text-sm text-amber-500">The save was not retried. Close this dialog and refresh the connection list before adding again to avoid duplicate profiles.</p>}
         <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
           <Button variant="secondary" onClick={close} disabled={saving}>Close</Button>
           {(!savedConnection || hasChanges) && <Button aria-label={savedConnection ? "Save connection" : "Add Connection and Sign In"} onClick={save} loading={saving} disabled={uncertain || !name.trim() || (!!savedConnection && !PROFILE_ID.test(profileId.trim()))}>{savedConnection ? "Save connection" : "Add Connection & Sign In"}</Button>}
         </div>
-        {isOpen && savedConnection && <ChatGPTWebRuntimePanel key={savedConnection.providerSpecificData.profileId} profileId={savedConnection.providerSpecificData.profileId} selectedProfileId={profileId} autoStartLogin={autoStartLogin} onProfileSelected={setProfileId} onChanged={onSaved} />}
+        {isOpen && savedConnection && <ChatGPTWebRuntimePanel key={savedConnection.providerSpecificData.profileId} connectionName={name.trim() || savedConnection.name} profileId={savedConnection.providerSpecificData.profileId} selectedProfileId={profileId} autoStartLogin={autoStartLogin} onProfileSelected={setProfileId} onViewerOpenChange={setViewerOpen} onChanged={onSaved} />}
       </div>
     </Modal>
   );

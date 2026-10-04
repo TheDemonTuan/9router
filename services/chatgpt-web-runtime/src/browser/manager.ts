@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { chromium, type BrowserContext, type Page } from "playwright-core";
 import { MAX_CHATGPT_BROWSER_TABS } from "../adapters/chatgpt-web/concurrency";
 import { ChatGptWebAdapterError, chatGptRetainedConversationUnavailableError } from "../adapters/chatgpt-web/adapter-error";
+import { NativeBrowserProcess } from "./native-process";
 
 export interface BrowserProfileConfig {
   profileId: string;
@@ -43,7 +44,7 @@ function busy(message: string): ChatGptWebAdapterError {
   });
 }
 
-/** One local Playwright pipe and persistent Chromium context per canonical account profile. */
+/** One physical browser owner per canonical account profile; login has no automation channel. */
 export class BrowserManager {
   static forProfile(config: BrowserProfileConfig): BrowserManager {
     if (!/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(config.profileId)
@@ -82,6 +83,11 @@ export class BrowserManager {
   private readonly conversations = new Map<string, Conversation>();
   private inspectionPage?: Page;
   private ownedDirectory?: string;
+  private manualLogin = false;
+  private manualVerifying = false;
+  private manualBrowser?: NativeBrowserProcess;
+  private manualStarting?: Promise<void>;
+  private manualEnding?: Promise<void>;
 
   private constructor(private readonly config: BrowserProfileConfig, private readonly predecessor?: Promise<void>) {
     this.directory = resolve(config.browserProfilePath);
@@ -89,7 +95,7 @@ export class BrowserManager {
 
   get isIdle(): boolean {
     return this.runs.size === 0 && this.maintenanceCount === 0
-      && this.pendingLeaseCount === 0 && this.physicalLeases.size === 0 && !this.opening;
+      && this.pendingLeaseCount === 0 && this.physicalLeases.size === 0 && !this.opening && !this.manualLogin;
   }
   get activeTurns(): number { return Math.max(this.runs.size, this.physicalLeases.size); }
   get profileEpoch(): string { return this.config.profileEpoch; }
@@ -108,6 +114,7 @@ export class BrowserManager {
   }
 
   async ensureContext(): Promise<BrowserContext> {
+    if (this.manualEnding || this.manualBrowser || (this.manualLogin && !this.manualVerifying)) throw busy("Human sign-in owns the browser profile");
     if (this.closed || this.physicalSettlementFailed || (this.closing && this.isIdle)) throw busy("ChatGPT profile browser is closed");
     if (this.context) return this.context;
     if (this.opening) return this.opening;
@@ -117,7 +124,7 @@ export class BrowserManager {
     finally { if (this.opening === opening) this.opening = undefined; }
   }
 
-  private async openContext(): Promise<BrowserContext> {
+  private async claimDirectory(): Promise<string> {
     await this.predecessor;
     if (this.closed) throw busy("ChatGPT profile browser is closed");
     if (!existsSync(this.config.chromeExecutablePath)) throw new Error("Configured Chromium executable does not exist");
@@ -128,6 +135,12 @@ export class BrowserManager {
     if (owner && owner !== this) throw new Error("Browser profile directory already has an owner");
     directories.set(canonicalDirectory, this);
     this.ownedDirectory = canonicalDirectory;
+    return canonicalDirectory;
+  }
+
+  private async openContext(): Promise<BrowserContext> {
+    const canonicalDirectory = await this.claimDirectory();
+    if (this.manualBrowser || (this.manualLogin && !this.manualVerifying)) throw busy("Human sign-in owns the browser profile");
     try {
       const context = await chromium.launchPersistentContext(this.directory, {
         executablePath: this.config.chromeExecutablePath,
@@ -145,18 +158,18 @@ export class BrowserManager {
         }
         for (const lease of this.physicalLeases.values()) lease.settle();
         this.physicalLeases.clear();
-        if (directories.get(canonicalDirectory) === this) directories.delete(canonicalDirectory);
+        if (!this.manualLogin && directories.get(canonicalDirectory) === this) directories.delete(canonicalDirectory);
       });
       return context;
     } catch (error) {
-      if (directories.get(canonicalDirectory) === this) directories.delete(canonicalDirectory);
-      this.ownedDirectory = undefined;
+      if (!this.manualLogin && directories.get(canonicalDirectory) === this) directories.delete(canonicalDirectory);
+      if (!this.manualLogin) this.ownedDirectory = undefined;
       throw error;
     }
   }
 
   run<T>(traceId: string, action: () => Promise<T>): Promise<T> {
-    if (this.closed || this.closing || this.physicalSettlementFailed || this.maintenanceCount > 0) {
+    if (this.closed || this.closing || this.physicalSettlementFailed || this.maintenanceCount > 0 || this.manualLogin) {
       return Promise.reject(busy("ChatGPT profile browser is in maintenance or requires restart"));
     }
     if (this.runs.has(traceId)) return Promise.reject(new Error("Duplicate profile browser turn"));
@@ -173,10 +186,11 @@ export class BrowserManager {
     return operation;
   }
 
-  maintenance<T>(name: string, action: () => Promise<T>): Promise<T> {
-    if (this.closed || this.closing || this.physicalSettlementFailed) return Promise.reject(busy("ChatGPT profile browser requires restart"));
+  maintenance<T>(name: string, action: () => Promise<T>, manualLogin = false): Promise<T> {
+    if (this.closed || this.closing || this.physicalSettlementFailed || (this.manualLogin && !manualLogin)) return Promise.reject(busy("ChatGPT profile browser requires restart or human sign-in completion"));
     this.maintenanceCount += 1;
     const operation = this.maintenanceTail.then(() => {
+      if (this.closed || this.closing || (this.manualLogin && !manualLogin)) throw busy("ChatGPT profile browser is unavailable");
       if (this.runs.size > 0 || this.physicalLeases.size > 0 || this.pendingLeaseCount > 0) {
         throw busy(`ChatGPT ${name} requires all profile turns to settle`);
       }
@@ -189,7 +203,7 @@ export class BrowserManager {
   async maintenancePage(): Promise<Page> {
     const context = await this.ensureContext();
     if (!this.inspectionPage || this.inspectionPage.isClosed()) {
-      // The persistent context starts with an empty tab. It is also the private login surface.
+      // Reuse the persistent context's empty tab for authenticated inspection only.
       this.inspectionPage = context.pages().find(page => !page.isClosed()
         && ![...this.conversations.values()].some(conversation => conversation.page === page))
         ?? await context.newPage();
@@ -204,7 +218,7 @@ export class BrowserManager {
     connectorIdentity?: string;
     requireRetainedConversation?: boolean;
   }): Promise<BrowserTurnLease> {
-    if (this.closed || this.closing || this.physicalSettlementFailed || this.maintenanceCount > 0) {
+    if (this.closed || this.closing || this.physicalSettlementFailed || this.maintenanceCount > 0 || this.manualLogin) {
       throw busy("ChatGPT browser is in maintenance or requires restart");
     }
     this.pendingLeaseCount += 1;
@@ -297,10 +311,79 @@ export class BrowserManager {
     this.leaseTail = operation.then(() => undefined, () => undefined);
     return operation;
   }
+  startManualLogin(startUrl: string, onUnexpectedExit?: () => void): Promise<void> {
+    if (this.manualLogin || !this.isIdle || this.closed || this.closing) return Promise.reject(busy("Human sign-in requires an idle profile"));
+    // Fence synchronously, including the context-close/native-spawn interval.
+    this.manualLogin = true;
+    const operation = this.maintenance("human sign-in", async () => {
+      await this.opening;
+      if (this.context) await this.context.close();
+      await this.claimDirectory();
+      if (this.manualEnding || this.closing || !this.manualLogin) throw busy("Human sign-in was revoked");
+      this.manualBrowser = await NativeBrowserProcess.launch(this.config.chromeExecutablePath,
+        this.ownedDirectory!, this.config.display, startUrl, onUnexpectedExit);
+    }, true).catch(async error => {
+      await this.stopManualBrowser();
+      this.manualLogin = false;
+      throw error;
+    });
+    this.manualStarting = operation;
+    void operation.finally(() => { if (this.manualStarting === operation) this.manualStarting = undefined; }).catch(() => {});
+    return operation;
+  }
+
+  private async stopManualBrowser(): Promise<void> {
+    const browser = this.manualBrowser;
+    if (!browser) return;
+    try { await browser.close(); }
+    catch (error) { this.physicalSettlementFailed = true; throw error; }
+    if (this.manualBrowser === browser) this.manualBrowser = undefined;
+  }
+
+  async verifyManualLogin<T>(action: () => Promise<T>): Promise<T> {
+    if (!this.manualLogin || this.manualVerifying || this.manualEnding || this.closed || this.closing) throw busy("Exact waiting human sign-in required");
+    this.manualVerifying = true;
+    try {
+      await this.manualStarting;
+      await this.stopManualBrowser();
+      if (!this.manualLogin || this.manualEnding || this.closed || this.closing) throw busy("Human sign-in was revoked");
+      return await action();
+    }
+    finally { this.manualVerifying = false; }
+  }
+
+  async restoreManualLogin(startUrl: string, onUnexpectedExit?: () => void): Promise<void> {
+    if (!this.manualLogin || this.manualEnding || this.closed || this.closing) throw busy("Human sign-in was revoked");
+    await this.maintenance("restore human sign-in", async () => {
+      if (this.context) await this.context.close();
+      await this.claimDirectory();
+      if (this.manualEnding || this.closing) throw busy("Human sign-in was revoked");
+      this.manualBrowser = await NativeBrowserProcess.launch(this.config.chromeExecutablePath,
+        this.ownedDirectory!, this.config.display, startUrl, onUnexpectedExit);
+    }, true);
+  }
+
+  endManualLogin(): Promise<void> {
+    if (this.manualEnding) return this.manualEnding;
+    if (!this.manualLogin) return Promise.resolve();
+    this.manualEnding = (async () => {
+      await this.manualStarting?.catch(() => undefined);
+      await this.maintenanceTail;
+      await this.stopManualBrowser();
+      // Verification may have opened an automated inspection context. Settle it
+      // before clearing the fence; no viewer can inherit the next physical owner.
+      if (this.context) await this.context.close();
+      this.manualLogin = false;
+      if (this.ownedDirectory && directories.get(this.ownedDirectory) === this) directories.delete(this.ownedDirectory);
+      this.ownedDirectory = undefined;
+    })().finally(() => { this.manualEnding = undefined; });
+    return this.manualEnding;
+  }
 
   close(): Promise<void> {
     if (this.closing) return this.closing;
     this.closing = (async () => {
+      await this.endManualLogin();
       await Promise.allSettled([...this.runs.values()]);
       await this.maintenanceTail;
       await this.leaseTail;

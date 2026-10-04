@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useId, useRef } from "react";
 import { cn } from "@/shared/utils/cn";
 import Button from "./Button";
 import Tooltip from "./Tooltip";
@@ -15,7 +15,11 @@ export default function Modal({
   closeOnOverlay = true,
   showTrafficLights = true,
   className,
+  suspended = false,
 }) {
+  const titleId = useId();
+  const dialog = useRef(null);
+  const openingFocus = useRef(typeof document !== "undefined" ? document.activeElement : null);
   const sizes = {
     sm: "max-w-sm",
     md: "max-w-md",
@@ -25,26 +29,36 @@ export default function Modal({
   };
 
   useEffect(() => {
-    if (isOpen) {
-      document.body.style.overflow = "hidden";
-    } else {
-      document.body.style.overflow = "";
-    }
-    return () => { document.body.style.overflow = ""; };
+    if (!isOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    const previousFocus = openingFocus.current || document.activeElement;
+    openingFocus.current = null;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      queueMicrotask(() => {
+        if (previousFocus?.isConnected && !previousFocus.closest("[inert]")) previousFocus.focus({ preventScroll: true });
+      });
+    };
   }, [isOpen]);
 
   useEffect(() => {
     const handleEscape = (e) => {
-      if (e.key === "Escape" && isOpen) onClose();
+      if (e.key === "Escape" && isOpen && !suspended && !e.defaultPrevented) onClose();
     };
     document.addEventListener("keydown", handleEscape);
     return () => document.removeEventListener("keydown", handleEscape);
-  }, [isOpen, onClose]);
+  }, [isOpen, onClose, suspended]);
+
+  useEffect(() => {
+    if (!isOpen || suspended) return;
+    if (!dialog.current?.contains(document.activeElement)) dialog.current?.focus({ preventScroll: true });
+  }, [isOpen, suspended]);
 
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" aria-hidden={suspended || undefined} inert={suspended ? true : undefined}>
       {/* Overlay */}
       <div
         className="absolute inset-0 bg-black/50 backdrop-blur-[2px] fade-in"
@@ -53,6 +67,11 @@ export default function Modal({
 
       {/* Modal content */}
       <div
+        ref={dialog}
+        role="dialog"
+        aria-modal={!suspended || undefined}
+        aria-labelledby={title ? titleId : undefined}
+        tabIndex={-1}
         className={cn(
           "relative w-full bg-surface",
           "border border-border-subtle",
@@ -84,7 +103,7 @@ export default function Modal({
                 </div>
               )}
               {title && (
-                <h2 className="text-lg font-semibold text-text-main">{title}</h2>
+                <h2 id={titleId} className="text-lg font-semibold text-text-main">{title}</h2>
               )}
             </div>
             {/* X button — mobile only */}
