@@ -2,6 +2,7 @@ import { createHash } from "crypto";
 import { CODEX_CLIENT_VERSION, CODEX_ORIGINATOR, CODEX_USER_AGENT } from "../config/codexClient.js";
 import {
   CODEX_MODEL_CACHE_TTL_MS,
+  CODEX_EXTENDED_CONTEXT_LENGTH,
   CODEX_DISCOVERY_STATUS,
   CODEX_COMPATIBILITY_REASON,
   CODEX_DISCOVERY_SOURCE,
@@ -13,6 +14,7 @@ import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { refreshProviderCredentials } from "./oauthCredentialManager.js";
 import { projectPublicModel } from "../providers/publicModel.js";
 import { cancelResponseBody } from "./usage/shared.js";
+import { stripModelContextMarker } from "../utils/modelMarkers.js";
 
 export const CODEX_MODELS_URL = "https://chatgpt.com/backend-api/codex/models";
 export const CODEX_OFFICIAL_MODELS_URL = "https://raw.githubusercontent.com/openai/codex/main/codex-rs/models-manager/models.json";
@@ -146,8 +148,9 @@ export function normalizeCodexModel(record) {
     record.contextLength,
     record.max_context_window,
     record.maxContextWindow,
+    record.maxContextLength,
   );
-  const maxContextLength = firstPositive(record.max_context_window, record.maxContextWindow);
+  const maxContextLength = firstPositive(record.max_context_window, record.maxContextWindow, record.maxContextLength);
   const effectiveContextLength = maxContextLength && contextLength
     ? Math.min(contextLength, maxContextLength)
     : contextLength || maxContextLength;
@@ -217,7 +220,10 @@ export function normalizeCodexCatalog(payload) {
 }
 
 function staticModels() {
-  return getModelsByProviderId("codex").map((model) => ({ ...model }));
+  // Marker rows are routing aliases, never evidence of account entitlement.
+  return getModelsByProviderId("codex")
+    .filter((model) => !stripModelContextMarker(model.id).contextMarker)
+    .map((model) => ({ ...model }));
 }
 
 function staticById() {
@@ -283,6 +289,7 @@ export function getCodexBaseModelId(model) {
 
 export function isCodexFallbackModel(model) {
   const baseModel = getCodexBaseModelId(model);
+  if (stripModelContextMarker(baseModel).contextMarker) return false;
   return withReviews(staticModels()).some((entry) => entry?.id === baseModel);
 }
 
@@ -294,9 +301,11 @@ function normalizeRequestedEffort(value) {
 
 export function getCodexRequestRequirements(model, body = null, catalog = null) {
   const rawModel = typeof model === "string" ? model.trim() : "";
-  let baseModel = rawModel;
+  const initialContext = stripModelContextMarker(rawModel);
+  let baseModel = initialContext.model;
+  let contextMarker = initialContext.contextMarker;
   let effort = null;
-  const paren = rawModel.match(/^(.*)\(([^()]+)\)\s*$/);
+  const paren = baseModel.match(/^(.*)\(([^()]+)\)\s*$/);
   if (paren) {
     baseModel = paren[1].trim();
     effort = normalizeRequestedEffort(paren[2]);
@@ -304,8 +313,8 @@ export function getCodexRequestRequirements(model, body = null, catalog = null) 
     // Only strip legacy -level aliases when the resulting ID is a known catalog model.
     for (const level of ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]) {
       const suffix = `-${level}`;
-      if (!rawModel.endsWith(suffix)) continue;
-      const candidate = rawModel.slice(0, -suffix.length);
+      if (!baseModel.endsWith(suffix)) continue;
+      const candidate = baseModel.slice(0, -suffix.length);
       if (catalog.some((entry) => entry?.id === candidate)) {
         baseModel = candidate;
         effort = level;
@@ -313,6 +322,9 @@ export function getCodexRequestRequirements(model, body = null, catalog = null) 
       }
     }
   }
+  const context = stripModelContextMarker(baseModel);
+  baseModel = context.model;
+  contextMarker ||= context.contextMarker;
   let conflictingEfforts = false;
   if (!effort && body && typeof body === "object") {
     const bodyEfforts = [
@@ -323,14 +335,20 @@ export function getCodexRequestRequirements(model, body = null, catalog = null) 
     conflictingEfforts = new Set(bodyEfforts).size > 1;
     effort = bodyEfforts[0] || null;
   }
-  return { baseModel, requestedEffort: effort, conflictingEfforts };
+  return { baseModel, contextMarker, requestedEffort: effort, conflictingEfforts };
 }
 
 export function codexCatalogSupportsRequest(catalog, model, body = null) {
   const requirements = getCodexRequestRequirements(model, body, catalog);
   if (requirements.conflictingEfforts) return { supported: false, reason: "effort", ...requirements };
-  const entry = (catalog || []).find((candidate) => candidate?.id === requirements.baseModel);
+  let entry = (catalog || []).find((candidate) => candidate?.id === requirements.baseModel);
   if (!entry) return { supported: false, reason: "model", ...requirements };
+  if (requirements.contextMarker) {
+    if (!(finitePositive(entry.maxContextLength) >= CODEX_EXTENDED_CONTEXT_LENGTH)) {
+      return { supported: false, reason: "context", metadata: entry, ...requirements };
+    }
+    entry = extendedContextModel(entry);
+  }
   if (!requirements.requestedEffort || requirements.requestedEffort === "auto") {
     return { supported: true, reason: null, metadata: entry, ...requirements };
   }
@@ -381,9 +399,9 @@ function mergeLiveEnrichment(staticModel, officialModel, liveModel) {
   result.contextLength = finitePositive(liveModel.contextLength)
     || finitePositive(officialModel?.contextLength)
     || finitePositive(staticModel?.contextLength);
-  result.maxContextLength = finitePositive(liveModel.maxContextLength)
-    || finitePositive(officialModel?.maxContextLength)
-    || finitePositive(staticModel?.maxContextLength);
+  // An extended context maximum is account evidence, not registry enrichment.
+  // Official/static maxima must not unlock a larger window on this account.
+  result.maxContextLength = finitePositive(liveModel.maxContextLength);
   if (result.contextLength && result.maxContextLength) {
     result.contextLength = Math.min(result.contextLength, result.maxContextLength);
   }
@@ -427,6 +445,29 @@ function mergeLiveEnrichment(staticModel, officialModel, liveModel) {
     result.capabilities.thinkingCanDisable = result.supportedReasoningLevels.includes("none");
   }
   return result;
+}
+
+function extendedContextModel(model) {
+  const contextLength = Math.min(CODEX_EXTENDED_CONTEXT_LENGTH, model.maxContextLength);
+  return {
+    ...model,
+    id: `${model.id}[1m]`,
+    name: `${model.name || model.id} (extended context)`,
+    upstreamModelId: model.upstreamModelId || model.id,
+    contextLength,
+    capabilities: { ...(model.capabilities || {}), contextWindow: contextLength },
+  };
+}
+
+function withExtendedContextModels(models) {
+  const aliases = new Set(getModelsByProviderId("codex").map((model) => model.id));
+  const extended = [];
+  for (const model of models) {
+    if (model.kind === "image" || !aliases.has(`${model.id}[1m]`)
+      || !(finitePositive(model.maxContextLength) >= CODEX_EXTENDED_CONTEXT_LENGTH)) continue;
+    extended.push(extendedContextModel(model));
+  }
+  return [...models, ...extended];
 }
 
 function enrichModels(models, officialModels) {
@@ -702,7 +743,12 @@ async function resolveOfficialCatalog(options) {
 }
 
 function buildStaticFallback() {
-  const models = staticModels().map((model) => ({ ...model }));
+  const models = staticModels().map((model) => {
+    const fallback = { ...model };
+    // Registry maxima describe candidates, not this account's allowed window.
+    delete fallback.maxContextLength;
+    return fallback;
+  });
   return {
     models: withReviews(models),
     candidateModels: [],
@@ -808,7 +854,7 @@ export async function resolveCodexModels(connection, options = {}) {
   if (hasToken) {
     if (liveResult) {
       const enriched = enrichModels(liveResult.entry.models, official?.models);
-      const finalModels = withReviews(appendStaticMedia(enriched));
+      const finalModels = withReviews(appendStaticMedia(withExtendedContextModels(enriched)));
       const candidateModels = mergeCodexCandidateModels([officialCandidates], finalModels);
 
       return {
@@ -828,7 +874,7 @@ export async function resolveCodexModels(connection, options = {}) {
     const stale = liveLastKnownGood.get(key);
     if (stale && stale.staleAt > Date.now()) {
       const enriched = enrichModels(stale.models, official?.models);
-      const finalModels = withReviews(appendStaticMedia(enriched));
+      const finalModels = withReviews(appendStaticMedia(withExtendedContextModels(enriched)));
       const candidateModels = mergeCodexCandidateModels([officialCandidates], finalModels);
 
       const failure = liveFailures.get(key);

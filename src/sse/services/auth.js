@@ -77,6 +77,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
   let release;
   const current = new Promise(resolve => { release = resolve; });
   if (usesMutex) selectionMutexes.set(providerId, current);
+  const requestedModel = options?.requestedModel || model;
 
   try {
     await previous;
@@ -153,6 +154,8 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
           !isAlitpModelAvailableForEdition(model, c.providerSpecificData?.tokenPlanEdition)) {
         return false;
       }
+      const enabled = c.providerSpecificData?.enabledModels;
+      if (providerId === "codex" && Array.isArray(enabled) && enabled.length && requestedModel && !enabled.includes(requestedModel)) return false;
       return true;
     });
 
@@ -366,7 +369,7 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
       newBackoffLevel = 0;
     }
     if (!shouldFallback) {
-      const fallback = checkFallbackError(status, errorText, backoffLevel);
+      const fallback = checkFallbackError(status, errorText, backoffLevel, resolveProviderId(resolvedProvider));
       shouldFallback = fallback.shouldFallback;
       candidateExpiryMs = shouldFallback ? now + fallback.cooldownMs : null;
       newBackoffLevel = fallback.newBackoffLevel ?? backoffLevel;

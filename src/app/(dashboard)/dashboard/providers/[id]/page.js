@@ -23,6 +23,7 @@ import EditCompatibleNodeModal from "./EditCompatibleNodeModal";
 import AddCustomModelModal from "./AddCustomModelModal";
 import BulkImportCodexModal from "./BulkImportCodexModal";
 import BulkImportGrokCliModal from "./BulkImportGrokCliModal";
+import CustomConfigCard from "./CustomConfigCard";
 
 import { CODEX_MODEL_CACHE_TTL_MS } from "open-sse/config/codexModels.js";
 import { mergeCodexCandidateModels } from "open-sse/providers/codexCandidates.js";
@@ -173,7 +174,8 @@ export default function ProviderDetailPage() {
   const isFreeNoAuth = !!FREE_PROVIDERS[providerId]?.noAuth;
   // Deprecated compat aliases (alitp preview) stay routable but leave the picker.
   const staticModels = getModelsByProviderId(providerId)
-    .filter((m) => !(m.deprecated && providerId === "alitp-intl"));
+    .filter((m) => !(m.deprecated && providerId === "alitp-intl"))
+    .filter((m) => providerId !== "codex" || !m.id.includes("[1m]"));
   const activeCodexConnections = providerId === "codex"
     ? connections.filter((item) => item.isActive !== false && item.id)
     : [];
@@ -1990,6 +1992,9 @@ export default function ProviderDetailPage() {
           )}
         </Card>
       )}
+
+      {/* Per-provider user overrides (custom headers / connect timeout) */}
+      <CustomConfigCard providerId={providerId} />
 
       {/* Models */}
       <Card>

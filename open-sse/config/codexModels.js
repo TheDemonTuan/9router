@@ -1,4 +1,5 @@
 export const CODEX_MODEL_CACHE_TTL_MS = 5 * 60 * 1000;
+export const CODEX_EXTENDED_CONTEXT_LENGTH = 872000;
 
 export const CODEX_DISCOVERY_STATUS = Object.freeze({
   OFFICIAL_UNVERIFIED: "official-unverified",

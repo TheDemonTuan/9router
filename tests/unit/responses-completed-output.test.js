@@ -142,10 +142,11 @@ describe("response.completed output (issue #4307)", () => {
   it("does not duplicate items when flush runs more than once", () => {
     const state = newState();
     openaiToOpenAIResponsesResponse(textChunk("once"), state);
-    openaiToOpenAIResponsesResponse(null, state);
+    const first = openaiToOpenAIResponsesResponse(null, state);
     const second = openaiToOpenAIResponsesResponse(null, state);
 
     expect(second).toEqual([]);
-    expect(state.completedOutputItems.size).toBe(1);
+    expect(completedResponse(first).output).toHaveLength(1);
+    expect(completedResponse(first).output[0].content[0].text).toBe("once");
   });
 });

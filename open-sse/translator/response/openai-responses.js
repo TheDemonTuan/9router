@@ -12,8 +12,7 @@ import { ROLE, OPENAI_BLOCK, RESPONSES_ITEM, OPENAI_FINISH, MODEL_FALLBACK } fro
 import {
   buildResponseSnapshot,
   buildOutputArray,
-  normalizeResponseId,
-  normalizeResponsesUsage
+  normalizeResponseId
 } from "../../transformer/responsesBuilder.js";
 
 /**
@@ -33,17 +32,22 @@ import {
 function toResponsesUsage(usage) {
   if (!usage || typeof usage !== "object") return null;
 
-  const inputTokens = [usage.input_tokens, usage.prompt_tokens].find(Number.isFinite) ?? 0;
-  const outputTokens = [usage.output_tokens, usage.completion_tokens].find(Number.isFinite) ?? 0;
+  const inputTokens = [usage.input_tokens, usage.prompt_tokens].find(Number.isInteger);
+  const outputTokens = [usage.output_tokens, usage.completion_tokens].find(Number.isInteger);
+  // Some upstreams attach zeroed placeholders to every chunk. Wait for real counts
+  // so response.completed cannot freeze the placeholder before the usage trailer.
+  if (inputTokens === undefined || outputTokens === undefined || inputTokens + outputTokens <= 0) {
+    return null;
+  }
   const responseUsage = {
     input_tokens: inputTokens,
     output_tokens: outputTokens,
-    total_tokens: Number.isFinite(usage.total_tokens) ? usage.total_tokens : inputTokens + outputTokens
+    total_tokens: inputTokens + outputTokens
   };
-  const cachedTokens = [usage.input_tokens_details?.cached_tokens, usage.prompt_tokens_details?.cached_tokens].find(Number.isFinite);
-  const reasoningTokens = [usage.output_tokens_details?.reasoning_tokens, usage.completion_tokens_details?.reasoning_tokens].find(Number.isFinite);
-  if (Number.isFinite(cachedTokens)) responseUsage.input_tokens_details = { cached_tokens: cachedTokens };
-  if (Number.isFinite(reasoningTokens)) responseUsage.output_tokens_details = { reasoning_tokens: reasoningTokens };
+  const cachedTokens = [usage.input_tokens_details?.cached_tokens, usage.prompt_tokens_details?.cached_tokens].find(Number.isInteger);
+  const reasoningTokens = [usage.output_tokens_details?.reasoning_tokens, usage.completion_tokens_details?.reasoning_tokens].find(Number.isInteger);
+  if (Number.isInteger(cachedTokens)) responseUsage.input_tokens_details = { cached_tokens: cachedTokens };
+  if (Number.isInteger(reasoningTokens)) responseUsage.output_tokens_details = { reasoning_tokens: reasoningTokens };
 
   return responseUsage;
 }
@@ -52,13 +56,16 @@ export function openaiToOpenAIResponsesResponse(chunk, state) {
   if (!chunk) {
     return flushEvents(state);
   }
-  // Capture upstream usage BEFORE the choices guard below: the last OpenAI chunk
-  // may carry usage together with an empty choices array, and it must not be dropped.
-  if (chunk.usage) {
-    state.usage = normalizeResponsesUsage(chunk.usage);
-  }
+  if (state.completedSent) return [];
 
-  if (!chunk.choices?.length) return [];
+  // Capture usage before the choices guard: OpenAI may send it in a trailer
+  // whose choices array is empty. Keep logging/pivot usage in state.usage intact.
+  const responseUsage = toResponsesUsage(chunk.usage);
+  if (responseUsage) state.responsesUsage = responseUsage;
+
+  if (!chunk.choices?.length) {
+    return state.completionPending && state.responsesUsage ? flushEvents(state) : [];
+  }
   const events = [];
   const nextSeq = () => ++state.seq;
   
@@ -71,9 +78,6 @@ export function openaiToOpenAIResponsesResponse(chunk, state) {
     state.model = chunk.model;
   }
 
-  if (chunk.usage) {
-    state.usage = normalizeResponsesUsage(chunk.usage);
-  }
 
   // Emit initial events
   if (!state.started) {
@@ -102,13 +106,6 @@ export function openaiToOpenAIResponsesResponse(chunk, state) {
     });
   }
 
-  if (!chunk.choices?.length) {
-    if (state.finished && !state.completedSent && state.usage) {
-      sendCompleted(state, emit);
-      return events;
-    }
-    return events;
-  }
 
   const choice = chunk.choices[0];
   const idx = choice.index || 0;
@@ -170,7 +167,8 @@ export function openaiToOpenAIResponsesResponse(chunk, state) {
     closeReasoning(state, emit);
     for (const i in state.funcCallIds) closeToolCall(state, emit, i);
     const flushReachesUs = state.targetFormat === FORMATS.OPENAI;
-    if (state.usage || !flushReachesUs) sendCompleted(state, emit);
+    if (state.responsesUsage || !flushReachesUs) sendCompleted(state, emit);
+    else state.completionPending = true;
   }
 
   return events;
@@ -327,11 +325,11 @@ function closeMessage(state, emit, idx) {
 
     emit("response.output_item.done", {
       type: "response.output_item.done",
-      output_index: parseInt(idx),
+      output_index: outIdx,
       item
     });
 
-    recordCompletedOutputItem(state, parseInt(idx), item);
+    recordCompletedOutputItem(state, outIdx, item);
   }
 }
 
@@ -445,11 +443,11 @@ function closeToolCall(state, emit, idx) {
 
     emit("response.output_item.done", {
       type: "response.output_item.done",
-      output_index: parseInt(idx),
+      output_index: outIdx,
       item
     });
 
-    recordCompletedOutputItem(state, parseInt(idx), item);
+    recordCompletedOutputItem(state, outIdx, item);
 
     state.funcItemDone[idx] = true;
     state.funcArgsDone[idx] = true;
@@ -467,30 +465,23 @@ function closeToolCall(state, emit, idx) {
 // were emitted in. Lazily created because stream.js can hand us a state it built
 // itself rather than one from initState().
 function recordCompletedOutputItem(state, outputIndex, item) {
-  state.completedOutputItems ??= new Map();
-  const index = Number.isInteger(outputIndex) ? outputIndex : Number.parseInt(outputIndex, 10) || 0;
-  state.completedOutputItems.set(index, item);
+  state.outputItems ??= new Map();
+  state.outputItems.set(outputIndex, item);
 }
 
-function collectCompletedOutputItems(state) {
-  const recorded = state.completedOutputItems;
-  if (!(recorded instanceof Map) || recorded.size === 0) return [];
-  return [...recorded.entries()]
-    .sort((left, right) => left[0] - right[0])
-    .map(([, item]) => item);
-}
 
 function sendCompleted(state, emit) {
   if (!state.completedSent) {
     state.completedSent = true;
+    state.completionPending = false;
     emit("response.completed", {
       type: "response.completed",
       response: buildResponseSnapshot(state, {
         status: "completed",
         background: false,
         error: null,
-        output: collectCompletedOutputItems(state),
-        ...(state.responsesUsage ? { usage: state.responsesUsage } : (state.usage ? { usage: state.usage } : {}))
+        output: buildOutputArray(state.outputItems),
+        usage: state.responsesUsage || null
       })
     });
   }

@@ -99,7 +99,7 @@ export class BaseExecutor {
     return { status: response.status, message: bodyText || `HTTP ${response.status}` };
   }
 
-  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null, preResponse = null }) {
+  async execute({ model, body, stream, credentials, signal, log, proxyOptions = null, preResponse = null, providerOverrides = null }) {
     const fallbackCount = this.getFallbackCount();
     let lastError = null;
     let lastStatus = 0;
@@ -142,6 +142,16 @@ export class BaseExecutor {
       const url = this.buildUrl(model, stream, urlIndex, credentials, requestContext);
       const transformedBody = this.transformRequest(model, body, stream, credentials);
       const headers = this.buildHeaders(credentials, stream, url, model, transformedBody, body);
+      if (providerOverrides?.headers) {
+        const normalized = new Headers(headers);
+        for (const [name, value] of Object.entries(providerOverrides.headers)) {
+          const lower = name.toLowerCase();
+          if (["host", "content-length", "content-type", "connection", "transfer-encoding", "authorization", "cookie", "x-api-key", "api-key", "proxy-authorization"].includes(lower)) continue;
+          normalized.set(lower, value);
+        }
+        for (const name of Object.keys(headers)) delete headers[name];
+        Object.assign(headers, Object.fromEntries(normalized));
+      }
       if (!retryAttemptsByUrl[urlIndex]) retryAttemptsByUrl[urlIndex] = 0;
 
       // Keep the first abort origin in the merged signal reason.

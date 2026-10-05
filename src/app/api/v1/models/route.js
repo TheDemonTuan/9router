@@ -1,5 +1,6 @@
 import { PROVIDER_MODELS, PROVIDER_ID_TO_ALIAS, getModelKind } from "@/shared/constants/models";
 import {
+  ALIAS_TO_ID,
   AI_PROVIDERS,
   getProviderAlias,
   isAnthropicCompatibleProvider,
@@ -50,6 +51,22 @@ async function resolveQoderLiveModels(conn, provider) {
   const models = routableQoderModels(result);
   if (!models.length) return null;
   return { models: models.map((m) => ({ id: m.id, name: m.name })) };
+}
+
+// Combo seats use UI aliases; the model registry also has transport aliases.
+// Capability overrides and catalog limits are keyed by provider id.
+const ALIAS_TO_PROVIDER_ID = {
+  ...Object.fromEntries(
+    Object.entries(PROVIDER_ID_TO_ALIAS).map(([id, alias]) => [alias, id])
+  ),
+  ...ALIAS_TO_ID,
+};
+
+function comboSeatCapabilities(seat) {
+  const slash = seat.indexOf("/");
+  if (slash <= 0) return null;
+  const alias = seat.slice(0, slash);
+  return getCapabilitiesForModel(ALIAS_TO_PROVIDER_ID[alias] || alias, seat.slice(slash + 1));
 }
 
 // Per-provider live model resolvers. Each receives a connection record and
@@ -312,6 +329,47 @@ function comboMatchesKinds(combo, kindFilter) {
   return kindFilter.includes(kind);
 }
 
+// Nested combo names are valid seats — the model selector exposes them and
+// chat routing resolves them recursively — but a no-slash seat is otherwise
+// treated as a literal model and publishes the 200k floor. Expand nested
+// names (cycle-guarded) so the published window is the true min across the
+// whole chain.
+function comboSeatLimits(combo, combosByName, visiting = new Set()) {
+  const name = typeof combo?.name === "string" ? combo.name : null;
+  if (name) {
+    if (visiting.has(name)) return { contextWindow: undefined, maxOutput: undefined };
+    visiting.add(name);
+  }
+
+  let contextWindow = Infinity;
+  let maxOutput = Infinity;
+  try {
+    for (const seat of Array.isArray(combo?.models) ? combo.models : []) {
+      if (typeof seat !== "string") continue;
+      const slash = seat.indexOf("/");
+      if (slash <= 0) {
+        const nested = combosByName.get(seat);
+        if (nested) {
+          const nestedLimits = comboSeatLimits(nested, combosByName, visiting);
+          if (Number.isFinite(nestedLimits.contextWindow)) contextWindow = Math.min(contextWindow, nestedLimits.contextWindow);
+          if (Number.isFinite(nestedLimits.maxOutput)) maxOutput = Math.min(maxOutput, nestedLimits.maxOutput);
+          continue;
+        }
+      }
+      const caps = comboSeatCapabilities(seat) || getCapabilitiesForModel(null, seat);
+      if (Number.isFinite(caps?.contextWindow)) contextWindow = Math.min(contextWindow, caps.contextWindow);
+      if (Number.isFinite(caps?.maxOutput)) maxOutput = Math.min(maxOutput, caps.maxOutput);
+    }
+  } finally {
+    if (name) visiting.delete(name);
+  }
+
+  return {
+    contextWindow: Number.isFinite(contextWindow) ? contextWindow : undefined,
+    maxOutput: Number.isFinite(maxOutput) ? maxOutput : undefined,
+  };
+}
+
 /**
  * Build OpenAI-format models list filtered by service kinds.
  * @param {string[]} kindFilter - List of service kinds to include (e.g. ["llm"], ["webSearch","webFetch"]).
@@ -366,6 +424,9 @@ export async function buildModelsList(kindFilter, options = {}) {
   }
 
   const models = [];
+  const combosByName = new Map(
+    combos.filter((c) => typeof c?.name === "string").map((c) => [c.name, c]),
+  );
 
   // Lookup map so aggregateComboCapabilities can recursively resolve nested combos
   const comboByName = Object.fromEntries(combos.map((c) => [c.name, c.models]));
@@ -383,19 +444,23 @@ export async function buildModelsList(kindFilter, options = {}) {
     if (combo.kind === "webSearch" || combo.kind === "webFetch") {
       entry.kind = combo.kind;
     } else {
-      const comboCaps = aggregateComboCapabilities(combo.models, comboByName);
+      const comboCaps = aggregateComboCapabilities(combo.models, comboByName, comboSeatCapabilities);
       if (comboCaps) entry.capabilities = comboCaps;
+      // Any seat can serve the request, so the only window a combo can promise is
+      // its smallest. Combo entries were the only models on this endpoint that
+      // published no limits at all, which leaves a client to guess from the name —
+      // and it guesses high (see the snake_case note on the per-provider path).
+      const { contextWindow, maxOutput } = comboSeatLimits(combo, combosByName);
+      if (Number.isFinite(contextWindow)) entry.context_length = contextWindow;
+      if (Number.isFinite(maxOutput)) entry.max_completion_tokens = maxOutput;
     }
     models.push(entry);
   }
 
   if (connections.length === 0) {
     // DB unavailable -> return static models, filtered by per-model kind
-    const aliasToProviderId = Object.fromEntries(
-      Object.entries(PROVIDER_ID_TO_ALIAS).map(([id, alias]) => [alias, id])
-    );
     for (const [alias, providerModels] of Object.entries(PROVIDER_MODELS)) {
-      const providerId = aliasToProviderId[alias] || alias;
+      const providerId = ALIAS_TO_PROVIDER_ID[alias] || alias;
       if (!providerMatchesKinds(providerId, kindFilter)) continue;
       const providerInfo = AI_PROVIDERS[providerId];
       for (const model of providerModels) {
@@ -407,6 +472,7 @@ export async function buildModelsList(kindFilter, options = {}) {
         if (providerId === "alitp-intl" && !isAlitpModelAvailableForEdition(model.id, "personal")) continue;
         // Deprecated compat aliases stay routable but are not discoverable.
         if (model.deprecated && providerId === "alitp-intl") continue;
+        if (providerId === "codex" && model.id.includes("[1m]")) continue;
         if (providerId === "codex" && model.kind !== "image") {
           const projected = projectCodexModel({
             ...model,
@@ -518,6 +584,7 @@ export async function buildModelsList(kindFilter, options = {}) {
 
       let rawModelIds = providerModels
         .filter((model) => !(model.deprecated && providerId === "alitp-intl"))
+        .filter((model) => providerId !== "codex" || !model.id.includes("[1m]"))
         .map((model) => model.id);
 
       if (isCompatibleProvider && rawModelIds.length === 0 && !skipDynamicFetch) {
@@ -622,7 +689,8 @@ export async function buildModelsList(kindFilter, options = {}) {
         })
         .filter((modelId) => typeof modelId === "string" && modelId.trim() !== "");
 
-      const mergedModelIds = Array.from(new Set([...modelIds, ...customModelIds, ...aliasModelIds]));
+      const mergedModelIds = Array.from(new Set([...modelIds, ...customModelIds, ...aliasModelIds]))
+        .filter((id) => providerId !== "codex" || !id.includes("[1m]") || liveModelMetadataById.has(id));
 
       for (const modelId of mergedModelIds) {
         // Resolve kind: prefer custom/live metadata, then static, then ID heuristics.

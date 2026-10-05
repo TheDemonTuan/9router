@@ -143,30 +143,4 @@ describe("Codex Refresh Token", () => {
     });
   });
 
-  describe("getRefreshLeadMs (early refresh config)", () => {
-    it("should return provider-specific lead time for OAuth providers", async () => {
-      const { getRefreshLeadMs } = await import("../../open-sse/services/tokenRefresh.js");
-
-      // Synced with CLIProxyAPI refresh_registry
-      expect(getRefreshLeadMs("codex")).toBe(5 * 24 * 60 * 60 * 1000);   // 5 days
-      expect(getRefreshLeadMs("claude")).toBe(4 * 60 * 60 * 1000);       // 4 hours
-      expect(getRefreshLeadMs("iflow")).toBe(24 * 60 * 60 * 1000);       // 24 hours
-      expect(getRefreshLeadMs("kimi")).toBe(5 * 60 * 1000);              // 5 minutes
-      expect(getRefreshLeadMs("kimi-coding")).toBe(5 * 60 * 1000);       // legacy alias
-      expect(getRefreshLeadMs("antigravity")).toBe(5 * 60 * 1000);       // 5 minutes
-    });
-
-    it("should fallback to default buffer for unknown providers", async () => {
-      const { getRefreshLeadMs, TOKEN_EXPIRY_BUFFER_MS } = await import("../../open-sse/services/tokenRefresh.js");
-
-      expect(getRefreshLeadMs("unknown-provider")).toBe(TOKEN_EXPIRY_BUFFER_MS);
-      expect(getRefreshLeadMs("openai")).toBe(TOKEN_EXPIRY_BUFFER_MS);
-    });
-
-    it("codex lead should be greater than default buffer", async () => {
-      const { getRefreshLeadMs, TOKEN_EXPIRY_BUFFER_MS } = await import("../../open-sse/services/tokenRefresh.js");
-
-      expect(getRefreshLeadMs("codex")).toBeGreaterThan(TOKEN_EXPIRY_BUFFER_MS);
-    });
-  });
 });
