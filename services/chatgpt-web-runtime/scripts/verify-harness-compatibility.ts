@@ -12,7 +12,7 @@ if (!output || process.argv.length !== 3) throw new Error("Usage: bun scripts/ve
 const root = mkdtempSync(join(tmpdir(), "cgw-build-compatibility-"));
 const env = { ...process.env, CGW_DATA_DIR: root, DATA_DIR: root, HOME: root, USERPROFILE: root, APPDATA: root, ENABLE_REQUEST_LOGS: "false" };
 const gates = [
-  ["test", "./tests/mcp-native.test.ts", "./tests/authority.test.ts", "./tests/companion-lineage.test.ts", "./tests/runtime-state.test.ts", "./tests/compaction-idle.test.ts", "./tests/chatgpt-web-markdown.test.ts"],
+  ["test", "./tests/mcp-native.test.ts", "./tests/authority.test.ts", "./tests/companion-lineage.test.ts", "./tests/runtime-state.test.ts", "./tests/compaction-idle.test.ts", "./tests/chatgpt-web-markdown.test.ts", "./tests/browser-login-dom.test.ts"],
   ["scripts/image-smoke.ts", "--arch", process.arch === "arm64" ? "arm64" : "amd64"],
   ["scripts/smoke-offline.ts"], ["scripts/smoke-harness-offline.ts"], ["scripts/smoke-approval-offline.ts"], ["scripts/smoke-profile-ownership.ts"],
 ];

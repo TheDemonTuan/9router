@@ -10,6 +10,7 @@ import { NativeBrowserProcess } from "../src/browser/native-process";
 import { RuntimeStateError } from "../src/runtime-state";
 import { startRuntime } from "../src/server";
 import type { RuntimeConfig } from "../src/config";
+import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
 
 const loginId = "aabbccdd-1234-4567-89ab-0123456789ab";
 interface PhysicalBrowser { context?: BrowserContext; manualBrowser?: NativeBrowserProcess; }
@@ -111,6 +112,25 @@ describe.skipIf(process.platform !== "linux")("human-only sign-in physical owner
       expect((await f.admin(`/admin/login/session?loginId=${loginId}`)).status).toBe(200);
       expect(f.runtime.state.profile("personal").epoch).toBe(f.profile.epoch);
       expect(f.manager.isIdle).toBe(false);
+      expect(probe).toHaveBeenCalledTimes(1);
+    } finally { probe.mockRestore(); await f.close(); }
+  });
+  test("typed UI probe failure restores the exact manual lease without changing epoch or retrying", async () => {
+    const f = await runtimeFixture();
+    const originalPid = f.physical.manualBrowser!.child.pid;
+    const probe = spyOn(f.runtime.profiles, "probe").mockRejectedValue(new ChatGptWebAdapterError("Synthetic interface observation failed", {
+      status: 502, errorType: "runtime_error", code: "profile_probe_failed", retryable: false,
+    }));
+    try {
+      const response = await f.admin("/admin/login/complete", { loginId });
+      expect(response.status).toBe(502);
+      expect((await response.json()).error.code).toBe("profile_probe_failed");
+      expect(f.runtime.profiles.viewerSession(loginId)).toMatchObject({ loginId, manualLogin: true, state: "waiting" });
+      expect(f.physical.manualBrowser!.running).toBe(true);
+      expect(f.physical.manualBrowser!.child.pid).not.toBe(originalPid);
+      expect(f.runtime.state.profile("personal").epoch).toBe(f.profile.epoch);
+      expect(f.runtime.profiles.ready("personal")).toBe(false);
+      expect((await f.admin(`/admin/login/session?loginId=${loginId}`)).status).toBe(200);
       expect(probe).toHaveBeenCalledTimes(1);
     } finally { probe.mockRestore(); await f.close(); }
   });

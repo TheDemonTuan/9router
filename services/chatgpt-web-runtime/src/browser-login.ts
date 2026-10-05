@@ -1,6 +1,6 @@
 import { createHmac } from "node:crypto";
 import type { Page } from "playwright-core";
-import { assertAuthenticatedChatGptPage, assertNewChatPage, detectChatGptAccountCapabilities } from "./chatgpt-session";
+import { CHATGPT_COMPOSER_SELECTOR, assertAuthenticatedChatGptPage, assertNewChatPage, detectChatGptAccountCapabilities } from "./chatgpt-session";
 import type { ChatGptWebAccountCapabilities } from "./chatgpt-web-models";
 import { ChatGptWebAdapterError } from "./adapters/chatgpt-web/adapter-error";
 
@@ -41,8 +41,16 @@ export async function assertBrowserLoginSession(page: Page): Promise<void> {
 }
 export async function probeBrowserLoginSession(page: Page, salt: Uint8Array, useSavedChats: boolean): Promise<BrowserLoginEvidence> {
   const identity = await sessionIdentity(page);
-  await assertAuthenticatedChatGptPage(page);
-  await assertNewChatPage(page, useSavedChats);
-  const capabilities = await detectChatGptAccountCapabilities(page);
-  return { accountFingerprint: createHmac("sha256", salt).update(identity).digest("hex"), checkedAt: new Date().toISOString(), capabilities };
+  try {
+    await page.locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true }).waitFor({ state: "visible", timeout: 30_000 });
+    await assertAuthenticatedChatGptPage(page);
+    await assertNewChatPage(page, useSavedChats);
+    const capabilities = await detectChatGptAccountCapabilities(page);
+    return { accountFingerprint: createHmac("sha256", salt).update(identity).digest("hex"), checkedAt: new Date().toISOString(), capabilities };
+  } catch (cause) {
+    if (cause instanceof ChatGptWebAdapterError) throw cause;
+    throw new ChatGptWebAdapterError("ChatGPT verification could not inspect the chat interface. Open Browser, wait for the page to finish loading, then choose Finish Sign In again.", {
+      status: 502, errorType: "runtime_error", code: "profile_probe_failed", retryable: false, cause,
+    });
+  }
 }

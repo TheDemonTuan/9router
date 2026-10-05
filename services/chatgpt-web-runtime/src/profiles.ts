@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { connect } from "node:net";
 import { BrowserManager, browserProfileWork, closeBrowserManagers } from "./browser/manager";
 import { probeBrowserLoginSession } from "./browser-login";
-import { activateChatGptEffortMenu, chatGptNewChatUrl, CHATGPT_COMPOSER_SELECTOR, CHATGPT_EFFORT_CONTROL_SELECTOR } from "./chatgpt-session";
+import { activateChatGptEffortMenu, readChatGptEffortSnapshot, chatGptNewChatUrl, CHATGPT_COMPOSER_SELECTOR, CHATGPT_EFFORT_CONTROL_SELECTOR } from "./chatgpt-session";
 import { assertChatGptModelFamily, selectChatGptModelFamily } from "./adapters/chatgpt-web/model-selection";
 import { availableChatGptWebModelRoutes, chatGptWebRouteEfforts, resolveChatGptWebContextLimits, CHATGPT_WEB_LUNA_BACKEND_MODEL } from "./chatgpt-web-models";
 import type { ChatGptWebAccountCapabilities, ChatGptWebAutomaticModelRoute } from "./chatgpt-web-models";
@@ -186,13 +186,28 @@ export class RuntimeProfiles {
               let menu = await activate();
               menu = await selectChatGptModelFamily(menu, route.modelFamily, activate);
               const effortIndex = ["low", "medium", "high", "xhigh", "max"].indexOf(route.adapterEffort);
-              const minimum = Number(await menu.slider.getAttribute("aria-valuemin"));
-              const maximum = Number(await menu.slider.getAttribute("aria-valuemax"));
+              let snapshot = await readChatGptEffortSnapshot(menu.sliderContainer);
+              const minimum = snapshot.min, maximum = snapshot.max;
               const target = minimum + effortIndex;
-              for (let tries = 0; tries <= maximum - minimum; tries++) {
-                const value = Number(await menu.slider.getAttribute("aria-valuenow"));
-                if (value === target) break;
-                await menu.slider.press(value < target ? "ArrowRight" : "ArrowLeft");
+              if (effortIndex < 0 || target < minimum || target > maximum || snapshot.available[effortIndex] !== true) {
+                throw new Error("ChatGPT requested effort is unavailable");
+              }
+              const keyboardOwner = menu.slider.locator("xpath=ancestor::*[@role='menuitem'][1]");
+              for (let moves = 0; snapshot.value !== target; moves++) {
+                if (moves >= maximum - minimum) throw new Error("ChatGPT effort selection exceeded its range");
+                const previous = snapshot.value, direction = target > previous ? 1 : -1;
+                await keyboardOwner.press(direction > 0 ? "ArrowRight" : "ArrowLeft", { timeout: 5_000 });
+                const deadline = Date.now() + 5_000;
+                do {
+                  snapshot = await readChatGptEffortSnapshot(menu.sliderContainer);
+                  if (snapshot.min !== minimum || snapshot.max !== maximum || snapshot.available[effortIndex] !== true) {
+                    throw new Error("ChatGPT changed its effort range or availability during selection");
+                  }
+                  if (snapshot.value !== previous) break;
+                  if (Date.now() >= deadline) break;
+                  await Bun.sleep(50);
+                } while (true);
+                if (snapshot.value !== previous + direction) throw new Error("ChatGPT effort did not move exactly one step");
               }
               await assertChatGptModelFamily(menu, route.modelFamily, route.adapterEffort, effortIndex, 1000);
             } catch { continue; }

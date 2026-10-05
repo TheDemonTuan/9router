@@ -17,6 +17,8 @@ const ERROR_MESSAGES = {
   connector_unavailable: "Full mode requires an operator-provisioned, verified Native2 connector and tunnel.",
   action_not_allowed: "The account or workspace does not permit this connector action.",
   login_required: "Sign in using the private browser, then choose Finish Sign In to verify your account.",
+  profile_probe_failed: "ChatGPT verification could not inspect the chat interface. Open Browser, wait for the page to finish loading, then choose Finish Sign In again.",
+  model_version_unavailable: "ChatGPT sign-in was detected, but no supported model could be verified. Open Browser, check the model picker, then choose Finish Sign In again.",
   login_not_found: "The private viewer lease has ended.",
   profile_not_found: "Create this runtime profile first.",
   profile_exists: "This runtime profile already exists. Refresh to manage it.",

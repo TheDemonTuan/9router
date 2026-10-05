@@ -45,6 +45,18 @@ const nativeOrigin = `http://127.0.0.1:${native.port}`;
 const runtime = startRuntime({ dataDir: "/data", host: "0.0.0.0", port: 17841, chromiumExecutable,
   runtimeToken: Buffer.from("offline-viewer-data-token".repeat(4)), adminToken: Buffer.from("offline-viewer-admin-token".repeat(4)) });
 const ensure = runtime.profiles.ensureProfileBrowser.bind(runtime.profiles);
+const probe = runtime.profiles.probe.bind(runtime.profiles);
+runtime.profiles.probe = async (...args) => {
+  const result = await probe(...args);
+  const manager = args[3] ?? runtime.profiles.manager(args[0]);
+  await (await manager.maintenancePage()).evaluate(() => {
+    const fixture: unknown = Reflect.get(window, "fixture");
+    if (!fixture || typeof fixture !== "object" || !("sends" in fixture) || fixture.sends !== 0) {
+      throw new Error("Login verification submitted a synthetic prompt");
+    }
+  });
+  return result;
+};
 const prepare = async (id: string) => {
   const manager = await ensure(id);
   if (!preparedManagers.has(manager)) {
@@ -56,6 +68,9 @@ const prepare = async (id: string) => {
     manager.ensureContext = async () => {
       const context = await automated();
       if (!preparedContexts.has(context)) {
+        await context.addInitScript(() => {
+          Object.assign(window, { __cgwLoginFixture: { composerDelayMs: 500, pointerOnly: true, semanticSlider: true, headerOnlyModel: true } });
+        });
         await context.route("**/*", async route => {
           const url = new URL(route.request().url());
           if (url.origin !== "https://chatgpt.com") return route.abort();
@@ -188,7 +203,15 @@ try {
   await canvas.waitFor({ state: "detached" });
   await page.getByText("Signed in. Connection is ready.", { exact: true }).waitFor();
   const models = await page.request.get(`${gateway}/api/providers/${connections[0].id}/models`); assert.equal(models.status(), 200);
-  assert((await models.json()).models.some((row: { id: string }) => row.id.includes("gpt-5.6-sol")));
+  const catalog = (await models.json()).models as { id: string }[];
+  assert(catalog.some(row => row.id === "chatgpt-web/gpt-5.6-sol-instant"));
+  assert(catalog.some(row => row.id === "chatgpt-web/gpt-5.6-sol"));
+  const profilesResponse = await page.request.get(`${gateway}/api/providers/chatgpt-web/runtime/profiles`);
+  assert.equal(profilesResponse.status(), 200);
+  const profileCatalog = (await profilesResponse.json()).profiles.find((row: { profileId: string }) => row.profileId === id);
+  assert(profileCatalog);
+  const sol = profileCatalog.models.find((row: { id: string }) => row.id === "chatgpt-web/gpt-5.6-sol");
+  assert(sol); assert.deepEqual(sol.supported_reasoning_levels, ["medium", "high"]); assert.equal(sol.default_reasoning_level, "high");
   assert.equal((await page.request.get(`${gateway}/api/providers/chatgpt-web/runtime/login/session?loginId=${loginLease.loginId}`)).status(), 404);
   const second = await page.request.post(`${gateway}/api/providers`, { data: { provider: "chatgpt-web", name: "Offline independent account" } }); assert.equal(second.status(), 201);
   const secondConnection = (await second.json()).connection; assert.notEqual(secondConnection.providerSpecificData.profileId, id); assert.equal(secondConnection.testStatus, "login_required");

@@ -63,6 +63,28 @@ describe("ChatGPT Web runtime admin boundaries", () => {
     expect(output.error.code).toBe("connector_unavailable");
     expect(output.error.message).not.toContain("secret");
   });
+  it.each([["profile_probe_failed", 502, /chat interface/i], ["model_version_unavailable", 409, /supported model/i], ["unknown_probe_error", 500, /diagnostics/i]])("preserves safe %s completion diagnostics and status without retry or secret leakage", async (backendCode, status, meaning) => {
+    mocks.admin.mockResolvedValue(Response.json({ error: { code: backendCode, message: "Bearer fixture-secret <html>private trace</html>" } }, { status }));
+    const response = await POST(request("login/complete", "POST", { loginId }), context("login/complete"));
+    expect(response.status).toBe(status);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const data = await response.json();
+    expect(data.error.code).toBe(backendCode === "unknown_probe_error" ? "runtime_error" : backendCode);
+    expect(data.error.message).toMatch(meaning);
+    if (backendCode !== "unknown_probe_error") expect(data.error.message).toMatch(/Finish Sign In/i);
+    expect(JSON.stringify(data)).not.toMatch(/fixture-secret|Bearer|<html>|private trace/);
+    expect(mocks.admin).toHaveBeenCalledTimes(1);
+  });
+  it.each([["profile_probe_failed", /chat interface/i], ["model_version_unavailable", /supported model/i], ["unknown_probe_error", /diagnostics/i]])("redacts profile.lastError while preserving safe %s meaning", async (backendCode, meaning) => {
+    mocks.admin.mockResolvedValue(Response.json({ profiles: [{ ...fixture(), state: "error", lastError: { code: backendCode, message: "Bearer fixture-secret <html>private trace</html>" } }] }));
+    const response = await GET(request("profiles"), context("profiles"));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const data = await response.json();
+    expect(data.profiles[0].lastError.code).toBe(backendCode === "unknown_probe_error" ? "runtime_error" : backendCode);
+    expect(data.profiles[0].lastError.message).toMatch(meaning);
+    expect(JSON.stringify(data)).not.toMatch(/fixture-secret|Bearer|<html>|private trace/);
+  });
   it("preserves verified model efforts but strips private profile fields and error text", async () => {
     mocks.admin.mockImplementation(async () => Response.json({ profiles: [{ ...fixture(), cookies: "cookie-secret", token: "bearer-secret", lastError: "raw-private-diagnostic" }] }));
     const response = await GET(request("profiles"), context("profiles"));
