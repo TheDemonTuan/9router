@@ -47,7 +47,7 @@ COPY --from=assets /assets/share/licenses/ /usr/local/share/licenses/
 WORKDIR /opt/cgw
 COPY --from=dependencies /opt/cgw/node_modules/ ./node_modules/
 # Deliberate allowlist; never COPY the app, .env, local account state or Codex home.
-COPY services/chatgpt-web-runtime/package.json services/chatgpt-web-runtime/bun.lock services/chatgpt-web-runtime/tsconfig.json services/chatgpt-web-runtime/protocol.js services/chatgpt-web-runtime/session-transfer.js ./
+COPY services/chatgpt-web-runtime/package.json services/chatgpt-web-runtime/bun.lock services/chatgpt-web-runtime/tsconfig.json services/chatgpt-web-runtime/protocol.js services/chatgpt-web-runtime/session-transfer.js services/chatgpt-web-runtime/browser-request.js ./
 COPY services/chatgpt-web-runtime/src/ ./src/
 COPY services/chatgpt-web-runtime/scripts/ ./scripts/
 COPY services/chatgpt-web-runtime/tests/ ./tests/
