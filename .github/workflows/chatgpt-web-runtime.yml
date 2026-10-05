@@ -216,8 +216,8 @@ jobs:
         run: |
           set -euo pipefail
           export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/cgw-export-browser"
-          "$RUNNER_TEMP/cgw-bun-1.4.0" --cwd services/chatgpt-web-runtime x --no-install --bun playwright-core install chromium
-          "$RUNNER_TEMP/cgw-bun-1.4.0" --cwd services/chatgpt-web-runtime scripts/session-export-smoke.ts \
+          "$RUNNER_TEMP/cgw-bun-1.4.0" services/chatgpt-web-runtime/node_modules/playwright-core/cli.js install chromium
+          "$RUNNER_TEMP/cgw-bun-1.4.0" services/chatgpt-web-runtime/scripts/session-export-smoke.ts \
             --extension-dir "$PWD/tools/chatgpt-web-session-export" --output "$RUNNER_TEMP/cgw-synthetic-session.json"
           gateway="cgw-onboarding-gateway:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}"
           docker build -f Dockerfile -t "$gateway" .
