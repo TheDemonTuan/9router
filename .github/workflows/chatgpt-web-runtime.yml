@@ -217,6 +217,15 @@ jobs:
           set -euo pipefail
           export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/cgw-export-browser"
           "$RUNNER_TEMP/cgw-bun-1.4.0" services/chatgpt-web-runtime/node_modules/playwright-core/cli.js install chromium
+          # Ubuntu restricts user namespaces for downloaded Chrome. Allow only this
+          # job's executable, keeping Chromium sandbox and global policy enabled.
+          chrome=("$PLAYWRIGHT_BROWSERS_PATH"/chromium-*/chrome-linux*/chrome)
+          test "${#chrome[@]}" = 1 && test -x "${chrome[0]}"
+          sandbox_profile="$RUNNER_TEMP/cgw-export.apparmor"
+          printf 'abi <abi/4.0>,\ninclude <tunables/global>\nprofile cgw-export-%s-%s "%s" flags=(unconfined) {\n  userns,\n}\n' \
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "${chrome[0]}" > "$sandbox_profile"
+          sudo apparmor_parser -a "$sandbox_profile"
+          trap 'sudo apparmor_parser -R "$sandbox_profile"; rm -f "$sandbox_profile"' EXIT
           "$RUNNER_TEMP/cgw-bun-1.4.0" services/chatgpt-web-runtime/scripts/session-export-smoke.ts \
             --extension-dir "$PWD/tools/chatgpt-web-session-export" --output "$RUNNER_TEMP/cgw-synthetic-session.json"
           gateway="cgw-onboarding-gateway:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}"
