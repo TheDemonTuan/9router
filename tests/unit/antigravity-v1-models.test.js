@@ -62,4 +62,80 @@ describe("GET /v1/models for Antigravity", () => {
     const agModels = data.data.filter((m) => m.id.startsWith("ag/"));
     expect(agModels).toEqual([]);
   });
+
+  it("retains second account models when first account has a restrictive enabledModels list", async () => {
+    mockGetProviderConnections.mockResolvedValue([
+      {
+        id: "ag-a",
+        provider: "antigravity",
+        isActive: true,
+        accessToken: "token-a",
+        providerSpecificData: {
+          enabledModels: ["gemini-2.5-pro"],
+        },
+      },
+      {
+        id: "ag-b",
+        provider: "antigravity",
+        isActive: true,
+        accessToken: "token-b",
+        providerSpecificData: {
+          enabledModels: ["claude-sonnet-5-5"],
+        },
+      },
+    ]);
+
+    mockResolveAntigravityModels.mockImplementation(async (connection) => {
+      if (connection.id === "ag-a") {
+        return {
+          resolved: true,
+          models: [{ id: "gemini-2.5-pro", name: "Gemini 2.5 Pro" }],
+        };
+      }
+      if (connection.id === "ag-b") {
+        return {
+          resolved: true,
+          models: [{ id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5" }],
+        };
+      }
+      return null;
+    });
+
+    const { GET } = await import("../../src/app/api/v1/models/route.js");
+    const response = await GET(new Request("http://localhost:20127/v1/models"));
+    expect(response.status).toBe(200);
+    const data = await response.json();
+
+    const gemini = data.data.find((m) => m.id === "ag/gemini-2.5-pro");
+    const sonnet = data.data.find((m) => m.id === "ag/claude-sonnet-5-5");
+    expect(gemini).toBeDefined();
+    expect(sonnet).toBeDefined();
+  });
+
+  it("does not mix static models into union when one account succeeds and one fails", async () => {
+    mockGetProviderConnections.mockResolvedValue([
+      { id: "ag-success", provider: "antigravity", isActive: true, accessToken: "token-s" },
+      { id: "ag-fail", provider: "antigravity", isActive: true, accessToken: "token-f" },
+    ]);
+
+    mockResolveAntigravityModels.mockImplementation(async (connection) => {
+      if (connection.id === "ag-success") {
+        return {
+          resolved: true,
+          models: [{ id: "gemini-2.5-pro", name: "Gemini 2.5 Pro" }],
+        };
+      }
+      return null; // failed connection
+    });
+
+    const { GET } = await import("../../src/app/api/v1/models/route.js");
+    const response = await GET(new Request("http://localhost:20127/v1/models"));
+    expect(response.status).toBe(200);
+    const data = await response.json();
+
+    const agModels = data.data.filter((m) => m.id.startsWith("ag/"));
+    expect(agModels.map((m) => m.id)).toEqual(["ag/gemini-2.5-pro"]);
+    // Static models like claude-sonnet-4-6 must NOT be present
+    expect(agModels.some((m) => m.id.includes("claude-sonnet-4-6"))).toBe(false);
+  });
 });

@@ -13,6 +13,7 @@ import {
 import { resolveAntigravityModels, isAntigravityModelAvailable } from "open-sse/services/antigravityModels.js";
 import { getModelsByProviderId } from "open-sse/config/providerModels.js";
 import * as log from "../utils/logger.js";
+import { stripThinkingSuffix } from "open-sse/translator/concerns/thinkingUnified.js";
 
 // Serialize rotation within a provider without blocking unrelated upstreams.
 const selectionMutexes = new Map();
@@ -148,7 +149,8 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       await Promise.all(connections.map(async (connection) => {
         try {
           const enabled = connection.providerSpecificData?.enabledModels;
-          if (Array.isArray(enabled) && enabled.length > 0 && !enabled.includes(model)) return;
+          const bareModel = stripThinkingSuffix(model).trim();
+          if (Array.isArray(enabled) && enabled.length > 0 && !enabled.includes(model) && !enabled.includes(bareModel)) return;
           const proxyOptions = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
           const catalog = await resolveAntigravityModels(connection, {
             proxyOptions,

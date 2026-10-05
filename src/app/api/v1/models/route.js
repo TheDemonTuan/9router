@@ -30,8 +30,7 @@ import { isAlitpModelAvailableForEdition } from "open-sse/providers/alibabaToken
 import {
   getChatGptWebCatalog,
 } from "open-sse/services/chatgptWebRuntimeClient.js";
-import { resolveAntigravityModels } from "open-sse/services/antigravityModels.js";
-import { mergeAntigravityModelLists } from "@/lib/providerNormalization";
+import { resolveEffectiveAntigravityCatalog } from "@/lib/antigravityCatalog.js";
 import { mergeChatGptWebPublicModels } from "@/lib/providerNormalization";
 
 // Qoder shares one live resolver across intl (qoder) and CN (qoder-cn); the
@@ -103,36 +102,10 @@ const LIVE_MODEL_RESOLVERS = {
   antigravity: async (conn, ctx) => {
     const connections = (ctx?.connections || []).filter((entry) => entry.provider === "antigravity");
     const candidates = connections.length > 0 ? connections : [conn];
-    const results = await Promise.all(candidates.map(async (connection) => {
-      try {
-        const proxyOptions = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
-        const enabled = connection.providerSpecificData?.enabledModels;
-        const res = await resolveAntigravityModels(connection, {
-          proxyOptions,
-          log: console,
-          onCredentialsRefreshed: async (refreshed) => {
-            await updateProviderCredentials(connection.id, {
-              ...refreshed,
-              existingProviderSpecificData: connection.providerSpecificData || {},
-            });
-          },
-        });
-        if (!res) {
-          const fallback = getModelsByProviderId("antigravity").filter((m) => m.kind !== "image");
-          const filteredFallback = (Array.isArray(enabled) && enabled.length > 0)
-            ? fallback.filter((m) => enabled.includes(m.id))
-            : fallback;
-          return filteredFallback;
-        }
-        const list = res.models || [];
-        return (Array.isArray(enabled) && enabled.length > 0)
-          ? list.filter((m) => enabled.includes(m.id))
-          : list;
-      } catch {
-        return [];
-      }
-    }));
-    return { resolved: true, models: mergeAntigravityModelLists(results) };
+    const result = await resolveEffectiveAntigravityCatalog(candidates, {
+      log: console,
+    });
+    return { resolved: true, models: result.models };
   },
   kiro: async (conn) => {
     const result = await resolveKiroModels({
@@ -657,7 +630,7 @@ export async function buildModelsList(kindFilter, options = {}) {
         }
       }
 
-      if (hasExplicitEnabledModels) {
+      if (hasExplicitEnabledModels && providerId !== "antigravity") {
         const enabledSet = new Set(
           enabledModels.filter(
             (modelId) => typeof modelId === "string" && modelId.trim() !== "",

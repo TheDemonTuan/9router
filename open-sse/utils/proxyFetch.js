@@ -140,6 +140,7 @@ async function resolveRealIP(hostname) {
  * Check if request should bypass MITM DNS redirect
  */
 function shouldBypassMitmDns(url) {
+  if (process.env.DISABLE_MITM_DNS_BYPASS === "true") return false;
   try {
     const hostname = new URL(url).hostname;
     return MITM_BYPASS_HOSTS.some(host => hostname.includes(host));

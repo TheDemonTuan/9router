@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import PropTypes from "prop-types";
 import Modal from "./Modal";
 import ProviderIcon from "./ProviderIcon";
@@ -8,6 +8,8 @@ import CapacityBadges from "./CapacityBadges";
 import { useModelCaps } from "@/shared/hooks/useModelCaps";
 import { getModelsByProviderId, getModelKind } from "@/shared/constants/models";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, LOCAL_BRIDGE_PROVIDERS, AI_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, getProviderAlias } from "@/shared/constants/providers";
+import { ANTIGRAVITY_MODEL_CACHE_TTL_MS } from "open-sse/config/antigravityModels.js";
+import { mergeAntigravityModelLists } from "@/lib/providerNormalization";
 
 // Provider order: OAuth first, then Free Tier, then API Key (matches dashboard/providers)
 const PROVIDER_ORDER = [
@@ -23,32 +25,156 @@ const NO_AUTH_PROVIDER_IDS = Object.keys(FREE_PROVIDERS).filter(id => FREE_PROVI
 
 // Providers with per-account live catalogs via /api/providers/[id]/models.
 // Static registry stays as fallback when live fetch fails or is empty.
-const LIVE_CATALOG_PROVIDERS = ["codex", "cursor", "cline", "clinepass", "alitp-intl", "chatgpt-web", "zed"];
+const LIVE_CATALOG_PROVIDERS = ["codex", "cursor", "cline", "clinepass", "alitp-intl", "chatgpt-web", "zed", "antigravity"];
 
 // Fetch a provider's account-scoped catalog for every active connection and merge
 // the results. Entries collapse by model id on purpose: two connections of the
 // same provider produce the same picker value (`alias/id`), so keeping the first
 // avoids duplicate rows. Live capability fields are retained for strict capability filters.
 // Empty array means "nothing live" so callers keep the static fallback.
-function useLiveProviderModels(isOpen, connectionIds, label, allowStale = false) {
+function useLiveProviderModels(isOpen, connectionIds, label, allowStale = false, providerId = null) {
   const [models, setModels] = useState([]);
+  const [resolved, setResolved] = useState(false);
+  const [warning, setWarning] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const lastFetchTimeRef = useRef(0);
+  const inflightRef = useRef(false);
   const idsKey = (connectionIds ?? []).join("|");
-
   useEffect(() => {
     const ids = idsKey ? idsKey.split("|") : [];
-    if (!isOpen || ids.length === 0) {
-      setModels([]);
+    if (ids.length === 0 || !isOpen) {
       return undefined;
+    }
+    if (providerId === "antigravity") {
+      let cancelled = false;
+      const abortController = new AbortController();
+      let timerId = null;
+
+      const scheduleNextRefresh = () => {
+        clearTimeout(timerId);
+        timerId = setTimeout(() => {
+          if (!cancelled && isOpen && document.visibilityState === "visible") {
+            loadAntigravity();
+          }
+        }, ANTIGRAVITY_MODEL_CACHE_TTL_MS);
+      };
+
+      const handleVisibilityOrFocus = () => {
+        if (cancelled || !isOpen || document.visibilityState !== "visible") return;
+        const elapsed = Date.now() - lastFetchTimeRef.current;
+        if (elapsed >= ANTIGRAVITY_MODEL_CACHE_TTL_MS && !inflightRef.current) {
+          loadAntigravity();
+        }
+      };
+
+      async function loadAntigravity() {
+        if (inflightRef.current || cancelled) return;
+        inflightRef.current = true;
+        setLoading(true);
+
+        const batchAbortController = new AbortController();
+        const onParentAbort = () => batchAbortController.abort();
+        abortController.signal.addEventListener("abort", onParentAbort);
+
+        try {
+          const results = await Promise.all(
+            ids.map(async (connectionId) => {
+              try {
+                const res = await fetch(`/api/providers/${connectionId}/models`, {
+                  cache: "no-store",
+                  signal: batchAbortController.signal,
+                });
+                const data = await res.json().catch(() => null);
+                return {
+                  connectionId,
+                  ok: res.ok,
+                  status: res.status,
+                  data,
+                };
+              } catch {
+                return {
+                  connectionId,
+                  ok: false,
+                  status: 0,
+                  data: null,
+                };
+              }
+            })
+          );
+
+          if (cancelled) return;
+
+          const successfulResults = results.filter(
+            (r) => r.ok && !r.data?.stale && r.data?.resolved === true && Array.isArray(r.data?.models)
+          );
+
+          if (successfulResults.length > 0) {
+            const validCatalogs = successfulResults.map((r) => r.data.models);
+            const mergedList = mergeAntigravityModelLists(validCatalogs);
+            setModels(mergedList);
+            setResolved(true);
+            const warn = results.map((r) => r.data?.warning).find(Boolean);
+            setWarning(warn || null);
+          } else {
+            const fallbackCatalogs = results
+              .filter((r) => r.ok && Array.isArray(r.data?.models))
+              .map((r) => r.data.models);
+            const mergedFallback = fallbackCatalogs.length > 0
+              ? mergeAntigravityModelLists(fallbackCatalogs)
+              : getModelsByProviderId("antigravity").filter((m) => m.kind !== "image");
+            setModels(mergedFallback);
+            setResolved(false);
+            const warn = results.map((r) => r.data?.warning).find(Boolean);
+            setWarning(warn || "Antigravity live model catalog unavailable; showing legacy fallback models.");
+          }
+        } catch (err) {
+          if (!cancelled) {
+            console.warn("Unable to load Antigravity models for selector:", err);
+            const fallback = getModelsByProviderId("antigravity").filter((m) => m.kind !== "image");
+            setModels(fallback);
+            setResolved(false);
+            setWarning("Antigravity live model catalog unavailable; showing legacy fallback models.");
+          }
+        } finally {
+          abortController.signal.removeEventListener("abort", onParentAbort);
+          inflightRef.current = false;
+          if (!cancelled) {
+            setLoading(false);
+            lastFetchTimeRef.current = Date.now();
+            scheduleNextRefresh();
+          }
+        }
+      }
+
+      const elapsed = Date.now() - lastFetchTimeRef.current;
+      if (lastFetchTimeRef.current > 0 && elapsed < ANTIGRAVITY_MODEL_CACHE_TTL_MS) {
+        scheduleNextRefresh();
+      } else {
+        loadAntigravity();
+      }
+
+      window.addEventListener("focus", handleVisibilityOrFocus);
+      document.addEventListener("visibilitychange", handleVisibilityOrFocus);
+
+      return () => {
+        cancelled = true;
+        abortController.abort();
+        clearTimeout(timerId);
+        window.removeEventListener("focus", handleVisibilityOrFocus);
+        document.removeEventListener("visibilitychange", handleVisibilityOrFocus);
+      };
     }
 
     let cancelled = false;
-    Promise.all(ids.map(async (connectionId) => {
-      const response = await fetch(`/api/providers/${connectionId}/models`, { cache: "no-store" });
-      if (!response.ok) return [];
-      const data = await response.json();
-      return !allowStale && data.stale === true ? [] : (Array.isArray(data.models) ? data.models : []);
-    }))
-      .then((modelLists) => {
+    (async () => {
+      setLoading(true);
+      try {
+        const modelLists = await Promise.all(ids.map(async (connectionId) => {
+          const response = await fetch(`/api/providers/${connectionId}/models`, { cache: "no-store" });
+          if (!response.ok) return [];
+          const data = await response.json();
+          return !allowStale && data.stale === true ? [] : (Array.isArray(data.models) ? data.models : []);
+        }));
         if (cancelled) return;
         const seen = new Set();
         setModels(modelLists.flat().filter((model) => {
@@ -56,17 +182,25 @@ function useLiveProviderModels(isOpen, connectionIds, label, allowStale = false)
           seen.add(model.id);
           return true;
         }));
-      })
-      .catch((error) => {
-        // Do not hide the static fallback when the account catalog is unavailable.
+        setResolved(true);
+      } catch (error) {
         console.warn(`Unable to load ${label} models for selector:`, error);
-        if (!cancelled) setModels([]);
-      });
+        if (!cancelled) {
+          setModels([]);
+          setResolved(false);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
 
     return () => { cancelled = true; };
-  }, [isOpen, idsKey, label, allowStale]);
+  }, [isOpen, idsKey, label, allowStale, providerId]);
 
-  return models;
+  if (!idsKey) {
+    return { models: [], resolved: false, warning: null, loading: false };
+  }
+  return { models, resolved, warning, loading };
 }
 
 export default function ModelSelectModal({
@@ -106,7 +240,13 @@ export default function ModelSelectModal({
   const liveConnectionIdsByProvider = useMemo(() => {
     const map = Object.fromEntries(LIVE_CATALOG_PROVIDERS.map((id) => [id, []]));
     for (const p of activeProviders) {
-      if (p?.id && Object.prototype.hasOwnProperty.call(map, p.provider)) map[p.provider].push(p.id);
+      if (p?.id && Object.prototype.hasOwnProperty.call(map, p.provider)) {
+        if (p.provider === "antigravity") {
+          if (p.isActive !== false) map[p.provider].push(p.id);
+        } else {
+          map[p.provider].push(p.id);
+        }
+      }
     }
     return map;
   }, [activeProviders]);
@@ -117,15 +257,29 @@ export default function ModelSelectModal({
   const alitpConnectionIds = liveConnectionIdsByProvider["alitp-intl"];
   const chatgptWebConnectionIds = liveConnectionIdsByProvider["chatgpt-web"];
   const zedConnectionIds = liveConnectionIdsByProvider.zed;
+  const antigravityConnectionIds = liveConnectionIdsByProvider.antigravity;
 
-  const codexModels = useLiveProviderModels(isOpen, codexConnectionIds, "Codex", true);
-  const cursorModels = useLiveProviderModels(isOpen, cursorConnectionIds, "Cursor");
-  const clineModels = useLiveProviderModels(isOpen, clineConnectionIds, "Cline");
-  const clinepassModels = useLiveProviderModels(isOpen, clinepassConnectionIds, "ClinePass");
-  const alitpModels = useLiveProviderModels(isOpen, alitpConnectionIds, "Alibaba Token Plan");
-  const chatgptWebModels = useLiveProviderModels(isOpen, chatgptWebConnectionIds, "ChatGPT Web");
-  const zedModels = useLiveProviderModels(isOpen, zedConnectionIds, "Zed");
+  const { models: codexModels } = useLiveProviderModels(isOpen, codexConnectionIds, "Codex", true);
+  const { models: cursorModels } = useLiveProviderModels(isOpen, cursorConnectionIds, "Cursor");
+  const { models: clineModels } = useLiveProviderModels(isOpen, clineConnectionIds, "Cline");
+  const { models: clinepassModels } = useLiveProviderModels(isOpen, clinepassConnectionIds, "ClinePass");
+  const { models: alitpModels } = useLiveProviderModels(isOpen, alitpConnectionIds, "Alibaba Token Plan");
+  const { models: chatgptWebModels } = useLiveProviderModels(isOpen, chatgptWebConnectionIds, "ChatGPT Web");
+  const { models: zedModels } = useLiveProviderModels(isOpen, zedConnectionIds, "Zed");
+  const {
+    models: antigravityModels,
+    resolved: antigravityResolved,
+    warning: antigravityWarning,
+    loading: antigravityLoading,
+  } = useLiveProviderModels(isOpen, antigravityConnectionIds, "Antigravity", false, "antigravity");
 
+  const antigravityStatusText = useMemo(() => {
+    if (!antigravityConnectionIds || antigravityConnectionIds.length === 0) return null;
+    if (antigravityLoading && !antigravityResolved) return "Loading Antigravity models...";
+    if (antigravityResolved && antigravityModels.length === 0) return "No Antigravity chat models are available for the active accounts.";
+    if (antigravityWarning) return antigravityWarning;
+    return null;
+  }, [antigravityConnectionIds, antigravityLoading, antigravityResolved, antigravityModels.length, antigravityWarning]);
   const fetchCombos = async () => {
     try {
       const res = await fetch("/api/combos");
@@ -357,13 +511,33 @@ export default function ModelSelectModal({
           hasModels: mergedModels.length > 0,
         };
       } else {
-        const liveModels = providerId === "codex" ? codexModels : providerId === "cursor" ? cursorModels : providerId === "cline" ? clineModels : providerId === "clinepass" ? clinepassModels : providerId === "alitp-intl" ? alitpModels : providerId === "chatgpt-web" ? chatgptWebModels : providerId === "zed" ? zedModels : [];
-        const hardcodedModels = providerId === "chatgpt-web"
-          ? liveModels
-          : liveModels.length > 0
-            ? liveModels
-            // Deprecated compat aliases stay routable but leave the picker.
-            : getModelsByProviderId(providerId).filter((m) => !(m.deprecated && providerId === "alitp-intl"));
+        const liveModels = providerId === "codex" ? codexModels
+          : providerId === "cursor" ? cursorModels
+          : providerId === "cline" ? clineModels
+          : providerId === "clinepass" ? clinepassModels
+          : providerId === "alitp-intl" ? alitpModels
+          : providerId === "chatgpt-web" ? chatgptWebModels
+          : providerId === "zed" ? zedModels
+          : providerId === "antigravity" ? antigravityModels
+          : [];
+        let hardcodedModels;
+        if (providerId === "antigravity") {
+          if (antigravityLoading && !antigravityResolved) {
+            hardcodedModels = [];
+          } else if (antigravityResolved) {
+            hardcodedModels = antigravityModels;
+          } else {
+            hardcodedModels = antigravityModels.length > 0
+              ? antigravityModels
+              : getModelsByProviderId("antigravity").filter((m) => m.kind !== "image");
+          }
+        } else if (providerId === "chatgpt-web") {
+          hardcodedModels = liveModels;
+        } else if (liveModels.length > 0) {
+          hardcodedModels = liveModels;
+        } else {
+          hardcodedModels = getModelsByProviderId(providerId).filter((m) => !(m.deprecated && providerId === "alitp-intl"));
+        }
         const hardcodedIds = new Set(hardcodedModels.map((m) => m.id));
 
         // Custom models: if no hardcoded models (e.g. openrouter), show all aliases for this provider
@@ -439,7 +613,7 @@ export default function ModelSelectModal({
     });
 
     return groups;
-  }, [filteredActiveProviders, modelAliases, allProviders, providerNodes, customModels, disabledModels, kindFilter, activeProviders, codexModels, cursorModels, clineModels, clinepassModels, alitpModels, chatgptWebModels]);
+  }, [filteredActiveProviders, modelAliases, allProviders, providerNodes, customModels, disabledModels, kindFilter, activeProviders, codexModels, cursorModels, clineModels, clinepassModels, alitpModels, chatgptWebModels, zedModels, antigravityModels, antigravityResolved, antigravityLoading]);
 
   // Filter combos by search query (and hide combos when kindFilter is set — combos are LLM-only by design)
   const filteredCombos = useMemo(() => {
@@ -522,6 +696,11 @@ export default function ModelSelectModal({
         <span className="material-symbols-outlined text-primary shrink-0" style={{ fontSize: "14px" }}>info</span>
         <span>Click to add, click again to remove. Changes are saved automatically.</span>
       </div>
+      {antigravityStatusText && (
+        <div className="mb-3 px-2.5 text-xs text-text-muted">
+          <span>{antigravityStatusText}</span>
+        </div>
+      )}
 
       {/* Search - compact */}
       <div className="mb-3">

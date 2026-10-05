@@ -25,6 +25,7 @@ import BulkImportCodexModal from "./BulkImportCodexModal";
 import BulkImportGrokCliModal from "./BulkImportGrokCliModal";
 import CustomConfigCard from "./CustomConfigCard";
 import { mergeAntigravityModelLists } from "@/lib/providerNormalization";
+import { ANTIGRAVITY_MODEL_CACHE_TTL_MS } from "open-sse/config/antigravityModels.js";
 
 import { CODEX_MODEL_CACHE_TTL_MS } from "open-sse/config/codexModels.js";
 import { mergeCodexCandidateModels } from "open-sse/providers/codexCandidates.js";
@@ -87,6 +88,8 @@ export default function ProviderDetailPage() {
   const codexForceRefreshRef = useRef(false);
   const lastCodexFetchTimeRef = useRef(0);
   const codexInflightRef = useRef(false);
+  const lastAntigravityFetchTimeRef = useRef(0);
+  const antigravityInflightRef = useRef(false);
   const [kiloFreeModels, setKiloFreeModels] = useState([]);
   const [disabledModelIds, setDisabledModelIds] = useState([]);
   const [confirmState, setConfirmState] = useState(null);
@@ -505,22 +508,22 @@ export default function ProviderDetailPage() {
   // Personal + Team account exposes the union; its API already falls back to the
   // official edition catalog, so a discovery failure never blanks the picker.
   useEffect(() => {
-    const isLiveCatalog = providerId === "cursor" || providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web" || providerId === "antigravity";
+    const isLiveCatalog = providerId === "cursor" || providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web";
     if (!isLiveCatalog) {
-      if (providerId !== "codex") setLiveModels([]);
+      if (providerId !== "codex" && providerId !== "antigravity") setLiveModels([]);
       return;
     }
 
     const activeConnections = connections.filter((item) => item.isActive !== false && item.id);
     if (!activeConnections.length) {
       setLiveModels([]);
-      if (providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web" || providerId === "antigravity") setLiveModelsError(null);
+      if (providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web") setLiveModelsError(null);
       return;
     }
 
     let cancelled = false;
-    if (providerId === "zed" || providerId === "alitp-intl" || providerId === "antigravity") setLiveModelsError(null);
-    const catalogConnections = (providerId === "alitp-intl" || providerId === "chatgpt-web" || providerId === "antigravity") ? activeConnections : [activeConnections[0]];
+    if (providerId === "zed" || providerId === "alitp-intl") setLiveModelsError(null);
+    const catalogConnections = (providerId === "alitp-intl" || providerId === "chatgpt-web") ? activeConnections : [activeConnections[0]];
     Promise.all(catalogConnections.map((connection) =>
       fetch(`/api/providers/${connection.id}/models`, { cache: "no-store" })
         .then(async (res) => ({ ok: res.ok, data: await res.json().catch(() => null) }))
@@ -545,22 +548,132 @@ export default function ProviderDetailPage() {
           }
         }
       }
-      if (providerId === "antigravity") {
-        const validCatalogs = results.filter((r) => r.ok && Array.isArray(r.data?.models)).map((r) => r.data.models);
-        const mergedList = mergeAntigravityModelLists(validCatalogs);
-        setLiveModels(mergedList);
-      } else if (merged.size) setLiveModels([...merged.values()]);
+      if (merged.size) setLiveModels([...merged.values()]);
       else setLiveModels([]);
       const warning = results.map((r) => r.data?.warning || (r.data?.stale
         ? "A stale runtime catalog is not used for routing; refresh must succeed first."
         : null)).find(Boolean);
-      if ((providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web" || providerId === "antigravity") && warning) setLiveModelsError(warning);
+      if ((providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web") && warning) setLiveModelsError(warning);
       if (providerId === "zed" && !merged.size) setLiveModelsError(warning || "Zed returned no live models.");
       if (providerId === "chatgpt-web" && !merged.size) setLiveModelsError(warning || "No verified ChatGPT Web models are available.");
     });
 
     return () => { cancelled = true; };
   }, [providerId, connections]);
+  // Live Antigravity catalog with 5-minute auto-refresh while visible
+  useEffect(() => {
+    if (providerId !== "antigravity") {
+      lastAntigravityFetchTimeRef.current = 0;
+      return;
+    }
+
+    const activeConnections = connections.filter((item) => item.isActive !== false && item.id);
+    if (!activeConnections.length) {
+      setLiveModels([]);
+      setLiveModelsError(null);
+      lastAntigravityFetchTimeRef.current = 0;
+      return;
+    }
+
+    let cancelled = false;
+    const abortController = new AbortController();
+    let timerId = null;
+
+    const scheduleNextRefresh = () => {
+      clearTimeout(timerId);
+      timerId = setTimeout(() => {
+        if (!cancelled && document.visibilityState === "visible") {
+          loadAntigravityCatalog(false);
+        }
+      }, ANTIGRAVITY_MODEL_CACHE_TTL_MS);
+    };
+
+    const handleVisibilityOrFocus = () => {
+      if (cancelled || document.visibilityState !== "visible") return;
+      const elapsed = Date.now() - lastAntigravityFetchTimeRef.current;
+      if (elapsed >= ANTIGRAVITY_MODEL_CACHE_TTL_MS && !antigravityInflightRef.current) {
+        loadAntigravityCatalog(false);
+      }
+    };
+
+    async function loadAntigravityCatalog(force = false) {
+      if (antigravityInflightRef.current || cancelled) return;
+      antigravityInflightRef.current = true;
+
+      const batchAbortController = new AbortController();
+      const onParentAbort = () => batchAbortController.abort();
+      abortController.signal.addEventListener("abort", onParentAbort);
+
+      try {
+        const results = await Promise.all(
+          activeConnections.map((connection) =>
+            fetch(`/api/providers/${connection.id}/models${force ? "?refresh=true" : ""}`, {
+              cache: "no-store",
+              signal: batchAbortController.signal,
+            })
+              .then(async (res) => ({
+                connectionId: connection.id,
+                ok: res.ok,
+                status: res.status,
+                data: await res.json().catch(() => null),
+              }))
+              .catch(() => ({
+                connectionId: connection.id,
+                ok: false,
+                status: 0,
+                data: null,
+              }))
+          )
+        );
+
+        if (cancelled) return;
+
+        const successfulResults = results.filter(
+          (r) => r.ok && !r.data?.stale && r.data?.resolved === true && Array.isArray(r.data?.models)
+        );
+
+        if (successfulResults.length > 0) {
+          const validCatalogs = successfulResults.map((r) => r.data.models);
+          const mergedList = mergeAntigravityModelLists(validCatalogs);
+          setLiveModels(mergedList);
+          const warning = results.map((r) => r.data?.warning).find(Boolean);
+          setLiveModelsError(warning || null);
+        } else {
+          const fallbackCatalogs = results
+            .filter((r) => r.ok && Array.isArray(r.data?.models))
+            .map((r) => r.data.models);
+          const mergedFallback = mergeAntigravityModelLists(fallbackCatalogs);
+          setLiveModels(mergedFallback);
+          const warning = results.map((r) => r.data?.warning).find(Boolean);
+          setLiveModelsError(warning || "Antigravity live model catalog unavailable; showing legacy fallback models.");
+        }
+      } catch (err) {
+        if (!cancelled) {
+          console.log("Antigravity catalog fetch error:", err?.message || err);
+        }
+      } finally {
+        abortController.signal.removeEventListener("abort", onParentAbort);
+        if (!cancelled) {
+          antigravityInflightRef.current = false;
+          lastAntigravityFetchTimeRef.current = Date.now();
+          scheduleNextRefresh();
+        }
+      }
+    }
+
+    loadAntigravityCatalog(false);
+
+    window.addEventListener("focus", handleVisibilityOrFocus);
+    document.addEventListener("visibilitychange", handleVisibilityOrFocus);
+
+    return () => {
+      cancelled = true;
+      abortController.abort();
+      clearTimeout(timerId);
+      window.removeEventListener("focus", handleVisibilityOrFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityOrFocus);
+    };
+  }, [providerId, connections, liveModelsRefreshNonce]);
 
   // Live Codex catalog with candidate models & 5-minute auto-refresh while visible
   useEffect(() => {

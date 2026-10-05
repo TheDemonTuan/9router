@@ -12,6 +12,7 @@ import {
 } from "open-sse/services/chatgptWebRuntimeClient.js";
 import { resolveEffectiveCodexCatalog } from "open-sse/services/codexModels.js";
 import { mergeChatGptWebPublicModels } from "@/lib/providerNormalization";
+import { resolveEffectiveAntigravityCatalog } from "@/lib/antigravityCatalog.js";
 
 // GET /api/models - Get models with aliases
 export async function GET() {
@@ -141,6 +142,42 @@ export async function GET() {
               ...(Array.isArray(model.supportedReasoningLevels)
                 ? { supportedReasoningLevels: model.supportedReasoningLevels }
                 : {}),
+            },
+          });
+        }
+      }
+    }
+    const antigravityConnections = await getProviderConnections({ provider: "antigravity", isActive: true });
+    if (antigravityConnections.length > 0) {
+      const effective = await resolveEffectiveAntigravityCatalog(antigravityConnections, {
+        log: console,
+      });
+      if (effective.resolved) {
+        for (let index = models.length - 1; index >= 0; index -= 1) {
+          if (models[index].provider === "ag" || models[index].provider === "antigravity") {
+            models.splice(index, 1);
+          }
+        }
+        const disabledAg = new Set([
+          ...(Array.isArray(disabled.ag) ? disabled.ag : []),
+          ...(Array.isArray(disabled.antigravity) ? disabled.antigravity : []),
+        ]);
+        const catalog = (effective.models || []).filter((model) => !disabledAg.has(model.id));
+        for (const model of catalog) {
+          const liveCaps = model.capabilities && typeof model.capabilities === "object" && !Array.isArray(model.capabilities)
+            ? model.capabilities
+            : {};
+          models.push({
+            provider: "ag",
+            model: model.id,
+            name: model.name || model.id,
+            fullModel: `ag/${model.id}`,
+            routedModel: `ag/${model.id}`,
+            alias: modelAliases[`ag/${model.id}`] || modelAliases[`antigravity/${model.id}`] || model.id,
+            caps: {
+              ...liveCaps,
+              contextWindow: model.contextLength ?? null,
+              maxOutput: model.maxOutputTokens ?? null,
             },
           });
         }

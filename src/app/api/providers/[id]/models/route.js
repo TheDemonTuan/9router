@@ -220,6 +220,7 @@ const PROVIDER_MODELS_CONFIG = {
         models: result.models,
         source: result.source,
         fetchedAt: result.fetchedAt,
+        clientVersion: result.clientVersion,
       };
     },
   },

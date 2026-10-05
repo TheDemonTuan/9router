@@ -6,7 +6,7 @@ import { CLIENT_METADATA } from "../../config/appConstants.js";
 import { ANTIGRAVITY_IDE_USER_AGENT, ANTIGRAVITY_IDE_VERSION, ANTIGRAVITY_OAUTH_CLIENT } from "../../providers/shared.js";
 import { U, parseResetTime, normalizeCloudCodeProjectId, fetchWithTimeout, cancelResponseBody } from "./shared.js";
 import { fetchAntigravityWeeklyQuota } from "./antigravity-weekly.js";
-import { normalizeAntigravityCatalog } from "../antigravityModels.js";
+import { normalizeAntigravityCatalog, resolveAntigravityDiscoveryProfile } from "../antigravityModels.js";
 
 // Antigravity API config (from Quotio) — urls from registry, oauth client + dynamic UA kept here
 const ANTIGRAVITY_CONFIG = {
@@ -127,15 +127,19 @@ export async function getAntigravityUsage(accessToken, providerSpecificData, pro
     // Fetch subscription info once — reuse for both projectId and plan
     const subscriptionInfo = await getAntigravitySubscriptionInfo(accessToken, proxyOptions, options);
     const projectId = subscriptionInfo?.cloudaicompanionProject || null;
+    const discoveryProfile = await resolveAntigravityDiscoveryProfile({
+      proxyOptions,
+      signal: options?.signal,
+    });
 
     const response = await fetchWithTimeout(ANTIGRAVITY_CONFIG.quotaApiUrl, {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${accessToken}`,
-        "User-Agent": ANTIGRAVITY_CONFIG.userAgent,
+        "User-Agent": discoveryProfile?.userAgent || ANTIGRAVITY_CONFIG.userAgent,
         "Content-Type": "application/json",
         "X-Client-Name": "antigravity",
-        "X-Client-Version": ANTIGRAVITY_IDE_VERSION,
+        "X-Client-Version": discoveryProfile?.version || ANTIGRAVITY_IDE_VERSION,
       },
       body: JSON.stringify({
         ...(projectId ? { project: projectId } : {})
@@ -185,6 +189,11 @@ export async function getAntigravityUsage(accessToken, providerSpecificData, pro
       }
       modelIds = normalizedModels.map((m) => m.id);
       const allowedModelIds = new Set(modelIds);
+      if (Array.isArray(data.imageGenerationModelIds)) {
+        for (const id of data.imageGenerationModelIds) {
+          if (typeof id === "string" && id.trim()) allowedModelIds.add(id.trim());
+        }
+      }
       // Include known image generation models from raw data
       for (const key of Object.keys(data.models)) {
         if (key.includes("image") || key.includes("imagen")) allowedModelIds.add(key);
