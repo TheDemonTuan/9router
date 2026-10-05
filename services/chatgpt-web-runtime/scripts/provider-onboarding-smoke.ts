@@ -265,7 +265,7 @@ try {
   await page.getByRole("button", { name: "Use Saved Session", exact: true }).click();
   assert.equal((await reverified).status(), 200);
   await page.getByRole("button", { name: "Close", exact: true }).last().click();
-  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await page.getByRole("button", { name: /^(?:add\s+)?Add$/i }).click();
   await page.getByRole("textbox", { name: "Connection name", exact: true }).fill("Offline imported account");
   const creatingImport = page.waitForResponse(r => r.url().endsWith("/api/providers") && r.request().method() === "POST");
   let nativeStarts = 0, uploads = 0;
