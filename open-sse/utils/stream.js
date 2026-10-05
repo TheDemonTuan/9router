@@ -6,6 +6,9 @@ import { parseSSELine, hasValuableContent, fixInvalidId, formatSSE } from "./str
 import { getOpenAIResponsesEventName, isOpenAIResponsesTerminalEvent, formatIncompleteOpenAIResponsesStreamFailure } from "./responsesStreamHelpers.js";
 import { dbg, isDebugEnabled } from "./debugLog.js";
 import { validateJsonText } from "../translator/concerns/jsonSchemaValidation.js";
+import { validateAntigravityToolCalls } from "../translator/concerns/antigravityToolValidation.js";
+import { buildResponseSnapshot, normalizeResponseId } from "../transformer/responsesBuilder.js";
+import { buildStreamErrorBytes } from "./streamHelpers.js";
 
 import { SSE_DONE, SSE_HEADERS, SSE_HEADERS_NO_BUFFER } from "./sseConstants.js";
 
@@ -58,7 +61,9 @@ export function createSSEStream(options = {}) {
     apiKey = null,
     credentials = null,
     responseSchemaValidation = null,
-    releasePending = null
+    releasePending = null,
+    toolArgumentValidation = null,
+    signal = null
   } = options;
 
   let buffer = "";
@@ -94,6 +99,8 @@ export function createSSEStream(options = {}) {
   let streamDoneSent = false;  // track duplicate [DONE] across transform + flush
   let finalized = false;
   let validationFailed = null;
+  let toolValidationFailed = null;
+  let antigravityTerminalSeen = false;
   let completionFlushTimer = null;
   let pendingReleased = false;
 
@@ -114,7 +121,7 @@ export function createSSEStream(options = {}) {
     clearCompletionTimer();
     if (finalized) return;
     finalized = true;
-    releaseStream();
+    releaseStream(Boolean(toolValidationFailed || validationFailed));
 
     const isPassthrough = mode === STREAM_MODE.PASSTHROUGH;
     let finalUsage = isPassthrough ? usage : state?.usage;
@@ -127,7 +134,7 @@ export function createSSEStream(options = {}) {
     if (hasValidUsage(finalUsage)) {
       logUsage(isPassthrough ? provider : (state?.provider || targetFormat), finalUsage, model, connectionId, apiKey);
     } else {
-      appendRequestLog({ model, provider, connectionId, tokens: null, status: "200 OK" }).catch(() => { });
+      appendRequestLog({ model, provider, connectionId, tokens: null, status: toolValidationFailed ? "FAILED 502" : "200 OK" }).catch(() => { });
     }
 
     if (responseSchemaValidation && !validationFailed && accumulatedContent) {
@@ -138,7 +145,7 @@ export function createSSEStream(options = {}) {
       onStreamComplete({
         content: accumulatedContent,
         thinking: accumulatedThinking
-      }, finalUsage, ttftAt, validationFailed ? { status: "failed", successful: false, message: `Structured output failed JSON Schema validation: ${validationFailed}` } : undefined);
+      }, finalUsage, ttftAt, toolValidationFailed ? { status: "failed", successful: false, message: toolValidationFailed.message } : validationFailed ? { status: "failed", successful: false, message: `Structured output failed JSON Schema validation: ${validationFailed}` } : undefined);
     }
   };
 
@@ -161,9 +168,82 @@ export function createSSEStream(options = {}) {
     }
     finalizeStream();
   };
+  const failToolStream = (error, controller) => {
+    if (toolValidationFailed) return;
+    if (error.code !== "invalid_tool_arguments") error = Object.assign(new Error("Antigravity tool argument validation unavailable"), { code: "invalid_tool_arguments" });
+    toolValidationFailed = error;
+    const payload = { type: "server_error", code: "invalid_tool_arguments", message: error.message };
+    if (sourceFormat === FORMATS.OPENAI_RESPONSES) {
+      state.responseId = normalizeResponseId(state.responseId);
+      state.created ??= Math.floor(Date.now() / 1000);
+      const response = buildResponseSnapshot(state, { status: "failed", error: payload });
+      response.error = payload;
+      controller.enqueue(sharedEncoder.encode(formatSSE({ event: "response.failed", data: { type: "response.failed", sequence_number: ++state.seq || (state.seq = 1), response } }, sourceFormat)));
+      state.geminiTerminal = true;
+    } else if ([FORMATS.ANTIGRAVITY, FORMATS.GEMINI, FORMATS.GEMINI_CLI, FORMATS.VERTEX].includes(sourceFormat)) {
+      controller.enqueue(sharedEncoder.encode(formatSSE({ error: payload }, sourceFormat)));
+    } else {
+      controller.enqueue(buildStreamErrorBytes(502, error.message, sourceFormat));
+    }
+    finalizeStream();
+    controller.terminate();
+  };
+  // Both ordinary frames and the EOF tail use this gate before any tool emission.
+  const processAntigravityLine = async (line, controller) => {
+    if (finalized || toolValidationFailed || !line.trim()) return;
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("data:")) return;
+    let parsed;
+    try { parsed = trimmed.slice(5).trim() === "[DONE]" ? { done: true } : JSON.parse(trimmed.slice(5).trim()); }
+    catch {
+      failToolStream(Object.assign(new Error("Antigravity tool argument validation unavailable"), { code: "invalid_tool_arguments" }), controller);
+      return;
+    }
+    const response = parsed?.response || parsed;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || !response || typeof response !== "object" || Array.isArray(response) || (!parsed.done && !Array.isArray(response.candidates) && !(response.usageMetadata && !response.choices && !response.output))) {
+      failToolStream(Object.assign(new Error("Antigravity tool argument validation unavailable"), { code: "invalid_tool_arguments" }), controller);
+      return;
+    }
+    if (parsed.done) return;
+    const extracted = extractUsage(parsed);
+    if (extracted) state.usage = mergeUsage(state.usage, extracted);
+    try { await validateAntigravityToolCalls(parsed, toolArgumentValidation, { signal }); }
+    catch (error) {
+      if (signal?.aborted) throw signal.reason || error;
+      failToolStream(error, controller);
+      return;
+    }
+    if (response.error) {
+      failToolStream(Object.assign(new Error("Antigravity tool argument validation unavailable"), { code: "invalid_tool_arguments" }), controller);
+      return;
+    }
+    for (const candidate of response.candidates || []) {
+      if (candidate.finishReason) antigravityTerminalSeen = true;
+      for (const part of candidate.content?.parts || []) if (typeof part.text === "string") {
+        totalContentLength += part.text.length;
+        if (part.thought) accumulatedThinking += part.text; else accumulatedContent += part.text;
+      }
+    }
+    const translated = targetFormat === sourceFormat ? [parsed] : translateResponse(targetFormat, sourceFormat, parsed, state);
+    for (const item of translated || []) {
+      if (item === null || item === undefined || !hasValuableContent(item, sourceFormat)) continue;
+      const output = formatSSE(item, sourceFormat);
+      reqLogger?.appendConvertedChunk?.(output);
+      controller.enqueue(sharedEncoder.encode(output));
+    }
+    if (antigravityTerminalSeen) {
+      if (sourceFormat === FORMATS.OPENAI && !streamDoneSent) {
+        controller.enqueue(sharedEncoder.encode(SSE_DONE));
+        streamDoneSent = true;
+      }
+      // Responses consumers cancel on response.completed; EOF/flush may never run.
+      // Once terminal, subsequent provider frames cannot produce more client calls.
+      finalizeStream();
+    }
+  };
 
   const transform = new TransformStream({
-    transform(chunk, controller) {
+    async transform(chunk, controller) {
       if (!ttftAt) ttftAt = Date.now();
       const text = decoder.decode(chunk, { stream: true });
       buffer += text;
@@ -172,6 +252,13 @@ export function createSSEStream(options = {}) {
       const lines = buffer.split("\n");
       buffer = lines.pop() || "";
 
+      if (toolArgumentValidation) {
+        for (const line of lines) {
+          await processAntigravityLine(line, controller);
+          if (toolValidationFailed) break;
+        }
+        return;
+      }
       for (const line of lines) {
         const trimmed = line.trim();
         if (isDebugEnabled && trimmed) {
@@ -457,13 +544,28 @@ export function createSSEStream(options = {}) {
       }
     },
 
-    flush(controller) {
+    async flush(controller) {
       clearCompletionTimer();
       const evtSummary = Object.entries(eventTypeCounts).map(([k, v]) => `${k}=${v}`).join(",") || "none";
       dbg("SSE", `flush | provider=${provider} | model=${model} | recvLines=${sseLineCount} | emitted=${sseEmittedCount} | events=[${evtSummary}]`);
       try {
         const remaining = decoder.decode();
         if (remaining) buffer += remaining;
+        if (toolArgumentValidation) {
+          if (finalized || toolValidationFailed) return;
+          await processAntigravityLine(buffer, controller);
+          if (finalized || toolValidationFailed) return;
+          if (!antigravityTerminalSeen) {
+            failToolStream(Object.assign(new Error("Antigravity tool argument validation unavailable"), { code: "invalid_tool_arguments" }), controller);
+            return;
+          }
+          if (targetFormat !== sourceFormat) for (const item of translateResponse(targetFormat, sourceFormat, null, state) || []) {
+            if (item !== null && item !== undefined) controller.enqueue(sharedEncoder.encode(formatSSE(item, sourceFormat)));
+          }
+          if (sourceFormat === FORMATS.OPENAI) controller.enqueue(sharedEncoder.encode(SSE_DONE));
+          finalizeStream();
+          return;
+        }
 
         if (mode === STREAM_MODE.PASSTHROUGH) {
           if (buffer) {
@@ -564,6 +666,11 @@ export function createSSEStream(options = {}) {
 
         finalizeStream();
       } catch (error) {
+        if (toolArgumentValidation) {
+          if (signal?.aborted) throw signal.reason || error;
+          failToolStream(error, controller);
+          return;
+        }
         console.log("Error in flush:", error);
         finalizeStream();
       }
@@ -573,7 +680,7 @@ export function createSSEStream(options = {}) {
   return transform;
 }
 
-export function createSSETransformStreamWithLogger(targetFormat, sourceFormat, provider = null, reqLogger = null, toolNameMap = null, model = null, connectionId = null, body = null, onStreamComplete = null, apiKey = null, customToolNames = null, credentials = null, responseSchemaValidation = null, releasePending = null) {
+export function createSSETransformStreamWithLogger(targetFormat, sourceFormat, provider = null, reqLogger = null, toolNameMap = null, model = null, connectionId = null, body = null, onStreamComplete = null, apiKey = null, customToolNames = null, credentials = null, responseSchemaValidation = null, releasePending = null, toolArgumentValidation = null, signal = null) {
   return createSSEStream({
     mode: STREAM_MODE.TRANSLATE,
     targetFormat,
@@ -589,7 +696,9 @@ export function createSSETransformStreamWithLogger(targetFormat, sourceFormat, p
     apiKey,
     credentials,
     responseSchemaValidation,
-    releasePending
+    releasePending,
+    toolArgumentValidation,
+    signal
   });
 }
 

@@ -1,0 +1,16 @@
+export const ANTIGRAVITY_SCHEMA_LIMITS = Object.freeze({
+  canonicalBytes: 1024 * 1024,
+  depth: 64,
+  nodes: 20000,
+  expandedNodes: 20000,
+  argumentBytes: 1024 * 1024,
+  guidanceNodeBytes: 512,
+  guidanceToolBytes: 4096,
+  workers: 2,
+  queuedJobs: 32,
+  jobTimeoutMs: 2000,
+  queueTimeoutMs: 2000,
+  idleTimeoutMs: 30000,
+  cacheEntries: 128,
+  cacheBytes: 8 * 1024 * 1024,
+});

@@ -314,20 +314,6 @@ describe("Responses Structured Outputs & Multi-hop Translation", () => {
       expect(schema["x-custom-meta"]).toBeUndefined();
     });
 
-    it("keeps Claude Antigravity tools on the legacy sanitizer", () => {
-      const request = openaiToAntigravityRequest("claude-3-7-sonnet", {
-        messages: [{ role: "user", content: "Use tool" }],
-        tools: [{ type: "function", function: {
-          name: "pick",
-          parameters: { type: "object", properties: { value: { type: "string", minLength: 1 } } },
-        } }],
-      }, false);
-      expect(request.request.tools[0].functionDeclarations[0].parametersJsonSchema).toBeUndefined();
-      expect(request.request.tools[0].functionDeclarations[0].parameters).toMatchObject({
-        type: "object",
-        properties: { value: { type: "string" } },
-      });
-    });
 
     it("maps json_object response_format to application/json in Gemini", () => {
       const chatRequest = {

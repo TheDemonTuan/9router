@@ -42,6 +42,8 @@ import { detectCacheFence } from "../token-saver/cacheFence.js";
 import { planSessionDedup, commitSessionDedup } from "../token-saver/sessionDedup.js";
 import { measureCleanupOpportunities } from "../token-saver/safeCleanup.js";
 import { recordTokenSaverPreparation } from "../token-saver/state.js";
+import { isAntigravityClaudeModel } from "../translator/concerns/antigravityToolSchema.js";
+import { prepareAntigravityToolValidation } from "../translator/concerns/antigravityToolValidation.js";
 
 /**
  * Core chat handler - shared between SSE and Worker
@@ -244,6 +246,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const saverStarted = performance.now();
   let reqLogger, clientTool, responsesClientDialect, responsesProviderDialect;
   let translatedBody, responseSchemaValidation, toolNameMap, customToolNames, pxpipeSummary;
+  let toolArgumentValidation = null;
   try {
   const indexStarted = performance.now();
   if (tokenSaverEnabled) {
@@ -394,6 +397,18 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     delete translatedBody._customToolNames;
     translatedBody.model = wireModel;
     stripContinuityFields(translatedBody);
+  }
+  if (provider === "antigravity" && isAntigravityClaudeModel(translatedBody.model || model)) {
+    try {
+      const declarations = (translatedBody.request?.tools || []).flatMap(group => group.functionDeclarations || []);
+      // Source names retain diagnostics and detect collisions hidden by translator sanitization.
+      const sourceNames = (sourceBody.tools || []).map(tool => tool.name || tool.function?.name).filter(Boolean);
+      const namedDeclarations = declarations.map((declaration, index) => ({ ...declaration, originalName: sourceNames[index] || declaration.name }));
+      if (declarations.length) toolArgumentValidation = await prepareAntigravityToolValidation(namedDeclarations, { signal: preResponse?.signal || clientSignal });
+    } catch (error) {
+      if (preResponse?.signal?.aborted || clientSignal?.aborted) throw preResponse?.signal?.reason || clientSignal.reason || error;
+      return createErrorResult(error.status === 503 ? HTTP_STATUS.SERVICE_UNAVAILABLE : HTTP_STATUS.BAD_REQUEST, error.message, null, { errorClass: error.code, retryable: false });
+    }
   }
 
   if (provider === "codex" && targetFormat === FORMATS.OPENAI_RESPONSES) {
@@ -799,7 +814,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   const sharedCtx = {
     provider, model, body, stream, translatedBody, finalBody,
-    responseSchemaValidation, requestStartTime, connectionId, apiKey,
+    responseSchemaValidation, toolArgumentValidation, requestStartTime, connectionId, apiKey,
     clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag,
     log, responsesClientDialect, responsesProviderDialect, releasePending,
     preResponse, upstreamHeadersAt, routeContext,
