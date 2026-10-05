@@ -375,6 +375,7 @@ export default function ProviderLimits() {
         }
 
         await fetchQuota(connectionId, provider, { force: true });
+        await fetchConnections(page);
         setLastUpdated(new Date());
       } catch (error) {
         setErrors((prev) => ({ ...prev, [connectionId]: error.message || "Failed to reset limit" }));
@@ -382,7 +383,7 @@ export default function ProviderLimits() {
         setResettingLimitId(null);
       }
     },
-    [fetchQuota, resettingLimitId, quotaData],
+    [fetchConnections, fetchQuota, page, quotaData, resettingLimitId],
   );
 
   // Claude grants already arrive with the usage read; no extra fetch

@@ -3,10 +3,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 const mocks = vi.hoisted(() => ({
   proxyAwareFetch: vi.fn(),
   getProviderConnectionById: vi.fn(),
+  updateProviderConnection: vi.fn(),
   resolveConnectionProxyConfig: vi.fn(),
   refreshAndUpdateCredentials: vi.fn(),
   getCodexRateLimitResetCredits: vi.fn(),
   consumeCodexRateLimitResetCredit: vi.fn(),
+  invalidateUsageCache: vi.fn(),
 }));
 
 vi.mock("../../open-sse/utils/proxyFetch.js", () => ({
@@ -17,6 +19,7 @@ vi.mock("open-sse/index.js", () => ({}));
 
 vi.mock("@/lib/localDb", () => ({
   getProviderConnectionById: mocks.getProviderConnectionById,
+  updateProviderConnection: mocks.updateProviderConnection,
 }));
 
 vi.mock("@/lib/network/connectionProxy", () => ({
@@ -30,6 +33,7 @@ vi.mock("@/app/api/usage/[connectionId]/route.js", () => ({
 vi.mock("open-sse/services/usage.js", () => ({
   getCodexRateLimitResetCredits: mocks.getCodexRateLimitResetCredits,
   consumeCodexRateLimitResetCredit: mocks.consumeCodexRateLimitResetCredit,
+  invalidateUsageCache: mocks.invalidateUsageCache,
 }));
 
 describe("Codex reset credits", () => {
@@ -205,5 +209,36 @@ describe("Codex reset credits", () => {
       expect.any(String),
       expect.objectContaining({ strictProxy: false }),
     );
+  });
+
+  it("POST resets connection health state and clears model locks when credit is consumed", async () => {
+    mocks.getProviderConnectionById.mockResolvedValue({
+      id: "conn_1",
+      provider: "codex",
+      authType: "access_token",
+      accessToken: "token",
+      providerSpecificData: {},
+    });
+    mocks.consumeCodexRateLimitResetCredit.mockResolvedValue({
+      ok: true,
+      status: 200,
+      code: "reset",
+      windowsReset: 2,
+      raw: { credit: { id: "cred_1" } },
+    });
+
+    const { POST } = await import("../../src/app/api/usage/[connectionId]/codex-reset-credits/route.js");
+    const response = await POST(new Request("http://localhost/api/usage/conn_1/codex-reset-credits", { method: "POST" }), {
+      params: Promise.resolve({ connectionId: "conn_1" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      code: "reset",
+      reset: true,
+      windows_reset: 2,
+    });
+    expect(mocks.updateProviderConnection).toHaveBeenCalledWith("conn_1", { testStatus: "active" });
+    expect(mocks.invalidateUsageCache).toHaveBeenCalledWith("conn_1");
   });
 });

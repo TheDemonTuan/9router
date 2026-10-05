@@ -1,8 +1,8 @@
 // Ensure proxyFetch is loaded to patch globalThis.fetch
 import "open-sse/index.js";
 
-import { getProviderConnectionById } from "@/lib/localDb";
-import { consumeClaudeResetGrant } from "open-sse/services/usage.js";
+import { getProviderConnectionById, updateProviderConnection } from "@/lib/localDb";
+import { consumeClaudeResetGrant, invalidateUsageCache } from "open-sse/services/usage.js";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { refreshAndUpdateCredentials } from "../route.js";
 
@@ -30,7 +30,11 @@ export async function POST(request, { params }) {
     ({ connection } = await refreshAndUpdateCredentials(connection, false, proxyOptions));
     const result = await consumeClaudeResetGrant(connection.accessToken, grantId, proxyOptions);
 
-    if (result.ok) return Response.json(result);
+    if (result.ok) {
+      await updateProviderConnection(connectionId, { testStatus: "active" });
+      invalidateUsageCache(connectionId);
+      return Response.json(result);
+    }
     const status = result.status >= 400 && result.status < 500 ? result.status : 409;
     return Response.json({ ...result, message: result.message || `Reset not applied: ${result.reason || result.result || "unknown"}` }, { status });
   } catch (error) {

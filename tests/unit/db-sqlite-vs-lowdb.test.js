@@ -134,11 +134,14 @@ describe("DB SQLite layer — public API parity", () => {
       lastErrorAt: "2026-09-05T00:00:00.000Z",
       errorCode: 403,
       backoffLevel: 3,
+      unavailabilityReason: "quota_exhausted",
+      lastErrorType: "quota",
       rateLimitedUntil: "2099-01-01T00:00:00.000Z",
       modelLock_modelA: "2099-01-01T00:00:00.000Z",
+      modelLockReason_modelA: "quota_exhausted",
+      modelLockErrorCode_modelA: 429,
       modelLock_modelB: "2099-01-01T00:00:00.000Z",
     });
-
     await sqliteDb.updateProviderConnection(c.id, { testStatus: "active" });
 
     const back = await sqliteDb.getProviderConnectionById(c.id);
@@ -148,8 +151,12 @@ describe("DB SQLite layer — public API parity", () => {
       lastErrorAt: null,
       errorCode: null,
       backoffLevel: 0,
+      unavailabilityReason: null,
+      lastErrorType: null,
       rateLimitedUntil: null,
       modelLock_modelA: null,
+      modelLockReason_modelA: null,
+      modelLockErrorCode_modelA: null,
       modelLock_modelB: null,
     });
   });

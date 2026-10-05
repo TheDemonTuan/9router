@@ -86,6 +86,19 @@ function buildUsageCacheKey(connection, proxyOptions) {
   return `${provider}:${id}:${token}:${key}:${psd}:${proxy}:${project}`;
 }
 
+export function invalidateUsageCache(connectionId = null) {
+  if (!connectionId) {
+    usageCache.clear();
+    return;
+  }
+  for (const key of usageCache.keys()) {
+    const parts = key.split(":");
+    if (parts[1] === connectionId) {
+      usageCache.delete(key);
+    }
+  }
+}
+
 export async function getUsageForProvider(connection, proxyOptions = null, options = {}) {
   const force = options.force === true;
   const cacheKey = buildUsageCacheKey(connection, proxyOptions);

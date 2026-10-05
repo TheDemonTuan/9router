@@ -204,7 +204,20 @@ export async function GET(request, { params }) {
     if (connection.provider === "antigravity" && !usage?.message) {
       await persistAntigravityQuota(connection.id, usage?.quotas);
     }
-      return usage;
+
+    if (connection.provider === "codex" && !usage?.message) {
+      const hasQuota = usage.limitReached === false
+        && (!usage.quotas?.weekly || usage.quotas.weekly.remaining > 0);
+      const wasLocked = connection.testStatus === "unavailable"
+        || connection.unavailabilityReason === "quota_exhausted"
+        || Number(connection.errorCode) === 429
+        || Object.keys(connection).some((k) => k.startsWith("modelLock") && connection[k]);
+      if (hasQuota && wasLocked) {
+        await updateProviderConnection(connection.id, { testStatus: "active" });
+      }
+    }
+
+    return usage;
     } catch (error) {
       const provider = connection?.provider ?? "unknown";
       console.warn(`[Usage] ${provider}: ${error.message}`);

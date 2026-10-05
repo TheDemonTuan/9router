@@ -23,12 +23,13 @@ function resetHealthStateOnActivation(existing, patch) {
     errorCode: null,
     rateLimitedUntil: null,
     backoffLevel: 0,
+    unavailabilityReason: null,
+    lastErrorType: null,
   };
 
   for (const key of Object.keys(existing || {})) {
-    if (key.startsWith(MODEL_LOCK_PREFIX)) normalized[key] = null;
+    if (key.startsWith("modelLock")) normalized[key] = null;
   }
-
   return normalized;
 }
 

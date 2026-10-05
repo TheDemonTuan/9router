@@ -72,4 +72,31 @@ describe("usage cache identity and payload contract", () => {
     await getUsageForProvider(messageConnection);
     expect(mocks.codex).toHaveBeenCalledTimes(4);
   });
+
+  it("invalidateUsageCache clears specific connection or entire cache", async () => {
+    const { getUsageForProvider, invalidateUsageCache } = await load();
+    const conn1 = { id: "conn-1", provider: "codex", accessToken: "t1" };
+    const conn2 = { id: "conn-2", provider: "codex", accessToken: "t2" };
+
+    await getUsageForProvider(conn1);
+    await getUsageForProvider(conn2);
+    expect(mocks.codex).toHaveBeenCalledTimes(2);
+
+    // Cached hits
+    await getUsageForProvider(conn1);
+    await getUsageForProvider(conn2);
+    expect(mocks.codex).toHaveBeenCalledTimes(2);
+
+    // Invalidate conn1 only
+    invalidateUsageCache("conn-1");
+    await getUsageForProvider(conn1);
+    await getUsageForProvider(conn2);
+    expect(mocks.codex).toHaveBeenCalledTimes(3);
+
+    // Invalidate all
+    invalidateUsageCache();
+    await getUsageForProvider(conn1);
+    await getUsageForProvider(conn2);
+    expect(mocks.codex).toHaveBeenCalledTimes(5);
+  });
 });
