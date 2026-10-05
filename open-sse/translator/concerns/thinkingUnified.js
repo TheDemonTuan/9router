@@ -132,6 +132,12 @@ function openAIThinkingDisplay(body) {
 const NATIVE_ONLY_FORMATS = new Set(["gemini-level", "gemini-budget", "claude-budget", "claude-adaptive", "kiro"]);
 
 function resolveFormat(targetFormat, model, provider, metadata = null) {
+  if (targetFormat === "antigravity" && typeof model === "string") {
+    const bare = stripThinkingSuffix(model).toLowerCase();
+    if (bare.startsWith("claude-") || bare.includes("/claude-")) {
+      return "gemini-budget";
+    }
+  }
   if (targetFormat === "commandcode") return "commandcode";
   const providerFmt = provider ? PROVIDERS[provider]?.thinkingFormat : null;
   if (providerFmt) return providerFmt;
@@ -282,7 +288,9 @@ function applyFormat(fmt, body, cfg, caps, supportedLevels, display, strictCatal
       if (canDisable) body.thinking = { type: "adaptive", ...(display ? { display } : {}) };
       else delete body.thinking;
       const level = toLevel(eff);
-      body.output_config = { effort: level === "xhigh" || level === "auto" ? "high" : level };
+      // xhigh is model-gated (Opus/Sonnet 4.6 reject it) — clamp when not advertised.
+      body.output_config = { effort: level === "auto" ? "high"
+        : level === "xhigh" && !supportedLevels?.includes("xhigh") ? "high" : level };
       break;
     }
     case "claude-budget": {

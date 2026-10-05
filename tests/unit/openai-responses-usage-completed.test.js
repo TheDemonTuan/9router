@@ -1,4 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("@/lib/usageDb.js", () => ({
+  trackPendingRequest: vi.fn(),
+  appendRequestLog: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("../../open-sse/utils/usageTracking.js", async (importOriginal) => ({
+  ...await importOriginal(),
+  logUsage: vi.fn(),
+}));
+
+import "../translator/registerAll.js";
 
 import { FORMATS } from "../../open-sse/translator/formats.js";
 import { createSSETransformStreamWithLogger } from "../../open-sse/utils/stream.js";

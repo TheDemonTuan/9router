@@ -53,6 +53,7 @@ export default {
     },
   },
   models: [
+    { id: "gpt-6.1-sol", name: "GPT 6.1 Sol", responsesLite: true, thinkingLevels: GPT_6_LITE_THINKING_LEVELS },
     {
       id: "gpt-6-astra",
       name: "GPT-6-Astra",
@@ -92,11 +93,16 @@ export default {
     { id: "gpt-5.6-terra", name: "GPT 5.6 Terra" },
     { id: "gpt-5.6-luna", name: "GPT 5.6 Luna" },
     { id: "gpt-5.5", name: "GPT 5.5" },
-    { id: "gpt-5.4", name: "GPT 5.4" },
-    { id: "gpt-5.4-mini", name: "GPT 5.4 Mini" },
-    { id: "gpt-5.3-codex-spark", name: "GPT 5.3 Codex Spark" },
-    // Codex CLI's auto-review virtual model. Unlike the "-review" variants above it is not derived
-    // from a base model, so it is forwarded verbatim instead of having "-review" stripped (#1398).
+    { id: "gpt-daybreak-blue-latest", name: "GPT Daybreak Blue" },
+    { id: "gpt-reserve", name: "GPT Reserve" },
+    { id: "gpt-6.1-sol[1m]", name: "GPT 6.1 Sol (extended context)", upstreamModelId: "gpt-6.1-sol", responsesLite: true, thinkingLevels: GPT_6_LITE_THINKING_LEVELS },
+    { id: "gpt-6-astra[1m]", name: "GPT 6.0 Astra (extended context)", upstreamModelId: "gpt-6-astra" },
+    { id: "gpt-6-sol[1m]", name: "GPT 6.0 Sol (extended context)", upstreamModelId: "gpt-6-sol", responsesLite: true, thinkingLevels: GPT_6_LITE_THINKING_LEVELS },
+    { id: "gpt-6-luna[1m]", name: "GPT 6.0 Luna (extended context)", upstreamModelId: "gpt-6-luna", responsesLite: true, thinkingLevels: GPT_6_LITE_THINKING_LEVELS },
+    { id: "gpt-5.6-sol[1m]", name: "GPT 5.6 Sol (extended context)", upstreamModelId: "gpt-5.6-sol" },
+    { id: "gpt-5.6-terra[1m]", name: "GPT 5.6 Terra (extended context)", upstreamModelId: "gpt-5.6-terra" },
+    { id: "gpt-5.6-luna[1m]", name: "GPT 5.6 Luna (extended context)", upstreamModelId: "gpt-5.6-luna" },
+    // Codex CLI's auto-review model is forwarded verbatim, not stripped to a base ID.
     { id: "codex-auto-review", name: "Codex Auto Review", upstreamModelId: "codex-auto-review", quotaFamily: "review" },
     { id: "gpt-image-2.5", name: "GPT Image 2.5", capabilities: ["text2img","edit","multiImage"], params: ["size","quality","background","image_detail","output_format"], kind: "image" },
     { id: "gpt-image-2.5-flare", name: "GPT Image 2.5 Flare", capabilities: ["text2img","edit","multiImage"], params: ["size","quality","background","image_detail","output_format"], kind: "image" },
@@ -107,7 +113,7 @@ export default {
     { id: "gpt-5.6-terra-image", name: "GPT 5.6 Terra Image", capabilities: ["text2img","edit"], params: ["size","quality","background","image_detail","output_format"], kind: "image" },
     { id: "gpt-5.6-luna-image", name: "GPT 5.6 Luna Image", capabilities: ["text2img","edit"], params: ["size","quality","background","image_detail","output_format"], kind: "image" },
     { id: "gpt-5.5-image", name: "GPT 5.5 Image", capabilities: ["text2img","edit"], params: ["size","quality","background","image_detail","output_format"], kind: "image" },
-    { id: "gpt-5.4-image", name: "GPT 5.4 Image", capabilities: ["text2img","edit"], params: ["size","quality","background","image_detail","output_format"], kind: "image" },
+    // gpt-5.4-image removed alongside gpt-5.4 (both are dead on the backend) (#4202).
     { id: "gpt-5.3-image", name: "GPT 5.3 Image", capabilities: ["text2img","edit"], params: ["size","quality","background","image_detail","output_format"], kind: "image" },
   ],
   serviceKinds: ["llm","image"],
@@ -124,7 +130,9 @@ export default {
       codex_cli_simplified_flow: "true",
       originator: "codex_cli_rs",
     },
-    refreshLeadMs: 432000000,
+    // Access tokens live ~1h; a 5d lead rotated the refresh token on EVERY call —
+    // reuse of a rotated token revokes the whole OpenAI session (account logout).
+    refreshLeadMs: 600000,
     refresh: {
       encoding: "form",
       scope: "openid profile email offline_access",

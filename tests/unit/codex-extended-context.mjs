@@ -1,0 +1,27 @@
+import assert from "node:assert/strict";
+import codex from "../../open-sse/providers/registry/codex.js";
+import { getModelUpstreamId } from "../../open-sse/config/providerModels.js";
+import { getCapabilitiesForModel } from "../../open-sse/providers/capabilities.js";
+import { stripModelContextMarker } from "../../open-sse/utils/modelMarkers.js";
+import { checkFallbackError } from "../../open-sse/services/accountFallback.js";
+import { codexCatalogSupportsRequest, isCodexFallbackModel } from "../../open-sse/services/codexModels.js";
+
+for (const id of ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]) {
+  const extended = `${id}[1m]`;
+  assert.equal(codex.models.find((model) => model.id === extended)?.upstreamModelId, id);
+  assert.equal(getModelUpstreamId("cx", extended), id);
+  assert.equal(getCapabilitiesForModel("codex", extended).contextWindow, 872000);
+  assert.equal(getCapabilitiesForModel("cx", extended).contextWindow, 872000);
+  assert.deepEqual(stripModelContextMarker(`cx/${extended}`), { model: `cx/${id}`, contextMarker: "1m" });
+}
+const accountA = [{ id: "gpt-6-sol", contextLength: 272000, maxContextLength: 272000, supportedReasoningLevels: ["high"] }];
+const accountB = [{ id: "gpt-6-sol", contextLength: 272000, maxContextLength: 1000000, supportedReasoningLevels: ["high"] }];
+assert.equal(codexCatalogSupportsRequest(accountA, "gpt-6-sol[1m](high)").supported, false);
+assert.equal(codexCatalogSupportsRequest(accountB, "gpt-6-sol[1m](high)").supported, true);
+assert.equal(codexCatalogSupportsRequest(accountB, "gpt-6-sol[1m](high)").metadata.contextLength, 872000);
+assert.equal(codexCatalogSupportsRequest(accountB, "gpt-6-sol[1m](ultra)").supported, false);
+assert.equal(isCodexFallbackModel("gpt-6-sol[1m]"), false);
+const unsupported = "The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account.";
+assert.equal(checkFallbackError(400, unsupported, 0, "codex").shouldFallback, true);
+assert.equal(checkFallbackError(400, "Invalid JSON body", 0, "codex").shouldFallback, false);
+console.log("Codex extended models and account fallback OK");

@@ -26,11 +26,12 @@ export function clearAntigravityStrikes(connectionId, model) {
 }
 
 /** Persist only exact, future-dated zero-quota router models. */
-export async function persistAntigravityQuota(connectionId, quotas) {
+export async function persistAntigravityQuota(connectionId, quotas, modelIds = []) {
   if (!quotas || typeof quotas !== "object" || Array.isArray(quotas) || !connectionId || connectionId === "noauth") return;
+  const allowed = new Set([...MODEL_IDS, ...(modelIds || [])]);
   const locks = [];
   for (const [model, quota] of Object.entries(quotas)) {
-    if (DISPLAY_ONLY_KEYS.has(model) || !MODEL_IDS.has(model)) continue;
+    if (DISPLAY_ONLY_KEYS.has(model) || !allowed.has(model)) continue;
     if (quota?.unlimited === true || quota?.remainingPercentage !== 0) continue;
     if (typeof quota?.remainingPercentage !== "number" || !Number.isFinite(quota.remainingPercentage)) continue;
     const resetMs = new Date(quota.resetAt).getTime();
@@ -53,9 +54,9 @@ export async function refreshAntigravityQuota(connectionId, accessToken, provide
 
   const lastRefresh = lastRefreshAt.get(connectionId) || 0;
   if (now - lastRefresh < MIN_REFRESH_INTERVAL_MS) {
-    const snapshot = quotaCache.get(connectionId) || null;
-    if (snapshot) await persistAntigravityQuota(connectionId, snapshot);
-    return snapshot;
+    const cached = quotaCache.get(connectionId) || null;
+    if (cached) await persistAntigravityQuota(connectionId, cached.quotas, cached.modelIds);
+    return cached?.quotas || null;
   }
 
   lastRefreshAt.set(connectionId, now);
@@ -86,8 +87,8 @@ async function _doRefresh(connectionId, accessToken, providerSpecificData, now) 
   }
 
   if (!usage?.quotas || usage.message) return null;
-  quotaCache.set(connectionId, usage.quotas);
-  await persistAntigravityQuota(connectionId, usage.quotas);
+  quotaCache.set(connectionId, { quotas: usage.quotas, modelIds: usage.modelIds || [] });
+  await persistAntigravityQuota(connectionId, usage.quotas, usage.modelIds || []);
   return usage.quotas;
 }
 
@@ -96,7 +97,8 @@ async function _doRefresh(connectionId, accessToken, providerSpecificData, now) 
  * @returns {null|{resetsAtMs:number,errorClass:string}}
  */
 export function getAntigravityCachedQuotaEvidence(connectionId, model) {
-  const quota = quotaCache.get(connectionId)?.[model];
+  const cached = quotaCache.get(connectionId);
+  const quota = cached?.quotas ? cached.quotas[model] : cached?.[model];
   const now = Date.now();
   const resetMs = new Date(quota?.resetAt).getTime();
   if (quota?.remainingPercentage === 0 && Number.isFinite(resetMs) && resetMs > now) {

@@ -72,8 +72,8 @@ describe("Codex provider models route with live resolver", () => {
         return makeResponse({
           models: [
             {
-              slug: "gpt-6.1-sol",
-              display_name: "GPT-6.1-Sol",
+              slug: "gpt-fixture-candidate",
+              display_name: "GPT Fixture Candidate",
               supported_reasoning_levels: [{ effort: "low" }, { effort: "ultra" }],
               visibility: "list",
               supported_in_api: true,
@@ -87,8 +87,8 @@ describe("Codex provider models route with live resolver", () => {
         return makeResponse({
           models: [
             {
-              slug: "gpt-6.1-sol",
-              display_name: "GPT-6.1-Sol Official",
+              slug: "gpt-fixture-candidate",
+              display_name: "GPT Fixture Candidate Official",
               minimal_client_version: "0.153.0",
               visibility: "list",
             },
@@ -112,8 +112,11 @@ describe("Codex provider models route with live resolver", () => {
     expect(data1.resolved).toBe(true);
     expect(data1.clientVersion).toBe(CODEX_CLIENT_VERSION);
     expect(data1.warning).toContain("Live Codex catalog unavailable (HTTP 403); using the static fallback.");
-    expect(data1.models.map((m) => m.id)).not.toContain("gpt-6.1-sol");
-    expect(data1.candidateModels.map((m) => m.id)).toContain("gpt-6.1-sol");
+    expect(data1.models.map((m) => m.id)).not.toContain("gpt-fixture-candidate");
+    const candidate = data1.candidateModels.find((m) => m.id === "gpt-fixture-candidate");
+    expect(candidate).toBeDefined();
+    expect(candidate.discoveryStatus).toBe("official-unverified");
+    expect(candidate.discoverySource).toBe("official");
 
     // Stage 2: Upstream recovers, call route with ?refresh=true
     liveStatus = 200;
@@ -127,7 +130,7 @@ describe("Codex provider models route with live resolver", () => {
     expect(data2.resolved).toBe(true);
     expect(data2.clientVersion).toBe(CODEX_CLIENT_VERSION);
     expect(data2.warning).toBeUndefined(); // Warning cleared on recovery
-    expect(data2.models.map((m) => m.id)).toContain("gpt-6.1-sol");
+    expect(data2.models.map((m) => m.id)).toContain("gpt-fixture-candidate");
     expect(data2.candidateModels).toBeUndefined(); // No remaining candidates
   });
 });

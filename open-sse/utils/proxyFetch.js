@@ -223,11 +223,12 @@ async function getDispatcher(proxyUrl) {
       proxyDispatchers.delete(proxyDispatchers.keys().next().value);
     }
     const { ProxyAgent } = await import("undici");
-    proxyDispatchers.set(normalized, new ProxyAgent({ uri: normalized }));
+    proxyDispatchers.set(normalized, new ProxyAgent(normalized));
   }
 
   return proxyDispatchers.get(normalized);
 }
+
 
 // Keep the requested hostname for SNI/certificate checks; override DNS only.
 async function createBypassRequest(parsedUrl, options) {
@@ -277,6 +278,15 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
   const connectionProxyUrl = resolveConnectionProxyUrl(targetUrl, proxyOptions);
   const envProxyUrl = connectionProxyUrl ? null : normalizeProxyUrl(getEnvProxyUrl(targetUrl));
   const proxyUrl = connectionProxyUrl || envProxyUrl;
+  // Refuse an unresolved intended proxy before DNS bypass or direct transport.
+  // Qoder's strict replay protection still permits no-proxy configurations.
+  const proxyIntended = proxyOptions?.proxyPoolId
+    || proxyOptions?.enabled === true
+    || proxyOptions?.connectionProxyEnabled === true
+    || !!normalizeString(proxyOptions?.url ?? proxyOptions?.connectionProxyUrl);
+  if (!proxyUrl && proxyOptions?.strictProxy === true && proxyIntended) {
+    throw new Error("[ProxyFetch] Proxy required but none resolved (strictProxy=true)");
+  }
 
   // MITM DNS bypass: for known MITM-intercepted hosts, resolve real IP to avoid DNS spoof
   if (shouldBypassMitmDns(targetUrl)) {
@@ -316,6 +326,7 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
       return originalFetch(url, options);
     }
   }
+
 
   // got-scraping disabled — use native fetch directly
   // (Re-enable per-host by wrapping with tryGotScrapingFetch when needed)

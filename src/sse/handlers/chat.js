@@ -174,9 +174,8 @@ export async function handleChat(request, clientRawRequest = null, options = {})
     };
   }
   clientRawRequest = { ...clientRawRequest, headers: redactChatGptWebInternalHeaders(clientRawRequest.headers) };
-  // Claude Code marks a 1M-context request as `<model>[1m]`; the marker matches
-  // no combo, alias or provider/model pair, so it must not reach resolution.
-  // The capability travels in the anthropic-beta header, forwarded as-is.
+  // Preserve the requested context marker for account eligibility; strip only for resolution/wire.
+  const requestedModelStr = body.model;
   const { model: modelStr, contextMarker } = stripModelContextMarker(body.model);
   if (contextMarker) body.model = modelStr;
 
@@ -309,15 +308,15 @@ export async function handleChat(request, clientRawRequest = null, options = {})
   }
 
   return handleSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, { chatGptWebAuthority, preResponse,
-  clientModel: modelStr,
-  effectiveModel: modelStr,
-  routeReason: "direct", });
+    clientModel: modelStr, effectiveModel: modelStr, requestedModel: requestedModelStr,
+    routeReason: "direct" });
 }
 
 /**
  * Handle single model chat request
  */
-async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, { preResponse = null, clientModel = null, effectiveModel = null, routeReason = "direct", routeContext = null, chatGptWebAuthority = null } = {}) {
+async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, { preResponse = null, clientModel = null, effectiveModel = null, routeReason = "direct", routeContext = null, chatGptWebAuthority = null, requestedModel = null } = {}) {
+  requestedModel = (requestedModel || modelStr).split("/").slice(-1)[0];
   const modelInfo = await getModelInfo(modelStr);
 
   // If provider is null, this might be a combo name - check and handle
@@ -424,6 +423,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     let credentials;
     try {
       credentials = await getProviderCredentials(provider, excludeConnectionIds, model, {
+        requestedModel,
         requiredCapabilities,
         ...(explicitConnectionId ? { pinConnectionId: explicitConnectionId } : {}),
         ...(provider === "chatgpt-web" ? { bridgeCapability: "native_responses", chatGptWebAuthority, chatGptWebReasoning: body.reasoning?.effort,
@@ -493,11 +493,12 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
             });
           },
         });
-        const eligibility = codexCatalogSupportsRequest(catalog?.models, model, body);
+        const eligibility = codexCatalogSupportsRequest(catalog?.models, requestedModel || model, body);
         const catalogVerified = catalog?.access === "observed" || catalog?.access === "stale";
         const exactEffort = eligibility.requestedEffort && eligibility.requestedEffort !== "auto";
         if (!catalogVerified && (
           exactEffort
+          || eligibility.contextMarker === "1m"
           || eligibility.reason === "unknown_effort"
           || (eligibility.reason === "model" && !isCodexFallbackModel(model))
         )) {
@@ -574,6 +575,8 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       pxpipeTransform: chatSettings.pxpipeEnabled ? await getPxpipeTransform() : null,
       onPxpipeEvent: appendPxpipeEvent,
       providerThinking,
+      // Per-provider user overrides (custom headers / connect timeout) from settings
+      providerOverrides: (chatSettings.providerOverrides || {})[provider] || null,
       // Detect source format by endpoint + body
       sourceFormatOverride: request?.url ? detectFormatByEndpoint(new URL(request.url).pathname, body) : null,
       clientSignal: request?.signal || null,

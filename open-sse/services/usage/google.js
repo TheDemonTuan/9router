@@ -6,6 +6,7 @@ import { CLIENT_METADATA } from "../../config/appConstants.js";
 import { ANTIGRAVITY_IDE_USER_AGENT, ANTIGRAVITY_IDE_VERSION, ANTIGRAVITY_OAUTH_CLIENT } from "../../providers/shared.js";
 import { U, parseResetTime, normalizeCloudCodeProjectId, fetchWithTimeout, cancelResponseBody } from "./shared.js";
 import { fetchAntigravityWeeklyQuota } from "./antigravity-weekly.js";
+import { normalizeAntigravityCatalog } from "../antigravityModels.js";
 
 // Antigravity API config (from Quotio) — urls from registry, oauth client + dynamic UA kept here
 const ANTIGRAVITY_CONFIG = {
@@ -174,33 +175,24 @@ export async function getAntigravityUsage(accessToken, providerSpecificData, pro
 
     // Parse model quotas only for paid-tier accounts.
     // Free-tier accounts skip this — their only meaningful quota is the weekly limit.
+    let modelIds = [];
     if (!isFreeTier && data.models) {
-      // Filter only recommended/important models (must match PROVIDER_MODELS ag ids)
-      const importantModels = [
-        'gemini-3.8-flash-high',
-        'gemini-3.8-flash-medium',
-        'gemini-3.8-flash-low',
-        'gemini-3.7-flash-high',
-        'gemini-3.7-flash-medium',
-        'gemini-3.7-flash-low',
-        'gemini-3.6-flash-high',
-        'gemini-3.6-flash-medium',
-        'gemini-3.6-flash-low',
-        'gemini-3.5-flash-low',
-        'gemini-3.5-flash-extra-low',
-        'gemini-pro-agent',
-        'gemini-3.1-pro-low',
-        'claude-sonnet-4-6',
-        'claude-opus-4-6-thinking',
-        'gpt-oss-120b-medium',
-        // Image generation models
-        'gemini-3.1-flash-image',
-      ];
+      let normalizedModels = [];
+      try {
+        normalizedModels = normalizeAntigravityCatalog(data);
+      } catch {
+        normalizedModels = [];
+      }
+      modelIds = normalizedModels.map((m) => m.id);
+      const allowedModelIds = new Set(modelIds);
+      // Include known image generation models from raw data
+      for (const key of Object.keys(data.models)) {
+        if (key.includes("image") || key.includes("imagen")) allowedModelIds.add(key);
+      }
 
       for (const [modelKey, info] of Object.entries(data.models)) {
         if (!info.quotaInfo) continue;
-        if (info.isInternal || !importantModels.includes(modelKey)) continue;
-
+        if (info.isInternal || !allowedModelIds.has(modelKey)) continue;
         // Unnamed reset-only rows are provider metadata, not renderable model quotas.
         const resetAt = parseResetTime(info.quotaInfo.resetTime);
         const hasRemainingFraction = typeof info.quotaInfo.remainingFraction === "number"
@@ -280,6 +272,7 @@ export async function getAntigravityUsage(accessToken, providerSpecificData, pro
     return {
       plan: subscriptionInfo?.currentTier?.name || "Unknown",
       quotas,
+      modelIds,
       subscriptionInfo,
     };
   } catch (error) {

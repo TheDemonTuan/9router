@@ -70,7 +70,7 @@ export function stripContinuityFields(body) {
   return body;
 }
 
-export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, sessionDedupMode = "off", cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, clientSignal, preResponse = null, routeContext: inputRouteContext = null, routeReason = "direct", effectiveModel = null }) {
+export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, sessionDedupMode = "off", cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, providerOverrides = null, clientSignal, preResponse = null, routeContext: inputRouteContext = null, routeReason = "direct", effectiveModel = null }) {
   const { provider, model } = modelInfo;
   const requestStartTime = Date.now();
   // Stable per-session color so all lines of one CLI conversation share a tag
@@ -404,9 +404,9 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     }
   }
 
-  // Dedupe duplicate built-in tools when equivalent MCP tools are present (Claude clients only).
-  if (clientTool === "claude" && Array.isArray(translatedBody.tools)) {
-    const { tools: deduped, stripped } = dedupeTools(translatedBody.tools);
+  // Normalize equivalent MCP tools and duplicate DeepSeek tool names.
+  if (Array.isArray(translatedBody.tools)) {
+    const { tools: deduped, stripped } = dedupeTools(translatedBody.tools, { clientTool, model });
     if (stripped.length > 0) {
       translatedBody.tools = deduped;
       log?.debug?.("TOOLDEDUP", `stripped ${stripped.length}: ${stripped.slice(0, 3).join(", ")}${stripped.length > 3 ? "..." : ""}`);
@@ -642,10 +642,10 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   try {
     const result = await (preResponse ? preResponse.run(() => executor.execute({
       model, body: translatedBody, stream, credentials, providerSessionId: sessionSeed,
-      clientTool, signal: streamController.signal, log, proxyOptions, preResponse,
+      clientTool, signal: streamController.signal, log, proxyOptions, preResponse, providerOverrides,
     })) : executor.execute({
       model, body: translatedBody, stream, credentials, providerSessionId: sessionSeed,
-      clientTool, signal: streamController.signal, log, proxyOptions, preResponse,
+      clientTool, signal: streamController.signal, log, proxyOptions, preResponse, providerOverrides,
     }));
     providerResponse = bindResponseBody(result.response, { signal: preResponse ? AbortSignal.any([streamController.signal, preResponse.signal]) : streamController.signal });
     providerUrl = result.url;
@@ -732,10 +732,10 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
         try {
           const retryResult = await (preResponse ? preResponse.run(() => executor.execute({
             model, body: translatedBody, stream, credentials, providerSessionId: sessionSeed,
-            clientTool, signal: streamController.signal, log, proxyOptions, preResponse,
+            clientTool, signal: streamController.signal, log, proxyOptions, preResponse, providerOverrides,
           })) : executor.execute({
             model, body: translatedBody, stream, credentials, providerSessionId: sessionSeed,
-            clientTool, signal: streamController.signal, log, proxyOptions, preResponse,
+            clientTool, signal: streamController.signal, log, proxyOptions, preResponse, providerOverrides,
           }));
           retryResult.response = bindResponseBody(retryResult.response, { signal: preResponse ? AbortSignal.any([streamController.signal, preResponse.signal]) : streamController.signal });
           if (retryResult.response.ok) {

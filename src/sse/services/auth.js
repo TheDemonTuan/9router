@@ -10,6 +10,8 @@ import {
   chatGptWebModelSupportsCapabilities,
   requestChatGptWebRuntime,
 } from "open-sse/services/chatgptWebRuntimeClient.js";
+import { resolveAntigravityModels, isAntigravityModelAvailable } from "open-sse/services/antigravityModels.js";
+import { getModelsByProviderId } from "open-sse/config/providerModels.js";
 import * as log from "../utils/logger.js";
 
 // Serialize rotation within a provider without blocking unrelated upstreams.
@@ -77,6 +79,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
   let release;
   const current = new Promise(resolve => { release = resolve; });
   if (usesMutex) selectionMutexes.set(providerId, current);
+  const requestedModel = options?.requestedModel || model;
 
   try {
     await previous;
@@ -140,6 +143,37 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         } catch { /* Offline/unknown bridges are not dispatch candidates. */ }
       }));
     }
+    const antigravityEligible = new Set();
+    if (providerId === "antigravity" && model) {
+      await Promise.all(connections.map(async (connection) => {
+        try {
+          const enabled = connection.providerSpecificData?.enabledModels;
+          if (Array.isArray(enabled) && enabled.length > 0 && !enabled.includes(model)) return;
+          const proxyOptions = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
+          const catalog = await resolveAntigravityModels(connection, {
+            proxyOptions,
+            signal: options.signal,
+            log,
+            onCredentialsRefreshed: async (refreshed) => {
+              await updateProviderConnection(connection.id, (current) => ({
+                ...current,
+                ...refreshed,
+                providerSpecificData: {
+                  ...(current.providerSpecificData || {}),
+                  ...(refreshed.providerSpecificData || {}),
+                },
+              }));
+            },
+          });
+          if (catalog?.resolved === true) {
+            if (isAntigravityModelAvailable(catalog.models, model)) antigravityEligible.add(connection.id);
+          } else {
+            const legacyModels = getModelsByProviderId("antigravity");
+            if (isAntigravityModelAvailable(legacyModels, model)) antigravityEligible.add(connection.id);
+          }
+        } catch { /* Discovery failure drops unverified models */ }
+      }));
+    }
 
     // Filter out model-locked, excluded, and capability-ineligible connections.
     const availableConnections = connections.filter(c => {
@@ -147,12 +181,15 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       if (pinConnectionId && providerId !== "chatgpt-web" && c.id !== pinConnectionId) return false;
       if (providerId === "chatgpt-web" && model && !bridgeEligible.has(c.id)) return false;
       if (isModelLockActive(c, model)) return false;
+      if (providerId === "antigravity" && model && !antigravityEligible.has(c.id)) return false;
       // Alibaba Token Plan: Team-only models require a Team Edition connection
       // (metadata check on the cached connection — no network during selection).
       if (providerId === "alitp-intl" && model &&
           !isAlitpModelAvailableForEdition(model, c.providerSpecificData?.tokenPlanEdition)) {
         return false;
       }
+      const enabled = c.providerSpecificData?.enabledModels;
+      if (providerId === "codex" && Array.isArray(enabled) && enabled.length && requestedModel && !enabled.includes(requestedModel)) return false;
       return true;
     });
 
@@ -366,7 +403,7 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
       newBackoffLevel = 0;
     }
     if (!shouldFallback) {
-      const fallback = checkFallbackError(status, errorText, backoffLevel);
+      const fallback = checkFallbackError(status, errorText, backoffLevel, resolveProviderId(resolvedProvider));
       shouldFallback = fallback.shouldFallback;
       candidateExpiryMs = shouldFallback ? now + fallback.cooldownMs : null;
       newBackoffLevel = fallback.newBackoffLevel ?? backoffLevel;
