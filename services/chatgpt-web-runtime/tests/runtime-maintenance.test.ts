@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { RuntimeState } from "../src/runtime-state";
+import { RuntimeState, RuntimeStateError } from "../src/runtime-state";
 import { RuntimeProfiles } from "../src/profiles";
 import { startRuntime } from "../src/server";
 import { closeBrowserManagers } from "../src/browser/manager";
@@ -75,6 +75,19 @@ describe("durable maintenance lifecycle", () => {
       probe.mockRestore(); context.mockRestore(); browser.mockRestore();
       await profiles.close(); state.close(); rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  test("startup still rejects browser ownership and filesystem failures", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cgw-startup-owner-"));
+    const state = new RuntimeState(root); state.createProfile("one");
+    const profiles = new RuntimeProfiles(fixtureConfig(root), state);
+    const browser = spyOn(profiles, "ensureProfileBrowser").mockRejectedValue(new RuntimeStateError("browser_profile_owned", "Fixture directory ownership failure", 503));
+    try {
+      await expect(profiles.initialize()).rejects.toMatchObject({ code: "browser_profile_owned", status: 503 });
+      browser.mockRejectedValue(Object.assign(new Error("Fixture filesystem failure"), { code: "EACCES" }));
+      await expect(profiles.initialize()).rejects.toMatchObject({ code: "EACCES" });
+      expect(profiles.ready("one")).toBe(false);
+    } finally { browser.mockRestore(); await profiles.close(); state.close(); rmSync(root, { recursive: true, force: true }); }
   });
 
   test("malformed durable fences and missing schema tables fail closed rather than reset", () => {

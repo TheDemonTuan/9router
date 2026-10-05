@@ -6,20 +6,32 @@ import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { MAX_SESSION_TRANSFER_BYTES, parseChatGptWebSessionTransfer } from "../../services/chatgpt-web-runtime/session-transfer.js";
 
 const flags = {};
 for (let i = 2; i < process.argv.length; i += 2) {
   const key = process.argv[i];
-  assert(["--gateway-image", "--runtime-image", "--browser-volume", "--proof-dir"].includes(key) && process.argv[i + 1] && !Object.hasOwn(flags, key), "Invalid onboarding smoke options");
+  assert(["--gateway-image", "--runtime-image", "--browser-volume", "--proof-dir", "--session-file"].includes(key) && process.argv[i + 1] && !Object.hasOwn(flags, key), "Invalid onboarding smoke options");
   flags[key] = process.argv[i + 1];
 }
 assert(process.platform === "linux", "Native Linux Docker required");
-for (const key of ["--gateway-image", "--runtime-image", "--browser-volume"]) assert(flags[key], `${key} required`);
+for (const key of ["--gateway-image", "--runtime-image", "--browser-volume", "--session-file"]) assert(flags[key], `${key} required`);
+// Refuse real credentials before creating any container or copied fixture.
+const sessionBytes = readFileSync(resolve(flags["--session-file"]));
+assert(sessionBytes.byteLength <= MAX_SESSION_TRANSFER_BYTES, "Synthetic session file exceeds the transfer limit");
+let session;
+try { session = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(sessionBytes)); }
+catch { throw new Error("Invalid synthetic session fixture"); }
+const cookies = parseChatGptWebSessionTransfer(session);
+assert(session.cookies.length === 2 && cookies.length === 2 && cookies.every(cookie => cookie.domain === "chatgpt.com" && cookie.path === "/" && cookie.httpOnly && cookie.secure)
+  && cookies.some(cookie => cookie.name === "cgw_fixture_session.0" && cookie.value === "offline-account")
+  && cookies.some(cookie => cookie.name === "cgw_fixture_session.1" && cookie.value === "-import"), "Exporter synthetic two-part session required; real cookies are forbidden");
 const root = mkdtempSync(join(tmpdir(), "cgw-onboarding-"));
 const proofs = join(root, "proofs"); mkdirSync(proofs); chmodSync(root, 0o755); chmodSync(proofs, 0o777);
 const secrets = join(root, "secrets"); mkdirSync(secrets); chmodSync(secrets, 0o755);
 writeFileSync(join(secrets, "admin-token"), "offline-viewer-admin-token".repeat(4));
 writeFileSync(join(secrets, "data-token"), "offline-viewer-data-token".repeat(4));
+copyFileSync(resolve(flags["--session-file"]), join(secrets, "session.json"));
 const suffix = randomUUID().replaceAll("-", "");
 const network = `cgw-onboarding-${suffix}`, gateway = `cgw-onboarding-gateway-${suffix}`, runtime = `cgw-onboarding-browser-${suffix}`;
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -61,12 +73,13 @@ try {
     "--tmpfs", "/data:rw,nosuid,nodev,size=512m,uid=10001,gid=10001,mode=0700",
     "--mount", `type=volume,src=${flags["--browser-volume"]},dst=/opt/cgw-browser,readonly`,
     "-v", `${proofs}:/proof:Z`, "-e", "CGW_ONBOARDING_GATEWAY=http://127.0.0.1:20128", "-e", "CGW_ONBOARDING_PROOF_DIR=/proof",
+    "-v", `${join(secrets, "session.json")}:/run/cgw-fixtures/session.json:ro,Z`, "-e", "CGW_ONBOARDING_SESSION_FILE=/run/cgw-fixtures/session.json",
     flags["--runtime-image"], "bun", "scripts/provider-onboarding-smoke.ts"], 180000);
   result = JSON.parse(readFileSync(join(proofs, "result.json"), "utf8"));
   assert.equal(result.gate, "provider-onboarding-ui");
   if (flags["--proof-dir"]) {
     const destination = resolve(flags["--proof-dir"]); mkdirSync(destination, { recursive: true });
-    for (const name of ["result.json", "provider-embedded-login.png", "provider-connected-ready.png"]) copyFileSync(join(proofs, name), join(destination, name));
+    for (const name of ["result.json", "provider-embedded-login.png", "provider-connected-ready.png", "provider-import-ready.png", "provider-import-mobile.png"]) copyFileSync(join(proofs, name), join(destination, name));
   }
 } finally {
   spawnSync("docker", ["rm", "-f", runtime], { stdio: "ignore", timeout: 30000 });

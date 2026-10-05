@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>9Router ChatGPT Session Export</title>
+  <style>
+    body { width: 340px; margin: 0; padding: 20px; font: 14px/1.5 system-ui, sans-serif; color: #172033; background: #fff; }
+    h1 { margin: 0 0 12px; font-size: 19px; }
+    p { margin: 12px 0; }
+    .warning { padding: 12px; border: 1px solid #dba43a; border-radius: 6px; background: #fff7df; }
+    button { width: 100%; padding: 10px; border: 0; border-radius: 6px; background: #173e89; color: #fff; font: inherit; cursor: pointer; }
+    button:disabled { opacity: .6; cursor: wait; }
+    button:focus-visible { outline: 3px solid #738fcd; outline-offset: 3px; }
+    #status { min-height: 42px; }
+  </style>
+</head>
+<body>
+  <h1>Export ChatGPT Session</h1>
+  <p>Use the Chrome profile signed in to the ChatGPT account you want to connect. If that session has expired, sign in to ChatGPT in Chrome first.</p>
+  <p class="warning">This file is a credential: it can grant access to your ChatGPT session. Keep it private, import it only into your trusted 9Router dashboard, then delete the local file.</p>
+  <p>Only unpartitioned ChatGPT cookies are exported. Google sign-in, passwords and other browser storage are not included. This does not bypass authentication or prevent session expiry or revocation.</p>
+  <button id="export" type="button">Export ChatGPT Session</button>
+  <p id="status" role="status" aria-live="polite"></p>
+  <script src="popup.js"></script>
+</body>
+</html>

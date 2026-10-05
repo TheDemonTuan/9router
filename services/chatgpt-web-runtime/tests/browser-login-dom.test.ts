@@ -51,6 +51,69 @@ async function high(page: Page) {
 }
 
 describe.skipIf(!executablePath)("Chromium login DOM", () => {
+  test("startup isolates a real authenticated UI failure and keeps the other catalog ready", async () => {
+    await fixture({}, async page => {
+      const root = mkdtempSync(join(tmpdir(), "cgw-startup-dom-"));
+      const state = new RuntimeState(root);
+      const profiles = new RuntimeProfiles({ dataDir: root, host: "127.0.0.1", port: 0,
+        chromiumExecutable: executablePath!, runtimeToken: Buffer.from("fixture-runtime"), adminToken: Buffer.from("fixture-admin") }, state);
+      const display = spyOn(profiles as unknown as { ensureDisplay(id: string): Promise<void> }, "ensureDisplay").mockResolvedValue();
+      const diagnostics = spyOn(console, "error").mockImplementation(() => {});
+      const spies: { mockRestore(): void }[] = [];
+      const originalProbe = profiles.probe.bind(profiles);
+      try {
+        for (const id of ["broken", "healthy"]) {
+          const original = state.createProfile(id);
+          state.observeAccount(id, createHmac("sha256", state.accountSalt).update("synthetic-account").digest("hex"), original.revision);
+          const manager = profiles.manager(id);
+          spies.push(spyOn(manager, "ensureContext").mockResolvedValue(page.context()));
+          spies.push(spyOn(manager, "maintenancePage").mockResolvedValue(page));
+        }
+        spies.push(spyOn(profiles, "probe").mockImplementation(async (id, _navigate, initializing) => {
+          if (id === "broken") await page.evaluate(() => {
+            const clone = document.querySelector("form")!.cloneNode(true) as HTMLElement;
+            clone.id = "ambiguous-fixture"; document.body.append(clone);
+          });
+          else await page.locator("#ambiguous-fixture").evaluate(element => element.remove());
+          return originalProbe(id, false, initializing);
+        }));
+        await profiles.initialize();
+        expect(profiles.status("broken")).toMatchObject({ state: "error", lastError: "profile_probe_failed", models: [] });
+        expect(profiles.ready("healthy")).toBe(true);
+        expect(profiles.catalog("healthy")).toMatchObject({ profile_id: "healthy" });
+        const event = JSON.parse(String(diagnostics.mock.calls[0]![0]));
+        expect(event).toMatchObject({ event: "cgw_profile_probe_failed", profileId: "broken", stage: "composer", code: "profile_probe_failed" });
+      } finally {
+        for (const spy of spies) spy.mockRestore();
+        diagnostics.mockRestore(); display.mockRestore(); await profiles.close(); state.close(); rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }, 90_000);
+
+  test("navigation failure is typed and diagnostics never emit secret causes", async () => {
+    await fixture({}, async page => {
+      const root = mkdtempSync(join(tmpdir(), "cgw-navigation-dom-"));
+      const state = new RuntimeState(root);
+      const profiles = new RuntimeProfiles({ dataDir: root, host: "127.0.0.1", port: 0,
+        chromiumExecutable: executablePath!, runtimeToken: Buffer.from("fixture-runtime"), adminToken: Buffer.from("fixture-admin") }, state);
+      const display = spyOn(profiles as unknown as { ensureDisplay(id: string): Promise<void> }, "ensureDisplay").mockResolvedValue();
+      const diagnostics = spyOn(console, "error").mockImplementation(() => {});
+      const marker = "fixture-SECRET-session-cookie-identity";
+      const navigation = spyOn(page, "goto").mockRejectedValue(Object.assign(new Error(marker, { cause: { session: marker } }), { name: "TimeoutError" }));
+      state.createProfile("synthetic");
+      const manager = profiles.manager("synthetic");
+      const maintenancePage = spyOn(manager, "maintenancePage").mockResolvedValue(page);
+      try {
+        await expect(profiles.probe("synthetic")).rejects.toMatchObject({ code: "profile_probe_failed", status: 502, retryable: false });
+        expect(profiles.ready("synthetic")).toBe(false);
+        expect(state.profile("synthetic").revision).toBe(1);
+        const serialized = JSON.stringify(diagnostics.mock.calls);
+        expect(serialized).not.toContain(marker);
+        expect(JSON.parse(String(diagnostics.mock.calls[0]![0]))).toMatchObject({ stage: "navigation", errorName: "ChatGptWebAdapterError", code: "profile_probe_failed" });
+        expect(Object.keys(JSON.parse(String(diagnostics.mock.calls[0]![0]))).sort()).toEqual(["code", "elapsedMs", "errorName", "event", "profileId", "stage"]);
+      } finally { maintenancePage.mockRestore(); navigation.mockRestore(); diagnostics.mockRestore(); display.mockRestore(); await profiles.close(); state.close(); rmSync(root, { recursive: true, force: true }); }
+    });
+  }, 90_000);
   test("production profile probe verifies Instant and High through semantic keyboard owner", async () => {
     await fixture({ composerDelayMs: 500, pointerOnly: true, semanticSlider: true, headerOnlyModel: true }, async page => {
       const root = mkdtempSync(join(tmpdir(), "cgw-catalog-dom-"));
@@ -75,9 +138,11 @@ describe.skipIf(!executablePath)("Chromium login DOM", () => {
   }, 90_000);
   test("delayed composer preserves session fingerprint without sending", async () => {
     await fixture({ composerDelayMs: 500 }, async page => {
-      const result = await probeBrowserLoginSession(page, salt, false);
+      const stages: string[] = [];
+      const result = await probeBrowserLoginSession(page, salt, false, stage => { stages.push(stage); });
       expect(result.accountFingerprint).toBe(createHmac("sha256", salt).update("synthetic-account").digest("hex"));
       expect(result.capabilities).toEqual(capabilities);
+      expect(stages).toEqual(["session", "composer", "surface", "capabilities"]);
     });
   }, 90_000);
   for (const pointerOnly of [false, true]) {

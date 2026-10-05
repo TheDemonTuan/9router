@@ -6,6 +6,11 @@ on:
     paths:
       - services/chatgpt-web-runtime/**
       - open-sse/services/chatgptWebRuntimeClient.js
+      - tools/chatgpt-web-session-export/**
+      - src/shared/components/ChatGPTWebRuntimePanel.js
+      - src/shared/components/AddChatGPTWebRuntimeModal.js
+      - src/app/api/providers/chatgpt-web/runtime/**
+      - tests/integration/chatgpt-web-onboarding-smoke.mjs
       - open-sse/executors/chatgpt-web.js
       - src/lib/chatgptWebAuthority.js
       - src/sse/**
@@ -138,6 +143,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(bun --version)" = 1.4.0
+          install -m 0755 "$(command -v bun)" "$RUNNER_TEMP/cgw-bun-1.4.0"
           bun install --frozen-lockfile
           bun run typecheck
           bun run test
@@ -205,15 +211,19 @@ jobs:
           bun install --frozen-lockfile --cwd tests
           bun run build
           bun tests/integration/chatgpt-web-runtime-smoke.mjs --image "$CGW_CHECK_IMAGE" --browser-volume "$CGW_BROWSER_VOLUME" --gateway-port 21127
-      - name: Exercise Add Connection and embedded browser login
+      - name: Exercise native login and Chrome session transfer onboarding
         id: onboarding
         run: |
           set -euo pipefail
+          export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/cgw-export-browser"
+          "$RUNNER_TEMP/cgw-bun-1.4.0" --cwd services/chatgpt-web-runtime x --no-install --bun playwright-core install chromium
+          "$RUNNER_TEMP/cgw-bun-1.4.0" --cwd services/chatgpt-web-runtime scripts/session-export-smoke.ts \
+            --extension-dir "$PWD/tools/chatgpt-web-session-export" --output "$RUNNER_TEMP/cgw-synthetic-session.json"
           gateway="cgw-onboarding-gateway:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}"
           docker build -f Dockerfile -t "$gateway" .
           bun tests/integration/chatgpt-web-onboarding-smoke.mjs --gateway-image "$gateway" \
             --runtime-image "$CGW_CHECK_IMAGE" --browser-volume "$CGW_BROWSER_VOLUME" \
-            --proof-dir "$RUNNER_TEMP/cgw-onboarding-proof"
+            --proof-dir "$RUNNER_TEMP/cgw-onboarding-proof" --session-file "$RUNNER_TEMP/cgw-synthetic-session.json"
       - name: Preserve synthetic provider onboarding visual proof
         if: ${{ !cancelled() && (steps.onboarding.outcome == 'success' || steps.onboarding.outcome == 'failure') }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -252,6 +262,8 @@ jobs:
             "cgw-image-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}" \
             "cgw-compatibility-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}" 2>/dev/null || true
           if [[ -n "${CGW_BROWSER_VOLUME:-}" ]]; then docker volume rm "$CGW_BROWSER_VOLUME"; fi
+          rm -f "$RUNNER_TEMP/cgw-synthetic-session.json" "$RUNNER_TEMP/cgw-bun-1.4.0"
+          rm -rf "$RUNNER_TEMP/cgw-export-browser"
       # No registry login, push, account-state artifact upload, reusable old platform
       # Trivy call, deploy action, or production manifest/pin mutation belongs here.
 

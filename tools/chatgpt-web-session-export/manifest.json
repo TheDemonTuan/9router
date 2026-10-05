@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "9Router ChatGPT Session Export",
+  "version": "1.0.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtZ3i2K12JhFhcW78vHgvFGvF6LpFE2p6fFRDVmYcYqDowbDPvdltEtAe4aWrKqKlxJSe83wJP6D+R62scxwBvrF1v6RVxoaOyqaG6dYBXPUTVz7Khubo6zj1XAFdttt4pD9cxpOxS8VyubOpOYA5PAw8WnpeLi5MV+Jh+PI/d9oaLcElCByfc+RfaiJ0nHbH+rgk0YMxP7vdQDqGRx+6fs7xa4aVZBQw+2bVX+oweCKcTL9RW2fesmIB6aP6RJigC7sFS4kHChTqjlPeQiAf1pdUioD4wpSM85OvJewZCvbNS3okxUmO0n7xtHfO8nLxx/b28pfranb9l5sHhYL1iQIDAQAB",
+  "permissions": ["cookies"],
+  "host_permissions": ["https://chatgpt.com/*"],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "content_security_policy": {
+    "extension_pages": "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; object-src 'none'; connect-src 'none'"
+  }
+}

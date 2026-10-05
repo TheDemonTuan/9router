@@ -39,12 +39,16 @@ export async function assertBrowserLoginSession(page: Page): Promise<void> {
   await sessionIdentity(page);
   await assertAuthenticatedChatGptPage(page);
 }
-export async function probeBrowserLoginSession(page: Page, salt: Uint8Array, useSavedChats: boolean): Promise<BrowserLoginEvidence> {
+export async function probeBrowserLoginSession(page: Page, salt: Uint8Array, useSavedChats: boolean, onStage?: (stage: "session" | "composer" | "surface" | "capabilities") => void): Promise<BrowserLoginEvidence> {
+  onStage?.("session");
   const identity = await sessionIdentity(page);
   try {
+    onStage?.("composer");
     await page.locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true }).waitFor({ state: "visible", timeout: 30_000 });
+    onStage?.("surface");
     await assertAuthenticatedChatGptPage(page);
     await assertNewChatPage(page, useSavedChats);
+    onStage?.("capabilities");
     const capabilities = await detectChatGptAccountCapabilities(page);
     return { accountFingerprint: createHmac("sha256", salt).update(identity).digest("hex"), checkedAt: new Date().toISOString(), capabilities };
   } catch (cause) {

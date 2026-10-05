@@ -137,7 +137,9 @@ describe.skipIf(process.platform !== "linux")("human-only sign-in physical owner
   test("failed native restoration terminates the lease rather than exposing verification browser", async () => {
     const f = await runtimeFixture();
     const probe = spyOn(f.runtime.profiles, "probe").mockRejectedValue(new RuntimeStateError("login_required", "Still signed out"));
-    const restore = spyOn(f.manager, "restoreManualLogin").mockRejectedValue(new Error("Fixture native restart failed"));
+    const marker = "fixture-SECRET-native-restore";
+    const restore = spyOn(f.manager, "restoreManualLogin").mockRejectedValue(new Error(marker, { cause: { cookie: marker } }));
+    const diagnostics = spyOn(console, "error").mockImplementation(() => {});
     try {
       expect((await f.admin("/admin/login/complete", { loginId })).status).toBe(500);
       expect(f.runtime.profiles.viewerStatus(loginId)).toMatchObject({ loginId, state: "error" });
@@ -145,7 +147,26 @@ describe.skipIf(process.platform !== "linux")("human-only sign-in physical owner
       expect(f.lease.password).toBe("");
       expect(f.physical.manualBrowser).toBeUndefined();
       expect(f.manager.isIdle).toBe(true);
-    } finally { probe.mockRestore(); restore.mockRestore(); await f.close(); }
+      expect(JSON.stringify(diagnostics.mock.calls)).not.toContain(marker);
+      expect(JSON.parse(String(diagnostics.mock.calls[0]![0]))).toMatchObject({ stage: "native_restore", code: "profile_probe_failed", errorName: "Error" });
+    } finally { diagnostics.mockRestore(); probe.mockRestore(); restore.mockRestore(); await f.close(); }
+  });
+
+  test("native close failure keeps the lease recoverable and logs no cause payload", async () => {
+    const f = await runtimeFixture();
+    const marker = "fixture-SECRET-native-close";
+    const verify = spyOn(f.manager, "verifyManualLogin").mockRejectedValue(new Error(marker, { cause: { session: marker } }));
+    const restore = spyOn(f.manager, "restoreManualLogin").mockResolvedValue();
+    const diagnostics = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect((await f.admin("/admin/login/complete", { loginId })).status).toBe(500);
+      expect(f.runtime.profiles.viewerSession(loginId)).toMatchObject({ loginId, state: "waiting" });
+      expect(f.runtime.state.profile("personal").epoch).toBe(f.profile.epoch);
+      expect(verify).toHaveBeenCalledTimes(1);
+      expect(restore).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(diagnostics.mock.calls)).not.toContain(marker);
+      expect(JSON.parse(String(diagnostics.mock.calls[0]![0]))).toMatchObject({ stage: "native_close", code: "profile_probe_failed", errorName: "Error" });
+    } finally { diagnostics.mockRestore(); restore.mockRestore(); verify.mockRestore(); await f.close(); }
   });
 
   test("verification settles the human process, denies viewer access, and only completes after probe success", async () => {

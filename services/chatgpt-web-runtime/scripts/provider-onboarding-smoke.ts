@@ -7,13 +7,20 @@ import { connect } from "node:net";
 import { startRuntime } from "../src/server";
 import type { BrowserTurnLease } from "../src/browser/manager";
 import type { BrowserContext } from "playwright-core";
+import { MAX_SESSION_TRANSFER_BYTES, parseChatGptWebSessionTransfer } from "../session-transfer.js";
 
 // Native Chrome signs into a local website with real desktop input. No CDP or
 // Playwright connection touches that browser until explicit login confirmation.
 const gateway = process.env.CGW_ONBOARDING_GATEWAY;
 const proof = process.env.CGW_ONBOARDING_PROOF_DIR;
 const chromiumExecutable = process.env.CGW_CHROMIUM_EXECUTABLE;
-if (!gateway || !proof || !chromiumExecutable || process.platform !== "linux") throw new Error("Owned gateway, Chromium and proof directory required");
+const sessionFile = process.env.CGW_ONBOARDING_SESSION_FILE;
+if (!gateway || !proof || !chromiumExecutable || !sessionFile || process.platform !== "linux") throw new Error("Owned gateway, Chromium, synthetic session and proof directory required");
+const sessionBytes = readFileSync(sessionFile);
+assert(sessionBytes.byteLength <= MAX_SESSION_TRANSFER_BYTES, "Synthetic session fixture exceeds limit");
+const session = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(sessionBytes));
+const sessionCookies = parseChatGptWebSessionTransfer(session);
+assert(session.cookies.length === 2 && sessionCookies.length === 2 && sessionCookies.some(cookie => cookie.name === "cgw_fixture_session.0" && cookie.value === "offline-account") && sessionCookies.some(cookie => cookie.name === "cgw_fixture_session.1" && cookie.value === "-import"), "Synthetic exporter session required");
 interface Box { x: number; y: number; width: number; height: number; }
 interface NativeGeometry { pageId: string; sequence: number; authenticated: boolean; x: number; y: number; outerHeight: number; innerHeight: number; input: Box; button: Box; activeId: string; focused: boolean; value: string; webdriver: boolean; }
 const geometry = new Map<string, NativeGeometry>();
@@ -23,6 +30,7 @@ let currentId = "";
 const preparedManagers = new WeakSet<object>();
 const preparedContexts = new WeakSet<BrowserContext>();
 const html = readFileSync(join(import.meta.dir, "../tests/fixtures/chatgpt-runtime.html"), "utf8");
+let providerSends = 0;
 const native = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
   const url = new URL(request.url);
   const [, action, id] = url.pathname.split("/");
@@ -74,10 +82,14 @@ const prepare = async (id: string) => {
         await context.route("**/*", async route => {
           const url = new URL(route.request().url());
           if (url.origin !== "https://chatgpt.com") return route.abort();
+          if (route.request().method() === "POST") providerSends++;
           const cookiePresent = (await context.cookies(nativeOrigin)).some(cookie => cookie.name === "offline_account" && cookie.value === id);
-          const authenticated = signedIn.has(id) && cookiePresent;
+          const cookies = await context.cookies("https://chatgpt.com");
+          const importedIdentity = ["cgw_fixture_session.0", "cgw_fixture_session.1"].map(name => cookies.find(cookie => cookie.name === name)?.value || "").join("");
+          const identity = importedIdentity === "offline-account-import" ? importedIdentity : signedIn.has(id) && cookiePresent ? "offline-account" : null;
+          const authenticated = identity !== null;
           if (authenticated) persisted.add(id);
-          if (url.pathname === "/api/auth/session") return route.fulfill({ json: authenticated ? { expires: new Date(Date.now() + 3600000).toISOString(), user: { id: "offline-account" } } : {} });
+          if (url.pathname === "/api/auth/session") return route.fulfill({ json: authenticated ? { expires: new Date(Date.now() + 3600000).toISOString(), user: { id: identity } } : {} });
           return route.fulfill({ contentType: "text/html", body: authenticated ? html : "<!doctype html><html><body><h1>Sign in required</h1></body></html>" });
         });
         preparedContexts.add(context);
@@ -90,6 +102,11 @@ const prepare = async (id: string) => {
 };
 const viewer = runtime.profiles.startViewer.bind(runtime.profiles);
 runtime.profiles.startViewer = async (id, login, trace) => { await prepare(id); return viewer(id, login, trace); };
+runtime.profiles.ensureProfileBrowser = prepare;
+const importSession = runtime.profiles.importSession.bind(runtime.profiles);
+runtime.profiles.importSession = async (id, revision, session) => { await prepare(id); return importSession(id, revision, session); };
+const verifySession = runtime.profiles.verifySession.bind(runtime.profiles);
+runtime.profiles.verifySession = async (id, revision) => { await prepare(id); return verifySession(id, revision); };
 const until = async (condition: () => boolean, label: string, timeout = 10000) => {
   const end = Date.now() + timeout;
   while (!condition() && Date.now() < end) await Bun.sleep(50);
@@ -98,13 +115,29 @@ const until = async (condition: () => boolean, label: string, timeout = 10000) =
 let inspection: BrowserTurnLease | undefined;
 try {
   await runtime.initialized;
+  // A typed UI failure during initialization must not poison other profiles or admin APIs.
+  runtime.state.createProfile("startup-ui-error"); runtime.state.createProfile("startup-ready");
+  const failedContext = await (await prepare("startup-ui-error")).ensureContext();
+  await failedContext.addCookies(sessionCookies);
+  await failedContext.addInitScript(() => document.addEventListener("DOMContentLoaded", () => {
+    const form = document.querySelector("form");
+    if (form) { form.hidden = false; form.after(form.cloneNode(true)); }
+  }));
+  await (await (await prepare("startup-ready")).ensureContext()).addCookies(sessionCookies);
+  await runtime.profiles.initialize();
+  assert.equal(runtime.profiles.ready("startup-ui-error"), false);
+  assert.equal(runtime.profiles.ready("startup-ready"), true);
+  const failedStatus = runtime.profiles.status("startup-ui-error") as { lastError: string };
+  assert.equal(failedStatus.lastError, "profile_probe_failed");
+  await runtime.profiles.manager("startup-ui-error").close();
+  await runtime.profiles.manager("startup-ready").close();
   runtime.state.createProfile("ui-inspection");
   const inspector = await ensure("ui-inspection");
   inspection = await inspector.leaseTurn({ traceId: "provider-ui-inspection", modelIdentity: "offline-ui" });
   const page = inspection.page;
-  await page.setViewportSize({ width: 1440, height: 1024 });
-  const session = await page.request.post(`${gateway}/api/auth/login`, { data: { password: "Offline-Provider-UI-Fixture-20261004" } });
-  assert.equal(session.status(), 200);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const loginResponse = await page.request.post(`${gateway}/api/auth/login`, { data: { password: "Offline-Provider-UI-Fixture-20261004" } });
+  assert.equal(loginResponse.status(), 200);
   await page.goto(`${gateway}/dashboard/providers/chatgpt-web`, { waitUntil: "networkidle" });
   await page.getByRole("button", { name: /Add Connection/ }).click();
   await page.getByRole("textbox", { name: "Connection name", exact: true }).fill("Offline integrated account");
@@ -213,10 +246,73 @@ try {
   const sol = profileCatalog.models.find((row: { id: string }) => row.id === "chatgpt-web/gpt-5.6-sol");
   assert(sol); assert.deepEqual(sol.supported_reasoning_levels, ["medium", "high"]); assert.equal(sol.default_reasoning_level, "high");
   assert.equal((await page.request.get(`${gateway}/api/providers/chatgpt-web/runtime/login/session?loginId=${loginLease.loginId}`)).status(), 404);
-  const second = await page.request.post(`${gateway}/api/providers`, { data: { provider: "chatgpt-web", name: "Offline independent account" } }); assert.equal(second.status(), 201);
-  const secondConnection = (await second.json()).connection; assert.notEqual(secondConnection.providerSpecificData.profileId, id); assert.equal(secondConnection.testStatus, "login_required");
   await page.screenshot({ path: join(proof, "provider-connected-ready.png"), fullPage: true });
-  writeFileSync(join(proof, "result.json"), JSON.stringify({ gate: "provider-onboarding-ui", automaticProfile: true, providerConnectionPersisted: true, actualEmbeddedRfb: true, keyboardAndPointerForwarded: true, fullWindowWorkspace: true, actualSizeInput: true, sameLeaseResume: true, humanOnlyLogin: true, explicitLoginVerification: true, prematureVerificationRestored: true, persistedNativeCookie: true, readyAfterBrowserSignIn: true, liveCatalog: true, closedViewerRejected: true, distinctProfiles: true, loopbackOnlyVnc: true, liveChatGpt: false }));
+  await page.locator("section[aria-label='ChatGPT Web connection'] summary").click();
+  const verified = page.waitForResponse(r => r.url().endsWith("/runtime/session/verify") && r.request().method() === "POST");
+  await page.getByRole("button", { name: "Use Saved Session", exact: true }).click();
+  assert.equal((await verified).status(), 200);
+  assert.equal(await page.locator("canvas").count(), 0);
+  const manualIdentity = runtime.state.profile(id);
+  await page.locator("input[type=file]").setInputFiles(sessionFile);
+  const mismatch = page.waitForResponse(r => r.url().endsWith("/runtime/session/import") && r.request().method() === "POST");
+  await page.getByRole("button", { name: "Import selected session", exact: true }).click();
+  const rejectedImport = await mismatch;
+  assert.equal(rejectedImport.status(), 409);
+  assert.equal((await rejectedImport.json()).error.code, "session_account_mismatch");
+  assert.deepEqual(runtime.state.profile(id), manualIdentity);
+  assert.equal(await page.locator("canvas").count(), 0);
+  const reverified = page.waitForResponse(r => r.url().endsWith("/runtime/session/verify") && r.request().method() === "POST");
+  await page.getByRole("button", { name: "Use Saved Session", exact: true }).click();
+  assert.equal((await reverified).status(), 200);
+  await page.getByRole("button", { name: "Close", exact: true }).last().click();
+  await page.getByRole("button", { name: /Add Connection/ }).click();
+  await page.getByRole("textbox", { name: "Connection name", exact: true }).fill("Offline imported account");
+  const creatingImport = page.waitForResponse(r => r.url().endsWith("/api/providers") && r.request().method() === "POST");
+  let nativeStarts = 0, uploads = 0;
+  const observeActions = (request: { url(): string; method(): string }) => {
+    if (request.method() !== "POST") return;
+    if (request.url().endsWith("/runtime/login/start") || request.url().endsWith("/runtime/browser/view")) nativeStarts++;
+    if (request.url().endsWith("/runtime/session/import")) uploads++;
+  };
+  page.on("request", observeActions);
+  await page.getByRole("button", { name: "Add Connection and Import Session", exact: true }).click();
+  const createdImport = await creatingImport; assert.equal(createdImport.status(), 201);
+  const secondConnection = (await createdImport.json()).connection;
+  const importedId = secondConnection.providerSpecificData.profileId;
+  assert.notEqual(importedId, id);
+  await page.getByRole("button", { name: "Import Chrome Session", exact: true }).waitFor();
+  await page.locator("input[type=file]").setInputFiles(sessionFile);
+  assert.equal(uploads, 0, "Selecting a file must not read or submit credentials");
+  const importing = page.waitForResponse(r => r.url().endsWith("/runtime/session/import") && r.request().method() === "POST");
+  await page.getByRole("button", { name: "Import selected session", exact: true }).click();
+  const importedResponse = await importing; assert.equal(importedResponse.status(), 200);
+  assert.equal((await importedResponse.json()).state, "ready");
+  await page.getByText("Connected and ready.", { exact: true }).waitFor();
+  assert.equal(nativeStarts, 0); assert.equal(uploads, 1); assert.equal(await page.locator("canvas").count(), 0);
+  const importModels = await page.request.get(`${gateway}/api/providers/${secondConnection.id}/models`);
+  assert.equal(importModels.status(), 200);
+  assert((await importModels.json()).models.some((row: { id: string }) => row.id === "chatgpt-web/gpt-5.6-sol"));
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.screenshot({ path: join(proof, "provider-import-ready.png"), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: join(proof, "provider-import-mobile.png"), fullPage: true });
+  const importBounds = await page.getByRole("button", { name: "Import Chrome Session", exact: true }).boundingBox(); assert(importBounds);
+  assert(importBounds.x >= 0 && importBounds.x + importBounds.width <= 390, "Mobile import control must fit the viewport");
+  await runtime.profiles.manager(importedId).close();
+  runtime.profiles.invalidate(importedId, "login_required");
+  const refreshProfiles = page.waitForResponse(r => r.url().endsWith("/runtime/profiles"));
+  await page.locator("section[aria-label='ChatGPT Web connection'] summary").click();
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await refreshProfiles;
+  const reused = page.waitForResponse(r => r.url().endsWith("/runtime/session/verify") && r.request().method() === "POST");
+  await page.getByRole("button", { name: "Use Saved Session", exact: true }).click();
+  assert.equal((await reused).status(), 200);
+  assert.equal(runtime.profiles.ready(importedId), true);
+  assert.equal(nativeStarts, 0); assert.equal(uploads, 1); assert.equal(providerSends, 0);
+  const importedPage = await runtime.profiles.manager(importedId).maintenancePage();
+  assert.equal(await importedPage.evaluate(() => Reflect.get(window, "fixture").sends), 0);
+  page.off("request", observeActions);
+  writeFileSync(join(proof, "result.json"), JSON.stringify({ gate: "provider-onboarding-ui", automaticProfile: true, providerConnectionPersisted: true, actualEmbeddedRfb: true, keyboardAndPointerForwarded: true, fullWindowWorkspace: true, actualSizeInput: true, sameLeaseResume: true, humanOnlyLogin: true, explicitLoginVerification: true, prematureVerificationRestored: true, persistedNativeCookie: true, readyAfterBrowserSignIn: true, liveCatalog: true, closedViewerRejected: true, distinctProfiles: true, loopbackOnlyVnc: true, savedSessionReused: true, actualExporterImport: true, accountMismatchPreserved: true, startupProfileIsolated: true, importedContextReopened: true, importWithoutNativeLogin: true, probeSends: providerSends, liveChatGpt: false }));
   console.log("CGW_PROVIDER_ONBOARDING_SMOKE_OK");
 } catch (error) {
   console.error("CGW_PROVIDER_ONBOARDING_SMOKE_FAILED", error);
@@ -224,7 +320,7 @@ try {
   throw error;
 } finally {
   // These are synthetic offline fixtures, not real-account screenshots or credentials.
-  for (const name of ["result.json", "provider-failed.png", "provider-embedded-login.png", "provider-connected-ready.png"]) {
+  for (const name of ["result.json", "provider-failed.png", "provider-embedded-login.png", "provider-connected-ready.png", "provider-import-ready.png", "provider-import-mobile.png"]) {
     const path = join(proof, name);
     if (existsSync(path)) chmodSync(path, 0o644);
   }

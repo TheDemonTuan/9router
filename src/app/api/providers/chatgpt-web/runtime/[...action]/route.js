@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
-import { authorizeChatGptWebRuntimeAdmin } from "@/dashboardGuard";
+import { authorizeChatGptWebRuntimeAdmin, isLocalRequest } from "@/dashboardGuard";
 import { requestChatGptWebRuntimeAdmin } from "open-sse/services/chatgptWebRuntimeClient.js";
+import { SessionTransferError, readChatGptWebSessionImport } from "../../../../../../../services/chatgpt-web-runtime/session-transfer.js";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -26,6 +27,13 @@ const ERROR_MESSAGES = {
   private_viewer_unavailable: "The runtime private VNC viewer is unavailable. Contact the operator.",
   runtime_draining: "The runtime is fenced for maintenance. Try again after the operator resumes it.",
   waiting_for_chatgpt_tool_approval: "Open the private browser and approve the active connector prompt once.",
+  invalid_session_transfer: "Invalid ChatGPT session file. Export a new file with the 9Router Chrome exporter.",
+  session_transfer_expired: "The exported cookies have expired. Sign in in Chrome and export again.",
+  session_transfer_too_large: "The session file exceeds the 256 KiB limit.",
+  session_account_mismatch: "The imported session belongs to another ChatGPT account. Use a new connection; the existing account was not replaced.",
+  session_restore_failed: "The previous browser session could not be restored. Do not retry the import; contact the operator.",
+  secure_origin_required: "Session import requires HTTPS except for loopback development.",
+  runtime_upgrade_required: "Session transfer requires an updated ChatGPT Web runtime. Contact the operator.",
 };
 
 function fail(status, code, message) {
@@ -87,7 +95,7 @@ function output(action, method, data) {
     if (!record(data) || !Array.isArray(data.profiles) || data.profiles.length > 128) throw new Error("invalid_runtime_response");
     return { profiles: data.profiles.map(profile) };
   }
-  if (action === "profiles" || action.startsWith("profiles/") || action === "browser/restart") return profile(data);
+  if (action === "profiles" || action.startsWith("profiles/") || action === "browser/restart" || ["session/verify", "session/import"].includes(action)) return profile(data);
   if (["login/start", "login/complete", "login/status", "login/session", "login/close", "browser/view"].includes(action)) return viewer(data, action === "login/session");
   if (action === "smoke") {
     return { profile: profile(data.profile), outerToolE2eVerified: data.outerToolE2eVerified === true, message: data.outerToolE2eVerified === true ? "Companion-observed tool smoke verified." : "Runtime diagnostic completed. This is not proof of local Codex tool execution; the companion staging gate is still required." };
@@ -106,10 +114,10 @@ function output(action, method, data) {
 
 async function handle(request, context) {
   if (!await authorizeChatGptWebRuntimeAdmin(request)) return fail(401, "dashboard_auth_required", "Dashboard authentication required.");
+  let originUrl;
   if (request.method !== "GET") {
     const origin = request.headers.get("origin");
     const fetchSite = request.headers.get("sec-fetch-site");
-    let originUrl;
     try { originUrl = origin ? new URL(origin) : null; } catch { return fail(403, "same_origin_required", "Runtime changes must originate from this dashboard."); }
     // Next may construct its internal request URL with localhost behind a loopback bind;
     // Host remains the browser-facing origin already constrained by the dashboard guard.
@@ -120,11 +128,14 @@ async function handle(request, context) {
   const { action: segments } = await context.params;
   if (!Array.isArray(segments) || segments.length > 2) return fail(404, "unknown_action", "Unknown runtime action.");
   const action = segments.join("/");
-  const allowed = { profiles: ["GET", "POST"], "login/start": ["POST"], "login/complete": ["POST"], "login/status": ["GET"], "login/session": ["GET"], "login/close": ["POST"], "browser/view": ["POST"], "browser/restart": ["POST"], smoke: ["POST"], drain: ["POST"], quiesce: ["POST"], resume: ["POST"], "interrupt-turn": ["POST"] };
+  const allowed = { profiles: ["GET", "POST"], "session/verify": ["POST"], "session/import": ["POST"], "login/start": ["POST"], "login/complete": ["POST"], "login/status": ["GET"], "login/session": ["GET"], "login/close": ["POST"], "browser/view": ["POST"], "browser/restart": ["POST"], smoke: ["POST"], drain: ["POST"], quiesce: ["POST"], resume: ["POST"], "interrupt-turn": ["POST"] };
   const patch = segments.length === 2 && segments[0] === "profiles" && PROFILE_ID.test(segments[1]);
   const methods = patch ? ["PATCH"] : Object.hasOwn(allowed, action) ? allowed[action] : null;
   if (!methods) return fail(404, "unknown_action", "Unknown runtime action.");
   if (!methods.includes(request.method)) return fail(405, "method_not_allowed", "Method not allowed for this runtime action.");
+  if (action === "session/import" && originUrl.protocol !== "https:" && !(originUrl.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(originUrl.hostname.toLowerCase()) && isLocalRequest(request))) {
+    return fail(403, "secure_origin_required", ERROR_MESSAGES.secure_origin_required);
+  }
   const url = new URL(request.url);
   let suffix = ""; let body;
   try {
@@ -134,29 +145,37 @@ async function handle(request, context) {
       suffix = `?loginId=${encodeURIComponent(loginIds[0])}`;
     } else if (url.search) throw new Error("invalid_query");
     if (request.method !== "GET") {
-      if (request.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !== "application/json") return fail(415, "json_required", "JSON required.");
-      body = await readJson(request, 8192);
-      if (patch) {
-        if (!exactKeys(body, ["revision", "settings"]) || !Number.isSafeInteger(body.revision) || body.revision < 0) throw new Error("invalid_revision");
-        body = { revision: body.revision, settings: settings(body.settings, true) };
-      } else if (["drain", "quiesce", "resume"].includes(action)) {
-        if (!exactKeys(body, ["operationId"]) || typeof body.operationId !== "string" || !ID.test(body.operationId)) throw new Error("invalid_operation");
-      } else if (action === "interrupt-turn") {
-        if (!exactKeys(body, ["clientId", "threadId", "turnId"]) || [body.clientId, body.threadId, body.turnId].some(id => typeof id !== "string" || !ID.test(id))) throw new Error("invalid_identity");
-      } else if (["login/close", "login/complete"].includes(action)) {
-        if (!exactKeys(body, ["loginId"]) || typeof body.loginId !== "string" || !LOGIN_ID.test(body.loginId)) throw new Error("invalid_login");
+      if (action === "session/import") {
+        body = await readChatGptWebSessionImport(request);
       } else {
-        const extra = action === "smoke" ? ["kind"] : [];
-        if (!exactKeys(body, ["profileId", ...extra], action === "browser/view" ? ["turnId"] : []) || typeof body.profileId !== "string" || !PROFILE_ID.test(body.profileId)) throw new Error("invalid_profile");
-        if (action === "smoke" && !["browser", "harness"].includes(body.kind)) throw new Error("invalid_smoke");
-        if (body.turnId !== undefined && (typeof body.turnId !== "string" || !ID.test(body.turnId))) throw new Error("invalid_identity");
+        if (request.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !== "application/json") return fail(415, "json_required", "JSON required.");
+        body = await readJson(request, 8192);
+        if (patch) {
+          if (!exactKeys(body, ["revision", "settings"]) || !Number.isSafeInteger(body.revision) || body.revision < 0) throw new Error("invalid_revision");
+          body = { revision: body.revision, settings: settings(body.settings, true) };
+        } else if (action === "session/verify") {
+          if (!exactKeys(body, ["profileId", "revision"]) || !PROFILE_ID.test(body.profileId || "") || typeof body.profileId !== "string" || !Number.isSafeInteger(body.revision) || body.revision < 1) throw new Error("invalid_profile");
+        } else if (["drain", "quiesce", "resume"].includes(action)) {
+          if (!exactKeys(body, ["operationId"]) || typeof body.operationId !== "string" || !ID.test(body.operationId)) throw new Error("invalid_operation");
+        } else if (action === "interrupt-turn") {
+          if (!exactKeys(body, ["clientId", "threadId", "turnId"]) || [body.clientId, body.threadId, body.turnId].some(id => typeof id !== "string" || !ID.test(id))) throw new Error("invalid_identity");
+        } else if (["login/close", "login/complete"].includes(action)) {
+          if (!exactKeys(body, ["loginId"]) || typeof body.loginId !== "string" || !LOGIN_ID.test(body.loginId)) throw new Error("invalid_login");
+        } else {
+          const extra = action === "smoke" ? ["kind"] : [];
+          if (!exactKeys(body, ["profileId", ...extra], action === "browser/view" ? ["turnId"] : []) || typeof body.profileId !== "string" || !PROFILE_ID.test(body.profileId)) throw new Error("invalid_profile");
+          if (action === "smoke" && !["browser", "harness"].includes(body.kind)) throw new Error("invalid_smoke");
+          if (body.turnId !== undefined && (typeof body.turnId !== "string" || !ID.test(body.turnId))) throw new Error("invalid_identity");
+        }
       }
     }
   } catch (error) {
+    if (error instanceof SessionTransferError && Object.hasOwn(ERROR_MESSAGES, error.code)) return fail(error.status, error.code, ERROR_MESSAGES[error.code]);
     return fail(error.message === "body_too_large" ? 413 : 400, "invalid_admin_request", "Invalid runtime action parameters.");
   }
   try {
-    const response = await requestChatGptWebRuntimeAdmin(`/admin/${action}${suffix}`, { method: request.method, ...(body ? { headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {}), signal: request.signal }, { timeoutMs: ["smoke", "login/complete"].includes(action) ? 120000 : 70000 });
+    const response = await requestChatGptWebRuntimeAdmin(`/admin/${action}${suffix}`, { method: request.method, ...(body ? { headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {}), signal: request.signal }, { timeoutMs: ["smoke", "login/complete", "session/verify", "session/import"].includes(action) ? 120000 : 70000 });
+    if (["session/verify", "session/import"].includes(action) && response.status === 404 && response.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !== "application/json") return fail(503, "runtime_upgrade_required", ERROR_MESSAGES.runtime_upgrade_required);
     const data = await readJson(response, 262144);
     if (!response.ok) {
       const code = typeof data?.error?.code === "string" && Object.hasOwn(ERROR_MESSAGES, data.error.code) ? data.error.code : "runtime_error";
@@ -165,6 +184,7 @@ async function handle(request, context) {
     }
     const result = output(action, request.method, data);
     if (["login/status", "login/session", "login/close", "login/complete"].includes(action) && result.loginId !== (body?.loginId || url.searchParams.get("loginId"))) throw new Error("invalid_runtime_response");
+    if (["session/verify", "session/import"].includes(action) && result.profileId !== body.profileId) throw new Error("invalid_runtime_response");
     return NextResponse.json(result, { headers: { "Cache-Control": "no-store" } });
   } catch {
     return fail(502, "runtime_unavailable", "Runtime unavailable or returned invalid diagnostics. No action was retried.");

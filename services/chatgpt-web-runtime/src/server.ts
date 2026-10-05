@@ -28,6 +28,7 @@ import type { AdapterEvent, CodexParsedRequest } from "./types";
 import { PROTOCOL_VERSION, SERVICE_NAME, UPSTREAM_REVISION, validateProfileId } from "../protocol.js";
 import { VERSION } from "./version";
 import { runtimeExecutionScope } from "./runtime-scope";
+import { readChatGptWebSessionImport, SessionTransferError } from "../session-transfer.js";
 
 export interface RuntimeEnvelope {
   protocolVersion: 1; profileId: string; profileEpoch: string; request: Record<string, unknown>; authority: AuthorityClaims;
@@ -94,7 +95,7 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
       || broker.pendingToolCalls > 0 || broker.activeMcpRequests > 0 || broker.openSockets > 0 || !profiles.physicalIdle();
   };
   const errorResponse = (error: unknown) => {
-    const typed = error instanceof RuntimeStateError || error instanceof AuthorityError;
+    const typed = error instanceof RuntimeStateError || error instanceof AuthorityError || error instanceof SessionTransferError;
     const code = typed ? error.code : "runtime_request_failed";
     const status = typed ? error.status : 500;
     return Response.json({ error: { type: "runtime_error", code, message: typed ? error.message : "Runtime request failed",
@@ -286,7 +287,18 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
             stateSchemaVersion: 1, operationFence: state.fence(), acceptedRequestCount: state.acceptedRequestCount(),
             physicalIdle: !hasPhysicalWork() && profiles.physicalIdle(), physicalSettlement: chatGptTurnSessions.physicalWorkCount(),
           });
+          if (path === "/admin/session/import") {
+            if (request.method !== "POST") throw new RuntimeStateError("method_not_allowed", "Session import requires POST", 405);
+            const body = await readChatGptWebSessionImport(request);
+            return await lifecycle(async () => Response.json(await profiles.importSession(body.profileId, body.revision, body.session), { headers: { "Cache-Control": "no-store" } }));
+          }
+          if (path === "/admin/session/verify" && request.method !== "POST") throw new RuntimeStateError("method_not_allowed", "Session verification requires POST", 405);
           const body = record(await readJsonRequestBody(request));
+          if (path === "/admin/session/verify") {
+            if (Object.keys(body).length !== 2 || !Object.hasOwn(body, "profileId") || !Object.hasOwn(body, "revision")
+              || typeof body.profileId !== "string" || !Number.isSafeInteger(body.revision) || Number(body.revision) < 1) throw new RuntimeStateError("invalid_request", "Exact profile identity and revision required", 400);
+            return await lifecycle(async () => Response.json(await profiles.verifySession(body.profileId as string, body.revision as number), { headers: { "Cache-Control": "no-store" } }));
+          }
           if (request.method === "POST" && ["/admin/login/close", "/admin/login/complete"].includes(path)) {
             if (typeof body.loginId !== "string" || !LOGIN_ID_PATTERN.test(body.loginId) || Object.keys(body).length !== 1) throw new RuntimeStateError("invalid_login", "Exact login ID required", 400);
             return await lifecycle(async () => Response.json(path.endsWith("/complete") ? await profiles.completeLogin(body.loginId as string) : await profiles.closeViewerLease(body.loginId as string), { headers: { "Cache-Control": "no-store" } }));

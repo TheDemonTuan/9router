@@ -24,6 +24,7 @@ New remote-runtime responsibilities: `protocol.js`, `src/authority.ts`, `src/pro
 - `duplicate-block-identity`: one-to-one ordered occurrence ledger reconciliation with range/key priority and fail-closed ambiguous alignment. Pinned failing-before/passing-after repro and true inconsistency regressions passed.
 - `login-interface-proof`: wait up to 30 seconds for the unique visible composer after authenticated session identity; capability detection reuses click/primary-pointerdown activation and closes the menu in `finally`. Profile catalog verification reads validated range/locks and drives the ancestor menuitem keyboard owner with bounded, exactly-one-step readback. Authentication, native cookie handoff, ownership fencing and the upstream 6.1.3 pin remain unchanged.
 - `model-header-evidence`: verbatim `readChatGptModelAnnouncements` backport from [upstream revision `b6ca2d3f91f8a2ba140b522fe3b3c50b4ebffa2d`](https://github.com/miuuyy/codex-chatgpt-web/blob/b6ca2d3f91f8a2ba140b522fe3b3c50b4ebffa2d/src/chatgpt-session.ts). Only the slider's own active menu header augments ARIA evidence; hidden/inert, multiple active headers and conflicting versions fail closed. Upstream 6.1.4 still uses Enter for capability detection; the shared activation change is a local convergence, not that upstream patch.
+- `session-reuse-transfer`: typed profile-local UI/navigation failures no longer reject initialization for unrelated profiles. Safe stderr events contain only profile/stage/code/error-name/timing and catalog route/effort. Explicit admin-only verify/import share one idle maintenance lock; import is same-account-bound, bounded to 256 KiB/180 cookies, and restores the previous in-memory snapshot on mutation/probe failure. A failed restore settles the context outside maintenance and leaves it unready. No cookie values, session API bodies, messages, stacks or fingerprints enter diagnostics.
 
 ### Login verification regression gate
 
@@ -35,6 +36,58 @@ Recovery verification on the same base revision in `fix/chatgpt-web-login-2`: Bu
 
 Isolated gateway `NODE_ENV=production bun run build` passed, including all 150 static pages and standalone asset copying. An initial invocation incorrectly retained `NODE_ENV=development` from dependency installation and failed prerendering `/_global-error`; correcting the invocation resolved the failure without source changes.
 
+
+## Saved sessions and Chrome import
+
+Status refreshes never verify a session or send a provider prompt. Use **Use Saved Session** to validate the existing persistent VPS profile before opening another sign-in browser. A waiting viewer lease must be completed or ended explicitly; verification/import will not close it. A UI probe failure is not proof of session expiration. ChatGPT may revoke or reject cookies even while their recorded expiry is in the future; challenges/2FA require normal sign-in, not a bypass.
+
+Optional Chrome transfer:
+
+1. In your personal Chrome, open `chrome://extensions`, enable Developer mode, and **Load unpacked** the repository's `tools/chatgpt-web-session-export` directory. The manifest contains a stable public key only; the extension requests only ChatGPT cookies/site access.
+2. Sign in to ChatGPT in that Chrome profile, then explicitly click **Export ChatGPT Session**. The extension downloads `chatgpt-session.json`; it does not upload, watch, store or copy to clipboard. Only unpartitioned `chatgpt.com` cookies transfer, including HttpOnly/multipart cookies; no Google credentials, access-token API, localStorage or personal Chrome profile is transferred.
+3. In the trusted HTTPS dashboard, choose **Add Connection & Import Session** (new account), or **Import Chrome Session** on an existing same-account connection. Select the file, then click **Import selected session**. Selection alone does not read cookies or upload. HTTP is permitted only for trusted loopback development; forwarded protocol headers cannot grant this exception.
+4. Wait for actual ready/catalog proof and delete the downloaded local file. Treat the file as a credential. Account mismatch restores old cookies and never changes the existing account binding. A lost HTTP observer does not retry the upload: read the target status, then explicitly **Use Saved Session** to confirm it. On `session_restore_failed`, do not retry import; contact the operator.
+
+Endpoints are `POST /admin/session/verify` with `{profileId, revision}` and `POST /admin/session/import` with `{profileId, revision, session}`. They require the runtime admin token; gateway dashboard authentication and same-origin checks remain mandatory. Import format is exactly `{format:"9router-chatgpt-session",version:1,cookies:[...]}`. No session file/payload is stored in the gateway database. Runtime persistent Chromium keeps cookies in the same profile directory. Missing new endpoints on an old runtime return `runtime_upgrade_required`, not a silently replayed/manual login.
+
+### Disposable transfer proof and release gate
+
+The actual Playwright 1.62.0 bundled Chromium extension smoke exercises `chrome.cookies` and real downloads with sandbox enabled, provider/Google networking blocked, and synthetic multipart HttpOnly/Secure cookies. It produces an exclusive `0600` synthetic session file. Branded Chrome and the pinned production browser are not substitutes for the side-loaded-extension test.
+
+From `services/chatgpt-web-runtime`, with Bun 1.4.0 and private disposable paths:
+
+```sh
+PLAYWRIGHT_BROWSERS_PATH="$CGW_EXPORT_BROWSER_CACHE" bun x --no-install --bun playwright-core install chromium
+PLAYWRIGHT_BROWSERS_PATH="$CGW_EXPORT_BROWSER_CACHE" bun scripts/session-export-smoke.ts \
+  --extension-dir "$CGW_TASK_ROOT/tools/chatgpt-web-session-export" --output "$CGW_SYNTHETIC_SESSION_FILE"
+CGW_CHROMIUM_EXECUTABLE=/path/to/chrome bun test tests/browser-login-dom.test.ts tests/human-login.test.ts tests/runtime-maintenance.test.ts tests/viewer-session.test.ts tests/session-import.test.ts
+```
+
+The synthetic exporter file was consumed by a disposable actual runtime HTTP/Chromium smoke: import and explicit verify reached ready with a verified Sol route and zero provider POSTs. Session-import regressions passed 13 cases/174 assertions, including full runtime reopen, account mismatch, invalid/expired schema, byte/media bounds, active/fenced targets, all clear/add/restore failure boundaries and secret-safe diagnostics. Four gateway contract suites passed 100 cases. Actual Next dashboard UI with synthetic network boundaries exercised create/import, selection-before-read, target mismatch, no replay/viewer, input clearing, and 1280×900/390×844 surfaces; these are not native container or live-account proof.
+Combined runtime verification after the rollback correction: Bun 1.4.0 typecheck passed; `CGW_CHROMIUM_EXECUTABLE=/usr/bin/google-chrome bun test ./tests` passed 112 tests across 15 files, zero failures/skips, 653 assertions. The host-Chrome runtime fixtures and bundled-Chromium exporter are separate proof surfaces.
+Isolated production `bun run build` passed all 150 static pages and standalone asset copying with a separate `.next-cgw-build` output. ESLint passed the changed supported JavaScript/MJS files. Workflow YAML and ten native shell steps parsed successfully. A review-discovered closed/crashed inspection-tab rollback defect was reproduced before the fix (503 instead of preserved account-mismatch 409); after separating tab quiescence from context-cookie restoration, the focused real-Chromium regression passed eight assertions and kept the original account ready after explicit verification.
+
+
+
+From the repository root on the authorized native Docker runner:
+
+```sh
+bun tests/integration/chatgpt-web-onboarding-smoke.mjs \
+  --gateway-image "$CGW_GATEWAY_IMAGE" --runtime-image "$CGW_CHECK_IMAGE" \
+  --browser-volume "$CGW_BROWSER_VOLUME" --proof-dir "$CGW_PROOF_DIR" \
+  --session-file "$CGW_SYNTHETIC_SESSION_FILE"
+```
+
+The runner rejects anything but the two exporter synthetic fixture cookies before creating containers, copies the file into its own root:10001/0640 fixture mount, and never alters the source file. CI exports before onboarding on each native architecture; artifacts include synthetic screenshots/results only, never session JSON. Local native onboarding remains blocked: no Docker CLI/daemon, openbox or x11vnc. Candidate image/security/native input gates must pass before release. No production account, browser, volume or deployment was mutated.
+
+Deploy runtime first, then gateway through the existing immutable platform lifecycle. Publication/activation requires separate operator authorization, default-branch integration, completed/expired user leases, idle drain/quiesce and operator-private backup preserving existing named data/browser volumes and secrets. Verify OCI digest/revision, not only 6.1.3/upstreamRevision. Do not infer incident resolution on the VPS account from offline proof. After authorization/integration only:
+
+```sh
+gh workflow run chatgpt-web-runtime.yml --ref master -f live_account=false -f publish=true -f deploy=true
+gh workflow run deploy.yml --ref master -f skip_deploy=false
+```
+
+`deploy.yml` also activates on pushes to master: hold that gateway gate until the runtime cutover is complete. Do not enable the broader live-account/Codex harness gate for a login-only check. Confirm the original account's saved session and controlled platform restart without sending a prompt; any remaining live failure must be diagnosed from the new safe stage, not bypassed.
 
 ## Current verified package gate
 

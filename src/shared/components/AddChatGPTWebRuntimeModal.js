@@ -24,7 +24,7 @@ export default function AddChatGPTWebRuntimeModal({ isOpen, connection, onClose,
     return () => current.abort();
   }, [isOpen]);
   const close = () => { if (!savingRef.current) onClose(); };
-  const save = async () => {
+  const save = async (authMethod) => {
     const current = controller.current;
     if (!current || current.signal.aborted || savingRef.current || uncertain) return;
     savingRef.current = true; setSaving(true); setError("");
@@ -47,7 +47,7 @@ export default function AddChatGPTWebRuntimeModal({ isOpen, connection, onClose,
       if (current.signal.aborted) return;
       setSavedConnection(data.connection);
       setProfileId(data.connection.providerSpecificData.profileId);
-      setAutoStartLogin(!editing);
+      setAutoStartLogin(!editing && authMethod === "browser");
       onSaved();
     } catch (cause) {
       if (!current.signal.aborted) {
@@ -63,13 +63,14 @@ export default function AddChatGPTWebRuntimeModal({ isOpen, connection, onClose,
   return (
     <Modal isOpen={isOpen} onClose={close} suspended={viewerOpen} size="xl" title={savedConnection ? "ChatGPT Web Connection" : "Add ChatGPT Web Connection"}>
       <div className="space-y-4">
-        {!savedConnection && <p className="text-sm text-text-muted">Create a connection, then sign in in its private browser. 9Router never asks for your password or cookies.</p>}
+        {!savedConnection && <p className="text-sm text-text-muted">Create a connection, then sign in in its private browser or import a Chrome session. Browser sign-in does not send your password to 9Router. Optional session import handles cookies as secret credentials.</p>}
         <Input label="Connection name" id="chatgpt-web-connection-name" aria-label="Connection name" value={name} onChange={event => setName(event.target.value)} autoFocus disabled={saving || uncertain} />
         {error && <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-400">{error}</div>}
         {uncertain && <p role="status" className="text-sm text-amber-500">The save was not retried. Close this dialog and refresh the connection list before adding again to avoid duplicate profiles.</p>}
         <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
           <Button variant="secondary" onClick={close} disabled={saving}>Close</Button>
-          {(!savedConnection || hasChanges) && <Button aria-label={savedConnection ? "Save connection" : "Add Connection and Sign In"} onClick={save} loading={saving} disabled={uncertain || !name.trim() || (!!savedConnection && !PROFILE_ID.test(profileId.trim()))}>{savedConnection ? "Save connection" : "Add Connection & Sign In"}</Button>}
+          {(!savedConnection || hasChanges) && <Button aria-label={savedConnection ? "Save connection" : "Add Connection and Sign In"} onClick={() => save("browser")} loading={saving} disabled={uncertain || !name.trim() || (!!savedConnection && !PROFILE_ID.test(profileId.trim()))}>{savedConnection ? "Save connection" : "Add Connection & Sign In"}</Button>}
+          {!savedConnection && <Button variant="secondary" aria-label="Add Connection and Import Session" onClick={() => save("import")} loading={saving} disabled={uncertain || !name.trim()}>Add Connection & Import Session</Button>}
         </div>
         {isOpen && savedConnection && <ChatGPTWebRuntimePanel key={savedConnection.providerSpecificData.profileId} connectionName={name.trim() || savedConnection.name} profileId={savedConnection.providerSpecificData.profileId} selectedProfileId={profileId} autoStartLogin={autoStartLogin} onProfileSelected={setProfileId} onViewerOpenChange={setViewerOpen} onChanged={onSaved} />}
       </div>

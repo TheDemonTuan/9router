@@ -7,16 +7,23 @@ import Input from "./Input";
 import Select from "./Select";
 import Toggle from "./Toggle";
 import ChatGPTWebViewer from "./ChatGPTWebViewer";
+import { MAX_SESSION_TRANSFER_BYTES, SessionTransferError, parseChatGptWebSessionTransfer } from "../../../services/chatgpt-web-runtime/session-transfer.js";
 
 const BASE = "/api/providers/chatgpt-web/runtime";
 const DEFAULT_SETTINGS = { mode: "browser-only", experimentalBiggerContext: false, experimentalFreshConversationPerTurn: false, useSavedChats: false, autoApproveToolCalls: false, connectorName: "Codex Native2" };
 const BIGGER_CONTEXT_ROUTES = new Set(["chatgpt-web/gpt-5.6-sol-instant", "chatgpt-web/gpt-5.6-sol", "chatgpt-web/gpt-5.6-pro", "chatgpt-web/gpt-6-pro"]);
+const IMPORT_ERRORS = {
+  invalid_session_transfer: "Invalid ChatGPT session file. Export a new file with the 9Router Chrome exporter.",
+  session_transfer_expired: "The exported cookies have expired. Sign in in Chrome and export again.",
+  session_transfer_too_large: "The session file exceeds the 256 KiB limit.",
+};
 async function request(action, init, signal) {
   const response = await fetch(`${BASE}/${action}`, { cache: "no-store", ...init, signal });
   const data = await response.json();
   if (!response.ok) {
     const error = new Error(typeof data.error === "string" ? data.error : data.error?.message || "Runtime action failed.");
     error.status = response.status;
+    error.code = data.error?.code;
     throw error;
   }
   return data;
@@ -40,6 +47,9 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
   const [lease, setLease] = useState(null);
   const [refresh, setRefresh] = useState(0);
   const [viewerOpen, setViewerOpen] = useState(false);
+  const [fileSelected, setFileSelected] = useState(false);
+  const fileInput = useRef(null);
+  const sessionFile = useRef(null);
   const autoStarted = useRef(false);
   const lifetime = useRef(null);
   const leaseRef = useRef(null);
@@ -48,6 +58,7 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
   const dirtyRef = useRef(false);
   const profile = profiles.find(item => item.profileId === profileId);
 
+  useEffect(() => () => { sessionFile.current = null; if (fileInput.current) fileInput.current.value = ""; }, [profileId]);
   useEffect(() => {
     onViewerOpenChange(viewerOpen);
     return () => onViewerOpenChange(false);
@@ -120,15 +131,25 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
         if (action === "login/complete" && data.state === "waiting") setError("Sign-in is not verified yet. Continue in the browser, then choose Finish Sign In again.");
       }
       const updated = data.profile || (data.profileId && data.settings ? data : null);
+      if (["session/verify", "session/import"].includes(action) && updated?.profileId !== body.profileId) throw new Error("invalid_runtime_response");
       if (updated) {
         setProfiles(previous => [...previous.filter(item => item.profileId !== updated.profileId), updated]);
         if (updated.profileId === profileId) { setDraft(updated.settings); baseRevision.current = updated.revision; dirtyRef.current = false; setDirty(false); }
       }
-      setNotice(data.message || (data.loginId ? (data.state === "waiting" ? "" : leaseNotice(data.state)) : `${label} completed.`));
+      setNotice(["session/verify", "session/import"].includes(action) ? (updated.state === "ready" ? "Connected and ready." : "Session is not ready. Check Advanced for diagnostics.") : data.message || (data.loginId ? (data.state === "waiting" ? "" : leaseNotice(data.state)) : `${label} completed.`));
       onChanged();
     } catch (cause) {
       if (!controller.signal.aborted) {
         setError(cause.message);
+        if (action === "session/import" && (!cause.status || cause.code === "runtime_unavailable")) {
+          // Read only after an interrupted observer; never replay the credential upload.
+          setNotice("Import was not retried. Use Saved Session to confirm the target connection before importing again.");
+          try {
+            const status = await request("profiles", {}, controller.signal);
+            const target = status.profiles?.find(item => item.profileId === body.profileId);
+            if (!controller.signal.aborted && target) setProfiles(previous => [...previous.filter(item => item.profileId !== target.profileId), target]);
+          } catch { /* Keep the uncertain import visible; no automatic mutation. */ }
+        }
         if (action === "login/complete") {
           // A rejected verification may have restored the human browser. Read this exact lease once,
           // after the explicit action; never silently submit another verification.
@@ -181,6 +202,36 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
   const biggerSupported = profile?.models.some(model => !model.legacy && BIGGER_CONTEXT_ROUTES.has(model.id)) === true;
   const waiting = lease?.state === "waiting";
   const needsLogin = !waiting && ["unconfigured", "login_required", "error"].includes(profile?.state);
+  const sessionDisabled = disabled || active || waiting || !loaded || !profile;
+  const verifySession = () => act("session/verify", { profileId, revision: profile.revision }, "Use Saved Session");
+  const secureImportOrigin = typeof window !== "undefined" && (window.location.protocol === "https:" || (window.location.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(window.location.hostname.toLowerCase())));
+  const clearSessionFile = () => {
+    sessionFile.current = null; setFileSelected(false);
+    if (fileInput.current) fileInput.current.value = "";
+  };
+  const importSession = async () => {
+    if (sessionDisabled || !secureImportOrigin || busyRef.current || !sessionFile.current) return;
+    const file = sessionFile.current;
+    const controller = lifetime.current;
+    if (!controller || controller.signal.aborted) return;
+    busyRef.current = true; setBusy("Read session file"); setError(""); setNotice("");
+    try {
+      if (file.size > MAX_SESSION_TRANSFER_BYTES) throw new SessionTransferError("session_transfer_too_large", 413);
+      let value;
+      try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(await file.arrayBuffer())); }
+      catch { throw new SessionTransferError("invalid_session_transfer", 400); }
+      if (controller.signal.aborted) return;
+      const body = { profileId, revision: profile.revision, session: { format: "9router-chatgpt-session", version: 1, cookies: parseChatGptWebSessionTransfer(value) } };
+      if (new TextEncoder().encode(JSON.stringify(body)).byteLength > MAX_SESSION_TRANSFER_BYTES) throw new SessionTransferError("session_transfer_too_large", 413);
+      busyRef.current = false;
+      await act("session/import", body, "Import session");
+    } catch (cause) {
+      if (!controller.signal.aborted) setError(IMPORT_ERRORS[cause.code] || IMPORT_ERRORS.invalid_session_transfer);
+    } finally {
+      clearSessionFile();
+      if (!controller.signal.aborted) { busyRef.current = false; setBusy(""); }
+    }
+  };
   const openBrowser = () => {
     if (waiting && Date.parse(lease.expiresAt) <= Date.now()) { endViewer("expired"); return; }
     if (waiting) { setError(""); setNotice(""); setViewerOpen(true); }
@@ -197,7 +248,17 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
   return (
     <section aria-label="ChatGPT Web connection" className="space-y-4 border-t border-border pt-4">
       <p role={error ? "alert" : "status"} className={`text-sm ${error ? "text-red-400" : "text-text-muted"}`}>{humanStatus}</p>
+      {notice && error && <p role="status" className="text-sm text-text-muted">{notice}</p>}
       <Button aria-label={needsLogin ? "Sign In" : "Open Browser"} disabled={disabled || (!profile && !waiting) || (needsLogin && active)} loading={busy === "Start login" || busy === "View browser"} onClick={openBrowser}>{needsLogin ? "Sign In" : "Open Browser"}</Button>
+      {profile?.state !== "ready" && !waiting && <Button variant="secondary" disabled={sessionDisabled} loading={busy === "Use Saved Session"} onClick={verifySession}>Use Saved Session</Button>}
+      <Button variant="secondary" disabled={sessionDisabled || !secureImportOrigin} onClick={() => fileInput.current?.click()}>Import Chrome Session</Button>
+      <input ref={fileInput} type="file" accept=".json,application/json" aria-label="Chrome session file" hidden disabled={sessionDisabled || !secureImportOrigin} onChange={event => { sessionFile.current = event.target.files?.[0] || null; setFileSelected(!!sessionFile.current); }} />
+      <p className="text-xs text-text-muted">Session files are credentials. Import only into your trusted dashboard, then delete the local file. An existing connection accepts only the same ChatGPT account; use a new connection for another account.</p>
+      {!secureImportOrigin && <p role="status" className="text-xs text-amber-500">Session import requires HTTPS except for loopback development.</p>}
+      {fileSelected && <div className="flex flex-wrap gap-2">
+        <Button disabled={sessionDisabled || !secureImportOrigin} loading={busy === "Read session file" || busy === "Import session"} onClick={importSession}>Import selected session</Button>
+        <Button variant="secondary" disabled={!!busy} onClick={clearSessionFile}>Cancel import</Button>
+      </div>}
       {viewerOpen && waiting && <ChatGPTWebViewer key={lease.loginId} connectionName={connectionName} loginId={lease.loginId} profileId={profileId} expiresAt={lease.expiresAt} manualLogin={lease.manualLogin} verifying={busy === "Finish Sign In"} error={error} onFinish={finishLogin} onClose={() => setViewerOpen(false)} onEnded={endViewer} />}
       <details className="space-y-4">
         <summary className="cursor-pointer text-sm text-text-muted">Advanced</summary>
@@ -221,6 +282,7 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
           </li>)}</ul> : <p className="text-sm text-text-muted">No verified models yet. Sign in in the browser, then choose Finish Sign In to verify your account.</p>}
         </div>
         <div className="flex flex-wrap gap-2">
+          {profile.state === "ready" && <Button size="sm" variant="secondary" disabled={sessionDisabled} loading={busy === "Use Saved Session"} onClick={verifySession}>Use Saved Session</Button>}
           <Button size="sm" variant="secondary" disabled={disabled || active || waiting} loading={busy === "Start login"} onClick={() => act("login/start", { profileId }, "Start login")}>Start Login</Button>
           <Button size="sm" variant="secondary" disabled={disabled} loading={busy === "View browser"} onClick={() => waiting ? setViewerOpen(true) : act("browser/view", { profileId }, "View browser")}>View Browser</Button>
           <Button size="sm" variant="secondary" disabled={disabled || active || waiting} loading={busy === "Restart browser"} onClick={() => act("browser/restart", { profileId }, "Restart browser")}>Restart Browser</Button>

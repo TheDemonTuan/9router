@@ -16,12 +16,13 @@ import type { RuntimeConfig } from "./config";
 import { RuntimeState, RuntimeStateError } from "./runtime-state";
 import { ProfileTunnel } from "./tunnel";
 import type { ProfileTunnelConfig } from "./tunnel";
-import { MAX_BROWSER_TURNS, PROTOCOL_VERSION } from "../protocol.js";
+import { MAX_BROWSER_TURNS, PROTOCOL_VERSION, validateProfileId } from "../protocol.js";
 import { harnessBuildCompatible } from "./harness-compatibility";
 import { ChatGptBrowserWorker } from "./adapters/chatgpt-web/browser-worker";
 import { TurnBroker } from "./adapters/chatgpt-web/turn-broker";
 import { defaultBrokerEndpoint, atomicWriteFile } from "./config";
 import { ChatGptWebAdapterError } from "./adapters/chatgpt-web/adapter-error";
+import { parseChatGptWebSessionTransfer, SessionTransferError } from "../session-transfer.js";
 
 export interface WebModelRow {
   id: string; display_name: string; supported_reasoning_levels: string[]; default_reasoning_level: string;
@@ -67,7 +68,7 @@ export class RuntimeProfiles {
         await this.probe(profile.profileId, true, true);
       } catch (error) {
         this.invalidate(profile.profileId, error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : "profile_probe_failed");
-        if (!(error instanceof RuntimeStateError || error instanceof ChatGptWebAdapterError) || !["login_required", "session_expired", "model_version_unavailable", "harness_compatibility_unverified"].includes(error.code || "")) throw error;
+        if (!(error instanceof RuntimeStateError || error instanceof ChatGptWebAdapterError) || !["login_required", "session_expired", "model_version_unavailable", "harness_compatibility_unverified", "profile_probe_failed"].includes(error.code || "")) throw error;
       }
     }
   }
@@ -161,91 +162,222 @@ export class RuntimeProfiles {
     return { protocolVersion: PROTOCOL_VERSION, profile_id: profileId, profile_epoch: profile.epoch,
       catalog_revision: evidence.catalogRevision, checked_at: evidence.checkedAt, max_concurrency: MAX_BROWSER_TURNS, models: evidence.models };
   }
+  private probeDiagnostic(profileId: string, stage: "browser_open" | "navigation" | "session" | "composer" | "surface" | "capabilities" | "model_selection" | "account_commit" | "native_close" | "native_restore", error: unknown, startedAt: number, modelId?: string, effort?: string): void {
+    const code = error instanceof RuntimeStateError || error instanceof ChatGptWebAdapterError ? error.code : undefined;
+    const errorName = error instanceof RuntimeStateError ? "RuntimeStateError" : error instanceof ChatGptWebAdapterError ? "ChatGptWebAdapterError"
+      : error instanceof Error && error.name === "TimeoutError" ? "TimeoutError" : "Error";
+    console.error(JSON.stringify({ event: "cgw_profile_probe_failed", profileId, stage,
+      code: code && /^[a-z][a-z0-9_]{0,79}$/.test(code) ? code : "profile_probe_failed", errorName,
+      elapsedMs: Math.max(0, Date.now() - startedAt), ...(modelId ? { modelId, effort } : {}) }));
+  }
   async probe(profileId: string, navigate = true, initializing = false, manualManager?: BrowserManager, assertLease?: () => void): Promise<ProfileProbe> {
     if (this.state.fence() && !initializing) throw new RuntimeStateError("runtime_draining", "Profile probe mutations denied while drained", 503);
-    await this.ensureDisplay(profileId);
-    assertLease?.();
-    const manager = manualManager ?? this.manager(profileId);
-    this.probes.delete(profileId);
+    const startedAt = Date.now();
+    let enteredMaintenance = false;
     try {
-      const result = await manager.maintenance("session probe", async () => {
-        const profile = this.state.profile(profileId);
-        if (!manualManager && profile.epoch !== manager.profileEpoch) throw new RuntimeStateError("profile_revision_conflict", "Stale browser epoch probe discarded");
-        const page = await manager.maintenancePage();
-        if (navigate) await page.goto(chatGptNewChatUrl(profile.settings.useSavedChats), { waitUntil: "domcontentloaded", timeout: 60_000 });
-        const evidence = await probeBrowserLoginSession(page, this.state.accountSalt, profile.settings.useSavedChats);
-        const models: WebModelRow[] = [];
-        for (const candidate of availableChatGptWebModelRoutes(evidence.capabilities)) {
-          if (candidate.interactionMode !== "automatic") continue;
-          const route: ChatGptWebAutomaticModelRoute = candidate;
-          if (route.modelFamily) {
-            try {
-              const composer = page.locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true });
-              const control = composer.locator("xpath=ancestor::form[1]").locator(CHATGPT_EFFORT_CONTROL_SELECTOR).filter({ visible: true });
-              const activate = () => activateChatGptEffortMenu(page, control);
-              let menu = await activate();
-              menu = await selectChatGptModelFamily(menu, route.modelFamily, activate);
-              const effortIndex = ["low", "medium", "high", "xhigh", "max"].indexOf(route.adapterEffort);
-              let snapshot = await readChatGptEffortSnapshot(menu.sliderContainer);
-              const minimum = snapshot.min, maximum = snapshot.max;
-              const target = minimum + effortIndex;
-              if (effortIndex < 0 || target < minimum || target > maximum || snapshot.available[effortIndex] !== true) {
-                throw new Error("ChatGPT requested effort is unavailable");
-              }
-              const keyboardOwner = menu.slider.locator("xpath=ancestor::*[@role='menuitem'][1]");
-              for (let moves = 0; snapshot.value !== target; moves++) {
-                if (moves >= maximum - minimum) throw new Error("ChatGPT effort selection exceeded its range");
-                const previous = snapshot.value, direction = target > previous ? 1 : -1;
-                await keyboardOwner.press(direction > 0 ? "ArrowRight" : "ArrowLeft", { timeout: 5_000 });
-                const deadline = Date.now() + 5_000;
-                do {
-                  snapshot = await readChatGptEffortSnapshot(menu.sliderContainer);
-                  if (snapshot.min !== minimum || snapshot.max !== maximum || snapshot.available[effortIndex] !== true) {
-                    throw new Error("ChatGPT changed its effort range or availability during selection");
-                  }
-                  if (snapshot.value !== previous) break;
-                  if (Date.now() >= deadline) break;
-                  await Bun.sleep(50);
-                } while (true);
-                if (snapshot.value !== previous + direction) throw new Error("ChatGPT effort did not move exactly one step");
-              }
-              await assertChatGptModelFamily(menu, route.modelFamily, route.adapterEffort, effortIndex, 1000);
-            } catch { continue; }
-            finally { await page.keyboard.press("Escape").catch(() => {}); }
-          }
-          const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, { ...evidence.capabilities, experimentalBiggerContext: profile.settings.experimentalBiggerContext });
-          const full = profile.accountFingerprint === evidence.accountFingerprint && profile.settings.mode === "full" && harnessBuildCompatible()
-            && this.harnessEvidence.get(profileId)?.epoch === profile.epoch && await this.tunnels.get(profileId)?.ready() === true;
-          models.push({ id: route.slug, display_name: route.displayName,
-            supported_reasoning_levels: [...chatGptWebRouteEfforts(route, evidence.capabilities)], default_reasoning_level: route.codexEffort,
-            ...(route.modelFamily ? { model_family: route.modelFamily } : {}), legacy: route.legacy === true,
-            context_window: limits.contextWindow, auto_compact_token_limit: limits.autoCompactTokenLimit,
-            capabilities: { text: true, vision: true, reasoning: true, compact: route.backendModel !== CHATGPT_WEB_LUNA_BACKEND_MODEL,
-              streaming: true, responses: true, native_responses: true, generic_responses: false,
-              tools: full, mcp_tools: full, exec: full, subagents: full, computer_use: false, browser_tool: false } });
-        }
-        if (!models.length) throw new RuntimeStateError("model_version_unavailable", "Authenticated profile has no verified model route");
-        assertLease?.();
-        if (this.state.fence() && !initializing) throw new RuntimeStateError("runtime_draining", "Profile probe mutations denied while drained", 503);
-        const current = this.state.observeAccount(profileId, evidence.accountFingerprint, profile.revision);
-        if (current.epoch !== profile.epoch) {
-          this.harnessEvidence.delete(profileId);
-          await this.tunnels.get(profileId)?.stop(); this.tunnels.delete(profileId);
-          await TurnBroker.forSocket(defaultBrokerEndpoint(join(this.config.dataDir, "profiles", profileId))).close();
-          await manager.discardRetained();
-        }
-        assertLease?.();
-        if (this.state.fence() && !initializing) throw new RuntimeStateError("runtime_draining", "Profile probe mutations denied while drained", 503);
-        const probe: ProfileProbe = { revision: current.revision, epoch: current.epoch, capabilities: evidence.capabilities,
-          checkedAt: evidence.checkedAt, models, catalogRevision: randomUUID() };
-        this.probes.set(profileId, probe); this.errors.delete(profileId);
-        return probe;
+      await this.ensureDisplay(profileId);
+      assertLease?.();
+      const manager = manualManager ?? this.manager(profileId);
+      const result = await manager.maintenance("session probe", () => {
+        enteredMaintenance = true;
+        return this.probeInMaintenance(profileId, manager, navigate, initializing, manualManager !== undefined, assertLease);
       }, manualManager !== undefined);
       if (result.epoch !== manager.profileEpoch && !manualManager) await manager.close();
       return result;
     } catch (error) {
-      const code = error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : "profile_probe_failed";
-      this.errors.set(profileId, code);
+      if (!enteredMaintenance) this.probeDiagnostic(profileId, "browser_open", error, startedAt);
+      this.invalidate(profileId, error instanceof RuntimeStateError || error instanceof ChatGptWebAdapterError ? error.code || "profile_probe_failed" : "profile_probe_failed");
+      throw error;
+    }
+  }
+  private async probeInMaintenance(profileId: string, manager: BrowserManager, navigate: boolean, initializing: boolean, manualLogin: boolean, assertLease?: () => void, expectedAccountFingerprint?: string | null): Promise<ProfileProbe> {
+    const startedAt = Date.now();
+    let stage: Parameters<RuntimeProfiles["probeDiagnostic"]>[1] = "browser_open";
+    this.probes.delete(profileId);
+    try {
+      const profile = this.state.profile(profileId);
+      if (!manualLogin && profile.epoch !== manager.profileEpoch) throw new RuntimeStateError("profile_revision_conflict", "Stale browser epoch probe discarded");
+      const page = await manager.maintenancePage();
+      if (navigate) {
+        stage = "navigation";
+        try { await page.goto(chatGptNewChatUrl(profile.settings.useSavedChats), { waitUntil: "domcontentloaded", timeout: 60_000 }); }
+        catch (cause) {
+          throw new ChatGptWebAdapterError("ChatGPT session navigation failed", {
+            status: 502, errorType: "runtime_error", code: "profile_probe_failed", retryable: false, cause,
+          });
+        }
+      }
+      const evidence = await probeBrowserLoginSession(page, this.state.accountSalt, profile.settings.useSavedChats, value => { stage = value; });
+      if (expectedAccountFingerprint && evidence.accountFingerprint !== expectedAccountFingerprint) throw new RuntimeStateError("session_account_mismatch", "The imported session belongs to another ChatGPT account", 409);
+      stage = "model_selection";
+      const models: WebModelRow[] = [];
+      for (const candidate of availableChatGptWebModelRoutes(evidence.capabilities)) {
+        if (candidate.interactionMode !== "automatic") continue;
+        const route: ChatGptWebAutomaticModelRoute = candidate;
+        if (route.modelFamily) {
+          try {
+            const composer = page.locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true });
+            const control = composer.locator("xpath=ancestor::form[1]").locator(CHATGPT_EFFORT_CONTROL_SELECTOR).filter({ visible: true });
+            const activate = () => activateChatGptEffortMenu(page, control);
+            let menu = await activate();
+            menu = await selectChatGptModelFamily(menu, route.modelFamily, activate);
+            const effortIndex = ["low", "medium", "high", "xhigh", "max"].indexOf(route.adapterEffort);
+            let snapshot = await readChatGptEffortSnapshot(menu.sliderContainer);
+            const minimum = snapshot.min, maximum = snapshot.max;
+            const target = minimum + effortIndex;
+            if (effortIndex < 0 || target < minimum || target > maximum || snapshot.available[effortIndex] !== true) {
+              throw new Error("ChatGPT requested effort is unavailable");
+            }
+            const keyboardOwner = menu.slider.locator("xpath=ancestor::*[@role='menuitem'][1]");
+            for (let moves = 0; snapshot.value !== target; moves++) {
+              if (moves >= maximum - minimum) throw new Error("ChatGPT effort selection exceeded its range");
+              const previous = snapshot.value, direction = target > previous ? 1 : -1;
+              await keyboardOwner.press(direction > 0 ? "ArrowRight" : "ArrowLeft", { timeout: 5_000 });
+              const deadline = Date.now() + 5_000;
+              do {
+                snapshot = await readChatGptEffortSnapshot(menu.sliderContainer);
+                if (snapshot.min !== minimum || snapshot.max !== maximum || snapshot.available[effortIndex] !== true) {
+                  throw new Error("ChatGPT changed its effort range or availability during selection");
+                }
+                if (snapshot.value !== previous) break;
+                if (Date.now() >= deadline) break;
+                await Bun.sleep(50);
+              } while (true);
+              if (snapshot.value !== previous + direction) throw new Error("ChatGPT effort did not move exactly one step");
+            }
+            await assertChatGptModelFamily(menu, route.modelFamily, route.adapterEffort, effortIndex, 1000);
+          } catch (error) {
+            this.probeDiagnostic(profileId, "model_selection", error, startedAt, route.slug, route.adapterEffort);
+            continue;
+          }
+          finally { await page.keyboard.press("Escape").catch(() => {}); }
+        }
+        const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, { ...evidence.capabilities, experimentalBiggerContext: profile.settings.experimentalBiggerContext });
+        const full = profile.accountFingerprint === evidence.accountFingerprint && profile.settings.mode === "full" && harnessBuildCompatible()
+          && this.harnessEvidence.get(profileId)?.epoch === profile.epoch && await this.tunnels.get(profileId)?.ready() === true;
+        models.push({ id: route.slug, display_name: route.displayName,
+          supported_reasoning_levels: [...chatGptWebRouteEfforts(route, evidence.capabilities)], default_reasoning_level: route.codexEffort,
+          ...(route.modelFamily ? { model_family: route.modelFamily } : {}), legacy: route.legacy === true,
+          context_window: limits.contextWindow, auto_compact_token_limit: limits.autoCompactTokenLimit,
+          capabilities: { text: true, vision: true, reasoning: true, compact: route.backendModel !== CHATGPT_WEB_LUNA_BACKEND_MODEL,
+            streaming: true, responses: true, native_responses: true, generic_responses: false,
+            tools: full, mcp_tools: full, exec: full, subagents: full, computer_use: false, browser_tool: false } });
+      }
+      if (!models.length) throw new RuntimeStateError("model_version_unavailable", "Authenticated profile has no verified model route");
+      assertLease?.();
+      if (this.state.fence() && !initializing) throw new RuntimeStateError("runtime_draining", "Profile probe mutations denied while drained", 503);
+      stage = "account_commit";
+      const current = this.state.observeAccount(profileId, evidence.accountFingerprint, profile.revision);
+      if (current.epoch !== profile.epoch) {
+        this.harnessEvidence.delete(profileId);
+        await this.tunnels.get(profileId)?.stop(); this.tunnels.delete(profileId);
+        await TurnBroker.forSocket(defaultBrokerEndpoint(join(this.config.dataDir, "profiles", profileId))).close();
+        await manager.discardRetained();
+      }
+      // Import can only bind a first account or preserve the old one; its revision may
+      // advance at this synchronous commit point, so its precommit guard is not repeated.
+      if (expectedAccountFingerprint === undefined) assertLease?.();
+      if (this.state.fence() && !initializing) throw new RuntimeStateError("runtime_draining", "Profile probe mutations denied while drained", 503);
+      const probe: ProfileProbe = { revision: current.revision, epoch: current.epoch, capabilities: evidence.capabilities,
+        checkedAt: evidence.checkedAt, models, catalogRevision: randomUUID() };
+      this.probes.set(profileId, probe); this.errors.delete(profileId);
+      return probe;
+    } catch (error) {
+      this.probeDiagnostic(profileId, stage, error, startedAt);
+      this.invalidate(profileId, error instanceof RuntimeStateError || error instanceof ChatGptWebAdapterError ? error.code || "profile_probe_failed" : "profile_probe_failed");
+      throw error;
+    }
+  }
+  async importSession(profileId: string, revision: number, session: unknown): Promise<unknown> {
+    const cookies = parseChatGptWebSessionTransfer(session);
+    try { validateProfileId(profileId); }
+    catch { throw new SessionTransferError("invalid_session_transfer", 400); }
+    if (!Number.isSafeInteger(revision) || revision < 1) throw new SessionTransferError("invalid_session_transfer", 400);
+    const assertTarget = () => {
+      const profile = this.state.profile(profileId);
+      if (this.state.fence()) throw new RuntimeStateError("runtime_draining", "Session import denied while drained", 503);
+      if (profile.revision !== revision) throw new RuntimeStateError("profile_revision_conflict", "Profile revision changed", 409);
+      if (this.viewerStarting || this.viewerClosing || this.viewer?.profileId === profileId) throw new RuntimeStateError("profile_active", "Session import requires an idle profile", 409);
+      return profile;
+    };
+    assertTarget();
+    if (!browserProfileWork(profileId).idle) throw new RuntimeStateError("profile_active", "Session import requires an idle profile", 409);
+    await this.ensureDisplay(profileId);
+    assertTarget();
+    const manager = this.manager(profileId);
+    if (!manager.isIdle) throw new RuntimeStateError("profile_active", "Session import requires an idle profile", 409);
+    let restoreFailed = false;
+    try {
+      await manager.maintenance("session import", async () => {
+        const original = assertTarget();
+        const context = await manager.ensureContext();
+        const page = await manager.maintenancePage();
+        await manager.discardRetained();
+        for (const idlePage of context.pages()) if (idlePage !== page) await idlePage.close();
+        await page.goto("about:blank");
+        const snapshot = await context.cookies();
+        assertTarget();
+        try {
+          await context.clearCookies();
+          try { await context.addCookies(cookies); }
+          catch { throw new SessionTransferError("invalid_session_transfer", 400); }
+          await this.probeInMaintenance(profileId, manager, true, false, false, () => { assertTarget(); }, original.accountFingerprint);
+        } catch (error) {
+          this.invalidate(profileId, error instanceof RuntimeStateError || error instanceof ChatGptWebAdapterError || error instanceof SessionTransferError ? error.code || "profile_probe_failed" : "profile_probe_failed");
+          try {
+            // A closed/crashed tab must not short-circuit context-level restoration.
+            let quiesceFailed = false;
+            try {
+              try { await page.goto("about:blank"); }
+              catch { if (!page.isClosed()) await page.close(); }
+              for (const idlePage of context.pages()) if (idlePage !== page) await idlePage.close();
+            } catch { quiesceFailed = true; }
+            await context.clearCookies();
+            await context.addCookies(snapshot);
+            if (quiesceFailed) throw new RuntimeStateError("session_restore_failed", "Browser pages could not settle during session restoration", 503);
+          } catch {
+            restoreFailed = true;
+            this.invalidate(profileId, "session_restore_failed");
+            throw new RuntimeStateError("session_restore_failed", "The previous browser session could not be restored", 503);
+          }
+          throw error;
+        }
+      });
+      return this.status(profileId);
+    } catch (error) {
+      if (restoreFailed) {
+        // Closing inside maintenance would await its own tail. Settle only after it exits.
+        await manager.close().catch(() => {});
+      }
+      if (error instanceof ChatGptWebAdapterError) throw new RuntimeStateError(error.code || "profile_probe_failed", error.message, error.status);
+      throw error;
+    }
+  }
+  async verifySession(profileId: string, revision: number): Promise<unknown> {
+    try { validateProfileId(profileId); }
+    catch { throw new RuntimeStateError("invalid_request", "Exact profile identity and revision required", 400); }
+    if (!Number.isSafeInteger(revision) || revision < 1) throw new RuntimeStateError("invalid_request", "Exact profile identity and revision required", 400);
+    const assertTarget = () => {
+      const profile = this.state.profile(profileId);
+      if (this.state.fence()) throw new RuntimeStateError("runtime_draining", "Session verification denied while drained", 503);
+      if (profile.revision !== revision) throw new RuntimeStateError("profile_revision_conflict", "Profile revision changed", 409);
+      if (this.viewerStarting || this.viewerClosing || this.viewer?.profileId === profileId) throw new RuntimeStateError("profile_active", "Session verification requires an idle profile", 409);
+    };
+    assertTarget();
+    if (!browserProfileWork(profileId).idle) throw new RuntimeStateError("profile_active", "Session verification requires an idle profile", 409);
+    await this.ensureDisplay(profileId);
+    assertTarget();
+    const manager = this.manager(profileId);
+    if (!manager.isIdle) throw new RuntimeStateError("profile_active", "Session verification requires an idle profile", 409);
+    try {
+      const result = await manager.maintenance("saved session verification", async () => {
+        assertTarget();
+        return this.probeInMaintenance(profileId, manager, true, false, false);
+      });
+      if (result.epoch !== manager.profileEpoch) await manager.close();
+      return this.status(profileId);
+    } catch (error) {
+      if (error instanceof ChatGptWebAdapterError) throw new RuntimeStateError(error.code || "profile_probe_failed", error.message, error.status);
       throw error;
     }
   }
@@ -412,15 +544,20 @@ export class RuntimeProfiles {
     };
     const manager = viewer.manager;
     const operation = (async () => {
+      const startedAt = Date.now();
+      let nativeClose = true;
       try {
         await manager.verifyManualLogin(async () => {
+          nativeClose = false;
           assertLease();
           return this.probe(viewer.profileId, true, false, manager, assertLease);
         });
         assertLease();
+        nativeClose = true;
         await this.closeViewer("completed");
         return this.viewerStatus(loginId);
       } catch (error) {
+        if (nativeClose) this.probeDiagnostic(viewer.profileId, "native_close", error, startedAt);
         if (this.viewer === viewer && !viewer.revoked && !this.viewerClosing && !this.state.fence() && viewer.expiresAt > Date.now()) {
           try {
             await manager.restoreManualLogin(chatGptNewChatUrl(this.state.profile(viewer.profileId).settings.useSavedChats), () => {
@@ -428,6 +565,7 @@ export class RuntimeProfiles {
             });
             assertLease();
           } catch (restoreError) {
+            this.probeDiagnostic(viewer.profileId, "native_restore", restoreError, startedAt);
             await this.closeViewer("error");
             throw restoreError;
           }
