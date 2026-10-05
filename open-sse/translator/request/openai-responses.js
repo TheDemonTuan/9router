@@ -443,9 +443,11 @@ export function openaiToOpenAIResponsesRequest(model, body, stream, credentials)
 
   for (const msg of messages) {
     if (msg.role === ROLE.SYSTEM || msg.role === ROLE.DEVELOPER) {
-      // Use the first instruction-bearing message as instructions.
-      // OpenAI recommends role="developer" for GPT-5/Codex as the system-level prompt.
-      if (!hasSystemMessage) {
+      if (credentials?.chatGptWebRequestMode === "browser") {
+        const instruction = extractInstructionsText(msg.content);
+        result.instructions = hasSystemMessage ? `${result.instructions}\n\n${instruction}` : instruction;
+        hasSystemMessage = true;
+      } else if (!hasSystemMessage) {
         result.instructions = extractInstructionsText(msg.content);
         hasSystemMessage = true;
       }
@@ -562,6 +564,7 @@ export function openaiToOpenAIResponsesRequest(model, body, stream, credentials)
   if (body.parallel_tool_calls !== undefined) result.parallel_tool_calls = body.parallel_tool_calls;
   const text = chatResponseFormatToResponsesText(body.response_format);
   if (text) result.text = text;
+  if (credentials?.chatGptWebRequestMode === "browser" && body.text) result.text = { ...result.text, ...body.text };
 
   return result;
 }

@@ -39,7 +39,7 @@ function createSilentWavFile() {
   return new Blob([buffer], { type: "audio/wav" });
 }
 
-async function getInternalHeaders() {
+async function getInternalHeaders(browser = false) {
   let apiKey = null;
   try {
     const keys = await getApiKeys();
@@ -48,13 +48,18 @@ async function getInternalHeaders() {
 
   const headers = { "Content-Type": "application/json" };
   if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
-  headers["x-9r-cli-token"] = await getConsistentMachineId(CLI_TOKEN_SALT);
+  if (!browser) headers["x-9r-cli-token"] = await getConsistentMachineId(CLI_TOKEN_SALT);
   return headers;
 }
 
-export async function pingModelByKind(model, kind, baseUrl = `http://127.0.0.1:${process.env.PORT || UPDATER_CONFIG.appPort}`) {
-  const headers = await getInternalHeaders();
+export async function pingModelByKind(model, kind, baseUrl = `http://127.0.0.1:${process.env.PORT || UPDATER_CONFIG.appPort}`, options = {}) {
+  const browser = resolveProviderId(String(model).split("/")[0]) === "chatgpt-web";
+  const headers = await getInternalHeaders(browser);
   const start = Date.now();
+  if (browser && !headers.Authorization) return { ok: false, latencyMs: 0, error: "Create an active 9Router API key before testing ChatGPT Web models", status: 401 };
+  if (browser && options.connectionId) headers["x-connection-id"] = options.connectionId;
+  const deadline = AbortSignal.timeout(browser ? 120000 : 15000);
+  const signal = options.signal ? AbortSignal.any([deadline, options.signal]) : deadline;
 
   if (kind === "embedding") {
     const res = await fetch(`${baseUrl}/api/v1/embeddings`, {
@@ -162,21 +167,20 @@ export async function pingModelByKind(model, kind, baseUrl = `http://127.0.0.1:$
     return { ok: true, latencyMs, error: null, status: res.status };
   }
 
-  const res = await fetch(`${baseUrl}/api/v1/chat/completions`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      model,
-      // 1024 tokens: reasoning models (ClinePass/kimi-k3, deepseek-v4-pro, etc.) spend
-      // their budget on chain-of-thought before emitting an answer. A tiny probe like
-      // max_tokens:16 starves the answer and yields a false "no choices" failure.
-      // See issue #3010.
-      max_tokens: 1024,
-      stream: false,
-      messages: [{ role: "user", content: "hi" }],
-    }),
-    signal: AbortSignal.timeout(15000),
-  });
+  let res;
+  try {
+    res = await fetch(`${baseUrl}/api/v1/chat/completions`, {
+      method: "POST", headers,
+      body: JSON.stringify(browser
+        ? { model, stream: false, messages: [{ role: "user", content: "Reply with OK only." }] }
+        : { model, max_tokens: 1024, stream: false, messages: [{ role: "user", content: "hi" }] }),
+      signal,
+    });
+  } catch (error) {
+    if (!browser) throw error;
+    return { ok: false, latencyMs: Date.now() - start, status: signal.aborted ? 499 : 502,
+      error: signal.aborted ? "Model test cancelled or timed out; request was not retried" : "Model test transport failed; request was not retried" };
+  }
   const latencyMs = Date.now() - start;
 
   const rawText = await res.text().catch(() => "");
@@ -219,6 +223,15 @@ export async function pingModelByKind(model, kind, baseUrl = `http://127.0.0.1:$
   }
 
   const hasChoices = Array.isArray(parsed?.choices) && parsed.choices.length > 0;
+  if (browser) {
+    const choice = parsed?.choices?.[0];
+    const text = choice?.message?.content;
+    const connectionId = res.headers.get("x-9router-connection-id");
+    if (parsed?.status && parsed.status !== "completed" || !hasChoices || choice.finish_reason !== "stop" || typeof text !== "string" || !text.trim()) {
+      return { ok: false, latencyMs, status: res.status, connectionId, error: "ChatGPT Web did not return a completed text response" };
+    }
+    return { ok: true, latencyMs, error: null, status: res.status, connectionId, completionText: text };
+  }
 
   // Soft-pass (issue #3010): a reasoning model may burn its whole budget on
   // chain-of-thought and return finish_reason:"length" with empty content but

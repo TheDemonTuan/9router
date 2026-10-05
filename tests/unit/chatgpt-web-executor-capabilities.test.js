@@ -32,3 +32,33 @@ it("unknown 429 and busy wording do not create rate/quota cooldown classificatio
   expect(executor.parseError(new Response(null, { status: 503 }), JSON.stringify({ error: { code: "provider_busy", message: "concurrency limit reached" } })).errorClass).toBe("runtime_error");
   expect(executor.parseError(new Response(null, { status: 429 }), JSON.stringify({ error: { code: "quota_exhausted" } })).errorClass).toBe("quota_exhausted");
 });
+it("generic rejects unsupported bodies before catalog/transport and never upgrades authority", async () => {
+  const executor = new ChatGPTWebExecutor();
+  for (const extra of [{ tools: [{ type: "function", name: "exec" }] }, { previous_response_id: "prior" }, { authority: {} }, { max_output_tokens: 2 }]) {
+    const result = await executor.execute({ model: row.id, body: { input: "hello", ...extra }, credentials: { chatGptWebRequestMode: "browser" } });
+    expect(result.response.status).toBe(400);
+    expect((await result.response.json()).error.code).toBe("unsupported_browser_request");
+  }
+  expect(mocks.getChatGptWebCatalog).not.toHaveBeenCalled();
+  expect(mocks.requestChatGptWebRuntime).not.toHaveBeenCalled();
+  const mixed = await executor.execute({ model: row.id, body: { input: "hello" }, credentials: { chatGptWebRequestMode: "browser", chatGptWebAuthority: { purpose: "responses" } } });
+  expect(mixed.response.status).toBe(400);
+});
+it("generic fails closed on native-only catalog, upgrade and unknown submission", async () => {
+  const executor = new ChatGPTWebExecutor();
+  const args = { model: row.id, body: { input: "hello" }, credentials: { chatGptWebRequestMode: "browser", chatGptWebProfileEpoch: "epoch" } };
+  let result = await executor.execute(args);
+  expect(result.response.status).toBe(503);
+  expect((await result.response.json()).error.code).toBe("generic_model_unavailable");
+  expect(mocks.requestChatGptWebRuntime).not.toHaveBeenCalled();
+  mocks.getChatGptWebCatalog.mockResolvedValue({ profileId: "fixture", profileEpoch: "epoch", stale: false, models: [{ ...row, capabilities: { ...row.capabilities, generic_responses: true, text: true } }] });
+  mocks.requestChatGptWebRuntime.mockResolvedValue(new Response(null, { status: 404 }));
+  result = await executor.execute(args);
+  expect(result.response.status).toBe(503);
+  expect((await result.response.json()).error.code).toBe("runtime_upgrade_required");
+  mocks.requestChatGptWebRuntime.mockRejectedValue(new Error("transport lost after Send"));
+  result = await executor.execute(args);
+  expect(result.response.status).toBe(502);
+  expect((await result.response.json()).error).toMatchObject({ code: "submission_unknown", retryable: false, submission_state: "unknown" });
+  expect(mocks.requestChatGptWebRuntime).toHaveBeenCalledTimes(2);
+});

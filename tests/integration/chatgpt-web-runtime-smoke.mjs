@@ -174,6 +174,8 @@ try {
   const apiKey = (await db.createApiKey("offline-cgw", "offline-machine")).key;
   const apiFile = secret("gateway-api.key", apiKey);
   await db.updateSettings({ requireLogin: false, requireApiKey: false });
+  await db.setModelAlias("offline-browser-alias", "cgw/chatgpt-web/gpt-5.6-sol");
+  await db.createCombo({ name: "offline-browser-combo", models: ["offline-browser-alias"] });
   const connections = [];
   for (const [index, profileId] of ["browser-only-fixture", "fixture", "fixture"].entries()) {
     connections.push(await db.createProviderConnection({ provider: "chatgpt-web", authType: "bridge", name: `offline-row-${index}`, priority: index + 1, isActive: true, testStatus: "active", providerSpecificData: { profileId } }));
@@ -205,6 +207,46 @@ try {
   const sol = models.data.find(model => model.id === "cgw/chatgpt-web/gpt-5.6-sol");
   assert(sol?.supported_reasoning_levels.includes("high") && !sol.supported_reasoning_levels.includes("xhigh") && sol.model_family === "5.6", "Dotted route/effort/family lost through public Next/companion catalog");
   const auth = { authorization: `Bearer ${apiKey}` };
+  stage = "unsigned Browser-only four public wires";
+  const genericBefore = (await control()).physicalSends;
+  for (const model of ["cgw/chatgpt-web/gpt-5.6-sol", "offline-browser-alias", "offline-browser-combo"]) {
+    const denied = await post(gateways[0].base, "/v1/chat/completions", { model, messages: [{ role: "user", content: "Do not send" }] }, { authorization: "Bearer invalid" });
+    assert(denied.status === 401, "Direct/alias/combo allowed an invalid API key"); await denied.arrayBuffer();
+  }
+  assert((await control()).physicalSends === genericBefore, "API-key rejection reached Send through alias or combo");
+  const fixtureAnswer = "Offline answer first paragraph.\n\nOffline answer second paragraph.";
+  const browserConnection = connections[0].id;
+  writeFileSync(clientKeysFile, JSON.stringify({ version: 1, clients: [] }), { mode: 0o600 });
+  try {
+    for (const path of ["/v1/chat/completions", "/v1/responses"]) {
+      for (const stream of [false, true]) {
+        const body = { model: "cgw/chatgpt-web/gpt-5.6-sol", stream,
+          ...(path.endsWith("completions") ? { messages: [{ role: "user", content: "Return fixture text" }] } : { input: "Return fixture text" }) };
+        const response = await post(gateways[0].base, path, body, { ...auth, "x-connection-id": browserConnection, "user-agent": "codex_cli_rs/offline" });
+        assert(response.ok && response.headers.get("x-9router-connection-id") === browserConnection, "Generic request rejected or selected another account");
+        let answer;
+        if (!stream) {
+          const result = await response.json();
+          if (path.endsWith("completions")) { assert(result.choices[0].finish_reason === "stop", "Chat completion missing successful terminal"); answer = result.choices[0].message.content; }
+          else { assert(result.status === "completed", "Responses JSON missing successful terminal"); answer = result.output.flatMap(item => item.content || []).filter(part => part.type === "output_text").map(part => part.text).join(""); }
+        } else {
+          const wire = await response.text();
+          if (path.endsWith("completions")) {
+            const chunks = wire.split(/\r?\n/).filter(line => line.startsWith("data: ") && line !== "data: [DONE]").map(line => JSON.parse(line.slice(6)));
+            assert(wire.includes("data: [DONE]") && chunks.some(chunk => chunk.choices?.[0]?.finish_reason === "stop"), "Chat stream missing terminal");
+            answer = chunks.map(chunk => chunk.choices?.[0]?.delta?.content || "").join("");
+          } else {
+            const final = responseFromSse(wire);
+            answer = final.output.flatMap(item => item.content || []).filter(part => part.type === "output_text").map(part => part.text).join("");
+            const deltas = wire.split(/\r?\n/).filter(line => line.startsWith("data: ") && line !== "data: [DONE]").map(line => JSON.parse(line.slice(6))).filter(event => event.type === "response.output_text.delta").map(event => event.delta).join("");
+            assert(deltas === answer, "Responses incremental text differs from final");
+          }
+        }
+        assert(answer === fixtureAnswer, "Generic browser answer changed or lost paragraphs");
+      }
+    }
+    assert((await control()).physicalSends === genericBefore + 4, "Generic wires did not produce exactly four physical Sends");
+  } finally { writeFileSync(clientKeysFile, JSON.stringify(provisioned), { mode: 0o600 }); }
   const { parseRequest } = await import(join(runtimePackage, "src/responses/parser.ts"));
   const { resolveCompanionAuthority } = await import(join(runtimePackage, "src/companion/local-authority.ts"));
   const { signAuthority, sha256 } = await import(join(runtimePackage, "src/authority.ts"));
@@ -327,6 +369,7 @@ try {
     publicDottedReasoningCatalog: true, canonicalRootAndChild: true, missingAndPoisonedRolloutRejected: true, unsignedBodyModelPathRevokedRejectedBeforeSend: true,
     normalStreamingTerminal: "completed", compactSignatureBeforeRewrite: true, signedInterruptAfterRolloutRemoval: true, noFallbackHeader: true,
     signedPendingToolInterruptSettled: true,
+    genericPublicFourWires: true, emptyCompanionProvisioningGeneric: true, codexUserAgentDoesNotGrantAuthority: true,
     actualGatewayProcesses: 2, duplicateConnectionRowsOneProfile: true, durableBlueGreenBinding: true, parallelJtiReplayDenied: true,
     browserOnlyCandidateSkippedForTools: true, allRowsDisabledTypedNoFallbackNoSend: true,
     actualPersistentChromium: true, actualMcpStdio: true, nativeNamespacedCall: true, nativeFreeformPatch: true, localOuterExecutions: executed.size, sameBrowserToolContinuationSends: 1,

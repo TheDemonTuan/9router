@@ -13,6 +13,7 @@ import { normalizeProviderId, normalizeProviderSpecificData, sanitizeProviderSpe
 import { validateChatGptWebProfileId } from "open-sse/services/chatgptWebRuntimeClient.js";
 import { authorizeChatGptWebRuntimeAdmin } from "@/dashboardGuard";
 import { ensureChatGptWebRuntimeProfile } from "@/lib/chatgptWebProfileProvisioning";
+import { getChatGptWebProfileStates, applyChatGptWebProfileState, chatGptWebUnavailableProfileState } from "@/lib/chatgptWebConnectionState";
 
 export const dynamic = "force-dynamic";
 
@@ -51,9 +52,15 @@ async function normalizeProxyPoolId(proxyPoolId) {
 }
 
 // GET /api/providers - List all connections
-export async function GET() {
+export async function GET(request) {
   try {
     const connections = await getProviderConnections();
+    let profileStates;
+    let runtimeUnavailable = false;
+    if (connections.some(connection => connection.provider === "chatgpt-web")) {
+      try { profileStates = await getChatGptWebProfileStates({ signal: request?.signal }); }
+      catch { runtimeUnavailable = true; }
+    }
 
     // Build nodeNameMap for compatible providers (id → name)
     let nodeNameMap = {};
@@ -75,6 +82,11 @@ export async function GET() {
         name,
         providerSpecificData: c.provider === "chatgpt-web" ? { profileId: c.providerSpecificData?.profileId } : sanitizeProviderSpecificData(c.providerSpecificData),
       };
+      if (c.provider === "chatgpt-web") {
+        Object.assign(safe, applyChatGptWebProfileState(safe, runtimeUnavailable
+          ? chatGptWebUnavailableProfileState()
+          : profileStates.get(c.providerSpecificData?.profileId)));
+      }
       delete safe.apiKey;
       delete safe.accessToken;
       delete safe.refreshToken;

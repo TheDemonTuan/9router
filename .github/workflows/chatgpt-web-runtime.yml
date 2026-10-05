@@ -92,6 +92,8 @@ jobs:
             unit/models-route-chatgpt-web.test.js \
             unit/v1-models-chatgpt-web.test.js \
             unit/chatgpt-web-connection-test.test.js \
+            unit/chatgpt-web-connection-state.test.js \
+            unit/model-test-routing.test.js \
             unit/force-stream-config.test.js \
             unit/responses-native-forwarding.test.js \
             unit/dashboard-guard.test.js \

@@ -158,3 +158,57 @@ describe("profile CRUD", () => {
     expect(mocks.updateProviderConnection).not.toHaveBeenCalled();
   });
 });
+
+describe("read-only ChatGPT Web connection overlay", () => {
+  const model = { id: "chatgpt-web/gpt-5.6-sol", supported_reasoning_levels: ["medium", "high"], default_reasoning_level: "high" };
+  const profile = (profileId, state = "ready", models = [model]) => ({ profileId, state, settings: { mode: "browser-only" }, models, lastError: null, accountFingerprint: "fixture-private-fingerprint", profileEpoch: "fixture-private-epoch" });
+  const saved = (id, profileId) => ({ id, provider: "chatgpt-web", authType: "bridge", providerSpecificData: { profileId }, testStatus: "login_required", lastError: "old private diagnostic", lastErrorAt: "2025-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z", priority: 1, isActive: true, modelLock_any: "2099-01-01T00:00:00.000Z" });
+  it("repairs old login_required rows from one fresh snapshot while keeping profile isolation and quota locks", async () => {
+    const a = saved("one", "personal"); const b = saved("two", "other");
+    mocks.getProviderConnections.mockResolvedValue([a, b, { id: "ordinary", provider: "openai", testStatus: "active" }]);
+    mocks.requestChatGptWebRuntimeAdmin.mockImplementation(async () => Response.json({ protocolVersion: 1, profiles: [profile("personal"), profile("other", "login_required", [])] }));
+    const data = await (await GET()).json();
+    expect(data.connections[0]).toMatchObject({ testStatus: "active", lastError: null, lastErrorAt: null, priority: 1, modelLock_any: a.modelLock_any, chatGptWebRuntime: { state: "ready", mode: "browser-only", lastError: null } });
+    expect(data.connections[1]).toMatchObject({ testStatus: "login_required", chatGptWebRuntime: { state: "login_required", lastError: { code: "login_required" } } });
+    expect(data.connections[2]).not.toHaveProperty("chatGptWebRuntime");
+    expect(JSON.stringify(data)).not.toMatch(/private-fingerprint|private-epoch|old private diagnostic/);
+    expect(Object.keys(data.connections[0].chatGptWebRuntime)).toEqual(["state", "mode", "lastError"]);
+    expect(mocks.requestChatGptWebRuntimeAdmin).toHaveBeenCalledExactlyOnceWith("/admin/profiles", { signal: undefined }, { timeoutMs: 3000 });
+    expect(mocks.updateProviderConnection).not.toHaveBeenCalled();
+    expect(a.testStatus).toBe("login_required");
+  });
+  it("preserves disabled presentation and does not use active readiness to clear model locks", async () => {
+    const a = { ...saved("one", "personal"), isActive: false };
+    mocks.getProviderConnections.mockResolvedValue([a]);
+    mocks.requestChatGptWebRuntimeAdmin.mockImplementation(async () => Response.json({ protocolVersion: 1, profiles: [profile("personal")] }));
+    const data = await (await GET()).json();
+    expect(data.connections[0]).toMatchObject({ isActive: false, testStatus: "active", modelLock_any: a.modelLock_any });
+  });
+  it("does not contact runtime when there are no ChatGPT Web connections", async () => {
+    mocks.getProviderConnections.mockResolvedValue([{ id: "ordinary", provider: "openai", testStatus: "active" }]);
+    expect((await GET()).status).toBe(200);
+    expect(mocks.requestChatGptWebRuntimeAdmin).not.toHaveBeenCalled();
+  });
+  it("distinguishes missing profiles from an offline runtime and never exposes stale success", async () => {
+    const a = { ...saved("one", "personal"), testStatus: "active" }; mocks.getProviderConnections.mockResolvedValue([a]);
+    mocks.requestChatGptWebRuntimeAdmin.mockImplementation(async () => Response.json({ protocolVersion: 1, profiles: [] }));
+    expect((await (await GET()).json()).connections[0]).toMatchObject({ testStatus: "login_required", chatGptWebRuntime: { state: "unconfigured", mode: null, lastError: { code: "profile_not_found" } } });
+    mocks.requestChatGptWebRuntimeAdmin.mockRejectedValue(new Error("Bearer fixture-runtime-secret"));
+    const first = (await (await GET()).json()).connections[0];
+    const next = (await (await GET()).json()).connections[0];
+    expect(first).toMatchObject({ testStatus: "error", chatGptWebRuntime: { state: "error", mode: null, lastError: { code: "runtime_unavailable", message: "Runtime unavailable. Refresh connections after the runtime recovers." } } });
+    expect(first.lastErrorAt).toBe(next.lastErrorAt);
+    expect(JSON.stringify(first)).not.toContain("fixture-runtime-secret");
+    expect(mocks.updateProviderConnection).not.toHaveBeenCalled();
+  });
+  it("treats an invalid runtime response as unavailable rather than expired sign-in", async () => {
+    mocks.getProviderConnections.mockResolvedValue([saved("one", "personal")]);
+    mocks.requestChatGptWebRuntimeAdmin.mockImplementation(async () => Response.json({ protocolVersion: 1, profiles: [profile("personal", "invented")] }));
+    expect((await (await GET()).json()).connections[0].chatGptWebRuntime.lastError.code).toBe("runtime_unavailable");
+  });
+  it("requires nonempty model evidence for ready display", async () => {
+    mocks.getProviderConnections.mockResolvedValue([saved("one", "personal")]);
+    mocks.requestChatGptWebRuntimeAdmin.mockImplementation(async () => Response.json({ protocolVersion: 1, profiles: [profile("personal", "ready", [])] }));
+    expect((await (await GET()).json()).connections[0]).toMatchObject({ testStatus: "error", chatGptWebRuntime: { state: "error", mode: "browser-only", lastError: { code: "model_version_unavailable" } } });
+  });
+});

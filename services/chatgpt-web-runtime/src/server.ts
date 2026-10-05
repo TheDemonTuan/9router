@@ -1,11 +1,11 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { Server } from "bun";
 import { RuntimeSingletonLock } from "./process";
 import { RuntimeState, RuntimeStateError } from "./runtime-state";
 import { RuntimeProfiles } from "./profiles";
 import { ViewerTransport, LOGIN_ID_PATTERN, VIEWER_MAX_MESSAGE, VIEWER_MAX_BUFFER } from "./viewer-transport";
-import { loadRuntimeConfig, providerConfig, tokenMatches } from "./config";
+import { browserProviderConfig, loadRuntimeConfig, providerConfig, tokenMatches } from "./config";
 import type { RuntimeConfig } from "./config";
 import { loadProfileTunnelConfigs } from "./tunnel";
 import { AuthorityError, sha256, validateAuthorityClaims } from "./authority";
@@ -29,6 +29,34 @@ import { PROTOCOL_VERSION, SERVICE_NAME, UPSTREAM_REVISION, validateProfileId } 
 import { VERSION } from "./version";
 import { runtimeExecutionScope } from "./runtime-scope";
 import { readChatGptWebSessionImport, SessionTransferError } from "../session-transfer.js";
+import { BrowserRequestError, validateBrowserResponsesRequest } from "../browser-request.js";
+
+export interface BrowserRuntimeEnvelope {
+  protocolVersion: 1; profileId: string; profileEpoch: string; request: Record<string, unknown>;
+  effectiveModel: string; effectiveReasoning: string; transformedRequestSha256: string;
+}
+export function validateBrowserRuntimeEnvelope(value: unknown, headerProfile: string | null): BrowserRuntimeEnvelope {
+  const envelope = record(value);
+  const allowed = ["protocolVersion", "profileId", "profileEpoch", "request", "effectiveModel", "effectiveReasoning", "transformedRequestSha256"];
+  if (Object.keys(envelope).length !== allowed.length || Object.keys(envelope).some(key => !allowed.includes(key))
+    || envelope.protocolVersion !== PROTOCOL_VERSION || typeof envelope.profileEpoch !== "string" || !envelope.profileEpoch
+    || typeof envelope.effectiveModel !== "string" || typeof envelope.effectiveReasoning !== "string") {
+    throw new RuntimeStateError("protocol_mismatch", "Invalid browser runtime envelope", 400);
+  }
+  let profileId: string;
+  try { profileId = validateProfileId(envelope.profileId); }
+  catch { throw new RuntimeStateError("profile_mismatch", "Invalid browser profile", 400); }
+  if (!headerProfile || headerProfile !== profileId) throw new RuntimeStateError("profile_mismatch", "Profile header/envelope mismatch", 400);
+  const request = record(envelope.request);
+  const transformedRequestSha256 = sha256(JSON.stringify(request));
+  if (envelope.transformedRequestSha256 !== transformedRequestSha256) throw new RuntimeStateError("transformed_body_mismatch", "Internal request integrity mismatch", 400);
+  const normalized = validateBrowserResponsesRequest(request);
+  if (normalized.model !== envelope.effectiveModel || normalized.reasoning?.effort !== undefined && normalized.reasoning.effort !== envelope.effectiveReasoning) {
+    throw new RuntimeStateError("model_scope_mismatch", "Effective browser model or reasoning mismatch", 400);
+  }
+  return { protocolVersion: 1, profileId, profileEpoch: envelope.profileEpoch, request: normalized,
+    effectiveModel: envelope.effectiveModel, effectiveReasoning: envelope.effectiveReasoning, transformedRequestSha256 };
+}
 
 export interface RuntimeEnvelope {
   protocolVersion: 1; profileId: string; profileEpoch: string; request: Record<string, unknown>; authority: AuthorityClaims;
@@ -95,7 +123,7 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
       || broker.pendingToolCalls > 0 || broker.activeMcpRequests > 0 || broker.openSockets > 0 || !profiles.physicalIdle();
   };
   const errorResponse = (error: unknown) => {
-    const typed = error instanceof RuntimeStateError || error instanceof AuthorityError || error instanceof SessionTransferError;
+    const typed = error instanceof RuntimeStateError || error instanceof AuthorityError || error instanceof SessionTransferError || error instanceof BrowserRequestError;
     const code = typed ? error.code : "runtime_request_failed";
     const status = typed ? error.status : 500;
     return Response.json({ error: { type: "runtime_error", code, message: typed ? error.message : "Runtime request failed",
@@ -202,6 +230,62 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
     return Response.json({ output: buildCompactV1Output(extractCompactUserMessages(envelope.request.input), summary) });
     });
   };
+  const handleBrowserResponse = async (request: Request): Promise<Response> => {
+    if (state.fence() || shuttingDown) throw new RuntimeStateError("runtime_draining", "Runtime is draining", 503);
+    const envelope = validateBrowserRuntimeEnvelope(await readJsonRequestBody(request), request.headers.get("x-cgw-profile-id"));
+    await profiles.refreshReadiness(envelope.profileId);
+    if (state.fence() || shuttingDown) throw new RuntimeStateError("runtime_draining", "Runtime is draining", 503);
+    const profile = state.profile(envelope.profileId);
+    if (profile.settings.mode !== "browser-only") throw new RuntimeStateError("codex_authority_required", "Full profiles require signed Codex companion authority", 400);
+    if (profile.epoch !== envelope.profileEpoch) throw new RuntimeStateError("profile_epoch_mismatch", "Account epoch changed", 409);
+    const evidence = profiles.evidence(profile.profileId);
+    const row = evidence.models.find(row => row.id === envelope.effectiveModel);
+    if (!row || row.capabilities.generic_responses !== true || row.capabilities.text !== true
+      || !row.supported_reasoning_levels.includes(envelope.effectiveReasoning)) {
+      throw new RuntimeStateError("model_version_unavailable", "Exact Browser-only model and reasoning route unavailable", 400);
+    }
+    const route = requireChatGptWebModelRoute(envelope.effectiveModel, evidence.capabilities, envelope.effectiveReasoning);
+    if (route.interactionMode !== "automatic") throw new RuntimeStateError("model_version_unavailable", "Manual routes are not supported", 400);
+    const requestId = randomUUID();
+    return runtimeExecutionScope.run({ profileId: profile.profileId, profileEpoch: profile.epoch, clientId: `browser:${requestId}` }, async () => {
+      const parsed = parseRequest(envelope.request);
+      parsed._chatgptEffectiveModelIdentity = { routeId: route.slug, browserFamily: route.modelFamily || route.backendModel, reasoning: envelope.effectiveReasoning };
+      parsed._chatgptModelFamily = route.modelFamily;
+      parsed.modelId = route.backendModel; parsed.options.reasoning = route.adapterEffort;
+      const provider = browserProviderConfig({ profileId: profile.profileId, profileEpoch: profile.epoch, requestId,
+        settings: profile.settings, capabilities: evidence.capabilities, dataDir: config.dataDir, contextWindow: row.context_window });
+      const adapter = createChatGptWebAdapter(provider, { browserRequestId: requestId });
+      const queue = new AsyncEventQueue<AdapterEvent>();
+      const abort = new AbortController();
+      const onDisconnect = () => abort.abort();
+      request.signal.addEventListener("abort", onDisconnect, { once: true });
+      if (request.signal.aborted) onDisconnect();
+      const run = async () => {
+        try {
+          await adapter.runTurn!(parsed, { headers: new Headers(), abortSignal: abort.signal }, event => {
+            if (event.type === "error" && ["login_required", "session_expired", "model_version_unavailable"].includes(event.code || "")) profiles.invalidate(profile.profileId, event.code!);
+            queue.push(event);
+          });
+        } catch (error) {
+          const code = error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : "runtime_error";
+          if (["login_required", "session_expired", "model_version_unavailable"].includes(code)) profiles.invalidate(profile.profileId, code);
+          queue.push({ type: "error", message: "ChatGPT Web browser turn failed", code, retryable: false });
+        } finally {
+          request.signal.removeEventListener("abort", onDisconnect);
+          queue.close();
+        }
+      };
+      const headers = { "cache-control": "no-store", "x-9router-no-fallback": "true" };
+      if (parsed.stream) {
+        void run();
+        return new Response(bridgeToResponsesSSE(queue, route.slug, undefined, undefined, undefined, () => abort.abort(), 2000,
+          { hideThinkingSummary: parsed.options.hideThinkingSummary }),
+          { headers: { ...headers, "content-type": "text/event-stream", "x-accel-buffering": "no" } });
+      }
+      await run();
+      return Response.json(buildResponseJSON(await queue.collect(), route.slug, { hideThinkingSummary: parsed.options.hideThinkingSummary }), { headers });
+    });
+  };
   const server = Bun.serve<ViewerData>({ hostname: config.host, port: config.port, idleTimeout: 0, maxRequestBodySize: 128 * 1024 * 1024 + 16_384,
     async fetch(request, server) {
       const url = new URL(request.url), path = url.pathname;
@@ -246,12 +330,12 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
           return Response.json(state.resolveBinding({ clientId: body.clientId, threadId: body.threadId, candidateProfileIds: body.candidateProfileIds,
             ...(typeof body.requestedProfileId === "string" ? { requestedProfileId: body.requestedProfileId } : {}), ready: id => profiles.ready(id) }));
         }
-        if (request.method === "POST" && (path === "/v1/responses" || path === "/v1/responses/compact")) {
+        if (request.method === "POST" && (path === "/v1/responses" || path === "/v1/responses/compact" || path === "/v1/browser/responses")) {
           activeHttpRequests++;
           let counted = true;
           const release = () => { if (counted) { counted = false; activeHttpRequests--; } };
           try {
-            const response = await handleResponse(request, path.endsWith("/compact"));
+            const response = path === "/v1/browser/responses" ? await handleBrowserResponse(request) : await handleResponse(request, path.endsWith("/compact"));
             if (!response.body) { release(); return response; }
             const reader = response.body.getReader();
             return new Response(new ReadableStream({ async pull(controller) {

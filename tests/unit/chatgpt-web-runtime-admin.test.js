@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({ authorize: vi.fn(), admin: vi.fn(), local: vi.fn() }));
+const mocks = vi.hoisted(() => ({ authorize: vi.fn(), admin: vi.fn(), local: vi.fn(), connections: vi.fn(), update: vi.fn(), invalidate: vi.fn() }));
 vi.mock("@/dashboardGuard", () => ({ authorizeChatGptWebRuntimeAdmin: mocks.authorize, isLocalRequest: mocks.local }));
-vi.mock("open-sse/services/chatgptWebRuntimeClient.js", () => ({ requestChatGptWebRuntimeAdmin: mocks.admin }));
+vi.mock("open-sse/services/chatgptWebRuntimeClient.js", () => ({ requestChatGptWebRuntimeAdmin: mocks.admin, invalidateChatGptWebCatalog: mocks.invalidate }));
+vi.mock("@/lib/db/index.js", () => ({ getProviderConnections: mocks.connections, updateProviderConnection: mocks.update }));
 vi.mock("next/server", () => ({ NextResponse: { json: (body, init) => Response.json(body, init) } }));
 const { GET, POST, PATCH } = await import("../../src/app/api/providers/chatgpt-web/runtime/[...action]/route.js");
 const settings = { mode: "browser-only", experimentalBiggerContext: false, experimentalFreshConversationPerTurn: false, useSavedChats: false, autoApproveToolCalls: false, connectorName: "Codex Native2" };
@@ -17,6 +18,8 @@ function request(action, method = "GET", body, headers = {}) {
 beforeEach(() => {
   vi.clearAllMocks(); mocks.authorize.mockResolvedValue(true);
   mocks.local.mockReturnValue(false);
+  mocks.connections.mockResolvedValue([]);
+  mocks.update.mockResolvedValue(null);
   mocks.admin.mockImplementation(async () => Response.json({ profiles: [fixture()] }));
 });
 describe("ChatGPT Web runtime admin boundaries", () => {
@@ -256,5 +259,86 @@ describe("ChatGPT Web runtime admin boundaries", () => {
     expect(value.error.code).toBe(code);
     expect(JSON.stringify(value)).not.toMatch(/fixture-cookie-secret|fixture-token-secret|fixture-fingerprint-secret/);
     expect(mocks.admin).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("runtime mutation connection reconciliation", () => {
+  const saved = (profileId = "personal", id = "one") => ({ id, provider: "chatgpt-web", authType: "bridge", providerSpecificData: { profileId }, updatedAt: "2026-01-01T00:00:00.000Z", testStatus: "login_required", lastError: "old error", lastErrorAt: "2025-01-01T00:00:00.000Z", priority: 1, isActive: false, modelLock_any: "2099-01-01T00:00:00.000Z" });
+  function backend(result, profiles = [fixture()]) {
+    mocks.admin.mockImplementation(async path => Response.json(path === "/admin/profiles" ? { protocolVersion: 1, profiles } : result));
+  }
+  it.each(["session/verify", "session/import", "login/complete"])("saves fresh readiness after %s without resetting quota or trusting the completed lease", async action => {
+    const one = saved(); const other = saved("other", "two");
+    mocks.connections.mockResolvedValue([one, other]);
+    const patches = [];
+    mocks.update.mockImplementation(async (id, updater, options) => {
+      const current = id === one.id ? one : other;
+      const patch = updater(current); patches.push({ id, patch, options });
+      return { ...current, ...patch };
+    });
+    backend(action === "login/complete" ? { ...lease(), state: "completed", manualLogin: false } : fixture());
+    const body = action === "session/import" ? transfer() : action === "login/complete" ? { loginId } : { profileId: "personal", revision: 3 };
+    const response = await POST(request(action, "POST", body), context(action));
+    expect(response.status).toBe(200);
+    expect((await response.json()).connectionStatusWarning).toBeUndefined();
+    expect(patches).toEqual([{ id: "one", patch: { testStatus: "active", lastError: null, lastErrorAt: null }, options: { resetHealth: false } }]);
+    expect(one).toMatchObject({ providerSpecificData: { profileId: "personal" }, priority: 1, isActive: false, modelLock_any: "2099-01-01T00:00:00.000Z" });
+    expect(mocks.admin.mock.calls.map(([path]) => path)).toEqual([`/admin/${action}`, "/admin/profiles"]);
+    expect(mocks.invalidate).toHaveBeenCalledExactlyOnceWith("personal");
+  });
+  it("does not claim active when a completed lease's fresh profile has no models", async () => {
+    const one = saved(); mocks.connections.mockResolvedValue([one]);
+    backend({ ...lease(), state: "completed", manualLogin: false }, [{ ...fixture(), models: [] }]);
+    const response = await POST(request("login/complete", "POST", { loginId }), context("login/complete"));
+    expect(response.status).toBe(200);
+    expect(mocks.update.mock.calls[0][1](one)).toMatchObject({ testStatus: "error", lastError: expect.stringContaining("no supported model") });
+  });
+  it("guards selector, provider, updatedAt, deletion and unchanged values in the transactional callback", async () => {
+    const one = saved(); mocks.connections.mockResolvedValue([one]); backend(fixture());
+    await POST(request("session/verify", "POST", { profileId: "personal", revision: 3 }), context("session/verify"));
+    const updater = mocks.update.mock.calls[0][1];
+    for (const current of [null, { ...one, provider: "other" }, { ...one, providerSpecificData: { profileId: "other" } }, { ...one, updatedAt: "newer" }, { ...one, testStatus: "active", lastError: null, lastErrorAt: null }]) expect(updater(current)).toBeNull();
+  });
+  it.each(["resume", "drain", "quiesce"])("invalidates and reconciles every connection after runtime-wide %s", async action => {
+    const a = saved(); const b = saved("other", "two"); mocks.connections.mockResolvedValue([a, b]);
+    backend(action === "resume" ? { resumed: true } : { operationId: "operation-one", state: action === "drain" ? "draining" : "quiesced" }, [fixture(), { ...fixture(), profileId: "other", state: "draining" }]);
+    const response = await POST(request(action, "POST", { operationId: "operation-one" }), context(action));
+    expect(response.status).toBe(200);
+    expect(mocks.invalidate).toHaveBeenCalledExactlyOnceWith(undefined);
+    expect(mocks.update.mock.calls.map(([id]) => id)).toEqual(["one", "two"]);
+    expect(mocks.update.mock.calls[1][1](b)).toMatchObject({ testStatus: "draining" });
+    expect(mocks.update.mock.calls.every(([, , options]) => options.resetHealth === false)).toBe(true);
+  });
+  it("returns successful mutation plus warning when status persistence fails without replaying it", async () => {
+    mocks.connections.mockResolvedValue([saved()]); backend(fixture());
+    mocks.update.mockRejectedValue(new Error("private sqlite path"));
+    const response = await POST(request("session/verify", "POST", { profileId: "personal", revision: 3 }), context("session/verify"));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ state: "ready", connectionStatusWarning: "Runtime state changed; connection status could not be saved. Refresh connections." });
+    expect(mocks.admin.mock.calls.filter(([path]) => path === "/admin/session/verify")).toHaveLength(1);
+  });
+  it("returns successful mutation plus warning if the fresh readiness snapshot is unavailable", async () => {
+    mocks.connections.mockResolvedValue([saved()]);
+    mocks.admin.mockImplementation(async path => path === "/admin/profiles" ? new Response("private trace", { status: 503 }) : Response.json(fixture()));
+    const response = await POST(request("session/verify", "POST", { profileId: "personal", revision: 3 }), context("session/verify"));
+    expect(response.status).toBe(200);
+    expect((await response.json()).connectionStatusWarning).toContain("Refresh connections.");
+    expect(mocks.update).not.toHaveBeenCalled();
+  });
+  it.each(["login/complete", "login/close"])("invalidates all catalog entries for failed %s without guessing a profile from the lease", async action => {
+    mocks.admin.mockImplementation(async () => Response.json({ error: { code: "login_not_found" } }, { status: 404 }));
+    expect((await POST(request(action, "POST", { loginId }), context(action))).status).toBe(404);
+    expect(mocks.invalidate).toHaveBeenCalledExactlyOnceWith(undefined);
+    expect(mocks.connections).not.toHaveBeenCalled();
+    expect(mocks.update).not.toHaveBeenCalled();
+  });
+  it("GET profiles and viewer polling never invalidate, persist, probe or send", async () => {
+    backend(lease());
+    await GET(request("profiles"), context("profiles"));
+    await GET(request(`login/status?loginId=${loginId}`), context("login/status"));
+    expect(mocks.invalidate).not.toHaveBeenCalled();
+    expect(mocks.connections).not.toHaveBeenCalled();
+    expect(mocks.update).not.toHaveBeenCalled();
+    expect(mocks.admin.mock.calls.map(([path]) => path)).toEqual(["/admin/profiles", `/admin/login/status?loginId=${loginId}`]);
   });
 });

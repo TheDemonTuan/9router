@@ -8,6 +8,7 @@ import Select from "./Select";
 import Toggle from "./Toggle";
 import ChatGPTWebViewer from "./ChatGPTWebViewer";
 import { MAX_SESSION_TRANSFER_BYTES, SessionTransferError, parseChatGptWebSessionTransfer } from "../../../services/chatgpt-web-runtime/session-transfer.js";
+import { getChatGptWebProfileNotice } from "@/shared/utils/connectionStatus";
 
 const BASE = "/api/providers/chatgpt-web/runtime";
 const DEFAULT_SETTINGS = { mode: "browser-only", experimentalBiggerContext: false, experimentalFreshConversationPerTurn: false, useSavedChats: false, autoApproveToolCalls: false, connectorName: "Codex Native2" };
@@ -29,7 +30,7 @@ async function request(action, init, signal) {
   return data;
 }
 
-const leaseNotice = state => ({ completed: "Signed in. Connection is ready.", expired: "Browser session expired. Open a new session to continue.", closed: "Browser session ended.", error: "Sign-in verification failed. Open a new session to try again." }[state] || "Browser session ended.");
+const leaseNotice = state => ({ completed: "Sign-in finished. Checking runtime readiness.", expired: "Browser session expired. Open a new session to continue.", closed: "Browser session ended.", error: "Sign-in verification failed. Open a new session to try again." }[state] || "Browser session ended.");
 const LEASE_STATES = new Set(["waiting", "completed", "expired", "closed", "error"]);
 function validLease(value, profileId, loginId) {
   return value?.profileId === profileId && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value.loginId || "") && (!loginId || value.loginId === loginId) && typeof value.manualLogin === "boolean" && LEASE_STATES.has(value.state) && Number.isFinite(Date.parse(value.expiresAt));
@@ -41,6 +42,8 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [noticeIsReadiness, setNoticeIsReadiness] = useState(false);
+  const [connectionStatusWarning, setConnectionStatusWarning] = useState("");
   const [busy, setBusy] = useState("");
   const [draft, setDraft] = useState(DEFAULT_SETTINGS);
   const [dirty, setDirty] = useState(false);
@@ -56,6 +59,8 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
   const busyRef = useRef(false);
   const baseRevision = useRef(null);
   const dirtyRef = useRef(false);
+  const pollError = useRef("");
+  const lastProfileEvidence = useRef(null);
   const profile = profiles.find(item => item.profileId === profileId);
 
   useEffect(() => () => { sessionFile.current = null; if (fileInput.current) fileInput.current.value = ""; }, [profileId]);
@@ -69,6 +74,7 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
     setViewerOpen(false);
     setError(state === "error" ? leaseNotice(state) : "");
     setNotice(state === "error" ? "" : leaseNotice(state));
+    setNoticeIsReadiness(false);
   }, []);
   useEffect(() => {
     const controller = new AbortController();
@@ -81,12 +87,22 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
           const data = await request("profiles", {}, controller.signal);
           if (controller.signal.aborted || busyRef.current) return;
           setProfiles(data.profiles); setLoaded(true);
+          if (pollError.current) {
+            const previousError = pollError.current;
+            setError(previous => previous === previousError ? "" : previous);
+            pollError.current = "";
+          }
           const current = data.profiles.find(item => item.profileId === profileId);
           if (current && !dirtyRef.current) {
             baseRevision.current = current.revision;
             setDraft(current.settings);
           }
+          const evidence = JSON.stringify([current?.state, current?.settings?.mode, current?.lastError?.code, current?.models.map(model => model.id)]);
+          const changed = lastProfileEvidence.current !== null && lastProfileEvidence.current !== evidence;
+          lastProfileEvidence.current = evidence;
+          if (changed) onChanged();
           const activeLease = leaseRef.current;
+          if (activeLease?.state === "completed") setNoticeIsReadiness(true);
           if (activeLease?.state === "waiting") {
             if (Date.parse(activeLease.expiresAt) <= Date.now()) {
               endViewer("expired");
@@ -96,7 +112,17 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
                 if (!controller.signal.aborted && !busyRef.current && leaseRef.current === activeLease) {
                   if (!validLease(status, profileId, activeLease.loginId)) throw new Error("Private viewer session changed. Open a new session.");
                   leaseRef.current = status; setLease(status);
-                  if (status.state !== "waiting") { endViewer(status.state); onChanged(); }
+                  if (status.state !== "waiting") {
+                    endViewer(status.state);
+                    if (status.state === "completed") {
+                      const fresh = await request("profiles", {}, controller.signal);
+                      if (controller.signal.aborted || busyRef.current) return;
+                      setProfiles(fresh.profiles);
+                      setNotice(getChatGptWebProfileNotice(fresh.profiles.find(item => item.profileId === profileId)));
+                      setNoticeIsReadiness(true);
+                    }
+                    onChanged();
+                  }
                 }
               } catch (cause) {
                 if (controller.signal.aborted || busyRef.current || leaseRef.current !== activeLease) return;
@@ -108,7 +134,12 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
           if (!busyRef.current && current?.state === "draining" && leaseRef.current?.state === "waiting") endViewer("closed");
         }
       } catch (cause) {
-        if (!controller.signal.aborted) setError(cause.message);
+        if (!controller.signal.aborted) {
+          pollError.current = cause.message;
+          setError(cause.message); setProfiles([]);
+          if (lastProfileEvidence.current !== null && lastProfileEvidence.current !== "unavailable") onChanged();
+          lastProfileEvidence.current = "unavailable";
+        }
       } finally {
         if (!controller.signal.aborted) timer = setTimeout(poll, 3000);
       }
@@ -120,9 +151,11 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
     const controller = lifetime.current;
     if (!controller || controller.signal.aborted || busyRef.current) return;
     busyRef.current = true; setBusy(label); setError(""); setNotice("");
+    setNoticeIsReadiness(false);
     try {
       const data = await request(action, { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) }, controller.signal);
       if (controller.signal.aborted) return;
+      setConnectionStatusWarning(typeof data.connectionStatusWarning === "string" ? data.connectionStatusWarning : "");
       if (["login/start", "login/complete", "login/close", "browser/view"].includes(action)) {
         if (!validLease(data, profileId, body.loginId) || (action === "login/complete" && data.state === "waiting" && !data.manualLogin)) throw new Error("Private browser session does not match this connection.");
         leaseRef.current = data; setLease(data);
@@ -131,8 +164,8 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
         if (action === "login/complete" && data.state === "waiting") setError("Sign-in is not verified yet. Continue in the browser, then choose Finish Sign In again.");
       }
       let updated = data.profile || (data.profileId && data.settings ? data : null);
-      if (action === "login/complete" && data.state === "completed") {
-        // Account binding advances the revision. Refresh before enabling another mutation.
+      if (["login/start", "login/complete", "login/close", "session/verify", "session/import", "browser/restart", "smoke"].includes(action) || method === "PATCH") {
+        // A completed lease alone is not readiness evidence. Reconcile the exact saved profile.
         const status = await request("profiles", {}, controller.signal);
         if (controller.signal.aborted) return;
         updated = status.profiles?.find(item => item.profileId === profileId);
@@ -143,7 +176,10 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
         setProfiles(previous => [...previous.filter(item => item.profileId !== updated.profileId), updated]);
         if (updated.profileId === profileId) { setDraft(updated.settings); baseRevision.current = updated.revision; dirtyRef.current = false; setDirty(false); }
       }
-      setNotice(["session/verify", "session/import"].includes(action) ? (updated.state === "ready" ? "Connected and ready." : "Session is not ready. Check Advanced for diagnostics.") : data.message || (data.loginId ? (data.state === "waiting" ? "" : leaseNotice(data.state)) : `${label} completed.`));
+      setNoticeIsReadiness(["session/verify", "session/import"].includes(action) || (action === "login/complete" && data.state === "completed"));
+      setNotice(["session/verify", "session/import"].includes(action) || (action === "login/complete" && data.state === "completed")
+        ? getChatGptWebProfileNotice(updated)
+        : data.message || (data.loginId ? (data.state === "waiting" ? "" : leaseNotice(data.state)) : `${label} completed.`));
       onChanged();
     } catch (cause) {
       if (!controller.signal.aborted) {
@@ -167,8 +203,17 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
             leaseRef.current = status; setLease(status);
             setViewerOpen(previous => previous && status.state === "waiting");
             if (status.state !== "waiting") {
-              setNotice(leaseNotice(status.state));
-              setError(status.state === "completed" ? "" : `${leaseNotice(status.state)} ${cause.message}`);
+              if (status.state === "completed") {
+                const fresh = await request("profiles", {}, controller.signal);
+                if (controller.signal.aborted) return;
+                setProfiles(fresh.profiles);
+                setNotice(getChatGptWebProfileNotice(fresh.profiles.find(item => item.profileId === profileId)));
+                setNoticeIsReadiness(true);
+                setError("");
+              } else {
+                setNotice(leaseNotice(status.state));
+                setError(`${leaseNotice(status.state)} ${cause.message}`);
+              }
             }
             onChanged();
           } catch (statusError) {
@@ -250,12 +295,15 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
     if (Date.parse(current.expiresAt) <= Date.now()) { endViewer("expired"); return; }
     void act("login/complete", { loginId: current.loginId }, "Finish Sign In");
   };
-  const humanStatus = error || notice || (busy === "Finish Sign In" ? "Checking your sign-in…" : waiting && lease.manualLogin ? "Sign in in the browser, then choose Finish Sign In." : waiting ? "Browser session is open." : ({ ready: "Connected and ready.", probing: "Checking your sign-in…", draining: "Connection temporarily unavailable.", waiting_for_chatgpt_tool_approval: "Open Browser to approve the active prompt.", error: "Sign-in needs attention. Try Sign In or see Advanced." }[profile?.state] || (!loaded ? "Opening connection…" : profile ? "Sign in to connect your account." : "Connection unavailable. See Advanced or contact the operator.")));
+  const reconciledNotice = noticeIsReadiness ? getChatGptWebProfileNotice(profile) : notice;
+  const humanStatus = error || reconciledNotice || (busy === "Finish Sign In" ? "Checking your sign-in…" : waiting && lease.manualLogin ? "Sign in in the browser, then choose Finish Sign In." : waiting ? "Browser session is open." : !loaded ? "Opening connection…" : getChatGptWebProfileNotice(profile));
 
   return (
     <section aria-label="ChatGPT Web connection" className="space-y-4 border-t border-border pt-4">
       <p role={error ? "alert" : "status"} className={`text-sm ${error ? "text-red-400" : "text-text-muted"}`}>{humanStatus}</p>
-      {notice && error && <p role="status" className="text-sm text-text-muted">{notice}</p>}
+      {reconciledNotice && error && reconciledNotice !== "Connected and ready." && <p role="status" className="text-sm text-text-muted">{reconciledNotice}</p>}
+      {connectionStatusWarning && <p role="status" className="text-sm text-amber-500">{connectionStatusWarning}</p>}
+      <p className="text-xs text-text-muted">Browser-only: API key text requests. Full: signed Codex companion required.</p>
       <Button aria-label={needsLogin ? "Sign In" : "Open Browser"} disabled={disabled || (!profile && !waiting) || (needsLogin && active)} loading={busy === "Start login" || busy === "View browser"} onClick={openBrowser}>{needsLogin ? "Sign In" : "Open Browser"}</Button>
       {profile?.state !== "ready" && !waiting && <Button variant="secondary" disabled={sessionDisabled} loading={busy === "Use Saved Session"} onClick={verifySession}>Use Saved Session</Button>}
       <Button variant="secondary" disabled={sessionDisabled || !secureImportOrigin} onClick={() => fileInput.current?.click()}>Import Chrome Session</Button>
@@ -302,7 +350,7 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
           </div>}
         </div>}
         <div className="space-y-4">
-          <Select label="Harness mode" value={draft.mode} options={[{ value: "browser-only", label: "Browser-only" }, { value: "full", label: "Full — verified Native2 connector required" }]} onChange={event => change("mode", event.target.value)} disabled={disabled || active} hint="Full is enabled only after the runtime accepts the provisioned tunnel and connector prerequisites." />
+          <Select label="Harness mode" value={draft.mode} options={[{ value: "browser-only", label: "Browser-only — API key text requests" }, { value: "full", label: "Full — signed Codex companion required" }]} onChange={event => change("mode", event.target.value)} disabled={disabled || active} hint="Full requires both a signed Codex companion and operator-provisioned Native2 connector/tunnel authority. Browser sign-in alone does not grant local tool access." />
           <Toggle label="Bigger Context" checked={draft.experimentalBiggerContext} onChange={value => change("experimentalBiggerContext", value)} disabled={disabled || active || !biggerSupported} description="Supported Sol/Pro routes only. Multipart staging increases latency and total context, not the per-message limit. Luna does not use multipart." />
           <Select label="Conversation mode" value={draft.experimentalFreshConversationPerTurn ? "fresh" : "retain"} options={[{ value: "retain", label: "Retain" }, { value: "fresh", label: "New each turn" }]} onChange={event => change("experimentalFreshConversationPerTurn", event.target.value === "fresh")} disabled={disabled || active} hint="New each turn starts a new conversation between human turns; tool-result rounds remain in the active conversation." />
           <Select label="Chat storage" value={draft.useSavedChats ? "saved" : "temporary"} options={[{ value: "temporary", label: "Temporary" }, { value: "saved", label: "Saved" }]} onChange={event => change("useSavedChats", event.target.value === "saved")} disabled={disabled || active} hint="Saved chats may apply ChatGPT Memory and custom instructions. Temporary is the default." />

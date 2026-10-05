@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startRuntime } from "../src/server";
 import { sha256 } from "../src/authority";
+import { chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 
 const browser = process.env.CGW_CHROMIUM_EXECUTABLE;
 if (!browser) throw new Error("CGW_CHROMIUM_EXECUTABLE is required for actual offline Chromium smoke");
@@ -22,12 +23,13 @@ try {
   runtime.state.createProfile("offline-fixture");
   const context = await (await runtime.profiles.ensureProfileBrowser("offline-fixture")).ensureContext();
   let physicalSends = 0, sessionExpired = false;
-  await context.exposeBinding("syntheticObserveSend", () => { physicalSends++; });
+  const sentPrompts: string[] = [];
+  await context.exposeBinding("syntheticObserveSend", (_source, prompt: string) => { physicalSends++; sentPrompts.push(prompt); });
   await context.addInitScript(() => {
     document.addEventListener("submit", () => {
       const observer = Reflect.get(window, "syntheticObserveSend");
-      if (typeof observer === "function") void observer();
-    });
+      if (typeof observer === "function") void observer(document.querySelector<HTMLElement>("#prompt-textarea")?.innerText || "");
+    }, true);
   });
   await context.route("**/*", route => {
     const url = new URL(route.request().url());
@@ -71,6 +73,51 @@ try {
   const unsupported = await post("/v1/responses", { ...envelope, request: unsupportedRequest, effectiveReasoning: "xhigh",
     transformedRequestSha256: sha256(JSON.stringify(unsupportedRequest)), authority: { ...authority, jti: "unsupported-effort" } });
   assert(unsupported.status === 400 && physicalSends === 1, "Unsupported effort reached Send");
+  assert(catalog.models.every((row: { capabilities: { generic_responses: boolean } }) => row.capabilities.generic_responses === true), "Browser-only catalog did not advertise generic Responses");
+  const expectedAnswer = "Offline answer first paragraph.\n\nOffline answer second paragraph.";
+  const browserEnvelope = (body: Record<string, unknown>) => ({ protocolVersion: 1, profileId: "offline-fixture", profileEpoch: catalog.profile_epoch,
+    request: body, effectiveModel: body.model, effectiveReasoning: "high", transformedRequestSha256: sha256(JSON.stringify(body)) });
+  const sendBrowser = (body: Record<string, unknown>, overrides: Record<string, unknown> = {}) => fetch(`${base}/v1/browser/responses`, {
+    method: "POST", headers: { authorization: data, "content-type": "application/json", "x-cgw-profile-id": "offline-fixture" },
+    body: JSON.stringify({ ...browserEnvelope(body), ...overrides }), redirect: "error",
+  });
+  const genericBaseline = physicalSends;
+  for (const stream of [false, true]) {
+    const history = stream ? "History stream only" : "History JSON only";
+    const body = { model: request.model, stream, reasoning: { effort: "high" }, instructions: "Keep every instruction", input: [
+      { role: "system", content: "First system instruction" }, { role: "developer", content: "Second developer instruction" },
+      { role: "user", content: history }, { role: "assistant", content: "Previous assistant answer" }, { role: "user", content: "Same latest prompt" },
+    ] };
+    const response = await sendBrowser(body);
+    assert(response.status === 200 && response.headers.get("x-9router-no-fallback") === "true", `Generic Responses failed (${response.status})`);
+    if (stream) {
+      const wire = await response.text();
+      const events = wire.split("\n").filter(line => line.startsWith("data: ") && line !== "data: [DONE]").map(line => JSON.parse(line.slice(6)));
+      const terminal = events.find(event => event.type === "response.completed");
+      assert(terminal?.response.status === "completed" && !events.some(event => event.type === "response.failed"), "Generic stream did not complete successfully");
+      const deltas = events.filter(event => event.type === "response.output_text.delta").map(event => event.delta).join("");
+      assert(deltas === expectedAnswer, "Generic stream deltas lost or duplicated text");
+      const finalText = terminal.response.output.flatMap((item: { content?: { type: string; text?: string }[] }) => item.content || []).filter((part: { type: string }) => part.type === "output_text").map((part: { text: string }) => part.text).join("");
+      assert(finalText === expectedAnswer, "Generic stream terminal answer differs from deltas");
+    } else {
+      const result = await response.json();
+      assert(result.status === "completed", "Generic JSON returned a false completion");
+      const text = result.output.flatMap((item: { content?: { type: string; text?: string }[] }) => item.content || []).filter((part: { type: string }) => part.type === "output_text").map((part: { text: string }) => part.text).join("");
+      assert(text === expectedAnswer, "Generic JSON lost complete fixture text");
+    }
+    const prompt = sentPrompts.at(-1)!;
+    for (const text of [history, "Keep every instruction", "First system instruction", "Second developer instruction", "Previous assistant answer", "Same latest prompt"]) assert(prompt.includes(text), "Generic compiler lost complete history");
+    assert(!prompt.includes(stream ? "History JSON only" : "History stream only"), "Generic request leaked another history");
+    assert(chatGptTurnSessions.activeCount() === 0 && chatGptTurnSessions.physicalWorkCount() === 0, "Generic terminal did not retire the physical browser owner");
+  }
+  assert(physicalSends === genericBaseline + 2, "Generic requests reused or duplicated a physical Send");
+  const genericCompletedSends = physicalSends;
+  for (const extra of [{ tools: [{ type: "function", name: "unsafe" }] }, { previous_response_id: "unavailable" }, { max_output_tokens: 1 }]) {
+    const rejected = await sendBrowser({ model: request.model, input: "Do not send", ...extra });
+    assert(rejected.status === 400 && physicalSends === genericCompletedSends, "Unsupported generic semantics reached Send");
+  }
+  const epochMismatch = await sendBrowser({ model: request.model, input: "Do not send" }, { profileEpoch: "outdated" });
+  assert(epochMismatch.status === 409 && physicalSends === genericCompletedSends, "Generic epoch mismatch reached Send");
   sessionExpired = true;
   const nextTurn = "01a06c66-4380-75c6-a0df-318f890ef6df";
   const expiredRequest = { ...request,
@@ -82,12 +129,16 @@ try {
   const expired = await post("/v1/responses", { ...envelope, request: expiredRequest, transformedRequestSha256: sha256(JSON.stringify(expiredRequest)),
     authority: { ...authority, jti: "expired-session-turn", turnId: nextTurn } });
   const expiredWire = await expired.text();
-  assert(expiredWire.includes("response.failed") && expiredWire.includes("login_required") && physicalSends === 1,
+  assert(expiredWire.includes("response.failed") && expiredWire.includes("login_required") && physicalSends === genericCompletedSends,
     `Expired-session gate failed (physicalSends=${physicalSends}, status=${expired.status}): ${expiredWire}`);
   assert(!runtime.profiles.ready("offline-fixture"), "Expired session retained account readiness");
+  const expiredBrowser = await sendBrowser({ model: request.model, input: "Expired generic request must not send", stream: false });
+  const expiredBrowserBody = await expiredBrowser.json();
+  assert(expiredBrowser.status >= 400 && expiredBrowserBody.error?.code === "login_required" && physicalSends === genericCompletedSends,
+    "Expired generic profile reached Send or reported false completion");
   console.info(JSON.stringify({ gate: "runtime-offline-browser", protocolVersion: 1, platform: process.platform,
     chromiumVersion: context.browser()?.version(), authenticatedHttp: true, modelEffortReadback: true, composerCleared: true,
-    parallelReplayRejected: true, unsupportedEffortNotSent: true, expiredSessionNotSent: true, physicalSends,
+    parallelReplayRejected: true, unsupportedEffortNotSent: true, expiredSessionNotSent: true, genericStreamAndJson: true, genericHistoryIsolated: true, genericPhysicalRetirement: true, physicalSends,
     terminal: "completed", liveChatGpt: false, outerCodexToolE2e: false }));
 } finally {
   await runtime.close();
