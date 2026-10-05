@@ -130,7 +130,14 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
         else setViewerOpen(data.state === "waiting");
         if (action === "login/complete" && data.state === "waiting") setError("Sign-in is not verified yet. Continue in the browser, then choose Finish Sign In again.");
       }
-      const updated = data.profile || (data.profileId && data.settings ? data : null);
+      let updated = data.profile || (data.profileId && data.settings ? data : null);
+      if (action === "login/complete" && data.state === "completed") {
+        // Account binding advances the revision. Refresh before enabling another mutation.
+        const status = await request("profiles", {}, controller.signal);
+        if (controller.signal.aborted) return;
+        updated = status.profiles?.find(item => item.profileId === profileId);
+        if (!updated) throw new Error("invalid_runtime_response");
+      }
       if (["session/verify", "session/import"].includes(action) && updated?.profileId !== body.profileId) throw new Error("invalid_runtime_response");
       if (updated) {
         setProfiles(previous => [...previous.filter(item => item.profileId !== updated.profileId), updated]);
