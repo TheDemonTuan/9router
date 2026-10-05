@@ -23,10 +23,10 @@ import { buildClineHeaders } from "@/shared/utils/clineAuth";
 import {
   getChatGptWebCatalog,
   getChatGptWebHealth,
-  requestChatGptWebRuntime,
 } from "open-sse/services/chatgptWebRuntimeClient.js";
 
 import { mergeChatGptWebPublicModels } from "@/lib/providerNormalization";
+import { getChatGptWebProfileStates, applyChatGptWebProfileState, chatGptWebUnavailableProfileState, chatGptWebConnectionStatusUpdate } from "@/lib/chatgptWebConnectionState";
 // OAuth provider test endpoints
 const OAUTH_TEST_CONFIG = {
   claude: { checkExpiry: true, refreshable: true },
@@ -877,6 +877,31 @@ case "llm7": {
 export async function testSingleConnection(id) {
   const connection = await getProviderConnectionById(id);
   if (!connection) return { valid: false, error: "Connection not found", latencyMs: 0, testedAt: new Date().toISOString() };
+  if (connection.provider === "chatgpt-web") {
+    const start = Date.now();
+    let profile; let health; let models = []; let stale = false;
+    try {
+      const states = await getChatGptWebProfileStates();
+      profile = states.get(connection.providerSpecificData?.profileId);
+      if (applyChatGptWebProfileState(connection, profile).testStatus === "active") {
+        const [runtimeHealth, catalog] = await Promise.all([
+          getChatGptWebHealth(connection), getChatGptWebCatalog(connection, { force: true }),
+        ]);
+        health = runtimeHealth;
+        stale = catalog.stale === true;
+        models = catalog.stale ? [] : mergeChatGptWebPublicModels([catalog]);
+        if (health.draining) profile = { ...profile, state: "draining" };
+        else if (!models.length) profile = { ...profile, models: [] };
+      }
+    } catch { profile = chatGptWebUnavailableProfileState(); }
+    const mapped = applyChatGptWebProfileState(connection, profile);
+    await updateProviderConnection(id, current => chatGptWebConnectionStatusUpdate(current, connection, profile), { resetHealth: false });
+    return {
+      valid: mapped.testStatus === "active", error: mapped.lastError, code: mapped.chatGptWebRuntime.lastError?.code || null,
+      refreshed: false, latencyMs: Date.now() - start, testedAt: new Date().toISOString(),
+      health, models: mapped.testStatus === "active" ? models : [], stale, chatGptWebRuntime: mapped.chatGptWebRuntime,
+    };
+  }
 
   const effectiveProxy = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
 
@@ -896,30 +921,7 @@ export async function testSingleConnection(id) {
   const start = Date.now();
   let result;
 
-  if (connection.authType === "bridge" && connection.provider === "chatgpt-web") {
-    try {
-      const [health, catalog, readiness] = await Promise.all([
-        getChatGptWebHealth(connection),
-        getChatGptWebCatalog(connection, { force: true }),
-        requestChatGptWebRuntime(connection, "/readyz", {}, { timeoutMs: 3000 }).then(async response => {
-          await response.body?.cancel();
-          return { ok: response.ok };
-        }),
-      ]);
-      const usableModels = mergeChatGptWebPublicModels([catalog]);
-      const valid = health.service === "9router-cgw-runtime" && health.protocolVersion === 1
-        && health.draining === false && readiness.ok && !catalog.stale && usableModels.length > 0;
-      result = {
-        valid,
-        error: valid ? null : health.draining ? "Runtime is draining; wait for the operator to resume admission" : catalog.stale ? "Runtime catalog is stale; refresh profile readiness" : usableModels.length === 0 ? "Profile has no verified usable models; complete login and probe the profile" : "Profile is not ready; check login, session and Full connector readiness in the runtime panel",
-        health,
-        models: usableModels,
-        stale: catalog.stale,
-      };
-    } catch (error) {
-      result = { valid: false, error: error.message };
-    }
-  } else if (connection.authType === "apikey" || connection.authType === "cookie") {
+  if (connection.authType === "apikey" || connection.authType === "cookie") {
     result = await testApiKeyConnection(connection, effectiveProxy);
   } else {
     result = await testOAuthConnection(connection, effectiveProxy);

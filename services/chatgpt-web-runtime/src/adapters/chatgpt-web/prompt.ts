@@ -35,6 +35,7 @@ export interface CompileChatGptWebPromptOptions {
   captureLunaCheckpoint?: boolean;
   experimentalSkillAttachments?: boolean;
   experimentalMultipartParts?: ChatGptWebMultipartPartCount;
+  preserveCompleteHistory?: boolean;
 }
 
 export const CHATGPT_BIGGER_CONTEXT_PARTS = 6 as const;
@@ -320,8 +321,9 @@ interface MultipartRecordWeight {
   chars: number;
 }
 
-function multipartRecordWeight(record: MultipartContextRecord): MultipartRecordWeight {
-  const text = withoutRetiredTurnHandles(JSON.stringify(record));
+function multipartRecordWeight(record: MultipartContextRecord, preserveCompleteHistory = false): MultipartRecordWeight {
+  const serialized = JSON.stringify(record);
+  const text = preserveCompleteHistory ? serialized : withoutRetiredTurnHandles(serialized);
   return { tokens: estimateTokens(text) + 1, chars: text.length + 1 };
 }
 
@@ -379,9 +381,10 @@ function partitionMultipartContext(
   records: readonly MultipartContextRecord[],
   totalParts: ChatGptWebMultipartPartCount,
   budgets: readonly MultipartRecordWeight[],
+  preserveCompleteHistory = false,
 ): ChatGptWebMultipartParts {
   if (budgets.length !== totalParts) throw new Error("ChatGPT multipart budget count does not match parts");
-  const weights = records.map(multipartRecordWeight);
+  const weights = records.map(record => multipartRecordWeight(record, preserveCompleteHistory));
   const boundaries = partitionMultipartRecordWeights(weights, budgets);
   let offset = 0;
   const groups = boundaries.map(end => {
@@ -390,12 +393,10 @@ function partitionMultipartContext(
     return group;
   });
   if (offset !== records.length) throw new Error("ChatGPT multipart context partition lost records");
-  const payloads = groups.map((group, index) => withoutRetiredTurnHandles(JSON.stringify({
-    version: 1,
-    part_index: index + 1,
-    total_parts: totalParts,
-    records: group,
-  })));
+  const payloads = groups.map((group, index) => {
+    const serialized = JSON.stringify({ version: 1, part_index: index + 1, total_parts: totalParts, records: group });
+    return preserveCompleteHistory ? serialized : withoutRetiredTurnHandles(serialized);
+  });
   return payloads;
 }
 
@@ -610,10 +611,11 @@ export function compileChatGptWebPrompt(
         }
         return { tokens, chars };
       });
-      multipart.parts = partitionMultipartContext(records, multipartParts!, budgets);
+      multipart.parts = partitionMultipartContext(records, multipartParts!, budgets, options?.preserveCompleteHistory === true);
       return { text: multipart.commit, images, ...attachments, multipart };
     }
-    const envelopeJson = withoutRetiredTurnHandles(JSON.stringify({ version: 3, system, messages }));
+    const serialized = JSON.stringify({ version: 3, system, messages });
+    const envelopeJson = options?.preserveCompleteHistory ? serialized : withoutRetiredTurnHandles(serialized);
     const text = [
       ...sharedContract,
       ...skillContract,
@@ -635,7 +637,7 @@ export function compileChatGptWebPrompt(
     return { text, images, ...attachments };
   };
 
-  let sourceMessages = withoutSupersededModelSwitchContracts(parsed.context.messages);
+  let sourceMessages = options?.preserveCompleteHistory ? [...parsed.context.messages] : withoutSupersededModelSwitchContracts(parsed.context.messages);
   const initialMessageCount = sourceMessages.length;
   let compiled = build(sourceMessages);
   if (!parsed._compactionRequest) return compiled;

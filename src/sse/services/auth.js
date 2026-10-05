@@ -129,6 +129,8 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
 
 
     const bridgeEligible = new Set();
+    const bridgeEpochs = new Map();
+    const bridgeEffortRejected = new Set();
     if (providerId === "chatgpt-web" && model) {
       await Promise.all(connections.map(async (connection) => {
         try {
@@ -138,8 +140,12 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
           if (!catalog.stale && hasChatGptWebModel(catalog, model)
             && liveModel?.capabilities?.[bridgeCapability] === true
             && chatGptWebModelSupportsCapabilities(liveModel, requiredCapabilities)) {
-            if (liveModel?.supported_reasoning_levels?.includes(effort) !== true) return;
+            if (liveModel?.supported_reasoning_levels?.includes(effort) !== true) {
+              bridgeEffortRejected.add(connection.id);
+              return;
+            }
             bridgeEligible.add(connection.id);
+            bridgeEpochs.set(connection.id, catalog.profileEpoch);
           }
         } catch { /* Offline/unknown bridges are not dispatch candidates. */ }
       }));
@@ -180,7 +186,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     // Filter out model-locked, excluded, and capability-ineligible connections.
     const availableConnections = connections.filter(c => {
       if (excludeSet.has(c.id)) return false;
-      if (pinConnectionId && providerId !== "chatgpt-web" && c.id !== pinConnectionId) return false;
+      if (pinConnectionId && (providerId !== "chatgpt-web" || bridgeCapability === "generic_responses") && c.id !== pinConnectionId) return false;
       if (providerId === "chatgpt-web" && model && !bridgeEligible.has(c.id)) return false;
       if (isModelLockActive(c, model)) return false;
       if (providerId === "antigravity" && model && !antigravityEligible.has(c.id)) return false;
@@ -206,6 +212,11 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     });
 
     if (availableConnections.length === 0) {
+      if (providerId === "chatgpt-web" && bridgeCapability === "generic_responses"
+        && connections.some(row => !excludeSet.has(row.id) && (!pinConnectionId || row.id === pinConnectionId) && bridgeEffortRejected.has(row.id))) {
+        return { chatGptWebBindingError: Response.json({ error: { type: "runtime_error", code: "model_version_unavailable",
+          message: "Requested reasoning effort is not verified for the selected Browser-only model", retryable: false, submission_state: "not_sent" } }, { status: 400 }) };
+      }
       if (providerId === "chatgpt-web" && options.chatGptWebAuthority) {
         const response = await requestChatGptWebRuntime(null, "/v1/thread-bindings/resolve", { method: "POST", signal: options.signal, headers: { "content-type": "application/json" },
           body: JSON.stringify({ clientId: options.chatGptWebAuthority.clientId, threadId: options.chatGptWebAuthority.threadId, candidateProfileIds: [] }) }, { timeoutMs: 5000 });
@@ -299,7 +310,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     }
 
     let profileBinding;
-    if (providerId === "chatgpt-web") {
+    if (providerId === "chatgpt-web" && options.chatGptWebAuthority) {
       const authority = options.chatGptWebAuthority;
       if (!authority?.threadId || !authority?.turnId) return { chatGptWebBindingError: Response.json({ error: { code: "codex_authority_required" } }, { status: 400 }) };
       const requested = pinConnectionId ? connections.find(row => row.id === pinConnectionId)?.providerSpecificData?.profileId : undefined;
@@ -317,6 +328,8 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
 
     return {
       ...(profileBinding ? { chatGptWebProfileEpoch: profileBinding.profileEpoch } : {}),
+      ...(providerId === "chatgpt-web" && bridgeCapability === "generic_responses" && !options.chatGptWebAuthority
+        ? { chatGptWebRequestMode: "browser", chatGptWebProfileEpoch: bridgeEpochs.get(connection.id) } : {}),
       authType: connection.authType,
       apiKey: connection.apiKey,
       accessToken: connection.accessToken,

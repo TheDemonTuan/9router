@@ -146,3 +146,24 @@ export function providerConfig(options: {
     },
   };
 }
+
+export function browserProviderConfig(options: {
+  profileId: string; profileEpoch: string; requestId: string;
+  settings: ProfileSettings; capabilities: ChatGptWebAccountCapabilities;
+  dataDir: string; contextWindow: number;
+}): CodexProviderConfig {
+  const { profileId, profileEpoch, requestId, settings, capabilities, dataDir } = options;
+  return {
+    adapter: "chatgpt-web", baseUrl: "https://chatgpt.com", contextWindow: options.contextWindow,
+    chatgptWeb: {
+      profileId, profileEpoch, clientId: `browser:${requestId}`,
+      browserProfilePath: join(dataDir, "profiles", profileId, "browser"),
+      chromeExecutablePath: defaultChromeExecutable(), headed: true,
+      localToolsEnabled: false, autoApproveToolCalls: false,
+      experimentalFreshConversationPerTurn: true, useSavedChats: false,
+      experimentalBiggerContext: settings.experimentalBiggerContext,
+      solAvailable: capabilities.solAvailable, extraHighAvailable: capabilities.extraHighAvailable,
+      proAvailable: capabilities.proAvailable,
+    },
+  };
+}

@@ -31,6 +31,7 @@ const preparedManagers = new WeakSet<object>();
 const preparedContexts = new WeakSet<BrowserContext>();
 const html = readFileSync(join(import.meta.dir, "../tests/fixtures/chatgpt-runtime.html"), "utf8");
 let providerSends = 0;
+let physicalSends = 0;
 const native = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
   const url = new URL(request.url);
   const [, action, id] = url.pathname.split("/");
@@ -76,8 +77,13 @@ const prepare = async (id: string) => {
     manager.ensureContext = async () => {
       const context = await automated();
       if (!preparedContexts.has(context)) {
+        await context.exposeBinding("syntheticObserveSend", () => { physicalSends++; });
         await context.addInitScript(() => {
           Object.assign(window, { __cgwLoginFixture: { composerDelayMs: 500, pointerOnly: true, semanticSlider: true, headerOnlyModel: true } });
+          document.addEventListener("submit", () => {
+            const observer = Reflect.get(window, "syntheticObserveSend");
+            if (typeof observer === "function") void observer();
+          }, true);
         });
         await context.route("**/*", async route => {
           const url = new URL(route.request().url());
@@ -234,7 +240,9 @@ try {
   await until(() => runtime.profiles.ready(id), "Authenticated catalog probe did not settle", 60000);
   assert(persisted.has(id), "Native login cookie did not survive the same-profile verification restart");
   await canvas.waitFor({ state: "detached" });
-  await page.getByText("Signed in. Connection is ready.", { exact: true }).waitFor();
+  await page.getByText("Connected and ready.", { exact: true }).waitFor();
+  const reconciled = await page.request.get(`${gateway}/api/providers`);
+  assert.equal((await reconciled.json()).connections.find((row: { id: string }) => row.id === connections[0].id).testStatus, "active");
   const models = await page.request.get(`${gateway}/api/providers/${connections[0].id}/models`); assert.equal(models.status(), 200);
   const catalog = (await models.json()).models as { id: string }[];
   assert(catalog.some(row => row.id === "chatgpt-web/gpt-5.6-sol-instant"));
@@ -308,11 +316,38 @@ try {
   await page.getByRole("button", { name: "Use Saved Session", exact: true }).click();
   assert.equal((await reused).status(), 200);
   assert.equal(runtime.profiles.ready(importedId), true);
-  assert.equal(nativeStarts, 0); assert.equal(uploads, 1); assert.equal(providerSends, 0);
+  assert.equal(nativeStarts, 0); assert.equal(uploads, 1); assert.equal(providerSends, 0); assert.equal(physicalSends, 0);
   const importedPage = await runtime.profiles.manager(importedId).maintenancePage();
   assert.equal(await importedPage.evaluate(() => Reflect.get(window, "fixture").sends), 0);
   page.off("request", observeActions);
-  writeFileSync(join(proof, "result.json"), JSON.stringify({ gate: "provider-onboarding-ui", automaticProfile: true, providerConnectionPersisted: true, actualEmbeddedRfb: true, keyboardAndPointerForwarded: true, fullWindowWorkspace: true, actualSizeInput: true, sameLeaseResume: true, humanOnlyLogin: true, explicitLoginVerification: true, prematureVerificationRestored: true, persistedNativeCookie: true, readyAfterBrowserSignIn: true, liveCatalog: true, closedViewerRejected: true, distinctProfiles: true, loopbackOnlyVnc: true, savedSessionReused: true, actualExporterImport: true, accountMismatchPreserved: true, startupProfileIsolated: true, importedContextReopened: true, importWithoutNativeLogin: true, probeSends: providerSends, liveChatGpt: false }));
+  const verificationSends = physicalSends;
+  const importedConnections = await page.request.get(`${gateway}/api/providers`);
+  assert.equal((await importedConnections.json()).connections.find((row: { id: string }) => row.id === secondConnection.id).testStatus, "active");
+  const keyResponse = await page.request.post(`${gateway}/api/keys`, { data: { name: "offline-cgw-generic" } });
+  assert.equal(keyResponse.status(), 201);
+  const keyBody = await keyResponse.json();
+  assert.equal(typeof keyBody.key, "string");
+  // This disposable key is never logged, persisted in proof artifacts or used for real traffic.
+  await page.goto(`${gateway}/dashboard/providers/chatgpt-web`, { waitUntil: "networkidle" });
+  await page.getByText("Browser Session", { exact: true }).first().waitFor();
+  assert.equal(await page.getByText(/No verified ChatGPT Web models/).count(), 0, "Recovered catalog kept a stale model warning");
+  const fixtureAnswer = "Offline answer first paragraph.\n\nOffline answer second paragraph.";
+  const modelTest = page.waitForResponse(r => new URL(r.url()).pathname === "/api/models/test" && r.request().method() === "POST", { timeout: 120000 });
+  const beforeTest = physicalSends;
+  await page.getByRole("button", { name: "Test cgw/chatgpt-web/gpt-5.6-sol", exact: true }).click();
+  const tested = await modelTest;
+  assert.equal(tested.status(), 200);
+  const result = await tested.json();
+  assert.equal(result.ok, true);
+  assert.equal(result.completionText, fixtureAnswer);
+  assert(connections.concat([secondConnection]).some((row: { id: string }) => row.id === result.connectionId), "Dashboard test did not report its actual connection");
+  assert.equal(physicalSends, beforeTest + 1, "Dashboard model test did not perform exactly one browser Send");
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.screenshot({ path: join(proof, "provider-model-test.png"), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: join(proof, "provider-model-test-mobile.png"), fullPage: true });
+  const inferenceSends = physicalSends - verificationSends;
+  writeFileSync(join(proof, "result.json"), JSON.stringify({ gate: "provider-onboarding-ui", automaticProfile: true, providerConnectionPersisted: true, actualEmbeddedRfb: true, keyboardAndPointerForwarded: true, fullWindowWorkspace: true, actualSizeInput: true, sameLeaseResume: true, humanOnlyLogin: true, explicitLoginVerification: true, prematureVerificationRestored: true, persistedNativeCookie: true, readyAfterBrowserSignIn: true, liveCatalog: true, closedViewerRejected: true, distinctProfiles: true, loopbackOnlyVnc: true, savedSessionReused: true, actualExporterImport: true, accountMismatchPreserved: true, startupProfileIsolated: true, importedContextReopened: true, importWithoutNativeLogin: true, connectionReadinessReconciled: true, staleCatalogWarningCleared: true, dashboardModelInference: true, probeSends: verificationSends, inferenceSends, liveChatGpt: false }));
   console.log("CGW_PROVIDER_ONBOARDING_SMOKE_OK");
 } catch (error) {
   console.error("CGW_PROVIDER_ONBOARDING_SMOKE_FAILED", error);
@@ -320,7 +355,7 @@ try {
   throw error;
 } finally {
   // These are synthetic offline fixtures, not real-account screenshots or credentials.
-  for (const name of ["result.json", "provider-failed.png", "provider-embedded-login.png", "provider-connected-ready.png", "provider-import-ready.png", "provider-import-mobile.png"]) {
+  for (const name of ["result.json", "provider-failed.png", "provider-embedded-login.png", "provider-connected-ready.png", "provider-import-ready.png", "provider-import-mobile.png", "provider-model-test.png", "provider-model-test-mobile.png"]) {
     const path = join(proof, name);
     if (existsSync(path)) chmodSync(path, 0o644);
   }

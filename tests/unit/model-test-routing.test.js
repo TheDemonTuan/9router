@@ -3,10 +3,12 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   getApiKeys: vi.fn(),
   getConsistentMachineId: vi.fn(),
+  getProviderConnectionById: vi.fn(),
 }));
 
 vi.mock("@/lib/localDb", () => ({
   getApiKeys: mocks.getApiKeys,
+  getProviderConnectionById: mocks.getProviderConnectionById,
 }));
 
 vi.mock("@/shared/utils/machineId", () => ({
@@ -190,5 +192,45 @@ describe("model test route kind routing", () => {
     expect(body.ok).toBe(false);
     expect(body.status).toBe(502);
     expect(body.error).toBe("HTTP 502: bad upstream");
+  });
+});
+
+describe("ChatGPT Web inference outcomes", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.getApiKeys.mockResolvedValue([{ key: "synthetic-key", isActive: true }]);
+    mocks.getProviderConnectionById.mockResolvedValue({ id: "account-a", provider: "chatgpt-web", isActive: true });
+  });
+  afterEach(() => { global.fetch = originalFetch; });
+  const probe = async (body = {}) => {
+    const { POST } = await import("../../src/app/api/models/test/route.js");
+    return POST(new Request("http://localhost/api/models/test", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "cgw/chatgpt-web/gpt-5.6-sol", ...body }) }));
+  };
+  it("does not send without a real active API key", async () => {
+    mocks.getApiKeys.mockResolvedValue([]); global.fetch = vi.fn();
+    const response = await probe(); expect((await response.json()).ok).toBe(false); expect(global.fetch).not.toHaveBeenCalled();
+    expect(mocks.getConsistentMachineId).not.toHaveBeenCalled();
+  });
+  it.each([
+    { error: { message: "runtime failed" } },
+    { status: "failed", choices: [{ finish_reason: "stop", message: { content: "partial" } }] },
+    { choices: [{ finish_reason: "length", message: { content: "partial" } }] },
+    { choices: [{ finish_reason: "stop", message: { content: "" } }] },
+  ])("rejects HTTP200 without successful complete text: %j", async payload => {
+    global.fetch = vi.fn().mockResolvedValue(Response.json(payload));
+    expect((await (await probe()).json()).ok).toBe(false);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+  it("reports text and actual account only after a successful terminal", async () => {
+    global.fetch = vi.fn().mockResolvedValue(Response.json({ choices: [{ finish_reason: "stop", message: { content: "Offline answer" } }] }, { headers: { "x-9router-connection-id": "account-a" } }));
+    expect(await (await probe({ connectionId: "account-a" })).json()).toMatchObject({ ok: true, completionText: "Offline answer", connectionId: "account-a" });
+  });
+  it("rejects disabled or mismatched pins without account rotation", async () => {
+    global.fetch = vi.fn();
+    for (const connection of [null, { provider: "chatgpt-web", isActive: false }, { provider: "codex", isActive: true }]) {
+      mocks.getProviderConnectionById.mockResolvedValue(connection);
+      expect((await probe({ connectionId: "account-a" })).status).toBe(400);
+    }
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 });

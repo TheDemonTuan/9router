@@ -6,12 +6,16 @@ export async function loadChatGptWebClientKeys() {
   const path = process.env.CHATGPT_WEB_CLIENT_KEYS_FILE?.trim();
   if (!path) throw new AuthorityError("codex_client_keys_unconfigured", "ChatGPT Web client provisioning is unavailable", 503);
   // Read each request: disabling a provisioned key revokes NEW requests without a stale key cache.
-  return parseClientKeys(JSON.parse(await readFile(path, "utf8")));
+  try { return parseClientKeys(JSON.parse(await readFile(path, "utf8"))); }
+  catch { throw new AuthorityError("codex_client_keys_unavailable", "ChatGPT Web client provisioning is unavailable", 503); }
 }
 export function verifyChatGptWebAuthority({ rawBody, method, path, headers, clientKeys, now }) {
   const incoming = headers instanceof Headers ? headers : new Headers(headers);
   const assertion = incoming.get(AUTHORITY_HEADER);
-  return verifyAuthority({ assertion, rawBody, method, path: canonicalPublicPath(path), clientKeys,
+  let canonical;
+  try { canonical = canonicalPublicPath(path); }
+  catch { throw new AuthorityError("codex_authority_path_unsupported", "Signed ChatGPT Web requests require the Responses endpoint", 400); }
+  return verifyAuthority({ assertion, rawBody, method, path: canonical, clientKeys,
     ...(now === undefined ? {} : { now }) });
 }
 export function redactChatGptWebInternalHeaders(headers) {

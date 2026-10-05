@@ -522,7 +522,8 @@ export default function ProviderDetailPage() {
     }
 
     let cancelled = false;
-    if (providerId === "zed" || providerId === "alitp-intl") setLiveModelsError(null);
+    if (providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web") setLiveModelsError(null);
+    if (providerId === "chatgpt-web") setLiveModels([]);
     const catalogConnections = (providerId === "alitp-intl" || providerId === "chatgpt-web") ? activeConnections : [activeConnections[0]];
     Promise.all(catalogConnections.map((connection) =>
       fetch(`/api/providers/${connection.id}/models`, { cache: "no-store" })
@@ -543,17 +544,21 @@ export default function ProviderDetailPage() {
               for (const key of ["context_window", "auto_compact_token_limit"]) {
                 if (Number.isFinite(previous[key]) && Number.isFinite(model[key])) limits[key] = Math.min(previous[key], model[key]);
               }
-              merged.set(model.id, { ...previous, ...limits, supported_reasoning_levels: efforts });
+              merged.set(model.id, { ...previous, ...limits, supported_reasoning_levels: efforts, capabilities: { ...previous.capabilities,
+                generic_responses: previous.capabilities?.generic_responses === true || model.capabilities?.generic_responses === true } });
             }
           }
         }
       }
       if (merged.size) setLiveModels([...merged.values()]);
       else setLiveModels([]);
-      const warning = results.map((r) => r.data?.warning || (r.data?.stale
-        ? "A stale runtime catalog is not used for routing; refresh must succeed first."
-        : null)).find(Boolean);
-      if ((providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web") && warning) setLiveModelsError(warning);
+      const warning = results.map((r) => {
+        const error = typeof r.data?.error === "string" ? r.data.error : r.data?.error?.message;
+        return (typeof r.data?.warning === "string" && r.data.warning)
+          || (providerId === "chatgpt-web" && !r.ok && typeof error === "string" && error)
+          || (r.data?.stale ? "A stale runtime catalog is not used for routing; refresh must succeed first." : null);
+      }).find(Boolean);
+      if (providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web") setLiveModelsError(warning || null);
       if (providerId === "zed" && !merged.size) setLiveModelsError(warning || "Zed returned no live models.");
       if (providerId === "chatgpt-web" && !merged.size) setLiveModelsError(warning || "No verified ChatGPT Web models are available.");
     });
@@ -1499,6 +1504,10 @@ export default function ProviderDetailPage() {
 
   const handleTestModel = async (modelId) => {
     if (testingModelIds.has(modelId)) return;
+    if (providerId === "chatgpt-web" && liveModels.find(model => model.id === modelId)?.capabilities?.generic_responses !== true) {
+      setModelsTestError("This model requires a signed Codex companion. Select Browser-only for API-key text tests.");
+      return;
+    }
     setTestingModelIds((prev) => new Set(prev).add(modelId));
     try {
       const res = await fetch("/api/models/test", {
@@ -1507,10 +1516,10 @@ export default function ProviderDetailPage() {
         body: JSON.stringify({ model: `${providerStorageAlias}/${modelId}` }),
       });
       const data = await res.json();
-      setModelTestResults((prev) => ({ ...prev, [modelId]: data.ok ? "ok" : "error" }));
+      setModelTestResults((prev) => ({ ...prev, [modelId]: providerId === "chatgpt-web" ? data : data.ok ? "ok" : "error" }));
       setModelsTestError(data.ok ? "" : (data.error || "Model not reachable"));
     } catch {
-      setModelTestResults((prev) => ({ ...prev, [modelId]: "error" }));
+      setModelTestResults((prev) => ({ ...prev, [modelId]: providerId === "chatgpt-web" ? { ok: false } : "error" }));
       setModelsTestError("Network error");
     } finally {
       setTestingModelIds((prev) => { const n = new Set(prev); n.delete(modelId); return n; });
@@ -1598,12 +1607,14 @@ export default function ProviderDetailPage() {
               onCopy={copy}
               onSetAlias={(alias) => handleSetAlias(model.id, alias, providerStorageAlias)}
               onDeleteAlias={() => handleDeleteAlias(existingAlias)}
-              testStatus={modelTestResults[model.id]}
+              testStatus={providerId === "chatgpt-web" && modelTestResults[model.id] ? (modelTestResults[model.id].ok ? "ok" : "error") : modelTestResults[model.id]}
+              testConnectionName={providerId === "chatgpt-web" && modelTestResults[model.id]?.connectionId
+                ? (connections.find(connection => connection.id === modelTestResults[model.id].connectionId)?.name || modelTestResults[model.id].connectionId) : undefined}
               onTest={connections.length > 0 || isFreeNoAuth ? () => handleTestModel(model.id) : undefined}
               isTesting={testingModelIds.has(model.id)}
               isFree={model.isFree}
               onDisable={() => handleDisableModel(model.id)}
-              caps={providerId === "codex" && model.capabilities ? model.capabilities : getCaps(`${providerId}/${model.id}`)}
+              caps={(providerId === "codex" || providerId === "chatgpt-web") && model.capabilities ? model.capabilities : getCaps(`${providerId}/${model.id}`)}
               thinkingSuffix={resolveThinkingSuffix(model.id)}
             />
           );
@@ -2189,6 +2200,9 @@ export default function ProviderDetailPage() {
         )}
         {(providerId === "codex" || providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web") && !!liveModelsError && (
           <p className={`text-xs mb-3 break-words ${providerId === "alitp-intl" ? "text-text-muted" : "text-red-500"}`}>{liveModelsError}</p>
+        )}
+        {providerId === "chatgpt-web" && connections.some(connection => connection.isActive !== false && connection.chatGptWebRuntime?.mode === "full") && (
+          <p role="status" className="text-xs mb-3 break-words text-amber-500">Full: signed Codex companion required. Browser sign-in alone does not enable local tools or ordinary API-key inference. Select Browser-only for API key text requests.</p>
         )}
         {providerId === "codex" && connections.length > 0 && (
           <div className="mb-3 flex flex-wrap items-center gap-3">
