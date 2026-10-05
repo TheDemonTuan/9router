@@ -10,6 +10,8 @@ import { DEFAULT_THINKING_AG_SIGNATURE } from "../config/defaultThinkingSignatur
 import { getGeminiThoughtSignatureSync } from "../services/thoughtSignatureStore.js";
 import { parseUpstreamError } from "../utils/error.js";
 import { MAX_ANTIGRAVITY_OUTPUT_TOKENS } from "../config/antigravityModels.js";
+import { isAntigravityClaudeModel, projectAntigravityClaudeToolSchema, invalidAntigravitySchema } from "../translator/concerns/antigravityToolSchema.js";
+import { takePreparedAntigravityProjection } from "../translator/concerns/antigravityToolValidation.js";
 
 // Sanitize function name: Gemini requires [a-zA-Z_][a-zA-Z0-9_.:\-]{0,63}
 function sanitizeFunctionName(name) {
@@ -257,7 +259,7 @@ export class AntigravityExecutor extends BaseExecutor {
       };
     });
     const contents = normalizeGeminiContents(rawContents, {
-      requireTrailingUser: !String(model).toLowerCase().includes("claude")
+      requireTrailingUser: !isAntigravityClaudeModel(body.model || model)
     });
 
     // Sanitize tool schemas and function names before sending to Antigravity.
@@ -273,16 +275,22 @@ export class AntigravityExecutor extends BaseExecutor {
           if (seenToolNames.has(name)) continue;
           seenToolNames.add(name);
           const { parameters, parametersJsonSchema, ...rest } = fn;
-          const schema = parametersJsonSchema || parameters;
-          const isJsonSchema = Boolean(parametersJsonSchema);
+          const claude = isAntigravityClaudeModel(body.model || model);
+          if (claude && Object.hasOwn(fn, "parameters") && Object.hasOwn(fn, "parametersJsonSchema")) {
+            throw invalidAntigravitySchema(name, "#", "parameters and parametersJsonSchema are mutually exclusive");
+          }
+          const schema = Object.hasOwn(fn, "parametersJsonSchema") ? parametersJsonSchema : parameters;
+          const isJsonSchema = Object.hasOwn(fn, "parametersJsonSchema");
           allDeclarations.push({
             ...rest,
             name,
-            ...(schema
-              ? isJsonSchema
-                ? { parametersJsonSchema: cleanToolJsonSchemaForGemini(schema) }
-                : { parameters: cleanJSONSchemaForAntigravity(structuredClone(schema)) }
-              : { parameters: { type: "object", properties: { reason: { type: "string", description: "Brief explanation" } }, required: ["reason"] } }),
+            ...(claude
+              ? { parameters: takePreparedAntigravityProjection(schema) || projectAntigravityClaudeToolSchema(schema, { toolName: name }).parameters }
+              : schema
+                ? isJsonSchema
+                  ? { parametersJsonSchema: cleanToolJsonSchemaForGemini(schema) }
+                  : { parameters: cleanJSONSchemaForAntigravity(structuredClone(schema)) }
+                : { parameters: { type: "object", properties: { reason: { type: "string", description: "Brief explanation" } }, required: ["reason"] } }),
           });
         }
       }

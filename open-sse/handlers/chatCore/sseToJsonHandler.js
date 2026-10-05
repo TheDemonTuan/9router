@@ -12,6 +12,60 @@ import { ROLE, RESPONSES_ITEM } from "../../translator/schema/index.js";
 const isResponsesProvider = (p) => PROVIDERS[p]?.format === FORMATS.OPENAI_RESPONSES;
 import { saveRequestDetail, appendRequestLog } from "@/lib/usageDb.js";
 import { validateStructuredResponse } from "../../translator/concerns/jsonSchemaValidation.js";
+import { initState, translateResponse } from "../../translator/index.js";
+import { validateAntigravityToolCalls, validateAntigravityChatToolCalls } from "../../translator/concerns/antigravityToolValidation.js";
+import { geminiToResponsesResponse } from "../../translator/response/gemini-to-responses.js";
+
+export function antigravityToolFailure(error) {
+  const message = error.code === "invalid_tool_arguments" ? error.message : "Antigravity tool argument validation unavailable";
+  const result = createErrorResult(HTTP_STATUS.BAD_GATEWAY, message, null, { errorClass: "invalid_tool_arguments", retryable: false });
+  result.terminalNoFallback = true;
+  return result;
+}
+
+export async function parseValidatedAntigravitySSE(rawSSE, model, context, { signal, sourceFormat, toolNameMap, customToolNames } = {}) {
+  const chatState = { ...initState(FORMATS.OPENAI), model, toolNameMap };
+  const responsesState = { ...initState(FORMATS.OPENAI_RESPONSES), model, toolNameMap, customToolNames: new Set(customToolNames || []) };
+  const chatLines = [];
+  const candidates = new Map();
+  let terminal = false;
+  let native = null;
+  let responseSnapshot = null;
+  const invalid = () => Object.assign(new Error("Antigravity tool argument validation unavailable"), { code: "invalid_tool_arguments" });
+  for (const line of String(rawSSE).split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("data:")) continue;
+    const payload = trimmed.slice(5).trim();
+    if (payload === "[DONE]") continue;
+    let parsed;
+    try { parsed = JSON.parse(payload); } catch { throw invalid(); }
+    await validateAntigravityToolCalls(parsed, context, { signal });
+    const response = parsed?.response || parsed;
+    if (!response || typeof response !== "object" || Array.isArray(response) || response.error || !Array.isArray(response.candidates)) throw invalid();
+    native = { ...(native || {}), ...response };
+    for (const [position, candidate] of response.candidates.entries()) {
+      const index = candidate.index ?? position;
+      const previous = candidates.get(index);
+      candidates.set(index, { ...previous, ...candidate, index, content: { ...previous?.content, ...candidate.content, parts: [...(previous?.content?.parts || []), ...(candidate.content?.parts || [])] } });
+      if (index === 0 && candidate.finishReason) terminal = true;
+    }
+    const primary = response.candidates.find((candidate, position) => (candidate.index ?? position) === 0);
+    if (primary) {
+      const primaryChunk = { response: { ...response, candidates: [primary] } };
+      for (const chunk of translateResponse(FORMATS.ANTIGRAVITY, FORMATS.OPENAI, primaryChunk, chatState) || []) if (chunk) chatLines.push(`data: ${JSON.stringify(chunk)}`);
+      for (const event of geminiToResponsesResponse(primaryChunk, responsesState)) if (event.data?.response && ["response.completed", "response.incomplete", "response.failed"].includes(event.event)) responseSnapshot = event.data.response;
+    }
+  }
+  if (!terminal || !native) throw invalid();
+  for (const chunk of translateResponse(FORMATS.ANTIGRAVITY, FORMATS.OPENAI, null, chatState) || []) if (chunk) chatLines.push(`data: ${JSON.stringify(chunk)}`);
+  const chat = parseSSEToOpenAIResponse(chatLines.join("\n"), model);
+  if (!chat || chat.error) throw invalid();
+  await validateAntigravityChatToolCalls(chat, context, { signal });
+  if (sourceFormat === FORMATS.OPENAI_RESPONSES && !responseSnapshot) throw invalid();
+  native.candidates = [...candidates.values()].sort((a, b) => a.index - b.index);
+  if ([FORMATS.ANTIGRAVITY, FORMATS.GEMINI, FORMATS.GEMINI_CLI, FORMATS.VERTEX].includes(sourceFormat) && native.candidates.some(candidate => !candidate.finishReason)) throw invalid();
+  return { chat, responses: responseSnapshot, native: { response: native } };
+}
 
 function textFromResponsesMessageItem(item) {
   if (!item?.content || !Array.isArray(item.content)) return "";
@@ -112,10 +166,14 @@ export function parseSSEToOpenAIResponse(rawSSE, fallbackModel) {
  * Handle case: provider forced streaming but client wants JSON.
  * Supports both Codex/Responses API SSE and standard Chat Completions SSE.
  */
-export async function handleForcedSSEToJson({ providerResponse, sourceFormat, targetFormat, provider, model, body, stream, translatedBody, finalBody, responseSchemaValidation, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, customToolNames, toolNameMap, trackDone, appendLog, reqTag, log, preResponse, routeContext = null }) {
+export async function handleForcedSSEToJson({ providerResponse, sourceFormat, targetFormat, provider, model, body, stream, translatedBody, finalBody, responseSchemaValidation, toolArgumentValidation = null, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, customToolNames, toolNameMap, trackDone, appendLog, reqTag, log, preResponse, routeContext = null }) {
   const contentType = providerResponse.headers.get("content-type") || "";
   const isSSE = contentType.includes("text/event-stream") || (contentType === "" && isResponsesProvider(provider));
   if (!isSSE) return null; // not handled here
+  if (toolArgumentValidation) {
+    const { handleNonStreamingResponse } = await import("./nonStreamingHandler.js");
+    return handleNonStreamingResponse({ providerResponse, sourceFormat, targetFormat, provider, model, body, stream, translatedBody, finalBody, responseSchemaValidation, toolArgumentValidation, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, customToolNames, toolNameMap, trackDone, appendLog, reqTag, log, preResponse, routeContext });
+  }
 
   const ctx = {
     provider, model, connectionId, routeContext,

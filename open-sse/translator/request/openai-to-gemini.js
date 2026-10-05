@@ -3,6 +3,7 @@ import { FORMATS } from "../formats.js";
 import { DEFAULT_THINKING_AG_SIGNATURE, DEFAULT_THINKING_GEMINI_CLI_SIGNATURE } from "../../config/defaultThinkingSignature.js";
 import { openaiToClaudeRequestForAntigravity } from "./openai-to-claude.js";
 import { getGeminiThoughtSignatureSync } from "../../services/thoughtSignatureStore.js";
+import { isAntigravityClaudeModel } from "../concerns/antigravityToolSchema.js";
 function generateUUID() {
   return crypto.randomUUID();
 }
@@ -433,12 +434,11 @@ function wrapInCloudCodeEnvelopeForClaude(model, claudeRequest, credentials = nu
   if (claudeRequest.tools && Array.isArray(claudeRequest.tools)) {
     const functionDeclarations = [];
     for (const tool of claudeRequest.tools) {
-      if (tool.name && tool.input_schema) {
-        const cleanedSchema = cleanJSONSchemaForAntigravity(tool.input_schema);
+      if (tool.name) {
         functionDeclarations.push({
           name: sanitizeGeminiFunctionName(tool.name),
           description: tool.description || "",
-          parameters: cleanedSchema
+          parameters: structuredClone(tool.input_schema === undefined ? { type: "object", properties: {} } : tool.input_schema)
         });
       }
     }
@@ -475,14 +475,10 @@ function wrapInCloudCodeEnvelopeForClaude(model, claudeRequest, credentials = nu
 }
 
 // Detect if model should use Claude backend in Antigravity
-// Claude models have specific ID patterns — more reliable than caps at routing level
-function isClaudeModel(model) {
-  return model.toLowerCase().includes("claude");
-}
 
 // OpenAI -> Antigravity (Sandbox Cloud Code with wrapper)
 export function openaiToAntigravityRequest(model, body, stream, credentials = null) {
-  if (isClaudeModel(model)) {
+  if (isAntigravityClaudeModel(model)) {
     const claudeRequest = openaiToClaudeRequestForAntigravity(model, body, stream);
     return wrapInCloudCodeEnvelopeForClaude(model, claudeRequest, credentials, DEFAULT_THINKING_AG_SIGNATURE, body.response_format);
   }

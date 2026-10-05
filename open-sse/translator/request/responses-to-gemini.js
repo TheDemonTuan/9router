@@ -1,5 +1,6 @@
 import { register } from "../index.js";
 import { FORMATS } from "../formats.js";
+import { isAntigravityClaudeModel } from "../concerns/antigravityToolSchema.js";
 import { normalizeResponsesInput } from "../formats/responsesApi.js";
 import {
   DEFAULT_SAFETY_SETTINGS,
@@ -210,8 +211,14 @@ export function responsesToGeminiCLIRequest(model, body, stream, credentials = n
 }
 
 export function responsesToAntigravityRequest(model, body, stream, credentials = null) {
-  if (String(model || "").toLowerCase().includes("claude")) {
-    return openaiToAntigravityRequest(model, openaiResponsesToOpenAIRequest(model, body, stream, credentials), stream, credentials);
+  if (isAntigravityClaudeModel(model)) {
+    const bridged = openaiResponsesToOpenAIRequest(model, body, stream, credentials);
+    const sourceTools = (body.tools || []).filter(tool => tool.function || (typeof tool.name === "string" && tool.name.trim()));
+    for (const [index, tool] of (bridged.tools || []).entries()) {
+      const source = sourceTools[index]?.function ?? sourceTools[index];
+      if (source && Object.hasOwn(source, "parameters") && tool.function) tool.function.parameters = structuredClone(source.parameters);
+    }
+    return openaiToAntigravityRequest(model, bridged, stream, credentials);
   }
   return wrapInCloudCodeEnvelope(model, responsesToGeminiBase(model, body, DEFAULT_THINKING_AG_SIGNATURE, credentials?._clientSessionId, "legacy", "jsonSchema"), credentials, true);
 }

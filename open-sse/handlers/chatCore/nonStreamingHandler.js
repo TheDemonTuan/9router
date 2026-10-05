@@ -6,7 +6,7 @@ import { addBufferToUsage, filterUsageForFormat } from "../../utils/usageTrackin
 import { createErrorResult } from "../../utils/error.js";
 import { upstreamResponseHeaders } from "../../utils/upstreamHeaders.js";
 import { HTTP_STATUS } from "../../config/runtimeConfig.js";
-import { parseSSEToOpenAIResponse } from "./sseToJsonHandler.js";
+import { parseSSEToOpenAIResponse, parseValidatedAntigravitySSE, antigravityToolFailure } from "./sseToJsonHandler.js";
 import { unwrapClineEnvelope } from "../../shared/clineEnvelope.js";
 import { validateStructuredResponse } from "../../translator/concerns/jsonSchemaValidation.js";
 import { buildRequestDetail, extractRequestConfig, extractUsageFromResponse, saveUsageStats, formatDoneLine } from "./requestDetail.js";
@@ -14,6 +14,7 @@ import { appendRequestLog, saveRequestDetail } from "@/lib/usageDb.js";
 import { decloakToolNames } from "../../utils/claudeCloaking.js";
 import { restoreToolNames } from "../../utils/opencodeFingerprint.js";
 import { ROLE, RESPONSES_ITEM } from "../../translator/schema/index.js";
+import { validateAntigravityToolCalls } from "../../translator/concerns/antigravityToolValidation.js";
 
 function parseToolArguments(value) {
   if (!value) return {};
@@ -235,9 +236,11 @@ export function translateNonStreamingResponse(responseBody, targetFormat, source
 /**
  * Handle non-streaming response from provider.
  */
-export async function handleNonStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, body, stream, translatedBody, finalBody, responseSchemaValidation, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, trackDone, appendLog, pxpipe, reqTag, log, routeContext }) {
+export async function handleNonStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, body, stream, translatedBody, finalBody, responseSchemaValidation, toolArgumentValidation = null, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, trackDone, appendLog, pxpipe, reqTag, log, routeContext, preResponse = null }) {
   const contentType = providerResponse.headers.get("content-type") || "";
   let responseBody;
+  let validatedClientResponse = null;
+  let validatedSSE = false;
 
   if (contentType.includes("text/event-stream")) {
     let sseText;
@@ -247,7 +250,21 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
       trackDone();
       throw error;
     }
-    const parsed = parseSSEToOpenAIResponse(sseText, model);
+    let parsed;
+    if (toolArgumentValidation) {
+      try {
+        const aggregate = await parseValidatedAntigravitySSE(sseText, model, toolArgumentValidation, { signal: preResponse?.signal, sourceFormat, toolNameMap, customToolNames });
+        parsed = aggregate.native;
+        validatedSSE = true;
+        if (sourceFormat === FORMATS.OPENAI_RESPONSES) validatedClientResponse = aggregate.responses;
+        else if (sourceFormat === FORMATS.OPENAI) validatedClientResponse = aggregate.chat;
+      } catch (error) {
+        trackDone();
+        if (preResponse?.signal?.aborted || toolArgumentValidation?.signal?.aborted) throw preResponse?.signal?.reason || toolArgumentValidation.signal.reason || error;
+        appendLog({ status: "FAILED 502" });
+        return antigravityToolFailure(error);
+      }
+    } else parsed = parseSSEToOpenAIResponse(sseText, model);
     if (!parsed) {
       trackDone();
       appendLog({ status: `FAILED ${HTTP_STATUS.BAD_GATEWAY}` });
@@ -261,6 +278,7 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
       if (err?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" || err?.code === "CLIENT_ABORT") throw err;
       trackDone();
       appendLog({ status: `FAILED ${HTTP_STATUS.BAD_GATEWAY}` });
+      if (toolArgumentValidation) return antigravityToolFailure(Object.assign(new Error("Antigravity tool argument validation unavailable"), { code: "invalid_tool_arguments" }));
       console.error(`[ChatCore] Failed to parse JSON from ${provider}:`, err.message);
       return createErrorResult(HTTP_STATUS.BAD_GATEWAY, `Invalid JSON response from ${provider}`);
     }
@@ -273,8 +291,21 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
   // bare OpenAI body and usage tracking sees data.usage. No-op unless the
   // provider opts in via transport.quirks.clineEnvelope.
   responseBody = unwrapClineEnvelope(responseBody, provider);
+  if (toolArgumentValidation && !validatedSSE) {
+    const nativeResponse = responseBody?.response || responseBody;
+    if (!nativeResponse || typeof nativeResponse !== "object" || Array.isArray(nativeResponse) || !Array.isArray(nativeResponse.candidates)) {
+      appendLog({ status: "FAILED 502" });
+      return antigravityToolFailure(Object.assign(new Error("Antigravity tool argument validation unavailable"), { code: "invalid_tool_arguments" }));
+    }
+    try { await validateAntigravityToolCalls(responseBody, toolArgumentValidation, { signal: preResponse?.signal }); }
+    catch (error) {
+      if (preResponse?.signal?.aborted || toolArgumentValidation?.signal?.aborted) throw preResponse?.signal?.reason || toolArgumentValidation.signal.reason || error;
+      appendLog({ status: "FAILED 502" });
+      return antigravityToolFailure(error);
+    }
+  }
 
-  reqLogger.logProviderResponse(providerResponse.status, providerResponse.statusText, providerResponse.headers, responseBody);
+  reqLogger?.logProviderResponse?.(providerResponse.status, providerResponse.statusText, providerResponse.headers, responseBody);
   if (onRequestSuccess) {
     Promise.resolve()
       .then(onRequestSuccess)
@@ -291,9 +322,9 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
   saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, silent: true });
   if (log?.line) log.line(reqTag, "📊", formatDoneLine({ usage, latency: { total: Date.now() - requestStartTime } }));
 
-  const translatedResponse = needsTranslation(targetFormat, sourceFormat)
+  const translatedResponse = validatedClientResponse || (needsTranslation(targetFormat, sourceFormat)
     ? translateNonStreamingResponse(responseBody, targetFormat, sourceFormat, customToolNames)
-    : responseBody;
+    : responseBody);
   if (responseSchemaValidation) {
     const validation = validateStructuredResponse(translatedResponse, responseSchemaValidation);
     if (!validation.valid) {
@@ -351,7 +382,7 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
     }
   }
 
-  reqLogger.logConvertedResponse(translatedResponse);
+  reqLogger?.logConvertedResponse?.(translatedResponse);
 
   const totalLatency = Date.now() - requestStartTime;
   saveRequestDetail(buildRequestDetail({

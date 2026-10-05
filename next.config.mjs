@@ -20,13 +20,19 @@ const nextConfig = {
   // letter). That throw happens at module scope, so every consumer of `open` dies on
   // import — including xAI/Grok token refresh, which loads the OAuth service that imports
   // it. Keeping it external preserves the real `import.meta.url` at runtime.
-  serverExternalPackages: ["open", "selfsigned"],
+  serverExternalPackages: ["open", "selfsigned", "ajv"],
   turbopack: {
     root: tracingRoot
   },
   outputFileTracingRoot: tracingRoot,
   // MITM starts as a child process; its DNS module loads this shared registry at runtime.
-  outputFileTracingIncludes: { "*": ["./src/shared/constants/mitmToolHosts.js"] },
+  outputFileTracingIncludes: { "*": [
+    "./src/shared/constants/mitmToolHosts.js",
+    // Worker module resolution stays dynamic; include its installed dependency closure.
+    "./node_modules/ajv/**/*", "./node_modules/fast-deep-equal/**/*",
+    "./node_modules/fast-uri/**/*", "./node_modules/json-schema-traverse/**/*",
+    "./node_modules/require-from-string/**/*",
+  ] },
   outputFileTracingExcludes: {
     "*": [
       "./tests/**/*",

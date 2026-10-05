@@ -340,7 +340,11 @@ function openaiToClaudeRequestForAntigravity(model, body, stream) {
 
   // Strip prefix from tool names for Antigravity (doesn't use Claude OAuth)
   if (result.tools && Array.isArray(result.tools)) {
-    result.tools = result.tools.map(tool => {
+    result.tools = result.tools.map((tool, index) => {
+      const source = body.tools[index]?.function ?? body.tools[index];
+      if (source && (Object.hasOwn(source, "parameters") || Object.hasOwn(source, "input_schema"))) {
+        tool = { ...tool, input_schema: structuredClone(Object.hasOwn(source, "parameters") ? source.parameters : source.input_schema) };
+      }
       if (tool.name && tool.name.startsWith(CLAUDE_OAUTH_TOOL_PREFIX)) {
         return {
           ...tool,
