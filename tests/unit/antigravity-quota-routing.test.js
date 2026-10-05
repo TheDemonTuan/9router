@@ -17,7 +17,7 @@ vi.mock("@/lib/localDb", () => ({
     const connection = mocks.connections.find(entry => entry.id === id);
     if (!connection) return null;
     const resolved = typeof patch === "function" ? patch(connection) : patch;
-    if (resolved !== null) Object.assign(connection, resolved);
+    if (resolved && typeof resolved === "object") Object.assign(connection, resolved);
     return connection;
   }),
 }));

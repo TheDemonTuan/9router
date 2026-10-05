@@ -24,6 +24,7 @@ import AddCustomModelModal from "./AddCustomModelModal";
 import BulkImportCodexModal from "./BulkImportCodexModal";
 import BulkImportGrokCliModal from "./BulkImportGrokCliModal";
 import CustomConfigCard from "./CustomConfigCard";
+import { mergeAntigravityModelLists } from "@/lib/providerNormalization";
 
 import { CODEX_MODEL_CACHE_TTL_MS } from "open-sse/config/codexModels.js";
 import { mergeCodexCandidateModels } from "open-sse/providers/codexCandidates.js";
@@ -181,9 +182,11 @@ export default function ProviderDetailPage() {
     : [];
   const models = providerId === "chatgpt-web" ? liveModels : providerId === "codex"
     ? (activeCodexConnections.length > 0 ? (codexCatalogResolved ? liveModels : []) : staticModels)
-    : (providerId === "cursor" || providerId === "zed" || providerId === "alitp-intl") && liveModels.length > 0
-      ? liveModels
-      : staticModels;
+    : providerId === "antigravity"
+      ? (connections.filter((c) => c.isActive !== false && c.id).length > 0 ? liveModels : staticModels)
+      : (providerId === "cursor" || providerId === "zed" || providerId === "alitp-intl") && liveModels.length > 0
+        ? liveModels
+        : staticModels;
   const providerAlias = getProviderAlias(providerId);
   
   const isOpenAICompatible = isOpenAICompatibleProvider(providerId);
@@ -502,7 +505,7 @@ export default function ProviderDetailPage() {
   // Personal + Team account exposes the union; its API already falls back to the
   // official edition catalog, so a discovery failure never blanks the picker.
   useEffect(() => {
-    const isLiveCatalog = providerId === "cursor" || providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web";
+    const isLiveCatalog = providerId === "cursor" || providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web" || providerId === "antigravity";
     if (!isLiveCatalog) {
       if (providerId !== "codex") setLiveModels([]);
       return;
@@ -511,13 +514,13 @@ export default function ProviderDetailPage() {
     const activeConnections = connections.filter((item) => item.isActive !== false && item.id);
     if (!activeConnections.length) {
       setLiveModels([]);
-      if (providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web") setLiveModelsError(null);
+      if (providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web" || providerId === "antigravity") setLiveModelsError(null);
       return;
     }
 
     let cancelled = false;
-    if (providerId === "zed" || providerId === "alitp-intl") setLiveModelsError(null);
-    const catalogConnections = providerId === "alitp-intl" || providerId === "chatgpt-web" ? activeConnections : [activeConnections[0]];
+    if (providerId === "zed" || providerId === "alitp-intl" || providerId === "antigravity") setLiveModelsError(null);
+    const catalogConnections = (providerId === "alitp-intl" || providerId === "chatgpt-web" || providerId === "antigravity") ? activeConnections : [activeConnections[0]];
     Promise.all(catalogConnections.map((connection) =>
       fetch(`/api/providers/${connection.id}/models`, { cache: "no-store" })
         .then(async (res) => ({ ok: res.ok, data: await res.json().catch(() => null) }))
@@ -542,12 +545,16 @@ export default function ProviderDetailPage() {
           }
         }
       }
-      if (merged.size) setLiveModels([...merged.values()]);
+      if (providerId === "antigravity") {
+        const validCatalogs = results.filter((r) => r.ok && Array.isArray(r.data?.models)).map((r) => r.data.models);
+        const mergedList = mergeAntigravityModelLists(validCatalogs);
+        setLiveModels(mergedList);
+      } else if (merged.size) setLiveModels([...merged.values()]);
       else setLiveModels([]);
       const warning = results.map((r) => r.data?.warning || (r.data?.stale
         ? "A stale runtime catalog is not used for routing; refresh must succeed first."
         : null)).find(Boolean);
-      if ((providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web") && warning) setLiveModelsError(warning);
+      if ((providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web" || providerId === "antigravity") && warning) setLiveModelsError(warning);
       if (providerId === "zed" && !merged.size) setLiveModelsError(warning || "Zed returned no live models.");
       if (providerId === "chatgpt-web" && !merged.size) setLiveModelsError(warning || "No verified ChatGPT Web models are available.");
     });

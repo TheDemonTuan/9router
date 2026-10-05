@@ -132,6 +132,12 @@ function openAIThinkingDisplay(body) {
 const NATIVE_ONLY_FORMATS = new Set(["gemini-level", "gemini-budget", "claude-budget", "claude-adaptive", "kiro"]);
 
 function resolveFormat(targetFormat, model, provider, metadata = null) {
+  if (targetFormat === "antigravity" && typeof model === "string") {
+    const bare = stripThinkingSuffix(model).toLowerCase();
+    if (bare.startsWith("claude-") || bare.includes("/claude-")) {
+      return "gemini-budget";
+    }
+  }
   if (targetFormat === "commandcode") return "commandcode";
   const providerFmt = provider ? PROVIDERS[provider]?.thinkingFormat : null;
   if (providerFmt) return providerFmt;

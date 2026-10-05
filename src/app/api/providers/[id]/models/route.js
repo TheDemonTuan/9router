@@ -13,6 +13,7 @@ import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { resolveCursorModels } from "open-sse/services/cursorModels.js";
 import { resolveZedModels } from "open-sse/shared/zedAuth.js";
 import { resolveClineModels, resolveClinepassModels } from "open-sse/services/clinepassModels.js";
+import { resolveAntigravityModels } from "open-sse/services/antigravityModels.js";
 import { resolveEffectiveProviderModels } from "open-sse/services/alibabaTokenPlanModels.js";
 import {
   getChatGptWebCatalog,
@@ -193,13 +194,34 @@ const PROVIDER_MODELS_CONFIG = {
     },
   },
   antigravity: {
-    url: "https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:models",
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    authHeader: "Authorization",
-    authPrefix: "Bearer ",
-    body: {},
-    parseResponse: (data) => data.models || []
+    customResolver: async (connection, options = {}) => {
+      const proxyOptions = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
+      const result = await resolveAntigravityModels(connection, {
+        proxyOptions,
+        forceRefresh: options.forceRefresh,
+        signal: options.signal,
+        log: console,
+        onCredentialsRefreshed: async (refreshed) => {
+          await updateProviderCredentials(connection.id, {
+            ...refreshed,
+            existingProviderSpecificData: connection.providerSpecificData || {},
+          });
+        },
+      });
+      if (!result) {
+        return {
+          resolved: false,
+          models: getModelsByProviderId("antigravity"),
+          warning: "Antigravity live model catalog unavailable; showing legacy fallback models.",
+        };
+      }
+      return {
+        resolved: true,
+        models: result.models,
+        source: result.source,
+        fetchedAt: result.fetchedAt,
+      };
+    },
   },
   github: {
     url: "https://api.githubcopilot.com/models",

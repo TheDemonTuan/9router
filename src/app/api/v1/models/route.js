@@ -30,6 +30,8 @@ import { isAlitpModelAvailableForEdition } from "open-sse/providers/alibabaToken
 import {
   getChatGptWebCatalog,
 } from "open-sse/services/chatgptWebRuntimeClient.js";
+import { resolveAntigravityModels } from "open-sse/services/antigravityModels.js";
+import { mergeAntigravityModelLists } from "@/lib/providerNormalization";
 import { mergeChatGptWebPublicModels } from "@/lib/providerNormalization";
 
 // Qoder shares one live resolver across intl (qoder) and CN (qoder-cn); the
@@ -97,6 +99,40 @@ const LIVE_MODEL_RESOLVERS = {
       catch { return null; }
     }));
     return { resolved: true, models: mergeChatGptWebPublicModels(catalogs) };
+  },
+  antigravity: async (conn, ctx) => {
+    const connections = (ctx?.connections || []).filter((entry) => entry.provider === "antigravity");
+    const candidates = connections.length > 0 ? connections : [conn];
+    const results = await Promise.all(candidates.map(async (connection) => {
+      try {
+        const proxyOptions = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
+        const enabled = connection.providerSpecificData?.enabledModels;
+        const res = await resolveAntigravityModels(connection, {
+          proxyOptions,
+          log: console,
+          onCredentialsRefreshed: async (refreshed) => {
+            await updateProviderCredentials(connection.id, {
+              ...refreshed,
+              existingProviderSpecificData: connection.providerSpecificData || {},
+            });
+          },
+        });
+        if (!res) {
+          const fallback = getModelsByProviderId("antigravity").filter((m) => m.kind !== "image");
+          const filteredFallback = (Array.isArray(enabled) && enabled.length > 0)
+            ? fallback.filter((m) => enabled.includes(m.id))
+            : fallback;
+          return filteredFallback;
+        }
+        const list = res.models || [];
+        return (Array.isArray(enabled) && enabled.length > 0)
+          ? list.filter((m) => enabled.includes(m.id))
+          : list;
+      } catch {
+        return [];
+      }
+    }));
+    return { resolved: true, models: mergeAntigravityModelLists(results) };
   },
   kiro: async (conn) => {
     const result = await resolveKiroModels({
@@ -740,6 +776,23 @@ export async function buildModelsList(kindFilter, options = {}) {
             }
             continue;
           }
+        }
+        if (providerId === "antigravity" && liveMetadata) {
+          // Live limits and flags override generic Claude family capabilities
+          if (liveMetadata.name) model.name = liveMetadata.name;
+          const agCaps = { ...(liveMetadata.capabilities || {}) };
+          if (liveMetadata.contextLength) {
+            model.context_length = liveMetadata.contextLength;
+            agCaps.contextWindow = liveMetadata.contextLength;
+          }
+          if (liveMetadata.maxOutputTokens) {
+            model.max_completion_tokens = liveMetadata.maxOutputTokens;
+            agCaps.maxOutput = liveMetadata.maxOutputTokens;
+          }
+          model.capabilities = agCaps;
+          model.input_modalities = liveMetadata.capabilities?.vision ? ["text", "image"] : ["text"];
+          models.push(model);
+          continue;
         }
         if (liveMetadata?.name || staticModel?.name) model.name = liveMetadata?.name || staticModel?.name;
         if (liveMetadata?.description || staticModel?.description) model.description = liveMetadata?.description || staticModel?.description;

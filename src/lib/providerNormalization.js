@@ -126,3 +126,46 @@ export function mergeChatGptWebPublicModels(catalogs) {
   }
   return [...merged.values()];
 }
+
+export function mergeAntigravityModelLists(lists = []) {
+  const merged = new Map();
+  for (const list of lists || []) {
+    for (const model of list || []) {
+      if (!model?.id) continue;
+      const existing = merged.get(model.id);
+      if (!existing) {
+        merged.set(model.id, {
+          ...model,
+          capabilities: model.capabilities ? { ...model.capabilities } : {},
+        });
+        continue;
+      }
+      const capabilities = { ...existing.capabilities };
+      if (model.capabilities) {
+        for (const [key, value] of Object.entries(model.capabilities)) {
+          if (capabilities[key] !== undefined) {
+            capabilities[key] = Boolean(capabilities[key] && value);
+          } else {
+            capabilities[key] = Boolean(value);
+          }
+        }
+      }
+      const combined = {
+        ...existing,
+        capabilities,
+      };
+      if (Number.isFinite(existing.contextLength) && Number.isFinite(model.contextLength)) {
+        combined.contextLength = Math.min(existing.contextLength, model.contextLength);
+      } else if (Number.isFinite(model.contextLength)) {
+        combined.contextLength = model.contextLength;
+      }
+      if (Number.isFinite(existing.maxOutputTokens) && Number.isFinite(model.maxOutputTokens)) {
+        combined.maxOutputTokens = Math.min(existing.maxOutputTokens, model.maxOutputTokens);
+      } else if (Number.isFinite(model.maxOutputTokens)) {
+        combined.maxOutputTokens = model.maxOutputTokens;
+      }
+      merged.set(model.id, combined);
+    }
+  }
+  return [...merged.values()];
+}

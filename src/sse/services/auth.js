@@ -10,6 +10,8 @@ import {
   chatGptWebModelSupportsCapabilities,
   requestChatGptWebRuntime,
 } from "open-sse/services/chatgptWebRuntimeClient.js";
+import { resolveAntigravityModels, isAntigravityModelAvailable } from "open-sse/services/antigravityModels.js";
+import { getModelsByProviderId } from "open-sse/config/providerModels.js";
 import * as log from "../utils/logger.js";
 
 // Serialize rotation within a provider without blocking unrelated upstreams.
@@ -141,6 +143,37 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         } catch { /* Offline/unknown bridges are not dispatch candidates. */ }
       }));
     }
+    const antigravityEligible = new Set();
+    if (providerId === "antigravity" && model) {
+      await Promise.all(connections.map(async (connection) => {
+        try {
+          const enabled = connection.providerSpecificData?.enabledModels;
+          if (Array.isArray(enabled) && enabled.length > 0 && !enabled.includes(model)) return;
+          const proxyOptions = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
+          const catalog = await resolveAntigravityModels(connection, {
+            proxyOptions,
+            signal: options.signal,
+            log,
+            onCredentialsRefreshed: async (refreshed) => {
+              await updateProviderConnection(connection.id, (current) => ({
+                ...current,
+                ...refreshed,
+                providerSpecificData: {
+                  ...(current.providerSpecificData || {}),
+                  ...(refreshed.providerSpecificData || {}),
+                },
+              }));
+            },
+          });
+          if (catalog?.resolved === true) {
+            if (isAntigravityModelAvailable(catalog.models, model)) antigravityEligible.add(connection.id);
+          } else {
+            const legacyModels = getModelsByProviderId("antigravity");
+            if (isAntigravityModelAvailable(legacyModels, model)) antigravityEligible.add(connection.id);
+          }
+        } catch { /* Discovery failure drops unverified models */ }
+      }));
+    }
 
     // Filter out model-locked, excluded, and capability-ineligible connections.
     const availableConnections = connections.filter(c => {
@@ -148,6 +181,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       if (pinConnectionId && providerId !== "chatgpt-web" && c.id !== pinConnectionId) return false;
       if (providerId === "chatgpt-web" && model && !bridgeEligible.has(c.id)) return false;
       if (isModelLockActive(c, model)) return false;
+      if (providerId === "antigravity" && model && !antigravityEligible.has(c.id)) return false;
       // Alibaba Token Plan: Team-only models require a Team Edition connection
       // (metadata check on the cached connection — no network during selection).
       if (providerId === "alitp-intl" && model &&
