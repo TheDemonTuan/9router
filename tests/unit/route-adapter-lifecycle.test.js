@@ -2,7 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({ handleChat: vi.fn(), init: vi.fn() }));
 vi.mock("@/sse/handlers/chat.js", () => ({ handleChat: mocks.handleChat }));
-vi.mock("../../open-sse/translator/index.js", () => ({ initTranslators: mocks.init }));
+vi.mock("../../open-sse/translator/index.js", async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    initTranslators: mocks.init,
+  };
+});
 
 const { POST: geminiPost } = await import("../../src/app/api/v1beta/models/[...path]/route.js");
 const { POST: ollamaPost } = await import("../../src/app/api/v1/api/chat/route.js");
