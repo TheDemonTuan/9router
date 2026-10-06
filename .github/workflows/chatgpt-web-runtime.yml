@@ -193,7 +193,7 @@ jobs:
             --tmpfs /tmp:rw,nosuid,nodev,size=512m,mode=1777 \
             --tmpfs /run:rw,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700 \
             --env TMPDIR=/opt/cgw-browser --mount "type=volume,src=$volume,dst=/opt/cgw-browser" \
-            "$CGW_CHECK_IMAGE" sh -c 'python3 -c '\''from pathlib import Path; import os; p = Path("/opt/cgw-browser"); assert not list(p.iterdir()); assert p.stat().st_uid == p.stat().st_gid == os.getuid() == 10001'\'' && python3 -B -m unittest discover -s tests -p install_browser_test.py'
+            "$CGW_CHECK_IMAGE" sh -c 'python3 -c '\''from pathlib import Path; import os; p = Path("/opt/cgw-browser"); assert not list(p.iterdir()); assert p.stat().st_uid == p.stat().st_gid == os.getuid() == 10001'\'' && python3 -B -m unittest discover -s tests -p install_browser_test.py && python3 -B -m unittest discover -s tests -p close_native_browser_test.py'
       - name: Provision pinned Chrome in an owned Docker cache volume
         env:
           ARCH: ${{ matrix.arch }}
@@ -335,7 +335,7 @@ jobs:
 
   security-source:
     name: Trivy CGW source gate
-    needs: [native, gateway-contracts]
+    needs: [activation-fence]
     if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     permissions:
       contents: read
@@ -350,8 +350,8 @@ jobs:
 
   publish:
     name: Publish verified native CGW image
-    needs: security-source
-    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    needs: [security-source, native, gateway-contracts, live-staging]
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && needs.security-source.result == 'success' && needs.native.result == 'success' && needs.gateway-contracts.result == 'success' && (!inputs.live_account || needs.live-staging.result == 'success') }}
     permissions:
       contents: read
       packages: write
@@ -382,6 +382,10 @@ jobs:
 
   deploy-runtime:
     name: Deploy scanned immutable CGW runtime
+    concurrency:
+      group: 9router-oracle-main-production
+      queue: max
+      cancel-in-progress: false
     needs: [publish, security-image]
     if: github.event_name == 'workflow_dispatch' && inputs.publish && inputs.deploy && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-24.04

@@ -34,6 +34,7 @@ permissions:
   contents: read
 concurrency:
   group: rtk-sidecar-${{ github.ref }}
+  queue: max
   cancel-in-progress: false
 jobs:
   verify:
@@ -182,6 +183,10 @@ jobs:
       platform: linux/arm64
 
   deploy:
+    concurrency:
+      group: 9router-oracle-main-production
+      queue: max
+      cancel-in-progress: false
     needs:
       - manifest
       - security-image-arm64

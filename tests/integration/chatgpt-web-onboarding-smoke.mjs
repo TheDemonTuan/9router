@@ -38,14 +38,16 @@ const repository = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 let createdNetwork = false, createdGateway = false;
 function command(args, timeout = 30000) {
   const result = spawnSync("docker", args, { encoding: "utf8", timeout, maxBuffer: 4 * 1024 * 1024 });
+  const failure = { operation: args[0], exitStatus: result.status ?? null, signal: result.signal ?? null,
+    errorCode: ["ENOENT", "EACCES", "EPERM", "ETIMEDOUT", "ENOBUFS", "E2BIG", "EIO"].includes(result.error?.code) ? result.error.code : result.error ? "spawn_error" : null };
   if (result.status !== 0 && flags["--proof-dir"]) {
     const destination = resolve(flags["--proof-dir"]); mkdirSync(destination, { recursive: true });
-    writeFileSync(join(destination, "failure.log"), `${result.stdout || ""}\n${result.stderr || ""}`, { mode: 0o600 });
+    writeFileSync(join(destination, "failure.log"), `${JSON.stringify(failure)}\n${result.stdout || ""}\n${result.stderr || ""}`, { mode: 0o600 });
     for (const name of ["provider-failed.png", "provider-embedded-login.png"]) {
       if (existsSync(join(proofs, name))) copyFileSync(join(proofs, name), join(destination, name));
     }
   }
-  assert(result.status === 0, `Owned Docker smoke operation failed: ${args[0]} (private command output not emitted)`);
+  assert(result.status === 0, `Owned Docker smoke operation failed: ${JSON.stringify(failure)}; inspect synthetic failure.log in the onboarding proof artifact (private command output not emitted)`);
   return result.stdout.trim();
 }
 let result;
@@ -79,7 +81,7 @@ try {
   assert.equal(result.gate, "provider-onboarding-ui");
   if (flags["--proof-dir"]) {
     const destination = resolve(flags["--proof-dir"]); mkdirSync(destination, { recursive: true });
-    for (const name of ["result.json", "provider-embedded-login.png", "provider-connected-ready.png", "provider-import-ready.png", "provider-import-mobile.png"]) copyFileSync(join(proofs, name), join(destination, name));
+    for (const name of ["result.json", "provider-embedded-login.png", "provider-connected-ready.png", "provider-import-ready.png", "provider-import-mobile.png", "provider-model-test.png", "provider-model-test-mobile.png"]) copyFileSync(join(proofs, name), join(destination, name));
   }
 } finally {
   spawnSync("docker", ["rm", "-f", runtime], { stdio: "ignore", timeout: 30000 });

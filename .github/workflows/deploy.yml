@@ -12,14 +12,27 @@ on:
 
 concurrency:
   group: 9router-deploy
+  queue: max
   cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
+  activation-fence:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require default-branch build and deployment
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == "refs/heads/$DEFAULT_BRANCH" ]] || { echo 'Build and Deploy requires the default branch (including skip_deploy=true)' >&2; exit 1; }
+
   verify:
     name: Application regression gates
+    needs: activation-fence
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
@@ -42,6 +55,7 @@ jobs:
 
   security-source:
     name: Trivy source security gate
+    needs: activation-fence
     permissions:
       contents: read
       packages: read
@@ -84,6 +98,10 @@ jobs:
       image-ref: ${{ needs.build.outputs.image-ref }}
       platform: linux/arm64
   deploy:
+    concurrency:
+      group: 9router-oracle-main-production
+      queue: max
+      cancel-in-progress: false
     name: Deploy immutable digest
     needs:
       - build

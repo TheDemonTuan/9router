@@ -275,6 +275,54 @@ describe.skipIf(process.platform !== "linux")("human-only sign-in physical owner
     } finally { await second.close(); await f.close(); await closeBrowserManagers(); }
   });
 
+  test.each(["exit", "signal", "timeout", "spawn", "no-match"] as const)("helper %s still settles owned processes without touching unrelated processes", async mode => {
+    const f = nativeFixture(true, true);
+    const browser = await NativeBrowserProcess.launch(f.executable, f.root, ":fixture-secret-marker", "https://chatgpt.com");
+    const unrelated = spawn(process.execPath, ["-e", 'process.stdout.write("ready\\n"); process.stdin.resume()'], { stdio: ["pipe", "pipe", "ignore"] });
+    const unrelatedReady = once(unrelated.stdout!, "data");
+    await once(unrelated, "spawn"); await unrelatedReady;
+    const oldPath = process.env.PATH;
+    const marker = "fixture-SECRET-helper-payload";
+    const diagnostics = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await waitForFile(f.descendantReady);
+      const descendant = Number(readFileSync(f.descendantReady, "utf8"));
+      // Real helper/process termination uses the production deadline; virtual time cannot reap POSIX children.
+      if (mode !== "spawn") {
+        const action = mode === "timeout" ? `exec '${process.execPath.replace(/'/g, "'\\''")}' -e 'require("node:net").createServer().listen(0, "127.0.0.1")'`
+          : mode === "signal" ? 'kill -KILL $$' : `exit ${mode === "exit" ? 2 : 1}`;
+        writeFileSync(join(f.root, "python3"), `#!/bin/sh\nprintf '%s\\n' '${marker}' >&2\n${action}\n`, { mode: 0o700 });
+      }
+      process.env.PATH = f.root;
+      const closing = browser.close();
+      expect(browser.close()).toBe(closing);
+      await closing;
+      expect(browser.running).toBe(false);
+      let state = "X";
+      try { const stat = readFileSync(`/proc/${descendant}/stat`, "utf8"); state = stat.slice(stat.lastIndexOf(") ") + 2).split(" ")[0]!; } catch {}
+      expect(["Z", "X"]).toContain(state);
+      expect(unrelated.exitCode).toBeNull();
+      expect(unrelated.signalCode).toBeNull();
+      if (mode === "no-match") expect(diagnostics.mock.calls).toHaveLength(0);
+      else {
+        expect(diagnostics.mock.calls).toHaveLength(1);
+        const diagnostic = JSON.parse(String(diagnostics.mock.calls[0]![0]));
+        expect(diagnostic).toEqual({ event: "cgw_native_close_failed",
+          reason: mode === "spawn" ? "helper_spawn" : mode === "timeout" ? "helper_timeout" : "helper_exit",
+          exitCode: mode === "exit" ? 2 : null,
+          signal: mode === "signal" || mode === "timeout" ? "SIGKILL" : null });
+      }
+      expect(JSON.stringify(diagnostics.mock.calls)).not.toContain(marker);
+      expect(JSON.stringify(diagnostics.mock.calls)).not.toContain("fixture-secret-marker");
+    } finally {
+      if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath;
+      await browser.close();
+      unrelated.kill("SIGKILL");
+      if (unrelated.exitCode === null && unrelated.signalCode === null) await once(unrelated, "exit");
+      diagnostics.mockRestore(); rmSync(f.root, { recursive: true, force: true });
+    }
+  }, 10000);
+
   test.each([false, true])("native release settles resistant descendants even when detached=%s", async detached => {
     const f = nativeFixture(true, detached);
     const browser = await NativeBrowserProcess.launch(f.executable, f.root, undefined, "https://chatgpt.com");

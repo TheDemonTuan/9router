@@ -78,11 +78,29 @@ export class NativeBrowserProcess {
 
   private requestWindowClose(): Promise<boolean> {
     if (!this.grouped || !this.display || !this.running) return Promise.resolve(false);
-    const helper = spawn("python3", [join(import.meta.dir, "../../scripts/close-native-browser.py"), this.display, String(this.child.pid)], { stdio: "ignore", shell: false });
     const { promise, resolve } = Promise.withResolvers<boolean>();
-    const timer = setTimeout(() => { helper.kill("SIGKILL"); }, 2000);
-    helper.once("error", () => { clearTimeout(timer); resolve(false); });
-    helper.once("exit", code => { clearTimeout(timer); resolve(code === 0); });
+    let settled = false;
+    let timer: Timer | undefined;
+    const finish = (requested: boolean, reason?: "helper_spawn" | "helper_exit" | "helper_timeout", exitCode: number | null = null, signal: string | null = null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (reason) console.error(JSON.stringify({ event: "cgw_native_close_failed", reason, exitCode, signal }));
+      resolve(requested);
+    };
+    try {
+      const helper = spawn("python3", [join(import.meta.dir, "../../scripts/close-native-browser.py"), this.display, String(this.child.pid)], { stdio: "ignore", shell: false });
+      let timedOut = false;
+      timer = setTimeout(() => { timedOut = true; helper.kill("SIGKILL"); }, 2000);
+      helper.once("error", () => { helper.kill("SIGKILL"); finish(false, timedOut ? "helper_timeout" : "helper_spawn"); });
+      helper.once("exit", (code, signal) => {
+        if (timedOut) finish(false, "helper_timeout", code, signal);
+        else if (signal !== null || (code !== 0 && code !== 1)) finish(false, "helper_exit", code, signal);
+        else finish(code === 0);
+      });
+    } catch {
+      finish(false, "helper_spawn");
+    }
     return promise;
   }
 

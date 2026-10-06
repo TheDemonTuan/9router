@@ -230,7 +230,6 @@ try {
   await page.screenshot({ path: join(proof, "provider-embedded-login.png"), fullPage: true });
   await clickNative("button");
   await until(() => signedIn.has(id) && geometry.get(id)?.authenticated === true, "Native human sign-in document did not settle");
-  await Bun.sleep(1000);
   assert.equal(runtime.profiles.ready(id), false, "Login completion requires explicit verification");
   const completed = page.waitForResponse(r => r.url().endsWith("/runtime/login/complete") && r.request().method() === "POST");
   await page.getByRole("button", { name: "Finish Sign In", exact: true }).click();
