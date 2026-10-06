@@ -366,7 +366,7 @@ jobs:
   security-image:
     name: Trivy immutable CGW image gate
     needs: publish
-    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && needs.publish.result == 'success' }}
     permissions:
       contents: read
       packages: read
@@ -387,7 +387,7 @@ jobs:
       queue: max
       cancel-in-progress: false
     needs: [publish, security-image]
-    if: github.event_name == 'workflow_dispatch' && inputs.publish && inputs.deploy && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.publish && inputs.deploy && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && needs.publish.result == 'success' && needs.security-image.result == 'success' }}
     runs-on: ubuntu-24.04
     environment: production
     timeout-minutes: 34
