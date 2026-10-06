@@ -55,10 +55,12 @@ class BrowserExtractionTests(unittest.TestCase):
                  'archiveSha256': self.asset['sha256'], 'binarySha256': self.asset['binarySha256'],
                  'files': {'chrome': self.asset['binarySha256']}}
         (self.root / '.cgw-chrome.json').write_text(json.dumps(proof), encoding='utf-8')
+        (self.root / '.cgw-chrome.json').chmod(0o644)
         browser = {'version': proof['version'], 'platforms': {'amd64': self.asset}}
         installer.verify_existing(self.root, browser, 'amd64')
         extra = self.root / 'injected'
         extra.write_bytes(b'unreviewed')
+        extra.chmod(0o644)
         with self.assertRaisesRegex(ValueError, 'FILE_CHECKSUM'):
             installer.verify_existing(self.root, browser, 'amd64')
         extra.unlink()
