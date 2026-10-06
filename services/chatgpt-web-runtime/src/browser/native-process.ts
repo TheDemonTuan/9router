@@ -78,7 +78,8 @@ export class NativeBrowserProcess {
 
   private requestWindowClose(): Promise<boolean> {
     if (!this.grouped || !this.display || !this.running) return Promise.resolve(false);
-    const helper = spawn("python3", [join(import.meta.dir, "../../scripts/close-native-browser.py"), this.display, String(this.child.pid)], { stdio: "ignore", shell: false });
+    const helper = spawn("python3", [join(import.meta.dir, "../../scripts/close-native-browser.py"), this.display, String(this.child.pid)], { stdio: ["ignore", "ignore", "pipe"], shell: false });
+    helper.stderr?.on("data", data => { Reflect.set(this, "syntheticCloseError", String(data).slice(0, 512)); });
     const { promise, resolve } = Promise.withResolvers<boolean>();
     const timer = setTimeout(() => { helper.kill("SIGKILL"); }, 2000);
     helper.once("error", () => { clearTimeout(timer); resolve(false); });

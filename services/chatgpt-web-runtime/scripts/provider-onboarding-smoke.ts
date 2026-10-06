@@ -34,7 +34,7 @@ NativeBrowserProcess.launch = async (...args) => {
   const requestClose = Reflect.get(browser, "requestWindowClose").bind(browser);
   Reflect.set(browser, "requestWindowClose", async () => {
     const requested = await requestClose();
-    shutdownDiagnostics.push({ requested });
+    shutdownDiagnostics.push({ requested, helperError: Reflect.get(browser, "syntheticCloseError") });
     return requested;
   });
   const close = browser.close.bind(browser);
