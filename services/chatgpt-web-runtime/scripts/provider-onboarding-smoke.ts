@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { networkInterfaces } from "node:os";
 import { connect } from "node:net";
 import { startRuntime } from "../src/server";
+import { NativeBrowserProcess } from "../src/browser/native-process";
 import type { BrowserTurnLease } from "../src/browser/manager";
 import type { BrowserContext } from "playwright-core";
 import { MAX_SESSION_TRANSFER_BYTES, parseChatGptWebSessionTransfer } from "../session-transfer.js";
@@ -26,6 +27,17 @@ interface NativeGeometry { pageId: string; sequence: number; authenticated: bool
 const geometry = new Map<string, NativeGeometry>();
 const signedIn = new Set<string>();
 const persisted = new Set<string>();
+const launchNative = NativeBrowserProcess.launch.bind(NativeBrowserProcess);
+NativeBrowserProcess.launch = async (...args) => {
+  const browser = await launchNative(...args);
+  Reflect.set(browser, "requestWindowClose", async () => {
+    const process = Bun.spawn(["python3", join(import.meta.dir, "close-native-browser.py"), args[2]!, String(browser.child.pid)], { stdout: "pipe", stderr: "pipe" });
+    const [stdout, stderr, code] = await Promise.all([new Response(process.stdout).text(), new Response(process.stderr).text(), process.exited]);
+    console.error("SYNTHETIC_NATIVE_CLOSE", JSON.stringify({ code, stdout, stderr }));
+    return code === 0;
+  });
+  return browser;
+};
 let currentId = "";
 const preparedManagers = new WeakSet<object>();
 const preparedContexts = new WeakSet<BrowserContext>();
