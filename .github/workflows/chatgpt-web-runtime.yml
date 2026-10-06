@@ -1,21 +1,47 @@
 name: ChatGPT Web runtime gates
 on:
   push:
-    branches: [feat/cgw-full-harness, integrate/cgw-production, master]
+    branches: [master]
+    paths:
+      - services/chatgpt-web-runtime/**
+      - tools/chatgpt-web-session-export/**
+      - src/**
+      - open-sse/**
+      - public/**
+      - tests/**
+      - .deploy/**
+      - package.json
+      - bun.lock
+      - Dockerfile
+      - .dockerignore
+      - custom-server.js
+      - chatgpt-web-viewer-proxy.cjs
+      - next.config.mjs
+      - jsconfig.json
+      - postcss.config.mjs
+      - scripts/copy-standalone-assets.mjs
+      - scripts/docker-entrypoint.sh
+      - .github/workflows/chatgpt-web-runtime.yml
   pull_request:
     paths:
       - services/chatgpt-web-runtime/**
-      - open-sse/services/chatgptWebRuntimeClient.js
       - tools/chatgpt-web-session-export/**
-      - src/shared/components/ChatGPTWebRuntimePanel.js
-      - src/shared/components/AddChatGPTWebRuntimeModal.js
-      - src/app/api/providers/chatgpt-web/runtime/**
-      - tests/integration/chatgpt-web-onboarding-smoke.mjs
-      - open-sse/executors/chatgpt-web.js
-      - src/lib/chatgptWebAuthority.js
-      - src/sse/**
-      - src/app/api/v1/**
-      - tests/integration/chatgpt-web-runtime-smoke.mjs
+      - src/**
+      - open-sse/**
+      - public/**
+      - tests/**
+      - .deploy/**
+      - package.json
+      - bun.lock
+      - Dockerfile
+      - .dockerignore
+      - custom-server.js
+      - chatgpt-web-viewer-proxy.cjs
+      - next.config.mjs
+      - jsconfig.json
+      - postcss.config.mjs
+      - scripts/copy-standalone-assets.mjs
+      - scripts/docker-entrypoint.sh
       - .github/workflows/chatgpt-web-runtime.yml
   workflow_dispatch:
     inputs:
@@ -33,28 +59,36 @@ on:
         description: Deploy the scanned immutable runtime after operator bootstrap/enrollment
 permissions:
   contents: read
+# Dispatch operations queue without replacement; automatic jobs supersede by ref below.
 concurrency:
-  group: cgw-runtime-${{ github.ref }}
+  group: ${{ github.event_name == 'workflow_dispatch' && 'cgw-runtime-operations' || format('cgw-runtime-ci-run-{0}', github.run_id) }}
+  queue: max
   cancel-in-progress: false
 jobs:
   activation-fence:
+    concurrency:
+      group: ${{ format('cgw-runtime-activation-{0}', github.event_name == 'workflow_dispatch' && github.run_id || github.ref) }}
+      cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
       - name: Enforce explicit default-branch activation
         env:
+          LIVE_ACCOUNT: ${{ inputs.live_account || false }}
           PUBLISH: ${{ inputs.publish || false }}
           DEPLOY: ${{ inputs.deploy || false }}
-          REF_NAME: ${{ github.ref_name }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
-          if [[ "$PUBLISH" == true || "$DEPLOY" == true ]]; then
-            [[ "$REF_NAME" == "$DEFAULT_BRANCH" ]] || { echo 'Publication and deployment require the default branch' >&2; exit 1; }
+          if [[ "$LIVE_ACCOUNT" == true || "$PUBLISH" == true || "$DEPLOY" == true ]]; then
+            [[ "$GITHUB_REF" == "refs/heads/$DEFAULT_BRANCH" ]] || { echo 'Live account, publication and deployment require the default branch' >&2; exit 1; }
           fi
           [[ "$DEPLOY" != true || "$PUBLISH" == true ]] || { echo 'Deploy requires this run to publish and scan its immutable image' >&2; exit 1; }
 
   gateway-contracts:
+    concurrency:
+      group: ${{ format('cgw-runtime-gateway-{0}', github.event_name == 'workflow_dispatch' && github.run_id || github.ref) }}
+      cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
     needs: activation-fence
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -76,28 +110,12 @@ jobs:
           set -euo pipefail
           bun install --frozen-lockfile
           bun install --frozen-lockfile --cwd tests
-      - name: Exercise all affected CGW gateway and dashboard contracts
+      # The regression umbrella below owns the other CGW contracts; routing is not discovered there.
+      - name: Exercise model-test routing contract
         working-directory: tests
         run: |
           set -euo pipefail
-          bun run test --config vitest.config.js \
-            integration/chatgpt-web.test.js \
-            unit/chatgpt-web-concurrency.test.js \
-            unit/chatgpt-web-executor-capabilities.test.js \
-            unit/session-manager.test.js \
-            unit/chat-quota-handler.test.js \
-            unit/providers-chatgpt-web-crud.test.js \
-            unit/provider-validation-chatgpt-web.test.js \
-            unit/provider-models-chatgpt-web.test.js \
-            unit/models-route-chatgpt-web.test.js \
-            unit/v1-models-chatgpt-web.test.js \
-            unit/chatgpt-web-connection-test.test.js \
-            unit/chatgpt-web-connection-state.test.js \
-            unit/model-test-routing.test.js \
-            unit/force-stream-config.test.js \
-            unit/responses-native-forwarding.test.js \
-            unit/dashboard-guard.test.js \
-            unit/chatgpt-web-runtime-admin.test.js
+          bun run test --config vitest.config.js unit/model-test-routing.test.js
       - name: Exercise binary viewer authorization and transport on Node and Bun
         run: |
           set -euo pipefail
@@ -109,6 +127,9 @@ jobs:
         run: bash .deploy/verify.sh
 
   native:
+    concurrency:
+      group: ${{ format('cgw-runtime-native-{0}-{1}', github.event_name == 'workflow_dispatch' && github.run_id || github.ref, matrix.arch) }}
+      cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
     needs: activation-fence
     timeout-minutes: 75
     strategy:
@@ -187,6 +208,7 @@ jobs:
             --tmpfs /run:rw,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700 \
             --mount "type=volume,src=$volume,dst=/opt/cgw-browser" \
             "$CGW_CHECK_IMAGE" python3 scripts/install-browser.py --manifest image-build-manifest.json
+      # The evidence producer runs image-smoke itself before emitting compatibility evidence.
       - name: Prove physical sandbox, native binaries and actual browser HTTP fixture
         env:
           ARCH: ${{ matrix.arch }}
@@ -198,9 +220,7 @@ jobs:
             --tmpfs /run:rw,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700
             --tmpfs /data:rw,nosuid,nodev,size=512m,uid=10001,gid=10001,mode=0700
             --mount "type=volume,src=$CGW_BROWSER_VOLUME,dst=/opt/cgw-browser,readonly")
-          echo "=== 1. image-smoke ==="
-          docker run --name "cgw-image-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}" "${hardening[@]}" "$CGW_CHECK_IMAGE" bun scripts/image-smoke.ts --arch "$ARCH"
-          echo "=== 2. verify-harness-compatibility ==="
+          echo "=== verify-harness-compatibility (includes native image sandbox proof) ==="
           docker run --name "cgw-compatibility-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}" "${hardening[@]}" "$CGW_CHECK_IMAGE" bun scripts/verify-harness-compatibility.ts /data/compatibility.json
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
@@ -210,7 +230,6 @@ jobs:
           set -euo pipefail
           test "$(bun --version)" = 1.4.2
           bun install --frozen-lockfile
-          bun install --frozen-lockfile --cwd tests
           bun run build
           bun tests/integration/chatgpt-web-runtime-smoke.mjs --image "$CGW_CHECK_IMAGE" --browser-volume "$CGW_BROWSER_VOLUME" --gateway-port 21127
       - name: Exercise native login and Chrome session transfer onboarding
@@ -270,7 +289,6 @@ jobs:
           docker rm -f "cgw-browser-init-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}" \
             "cgw-browserless-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}" \
             "cgw-browser-metadata-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}" \
-            "cgw-image-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}" \
             "cgw-compatibility-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}" 2>/dev/null || true
           if [[ -n "${CGW_BROWSER_VOLUME:-}" ]]; then docker volume rm "$CGW_BROWSER_VOLUME"; fi
           rm -f "$RUNNER_TEMP/cgw-synthetic-session.json" "$RUNNER_TEMP/cgw-bun-1.4.0"
@@ -280,7 +298,7 @@ jobs:
 
   live-staging:
     needs: [native, gateway-contracts]
-    if: github.event_name == 'workflow_dispatch' && inputs.live_account && github.ref_name == github.event.repository.default_branch
+    if: github.event_name == 'workflow_dispatch' && inputs.live_account && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: [self-hosted, linux, ARM64, cgw-staging-disposable]
     environment: staging
     timeout-minutes: 60
@@ -318,7 +336,7 @@ jobs:
   security-source:
     name: Trivy CGW source gate
     needs: [native, gateway-contracts]
-    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref_name == github.event.repository.default_branch
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     permissions:
       contents: read
       packages: read
@@ -333,7 +351,7 @@ jobs:
   publish:
     name: Publish verified native CGW image
     needs: security-source
-    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref_name == github.event.repository.default_branch
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     permissions:
       contents: read
       packages: write
@@ -348,7 +366,7 @@ jobs:
   security-image:
     name: Trivy immutable CGW image gate
     needs: publish
-    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref_name == github.event.repository.default_branch
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     permissions:
       contents: read
       packages: read
@@ -365,7 +383,7 @@ jobs:
   deploy-runtime:
     name: Deploy scanned immutable CGW runtime
     needs: [publish, security-image]
-    if: github.event_name == 'workflow_dispatch' && inputs.publish && inputs.deploy && github.ref_name == github.event.repository.default_branch
+    if: github.event_name == 'workflow_dispatch' && inputs.publish && inputs.deploy && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-24.04
     environment: production
     timeout-minutes: 34
