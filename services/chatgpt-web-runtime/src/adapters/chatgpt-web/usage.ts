@@ -64,6 +64,7 @@ export function resolveBiggerContextMultipartParts(
   parsed: CodexParsedRequest,
   capabilities: ChatGptWebCapabilities,
   experimentalSkillAttachments = false,
+  promptOptions: CompileChatGptWebPromptOptions = {},
 ): ChatGptWebMultipartPartCount | undefined {
   if (parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
     throw new Error("Bigger Context is unavailable for Luna because its accumulated browser transcript still shares one 28,000-token transport budget");
@@ -77,7 +78,7 @@ export function resolveBiggerContextMultipartParts(
   );
   const compile = (parts?: ChatGptWebMultipartPartCount): CompiledChatGptWebPrompt => compileChatGptWebPrompt(
     parsed, capabilities, mode.localTools ? ESTIMATE_TURN_TOKEN : undefined,
-    { experimentalMultipartParts: parts, experimentalSkillAttachments },
+    { ...promptOptions, experimentalMultipartParts: parts, experimentalSkillAttachments },
   );
   const inline = compile();
   const inputTokens = estimateCompiledChatGptWebInputTokens(inline, parsed.modelId);
@@ -139,11 +140,13 @@ export function estimateChatGptWebUsage(
   capabilities: ChatGptWebCapabilities,
   experimentalBiggerContext = false,
   experimentalSkillAttachments = false,
+  promptOptions: CompileChatGptWebPromptOptions = {},
 ): CodexUsage {
   const inputTokens = estimateChatGptWebInputTokens(parsed, capabilities, {
+    ...promptOptions,
     experimentalSkillAttachments,
     experimentalMultipartParts: experimentalBiggerContext
-      ? resolveBiggerContextMultipartParts(parsed, capabilities, experimentalSkillAttachments)
+      ? resolveBiggerContextMultipartParts(parsed, capabilities, experimentalSkillAttachments, promptOptions)
       : undefined,
   });
   const outputTokens = conservativeTextTokens(roundEvidenceText(evidence), parsed.modelId);

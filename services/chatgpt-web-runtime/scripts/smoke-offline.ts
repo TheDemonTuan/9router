@@ -112,7 +112,7 @@ try {
   }
   assert(physicalSends === genericBaseline + 2, "Generic requests reused or duplicated a physical Send");
   const genericCompletedSends = physicalSends;
-  for (const extra of [{ tools: [{ type: "function", name: "unsafe" }] }, { previous_response_id: "unavailable" }, { max_output_tokens: 1 }]) {
+  for (const extra of [{ tools: [{ type: "function" }] }, { tools: [{ type: "mcp" }] }, { previous_response_id: "unavailable" }, { max_output_tokens: 1 }]) {
     const rejected = await sendBrowser({ model: request.model, input: "Do not send", ...extra });
     assert(rejected.status === 400 && physicalSends === genericCompletedSends, "Unsupported generic semantics reached Send");
   }

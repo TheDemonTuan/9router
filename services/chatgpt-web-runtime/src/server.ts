@@ -29,7 +29,8 @@ import { PROTOCOL_VERSION, SERVICE_NAME, UPSTREAM_REVISION, validateProfileId } 
 import { VERSION } from "./version";
 import { runtimeExecutionScope } from "./runtime-scope";
 import { readChatGptWebSessionImport, SessionTransferError } from "../session-transfer.js";
-import { BrowserRequestError, validateBrowserResponsesRequest } from "../browser-request.js";
+import { BrowserRequestError, browserRequestUsesTools, validateBrowserResponsesRequest } from "../browser-request.js";
+import { createBrowserClientToolProtocol } from "./adapters/chatgpt-web/browser-client-tools";
 
 export interface BrowserRuntimeEnvelope {
   protocolVersion: 1; profileId: string; profileEpoch: string; request: Record<string, unknown>;
@@ -244,6 +245,9 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
       || !row.supported_reasoning_levels.includes(envelope.effectiveReasoning)) {
       throw new RuntimeStateError("model_version_unavailable", "Exact Browser-only model and reasoning route unavailable", 400);
     }
+    if (browserRequestUsesTools(envelope.request) && row.capabilities.generic_tools !== true) {
+      throw new RuntimeStateError("browser_tools_unavailable", "Selected Browser-only model does not support client function tools", 400);
+    }
     const route = requireChatGptWebModelRoute(envelope.effectiveModel, evidence.capabilities, envelope.effectiveReasoning);
     if (route.interactionMode !== "automatic") throw new RuntimeStateError("model_version_unavailable", "Manual routes are not supported", 400);
     const requestId = randomUUID();
@@ -254,7 +258,10 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
       parsed.modelId = route.backendModel; parsed.options.reasoning = route.adapterEffort;
       const provider = browserProviderConfig({ profileId: profile.profileId, profileEpoch: profile.epoch, requestId,
         settings: profile.settings, capabilities: evidence.capabilities, dataDir: config.dataDir, contextWindow: row.context_window });
-      const adapter = createChatGptWebAdapter(provider, { browserRequestId: requestId });
+      let clientTools: ReturnType<typeof createBrowserClientToolProtocol>;
+      try { clientTools = createBrowserClientToolProtocol(parsed); }
+      catch { throw new RuntimeStateError("invalid_tool_schema", "Client function schema cannot be compiled", 400); }
+      const adapter = createChatGptWebAdapter(provider, { browserRequestId: requestId, clientTools });
       const queue = new AsyncEventQueue<AdapterEvent>();
       const abort = new AbortController();
       const onDisconnect = () => abort.abort();

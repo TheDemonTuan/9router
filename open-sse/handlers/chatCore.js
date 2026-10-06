@@ -44,6 +44,8 @@ import { measureCleanupOpportunities } from "../token-saver/safeCleanup.js";
 import { recordTokenSaverPreparation } from "../token-saver/state.js";
 import { isAntigravityClaudeModel } from "../translator/concerns/antigravityToolSchema.js";
 import { prepareAntigravityToolValidation } from "../translator/concerns/antigravityToolValidation.js";
+import { browserRequestUsesTools, validateBrowserChatRequest, validateBrowserResponsesRequest } from "../../services/chatgpt-web-runtime/browser-request.js";
+import { openaiToOpenAIResponsesRequest } from "../translator/request/openai-responses.js";
 
 /**
  * Core chat handler - shared between SSE and Worker
@@ -154,6 +156,8 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const isChatGptWebCompact = provider === "chatgpt-web" && body?._compact === true;
   const nativePassthrough = provider === "chatgpt-web" ? !!credentials?.chatGptWebAuthority
     : isNativePassthrough(detectedClientTool, provider) || isChatGptWebCompact;
+  const browserClientTools = provider === "chatgpt-web" && credentials?.chatGptWebRequestMode === "browser"
+    && !credentials?.chatGptWebAuthority && browserRequestUsesTools(clientRawRequest?.body || body);
   const sameWireCodex = !nativePassthrough
     && provider === "codex"
     && sourceFormat === FORMATS.OPENAI_RESPONSES
@@ -161,7 +165,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   // Provider-level overrides are translation conveniences, never part of native passthrough.
   // Mutating a Codex request here would break opaque reasoning/tool state.
-  if (!nativePassthrough && providerThinking?.mode && providerThinking.mode !== "auto") {
+  if (!nativePassthrough && !browserClientTools && providerThinking?.mode && providerThinking.mode !== "auto") {
     const mode = providerThinking.mode;
     if (mode === "on" && !body.thinking) {
       console.log("Injecting provider-level thinking config override: on");
@@ -227,7 +231,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   }
 
 
-  const tokenSaverEnabled = !clientTokenSaverOptOut && !strictStructuredOutput && !nativePassthrough;
+  const tokenSaverEnabled = !clientTokenSaverOptOut && !strictStructuredOutput && !nativePassthrough && !browserClientTools;
 
   // Compress source-format tool results once; translators may flatten their metadata.
   const rtkSignal = preResponse?.signal && clientSignal && preResponse.signal !== clientSignal
@@ -311,7 +315,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   if (credentials) credentials.rawHeaders = clientRawRequest?.headers || {};
 
   // Auto-strip media blocks the model can't read (vision/audio/pdf) before translation.
-  if (!passthrough) {
+  if (!passthrough && !browserClientTools) {
     const baseCaps = getCapabilitiesForModel(provider, model);
     const caps = provider === "codex" && credentials?.codexModelMetadata?.capabilities
       ? { ...baseCaps, ...credentials.codexModelMetadata.capabilities }
@@ -332,7 +336,14 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   }
 
   // Translation may return early; preparation telemetry still records the attempt.
-  if (passthrough) {
+  if (browserClientTools) {
+    const raw = clientRawRequest?.body || body;
+    translatedBody = raw.input !== undefined
+      ? validateBrowserResponsesRequest({ ...raw, model: wireModel, stream })
+      : validateBrowserResponsesRequest(openaiToOpenAIResponsesRequest(wireModel, validateBrowserChatRequest(raw), stream, credentials));
+    translatedBody.model = wireModel;
+    translatedBody.stream = stream;
+  } else if (passthrough) {
     log?.debug?.("PASSTHROUGH", `${clientTool} → ${provider} | native lossless`);
     translatedBody = { ...sourceBody, model: wireModel };
     if (provider === "codex") {
@@ -420,7 +431,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   }
 
   // Normalize equivalent MCP tools and duplicate DeepSeek tool names.
-  if (Array.isArray(translatedBody.tools)) {
+  if (!browserClientTools && Array.isArray(translatedBody.tools)) {
     const { tools: deduped, stripped } = dedupeTools(translatedBody.tools, { clientTool, model });
     if (stripped.length > 0) {
       translatedBody.tools = deduped;

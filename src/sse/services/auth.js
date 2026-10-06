@@ -131,12 +131,15 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     const bridgeEligible = new Set();
     const bridgeEpochs = new Map();
     const bridgeEffortRejected = new Set();
+    const bridgeToolsRejected = new Set();
     if (providerId === "chatgpt-web" && model) {
       await Promise.all(connections.map(async (connection) => {
         try {
           const catalog = await getChatGptWebCatalog(connection);
           const liveModel = catalog.models?.find((entry) => entry.id === model);
           const effort = options.chatGptWebReasoning ?? liveModel?.default_reasoning_level;
+          if (!catalog.stale && liveModel?.capabilities?.generic_responses === true && bridgeCapability === "generic_responses"
+            && requiredCapabilities.has("generic_tools") && liveModel.capabilities.generic_tools !== true) bridgeToolsRejected.add(connection.id);
           if (!catalog.stale && hasChatGptWebModel(catalog, model)
             && liveModel?.capabilities?.[bridgeCapability] === true
             && chatGptWebModelSupportsCapabilities(liveModel, requiredCapabilities)) {
@@ -212,6 +215,11 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     });
 
     if (availableConnections.length === 0) {
+      if (providerId === "chatgpt-web" && bridgeCapability === "generic_responses"
+        && connections.some(row => !excludeSet.has(row.id) && (!pinConnectionId || row.id === pinConnectionId) && bridgeToolsRejected.has(row.id))) {
+        return { chatGptWebBindingError: Response.json({ error: { type: "runtime_error", code: "browser_tools_unavailable",
+          message: "Selected Browser-only model does not support client function tools", retryable: false, submission_state: "not_sent" } }, { status: 400 }) };
+      }
       if (providerId === "chatgpt-web" && bridgeCapability === "generic_responses"
         && connections.some(row => !excludeSet.has(row.id) && (!pinConnectionId || row.id === pinConnectionId) && bridgeEffortRejected.has(row.id))) {
         return { chatGptWebBindingError: Response.json({ error: { type: "runtime_error", code: "model_version_unavailable",

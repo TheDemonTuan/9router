@@ -34,7 +34,7 @@ it("unknown 429 and busy wording do not create rate/quota cooldown classificatio
 });
 it("generic rejects unsupported bodies before catalog/transport and never upgrades authority", async () => {
   const executor = new ChatGPTWebExecutor();
-  for (const extra of [{ tools: [{ type: "function", name: "exec" }] }, { previous_response_id: "prior" }, { authority: {} }, { max_output_tokens: 2 }]) {
+  for (const extra of [{ tools: [{ type: "function" }] }, { tools: [{ type: "web_search" }] }, { previous_response_id: "prior" }, { authority: {} }, { max_output_tokens: 2 }]) {
     const result = await executor.execute({ model: row.id, body: { input: "hello", ...extra }, credentials: { chatGptWebRequestMode: "browser" } });
     expect(result.response.status).toBe(400);
     expect((await result.response.json()).error.code).toBe("unsupported_browser_request");
@@ -61,4 +61,20 @@ it("generic fails closed on native-only catalog, upgrade and unknown submission"
   expect(result.response.status).toBe(502);
   expect((await result.response.json()).error).toMatchObject({ code: "submission_unknown", retryable: false, submission_state: "unknown" });
   expect(mocks.requestChatGptWebRuntime).toHaveBeenCalledTimes(2);
+});
+it("generic functions require their exact capability without granting native execution", async () => {
+  const executor = new ChatGPTWebExecutor();
+  const args = { model: row.id, body: { input: "hello", tools: [{ type: "function", name: "web_search" }], tool_choice: "required", parallel_tool_calls: false }, credentials: { chatGptWebRequestMode: "browser" } };
+  const capabilities = { text: true, generic_responses: true, tools: false, exec: false, mcp_tools: false };
+  mocks.getChatGptWebCatalog.mockResolvedValue({ profileId: "fixture", profileEpoch: "epoch", stale: false, models: [{ ...row, capabilities }] });
+  const unavailable = await executor.execute(args);
+  expect(unavailable.response.status).toBe(400);
+  expect(await unavailable.response.json()).toMatchObject({ error: { code: "browser_tools_unavailable", submission_state: "not_sent", retryable: false } });
+  expect(mocks.requestChatGptWebRuntime).not.toHaveBeenCalled();
+  mocks.getChatGptWebCatalog.mockResolvedValue({ profileId: "fixture", profileEpoch: "epoch", stale: false, models: [{ ...row, capabilities: { ...capabilities, generic_tools: true } }] });
+  mocks.requestChatGptWebRuntime.mockResolvedValue(new Response("accepted"));
+  const accepted = await executor.execute(args);
+  expect(accepted.response.status).toBe(200);
+  expect(accepted.transformedBody.tool_choice).toBe("required");
+  expect(accepted.transformedBody.parallel_tool_calls).toBe(false);
 });

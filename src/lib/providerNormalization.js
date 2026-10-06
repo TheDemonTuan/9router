@@ -103,7 +103,7 @@ export function mergeChatGptWebPublicModels(catalogs) {
         || (model.capabilities?.native_responses !== true && model.capabilities?.generic_responses !== true)) continue;
       const existing = merged.get(model.id);
       if (!existing) {
-        merged.set(model.id, { ...model, capabilities: { ...model.capabilities }, supported_reasoning_levels: [...model.supported_reasoning_levels] });
+        merged.set(model.id, { ...model, capabilities: { ...model.capabilities, tools: model.capabilities.tools === true || model.capabilities.generic_tools === true }, supported_reasoning_levels: [...model.supported_reasoning_levels] });
         continue;
       }
       const capabilities = { ...existing.capabilities };
@@ -111,6 +111,7 @@ export function mergeChatGptWebPublicModels(catalogs) {
         if (value === true) capabilities[key] = true;
         else if (!(key in capabilities) && value === false) capabilities[key] = false;
       }
+      capabilities.tools = capabilities.tools === true || capabilities.generic_tools === true;
       const combined = {
         ...existing,
         capabilities,

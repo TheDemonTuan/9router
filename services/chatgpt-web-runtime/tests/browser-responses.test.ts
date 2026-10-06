@@ -42,7 +42,7 @@ describe("Browser-only request contract", () => {
     const before = JSON.stringify(request);
     const normalized = validateBrowserResponsesRequest(request);
     expect(JSON.stringify(request)).toBe(before);
-    expect(normalized.input.map((item: { content: { text: string }[] }) => item.content[0].text)).toEqual(["First instruction", "Second instruction", "Earlier user", "Earlier answer", "Latest user"]);
+    expect(normalized.input.map(item => item.type === "message" ? item.content[0].text : undefined)).toEqual(["First instruction", "Second instruction", "Earlier user", "Earlier answer", "Latest user"]);
     expect(normalized.instructions).toBe("Follow all instructions");
     const parsed = parseRequest(normalized);
     expect(parsed.context.systemPrompt).toEqual(["Follow all instructions", "First instruction"]);
@@ -80,7 +80,7 @@ describe("Browser-only request contract", () => {
     for (const input of [[{ type: "function_call", name: "run", arguments: "{}" }], [{ role: "user", content: [{ type: "output_text", text: "hello" }] }], [{ role: "tool", content: "hello" }]]) {
       expect(() => validateBrowserResponsesRequest({ model, input })).toThrow(BrowserRequestError);
     }
-    for (const extra of [{ tools: [{ type: "function", name: "run" }] }, { tool_choice: "auto" }, { parallel_tool_calls: true }, { store: true }, { text: { format: { type: "json_object" } } }, { reasoning: { effort: "none" } }]) {
+    for (const extra of [{ tools: [{ type: "function" }] }, { tools: [{ type: "web_search" }] }, { tool_choice: "required" }, { parallel_tool_calls: "true" }, { store: true }, { text: { format: { type: "json_object" } } }, { reasoning: { effort: "none" } }]) {
       expect(() => validateBrowserResponsesRequest({ model, input: "hello", ...extra })).toThrow(BrowserRequestError);
     }
     expect(() => validateBrowserChatRequest({ model, messages: [{ role: "user", content: "hello" }], reasoning: { effort: "low" }, reasoning_effort: "high" })).toThrow(BrowserRequestError);
@@ -91,6 +91,37 @@ describe("Browser-only request contract", () => {
     for (const extra of [{ metadata: { invalid: 3 } }, { user: {} }, { prompt_cache_key: false }, { stream: "true" }]) {
       expect(() => validateBrowserResponsesRequest({ model, input: "hello", ...extra })).toThrow(BrowserRequestError);
     }
+  });
+  test("accepts standard functions and reordered results without altering long IDs or JSON", () => {
+    const ids = ["x".repeat(64) + "a", "x".repeat(64) + "b"];
+    const args = '{"text":"héllo \\"world\\""}';
+    const request = { model, tools: [{ type: "function", name: "Read", strict: null }], tool_choice: { type: "function", name: "Read" }, parallel_tool_calls: false,
+      input: [{ role: "user", content: "read" }, ...ids.map(call_id => ({ type: "function_call", id: "item_" + call_id, status: "completed", call_id, name: "OldRead", arguments: args })),
+        ...ids.toReversed().map(call_id => ({ type: "function_call_output", call_id, output: [{ type: "output_text", text: "result" }] })),
+        { type: "message", role: "assistant", status: "completed", id: "message_1", content: [{ type: "output_text", text: "done", annotations: [], logprobs: null }] }] };
+    const normalized = validateBrowserResponsesRequest(request);
+    expect(normalized.tools).toEqual([{ type: "function", name: "Read", parameters: { type: "object", properties: {} } }]);
+    expect(normalized.input.slice(1, 3)).toEqual(ids.map(call_id => ({ type: "function_call", call_id, name: "OldRead", arguments: args })));
+    expect(normalized.tool_choice).toEqual({ type: "function", name: "Read" });
+    const chat = validateBrowserChatRequest({ model, tools: [{ type: "function", function: { name: "Read" } }], messages: [{ role: "user", content: "read" },
+      { role: "assistant", tool_calls: ids.map(id => ({ id, type: "function", function: { name: "Read", arguments: "{}" } })) },
+      ...ids.toReversed().map(tool_call_id => ({ role: "tool", tool_call_id, content: "result" }))] });
+    expect(chat.messages[1].content).toBeNull();
+    expect(chat.messages[1].tool_calls?.map(call => call.id)).toEqual(ids);
+    expect(chat.tool_choice).toBe("auto");
+    expect(chat.parallel_tool_calls).toBe(true);
+  });
+  test("rejects ambiguous or incomplete client histories and malformed declarations", () => {
+    const call = { type: "function_call", call_id: "call_1", name: "Read", arguments: "{}" };
+    const result = { type: "function_call_output", call_id: "call_1", output: "ok" };
+    const user = { role: "user", content: "read" };
+    for (const history of [[user, call], [user, result], [user, call, call, result], [user, call, result, result], [user, call, user, result], [user, { ...call, arguments: "[]" }, result]]) {
+      expect(() => validateBrowserResponsesRequest({ model, input: history })).toThrow(BrowserRequestError);
+    }
+    for (const tools of [[{ type: "function", name: "bad name" }], [{ type: "function", name: "Read", parameters: [] }], [{ type: "function", name: "Read" }, { type: "function", name: "Read" }]]) {
+      expect(() => validateBrowserResponsesRequest({ model, input: "read", tools })).toThrow(BrowserRequestError);
+    }
+    expect(() => validateBrowserResponsesRequest({ model, input: "read", tools: [{ type: "function", name: "Read" }], tool_choice: { type: "function", name: "Exec" } })).toThrow(BrowserRequestError);
   });
 });
 
@@ -148,6 +179,40 @@ describe("Browser-only transport boundary", () => {
 });
 
 describe("Request-local browser adapter lifecycle", () => {
+  test("client decisions buffer private transport and emit only validated calls after retirement", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cgw-client-decision-"));
+    const before = brokerWorkSnapshot();
+    try {
+      let answer = JSON.stringify({ content: "checking", tool_calls: [{ name: "Read", arguments: { path: "fixture.mjs" } }] });
+      spyOn(ChatGptBrowserWorker.prototype, "run").mockImplementation(async turn => {
+        await turn.prepare(); turn.onSendActivated?.(); turn.onSubmitted?.();
+        turn.onTextDelta?.(answer.slice(0, 20)); await Promise.resolve(); turn.onTextDelta?.(answer.slice(20));
+        return answer;
+      });
+      for (const valid of [true, false]) {
+        if (!valid) answer = JSON.stringify({ content: null, tool_calls: [{ name: "Read", arguments: { path: 42 } }] });
+        const requestId = randomUUID();
+        const provider = browserProviderConfig({ profileId: `fixture-${randomUUID()}`, profileEpoch: "epoch", requestId, settings: DEFAULT_PROFILE_SETTINGS,
+          capabilities: { solAvailable: true, extraHighAvailable: false, proAvailable: false }, dataDir: root, contextWindow: 128000 });
+        const request = parsedBrowserFixture({ model, input: "read", tools: [{ type: "function", name: "Read", parameters: { type: "object", required: ["path"], properties: { path: { type: "string" } } } }] });
+        const events: AdapterEvent[] = [];
+        await createChatGptWebAdapter(provider, { browserRequestId: requestId }).runTurn!(request, { headers: new Headers() }, event => {
+          if (event.type === "done") expect(chatGptTurnSessions.physicalWorkCount()).toBe(0);
+          events.push(event);
+        });
+        expect(events.filter(event => event.type === "text_delta")).toEqual(valid ? [{ type: "text_delta", text: "checking" }] : []);
+        if (valid) {
+          expect(events.find(event => event.type === "done")).toMatchObject({ stopReason: "tool_use", endTurn: false });
+          expect(buildResponseJSON(events, model).output).toContainEqual(expect.objectContaining({ type: "function_call", name: "Read", arguments: '{"path":"fixture.mjs"}' }));
+        } else {
+          expect(events.some(event => event.type === "tool_call_start" || event.type === "done")).toBe(false);
+          expect(events.find(event => event.type === "error")).toMatchObject({ code: "browser_tool_output_invalid", retryable: false });
+        }
+        expect(chatGptTurnSessions.physicalWorkCount()).toBe(0);
+      }
+      expect(brokerWorkSnapshot()).toEqual(before);
+    } finally { mock.restore(); await closeChatGptBrowserWorkers(); rmSync(root, { recursive: true, force: true }); }
+  });
   test("fresh identities compile independent complete histories and physically retire on success", async () => {
     const root = mkdtempSync(join(tmpdir(), "cgw-browser-isolation-"));
     const profileId = `fixture-${randomUUID()}`;
@@ -201,9 +266,10 @@ describe("Request-local browser adapter lifecycle", () => {
       });
       const provider = browserProviderConfig({ profileId: `fixture-${randomUUID()}`, profileEpoch: "epoch", requestId: "abort", settings: DEFAULT_PROFILE_SETTINGS,
         capabilities: { solAvailable: true, extraHighAvailable: false, proAvailable: false }, dataDir: root, contextWindow: 128000 });
-      const parsed = parsedBrowserFixture({ model, input: "hello" });
+      const parsed = parsedBrowserFixture({ model, input: "hello", tools: [{ type: "function", name: "Read", parameters: { type: "object" } }] });
       let returned = false;
-      running = createChatGptWebAdapter(provider, { browserRequestId: "abort" }).runTurn!(parsed, { headers: new Headers(), abortSignal: controller.signal }, () => {})
+      const events: AdapterEvent[] = [];
+      running = createChatGptWebAdapter(provider, { browserRequestId: "abort" }).runTurn!(parsed, { headers: new Headers(), abortSignal: controller.signal }, event => events.push(event))
         .catch(() => {}).finally(() => { returned = true; });
       await started.promise; controller.abort(); await cancelled.promise;
       expect(returned).toBe(false);
@@ -211,6 +277,7 @@ describe("Request-local browser adapter lifecycle", () => {
       settle.resolve(); await running;
       expect(chatGptTurnSessions.physicalWorkCount()).toBe(0);
       expect(chatGptTurnSessions.activeCount()).toBe(0);
+      expect(events.some(event => event.type === "completed" || event.type === "tool_call_done")).toBe(false);
     } finally { controller.abort(); settle.resolve(); await running?.catch(() => {}); mock.restore(); await closeChatGptBrowserWorkers(); rmSync(root, { recursive: true, force: true }); }
   });
   test("pre-aborted request never starts a browser submission", async () => {

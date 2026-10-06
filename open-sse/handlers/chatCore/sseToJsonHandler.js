@@ -190,6 +190,12 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
     try {
       const jsonResponse = await convertResponsesStreamToJson(providerResponse.body);
       const completed = jsonResponse.status === "completed" || jsonResponse.status === "done";
+      if (provider === "chatgpt-web" && jsonResponse.status === "failed" && jsonResponse.error?.code === "browser_tool_output_invalid") {
+        trackDone();
+        return { success: false, terminalNoFallback: true, response: Response.json({ error: {
+          type: "server_error", code: "browser_tool_output_invalid", message: "Browser client function decision failed validation", retryable: false,
+        } }, { status: HTTP_STATUS.BAD_GATEWAY, headers: { "x-9router-no-fallback": "true", "x-should-retry": "false", "x-9router-error-code": "browser_tool_output_invalid" } }) };
+      }
       if (completed && onRequestSuccess) await onRequestSuccess();
 
       if (responseSchemaValidation) {

@@ -32,6 +32,7 @@ const transport = new StdioClientTransport({ command: process.execPath,
   args: [join(import.meta.dir, "../src/adapters/chatgpt-web/mcp-main.ts"), "--broker-socket", defaultBrokerEndpoint(join(config.dataDir, "profiles", "fixture")), "--contract", "native"],
   stderr: "pipe", env: Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string")) });
 let physicalSends = 0, composerClean = true, effortsVerified = true, mcpCalls = 0, mcpResults = 0, harness = false;
+let malformedClientTools = false, oldGenericTools = false;
 let closing = false;
 let control: Server<undefined> | undefined;
 async function close() {
@@ -67,20 +68,22 @@ try {
     const effort = document.querySelector('[role="slider"]')?.getAttribute("aria-valuenow");
     void Reflect.get(window, "syntheticObserveSend")({ stale: text.includes("Stale draft must be cleared"), effort });
   }, true));
-  const html = readFileSync(new URL("../tests/fixtures/chatgpt-runtime.html", import.meta.url), "utf8")
-    .replace("if(typeof window.syntheticMcpCall!=='function')return;", "if(typeof window.syntheticMcpCall!=='function'||!/turn_[A-Za-z0-9_-]{32}/.test(composer.innerText))return;");
+  const html = readFileSync(new URL("../tests/fixtures/chatgpt-runtime.html", import.meta.url), "utf8");
   await context.route("**/*", route => {
     const url = new URL(route.request().url());
     if (url.origin !== "https://chatgpt.com") return route.abort();
     if (url.pathname === "/api/auth/session") return route.fulfill({ json: { expires: new Date(Date.now() + 3600000).toISOString(), user: { id: "offline-synthetic-account" } } });
-    return route.fulfill({ body: html, contentType: "text/html" });
+    return route.fulfill({ body: html.replace("let value=0", `window.__cgwClientToolsFixture={malformed:${malformedClientTools}};let value=0`), contentType: "text/html" });
   });
   }
   await runtime.profiles.probe("browser-only-fixture");
   let offlineProbe = await runtime.profiles.probe("fixture");
   const productionEvidence = runtime.profiles.evidence.bind(runtime.profiles);
   runtime.profiles.evidence = (id: string) => {
-    if (!harness || id !== "fixture") return productionEvidence(id);
+    if (!harness || id !== "fixture") {
+      const evidence = productionEvidence(id);
+      return oldGenericTools ? { ...evidence, models: evidence.models.map(row => ({ ...row, capabilities: { ...row.capabilities, generic_tools: false } })) } : evidence;
+    }
     const profile = runtime.state.profile(id);
     if (profile.epoch !== offlineProbe.epoch || profile.revision !== offlineProbe.revision) throw new Error("Offline connector evidence expired");
     return offlineProbe;
@@ -95,6 +98,12 @@ try {
       setTimeout(() => { void close().then(() => process.exit(0)); }, 25);
       return Response.json({ closingOwnedFixture: true });
     }
+    if (request.method === "POST" && path.startsWith("/client-tools/")) {
+      const mode = path.slice("/client-tools/".length);
+      if (!["normal", "malformed", "old-capability"].includes(mode)) return new Response(null, { status: 400 });
+      malformedClientTools = mode === "malformed"; oldGenericTools = mode === "old-capability";
+      return Response.json({ mode });
+    }
     if (request.method === "POST" && path === "/harness") {
       const profile = runtime.state.profile("fixture");
       runtime.state.patchProfile("fixture", profile.revision, { ...profile.settings, mode: "full" });
@@ -108,6 +117,7 @@ try {
       const threadId = new URL(request.url).searchParams.get("threadId");
       const binding = threadId ? runtime.state.binding("offline-client", threadId) : null;
       return Response.json({ physicalSends, composerClean, effortsVerified, mcpCalls, mcpResults, binding,
+        activeBrowserTurns: chatGptTurnSessions.activeCount(), physicalBrowserWork: chatGptTurnSessions.physicalWorkCount(),
         epoch: runtime.state.profile("fixture").epoch, chromiumVersion: context.browser()?.version(), bunVersion: Bun.version,
         actualMcpStdio: true, outboundOpenAiTunnel: false, realCodex: false, liveChatGpt: false });
     }

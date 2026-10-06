@@ -11,6 +11,34 @@ if(loginFixture.pointerOnly)control.addEventListener('pointerdown',e=>{if(e.butt
 function arrow(e){if(e.key==='ArrowRight'||e.key==='ArrowLeft'){value=Math.max(0,Math.min(2,value+(e.key==='ArrowRight'?1:-1)));render();e.preventDefault();}}
 if(loginFixture.semanticSlider)keyboardOwner.addEventListener('keydown',e=>{if(e.target===keyboardOwner)arrow(e);});
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){menu.hidden=true;control.setAttribute('aria-expanded','false');control.textContent='5.6 Sol '+['Instant','Medium','High'][value];}else if(!loginFixture.semanticSlider)arrow(e);});
+function clientDecision(prompt){
+  const serialized=/<codex_context_json>\s*([\s\S]*?)\s*<\/codex_context_json>/.exec(prompt)?.[1];
+  if(!serialized)return;
+  const context=JSON.parse(serialized);if(!context.clientTools)return;
+  const results=context.messages.filter(message=>message.role==='tool_result');
+  const names=results.map(message=>message.tool_name||message.toolName||message.name);
+  const calls=context.messages.flatMap(message=>message.content||[]).filter(part=>part.type==='tool_call');
+  const completed=calls.slice(0,results.length).map(call=>call.name);
+  const used=[...names,...completed];
+  let decision=used.includes('Exec')?{content:'CGW_CLIENT_TOOLS_OK',tool_calls:[]}
+    :used.includes('Edit')?{content:null,tool_calls:[{name:'Exec',arguments:{command:'bun fixture.test.mjs'}}]}
+    :used.includes('Read')?{content:null,tool_calls:[{name:'Edit',arguments:{path:'fixture.mjs',old_text:'return a - b;',new_text:'return a + b;'}}]}
+    :{content:null,tool_calls:[{name:'Read',arguments:{path:'fixture.mjs'}}]};
+  const config=window.__cgwClientToolsFixture||{};
+  if(config.malformed)return 'malformed client envelope';
+  if(config.parallel)decision={content:null,tool_calls:[{name:'Read',arguments:{path:'fixture.mjs'}},{name:'Read',arguments:{path:'fixture.test.mjs'}}]};
+  if(config.final||context.clientTools.toolChoice==='none')decision={content:'CGW_CLIENT_TOOLS_OK',tool_calls:[]};
+  return JSON.stringify(decision);
+}
+form.addEventListener('submit',event=>{
+  const prompt=composer.innerText,decision=clientDecision(prompt);if(decision===undefined)return;
+  event.preventDefault();event.stopImmediatePropagation();window.fixture.sends++;window.fixture.prompts.push(prompt);window.fixture.selectedEfforts.push(value);composer.innerHTML='';
+  const key='client-'+(++sends),wrapper=document.createElement('div');wrapper.setAttribute('data-turn-key',key);
+  const user=document.createElement('div');user.setAttribute('data-user-message-bubble','');const source=document.createElement('div');source.setAttribute('data-search-result-target','');source.style.whiteSpace='pre-wrap';source.textContent=prompt;user.append(source);wrapper.append(user);
+  const answer=document.createElement('div');answer.setAttribute('data-content-search-unit-key',key+':assistant');answer.innerHTML='<div data-conversation-role="assistant"></div><div data-markdown-text-style="assistant-message"><pre><code class="language-json"></code></pre></div>';wrapper.append(answer);document.querySelector('#turns').append(wrapper);
+  const stop=document.createElement('button');stop.type='button';stop.setAttribute('data-testid','stop-button');stop.textContent='Stop';form.append(stop);
+  setTimeout(()=>{answer.querySelector('code').textContent=decision;stop.remove();const controls=document.createElement('div');controls.className='turn-action-controls';controls.innerHTML='<button data-testid="copy-turn-action-button">Copy</button>';wrapper.append(controls);generation++;},150);
+},true);
 form.addEventListener('submit',e=>{e.preventDefault();const prompt=composer.innerText;if(!prompt.trim())return;window.fixture.sends++;window.fixture.prompts.push(prompt);window.fixture.selectedEfforts.push(value);composer.innerText='';const number=++sends,key='fixture-'+number,wrapper=document.createElement('div');wrapper.setAttribute('data-turn-key',key);const user=document.createElement('div');user.setAttribute('data-user-message-bubble','');const source=document.createElement('div');source.setAttribute('data-search-result-target','');source.style.whiteSpace='pre-wrap';source.textContent=prompt;user.append(source);wrapper.append(user);const answer=document.createElement('div');answer.setAttribute('data-content-search-unit-key',key+':assistant');answer.innerHTML='<div data-conversation-role="assistant"></div><div data-markdown-text-style="assistant-message"><p>Offline answer first paragraph.</p></div>';wrapper.append(answer);document.querySelector('#turns').append(wrapper);const stop=document.createElement('button');stop.type='button';stop.setAttribute('data-testid','stop-button');stop.textContent='Stop';form.append(stop);setTimeout(()=>{answer.querySelector('[data-markdown-text-style]').innerHTML+='<p>Offline answer second paragraph.</p>';},150);setTimeout(()=>{stop.remove();const controls=document.createElement('div');controls.className='turn-action-controls';controls.innerHTML='<button type="button" data-testid="copy-turn-action-button">Copy</button>';wrapper.append(controls);generation++;},400);});render();
 </script></body></html>
 <script>
@@ -18,7 +46,7 @@ const mention=document.createElement('div');mention.hidden=true;mention.setAttri
 composer.addEventListener('input',()=>{mention.hidden=!composer.innerText.startsWith('@codex');});
 document.addEventListener('keydown',event=>{if(event.key==='Escape')mention.hidden=true;if(event.key==='Enter'&&!mention.hidden){event.preventDefault();composer.innerHTML='<span contenteditable="false" data-id="plugin:synthetic" data-keyword="Codex Native2">Codex Native2</span>';mention.hidden=true;}});
 form.addEventListener('submit',event=>{
-  if(typeof window.syntheticMcpCall!=='function')return;
+  if(typeof window.syntheticMcpCall!=='function'||! /turn_[A-Za-z0-9_-]{32}/.test(composer.innerText))return;
   event.preventDefault();event.stopImmediatePropagation();
   const prompt=composer.innerText,token=/turn_[A-Za-z0-9_-]{32}/.exec(prompt)?.[0];
   window.fixture.sends++;window.fixture.prompts.push(prompt);window.fixture.selectedEfforts.push(value);composer.innerHTML='';

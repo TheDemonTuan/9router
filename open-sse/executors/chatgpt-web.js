@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { getChatGptWebCatalog, requestChatGptWebRuntime, hasChatGptWebModel } from "../services/chatgptWebRuntimeClient.js";
-import { validateBrowserResponsesRequest } from "../../services/chatgpt-web-runtime/browser-request.js";
+import { browserRequestUsesTools, validateBrowserResponsesRequest } from "../../services/chatgpt-web-runtime/browser-request.js";
 
 const QUOTA_CODES = ["quota_exhausted", "usage_limit_reached", "insufficient_quota"];
 function runtimeError(status, code, message, submissionState = "not_sent") {
@@ -49,6 +49,7 @@ export class ChatGPTWebExecutor {
     const row = catalog.models.find(row => row.id === model);
     const effort = body.reasoning?.effort ?? row?.default_reasoning_level;
     if (browser && row?.capabilities?.generic_responses !== true) return result(runtimeError(503, "generic_model_unavailable", "No verified Browser-only model is available. Verify the profile, select Browser-only, or upgrade the runtime."));
+    if (browser && browserRequestUsesTools(outbound) && row?.capabilities?.generic_tools !== true) return result(runtimeError(400, "browser_tools_unavailable", "Selected Browser-only model does not support client function tools"));
     if (catalog.stale || !hasChatGptWebModel(catalog, model) || row?.capabilities?.[browser ? "generic_responses" : "native_responses"] !== true
       || browser && row.capabilities.text !== true || !row.supported_reasoning_levels.includes(effort)) return result(runtimeError(400, "model_version_unavailable", "Exact selected profile model/reasoning is not verified"));
     if (credentials.chatGptWebProfileEpoch && credentials.chatGptWebProfileEpoch !== catalog.profileEpoch) return result(runtimeError(409, "profile_epoch_mismatch", "Bound account epoch changed"));

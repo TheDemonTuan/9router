@@ -18,6 +18,7 @@ import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
+import { runClientToolsSmoke } from "./chatgpt-web-client-tools-smoke.mjs";
 
 const options = {};
 for (let index = 2; index < process.argv.length; index += 2) {
@@ -246,6 +247,46 @@ try {
       }
     }
     assert((await control()).physicalSends === genericBefore + 4, "Generic wires did not produce exactly four physical Sends");
+    stage = "unsigned client-managed tools four public wires";
+    const beforeTools = await control();
+    const summaries = [];
+    for (const wire of ["chat", "responses"]) for (const stream of [false, true]) {
+      summaries.push(await runClientToolsSmoke({ baseUrl: `${gateways[0].base}/v1`, apiKey, model: "cgw/chatgpt-web/gpt-5.6-sol", wire, stream, reasoning: "high" }));
+    }
+    for (const model of ["cgw/chatgpt-web/gpt-5.6-sol", "offline-browser-alias", "offline-browser-combo"]) {
+      const response = await post(gateways[0].base, "/v1/chat/completions", { model, stream: false, messages: [{ role: "user", content: "final" }], tools: [{ type: "function", function: { name: "web_search" } }], tool_choice: "none" }, auth);
+      assert.ok(response.ok, "Client function web_search incorrectly required hosted search capability");
+      const result = await response.json(); assert.equal(result.choices[0].message.content, "CGW_CLIENT_TOOLS_OK"); assert.equal(result.choices[0].finish_reason, "stop");
+    }
+    const afterTools = await control();
+    assert.equal(afterTools.physicalSends - beforeTools.physicalSends, summaries.reduce((sum, summary) => sum + summary.requests, 0) + 3);
+    assert.equal(afterTools.mcpCalls, beforeTools.mcpCalls); assert.equal(afterTools.mcpResults, beforeTools.mcpResults);
+    console.log(JSON.stringify({ genericClientToolLoops: summaries, noNativeMcp: true }));
+    assert.equal(afterTools.physicalBrowserWork, 0); assert.equal(afterTools.activeBrowserTurns, 0);
+    const toolBody = { model: "cgw/chatgpt-web/gpt-5.6-sol", stream: false, messages: [{ role: "user", content: "read" }], tools: [{ type: "function", function: { name: "Read", parameters: { type: "object", properties: { path: { type: "string" } } } } }] };
+    for (const extra of [{ tools: [{ type: "function", function: { name: "Read" } }, { type: "function", function: { name: "Read" } }] }, { authority: {} }, { messages: [{ role: "user", content: "read" }, { role: "tool", tool_call_id: "orphan", content: "result" }] }]) {
+      const rejected = await post(gateways[0].base, "/v1/chat/completions", { ...toolBody, ...extra }, auth);
+      assert.equal(rejected.status, 400, "Malformed generic tool request admission"); await rejected.arrayBuffer();
+    }
+    assert.equal((await control()).physicalSends, afterTools.physicalSends);
+    const invalidSchema = await post(gateways[0].base, "/v1/chat/completions", { ...toolBody, tools: [{ type: "function", function: { name: "Read", parameters: { $ref: "https://invalid.example/schema" } } }] }, { ...auth, "x-connection-id": browserConnection });
+    assert.equal(invalidSchema.status, 400, "Invalid schema preflight HTTP status"); assert.equal((await invalidSchema.json()).error.code, "invalid_tool_schema");
+    assert.equal((await control()).physicalSends, afterTools.physicalSends);
+    await control("/client-tools/malformed", "POST");
+    try {
+      const invalid = await post(gateways[0].base, "/v1/chat/completions", toolBody, { ...auth, "x-connection-id": browserConnection });
+      assert.equal(invalid.status, 502, "Malformed browser decision HTTP status");
+      assert.equal((await invalid.json()).error.code, "browser_tool_output_invalid");
+      assert.equal((await control()).physicalBrowserWork, 0);
+    } finally { await control("/client-tools/normal", "POST"); }
+    await control("/client-tools/old-capability", "POST");
+    try {
+      const unavailable = await post(gateways[0].base, "/v1/chat/completions", toolBody, { ...auth, "x-connection-id": browserConnection });
+      assert.equal(unavailable.status, 400, "Old runtime tools capability admission"); assert.equal((await unavailable.json()).error.code, "browser_tools_unavailable");
+      assert.equal((await control()).physicalSends, afterTools.physicalSends + 1);
+      const text = await post(gateways[0].base, "/v1/chat/completions", { model: toolBody.model, stream: false, messages: toolBody.messages }, { ...auth, "x-connection-id": browserConnection });
+      assert.ok(text.ok, "Old runtime text compatibility"); await text.arrayBuffer();
+    } finally { await control("/client-tools/normal", "POST"); }
   } finally { writeFileSync(clientKeysFile, JSON.stringify(provisioned), { mode: 0o600 }); }
   const { parseRequest } = await import(join(runtimePackage, "src/responses/parser.ts"));
   const { resolveCompanionAuthority } = await import(join(runtimePackage, "src/companion/local-authority.ts"));
@@ -370,6 +411,7 @@ try {
     normalStreamingTerminal: "completed", compactSignatureBeforeRewrite: true, signedInterruptAfterRolloutRemoval: true, noFallbackHeader: true,
     signedPendingToolInterruptSettled: true,
     genericPublicFourWires: true, emptyCompanionProvisioningGeneric: true, codexUserAgentDoesNotGrantAuthority: true,
+    genericClientToolFourWires: true, clientFixtureFailedBeforePassedAfter: true, genericClientToolsNoMcp: true,
     actualGatewayProcesses: 2, duplicateConnectionRowsOneProfile: true, durableBlueGreenBinding: true, parallelJtiReplayDenied: true,
     browserOnlyCandidateSkippedForTools: true, allRowsDisabledTypedNoFallbackNoSend: true,
     actualPersistentChromium: true, actualMcpStdio: true, nativeNamespacedCall: true, nativeFreeformPatch: true, localOuterExecutions: executed.size, sameBrowserToolContinuationSends: 1,

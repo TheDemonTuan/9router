@@ -260,7 +260,7 @@ export class RuntimeProfiles {
           ...(route.modelFamily ? { model_family: route.modelFamily } : {}), legacy: route.legacy === true,
           context_window: limits.contextWindow, auto_compact_token_limit: limits.autoCompactTokenLimit,
           capabilities: { text: true, vision: true, reasoning: true, compact: route.backendModel !== CHATGPT_WEB_LUNA_BACKEND_MODEL,
-            streaming: true, responses: true, native_responses: true, generic_responses: profile.settings.mode === "browser-only",
+            streaming: true, responses: true, native_responses: true, generic_responses: profile.settings.mode === "browser-only", generic_tools: profile.settings.mode === "browser-only",
             tools: full, mcp_tools: full, exec: full, subagents: full, computer_use: false, browser_tool: false } });
       }
       if (!models.length) throw new RuntimeStateError("model_version_unavailable", "Authenticated profile has no verified model route");

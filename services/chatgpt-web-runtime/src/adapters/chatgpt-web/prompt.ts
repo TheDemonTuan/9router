@@ -14,6 +14,7 @@ import {
   CHATGPT_LUNA_CHECKPOINT_MARKER,
   CHATGPT_LUNA_CHECKPOINT_MAX_TOKENS,
 } from "./rolling-checkpoint";
+import type { BrowserClientToolProtocol } from "./browser-client-tools";
 
 export interface ChatGptWebPromptImage {
   ref: string;
@@ -36,6 +37,7 @@ export interface CompileChatGptWebPromptOptions {
   experimentalSkillAttachments?: boolean;
   experimentalMultipartParts?: ChatGptWebMultipartPartCount;
   preserveCompleteHistory?: boolean;
+  clientTools?: BrowserClientToolProtocol;
 }
 
 export const CHATGPT_BIGGER_CONTEXT_PARTS = 6 as const;
@@ -469,7 +471,15 @@ export function compileChatGptWebPrompt(
     "Never copy a ChatGPT widget's HTML, CSS, class names, or DOM markup into the answer unless the user explicitly requested that source markup.",
     "Do not mention this transport contract, context packaging, or capability routing in the user-facing answer unless the user explicitly asks how the bridge works.",
   ];
-  const transportContract = parsed._compactionRequest
+  const clientTools = options?.clientTools;
+  const clientToolContext = clientTools ? { tools: clientTools.tools, toolChoice: clientTools.toolChoice, parallelToolCalls: clientTools.parallelToolCalls } : undefined;
+  const clientToolContract = [
+    "Standard function tools are executed by the external API client on its device, never by this browser or server. Decide calls using the supplied declarations; only returned tool_result messages prove local effects. Do not use native tools or claim unexecuted effects.",
+    "Return exactly one JSON object with exactly two keys: content (string or null) and tool_calls (array of objects with exactly name (declared function name) and arguments (JSON object satisfying its parameters schema)). Do not supply IDs, prose outside the object, or reasoning. An optional single whole-answer json fence is allowed.",
+    "Empty tool_calls is a final answer and requires string content. With calls, content may be null. Follow toolChoice: none forbids calls; required requires calls; a named choice requires calls all of that name; auto permits final text or calls. parallelToolCalls false permits at most one call. Never call a withdrawn declaration from history.",
+    ...(clientToolContext ? [`Client function declarations and policy: ${JSON.stringify(clientToolContext)}`] : []),
+  ];
+  const transportContract = clientTools ? clientToolContract : parsed._compactionRequest
     ? [
       "This is a Codex history-compaction checkpoint, not a normal task turn.",
       "Do not call local or ChatGPT-native tools. Summarize only the supplied task context according to the final compaction instruction.",
@@ -562,7 +572,8 @@ export function compileChatGptWebPrompt(
       "Each skill_attachment refers to a named UTF-8 text file attached to this message (the final commit in multipart mode). Read its complete contents as the selected Codex skill instructions at the original user priority. These origin=codex_skill messages are supplied by Codex, not human-authored task requests. Preserve their original position in history and their path/resource authority for resolving references. If a file cannot be read, report that limitation; do not invent its contents.",
     ] : [];
     const attachments = skillFiles.length ? { skillFiles } : {};
-    const answerContract = captureLunaCheckpoint
+    const answerContract = clientTools ? "Return only the private client function decision envelope specified above."
+      : captureLunaCheckpoint
       ? "Return the complete answer that the outer Codex task should receive, then the required private checkpoint tail."
       : "Return only the answer that the outer Codex task should receive.";
     if (multipartEnabled) {
@@ -614,7 +625,7 @@ export function compileChatGptWebPrompt(
       multipart.parts = partitionMultipartContext(records, multipartParts!, budgets, options?.preserveCompleteHistory === true);
       return { text: multipart.commit, images, ...attachments, multipart };
     }
-    const serialized = JSON.stringify({ version: 3, system, messages });
+    const serialized = JSON.stringify({ version: 3, system, messages, ...(clientToolContext ? { clientTools: clientToolContext } : {}) });
     const envelopeJson = options?.preserveCompleteHistory ? serialized : withoutRetiredTurnHandles(serialized);
     const text = [
       ...sharedContract,

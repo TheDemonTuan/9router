@@ -413,6 +413,7 @@ function buildReasoningInputItem(msg) {
  * Convert OpenAI Chat Completions to OpenAI Responses API format
  */
 export function openaiToOpenAIResponsesRequest(model, body, stream, credentials) {
+  const browser = credentials?.chatGptWebRequestMode === "browser" && !credentials?.chatGptWebAuthority;
   // Body already in Responses API format (e.g. Cursor CLI calling /chat/completions with input[])
   if (body.input) {
     const out = { ...body, model, stream: true };
@@ -444,9 +445,7 @@ export function openaiToOpenAIResponsesRequest(model, body, stream, credentials)
   for (const msg of messages) {
     if (msg.role === ROLE.SYSTEM || msg.role === ROLE.DEVELOPER) {
       if (credentials?.chatGptWebRequestMode === "browser") {
-        const instruction = extractInstructionsText(msg.content);
-        result.instructions = hasSystemMessage ? `${result.instructions}\n\n${instruction}` : instruction;
-        hasSystemMessage = true;
+        result.input.push({ type: RESPONSES_ITEM.MESSAGE, role: msg.role, content: [{ type: RESPONSES_ITEM.INPUT_TEXT, text: extractInstructionsText(msg.content) }] });
       } else if (!hasSystemMessage) {
         result.instructions = extractInstructionsText(msg.content);
         hasSystemMessage = true;
@@ -504,9 +503,9 @@ export function openaiToOpenAIResponsesRequest(model, body, stream, credentials)
         if (!name) continue;
         result.input.push({
           type: RESPONSES_ITEM.FUNCTION_CALL,
-          call_id: clampResponsesCallId(tc.id),
-          name: name.slice(0, MAX_TOOL_NAME_LEN),
-          arguments: coerceResponsesArguments(tc.function?.arguments)
+          call_id: browser ? tc.id : clampResponsesCallId(tc.id),
+          name: browser ? tc.function.name : name.slice(0, MAX_TOOL_NAME_LEN),
+          arguments: browser ? tc.function.arguments : coerceResponsesArguments(tc.function?.arguments)
         });
       }
     }
@@ -515,8 +514,8 @@ export function openaiToOpenAIResponsesRequest(model, body, stream, credentials)
     if (msg.role === ROLE.TOOL) {
       result.input.push({
         type: RESPONSES_ITEM.FUNCTION_CALL_OUTPUT,
-        call_id: clampResponsesCallId(msg.tool_call_id),
-        output: coerceResponsesOutput(msg.content)
+        call_id: browser ? msg.tool_call_id : clampResponsesCallId(msg.tool_call_id),
+        output: browser ? msg.content : coerceResponsesOutput(msg.content)
       });
     }
   }
@@ -530,6 +529,7 @@ export function openaiToOpenAIResponsesRequest(model, body, stream, credentials)
   if (body.tools && Array.isArray(body.tools)) {
     result.tools = body.tools.map(tool => {
       if (tool.type === OPENAI_BLOCK.FUNCTION) {
+        if (browser) return { type: OPENAI_BLOCK.FUNCTION, ...tool.function };
         // Strict upstreams reject nameless/overlong tool declarations
         const name = typeof tool.function?.name === "string" ? tool.function.name.trim() : "";
         if (!name) return null;
@@ -560,7 +560,8 @@ export function openaiToOpenAIResponsesRequest(model, body, stream, credentials)
   if (body.service_tier !== undefined) result.service_tier = body.service_tier;
   if (body.prompt_cache_key !== undefined) result.prompt_cache_key = body.prompt_cache_key;
   if (Array.isArray(body.include)) result.include = [...body.include];
-  if (body.tool_choice !== undefined) result.tool_choice = body.tool_choice;
+  if (body.tool_choice !== undefined) result.tool_choice = browser && typeof body.tool_choice === "object"
+    ? { type: "function", name: body.tool_choice.function.name } : body.tool_choice;
   if (body.parallel_tool_calls !== undefined) result.parallel_tool_calls = body.parallel_tool_calls;
   const text = chatResponseFormatToResponsesText(body.response_format);
   if (text) result.text = text;

@@ -26,7 +26,7 @@ import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy.js";
 import { assertChatGptWebAuthorityHeaderSize, chatGptWebAuthorityErrorResponse, chatGptWebAuthorityRequiredResponse, loadChatGptWebClientKeys, redactChatGptWebInternalHeaders, verifyChatGptWebAuthority } from "@/lib/chatgptWebAuthority.js";
-import { validateBrowserChatRequest, validateBrowserResponsesRequest } from "../../../services/chatgpt-web-runtime/browser-request.js";
+import { browserRequestUsesTools, validateBrowserChatRequest, validateBrowserResponsesRequest } from "../../../services/chatgpt-web-runtime/browser-request.js";
 import { AUTHORITY_HEADER } from "../../../services/chatgpt-web-runtime/protocol.js";
 
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
@@ -137,7 +137,7 @@ async function loadChatGptWebComboCapabilities(models, bridgeCapability = "gener
         if (!row?.capabilities || typeof row.capabilities !== "object") continue;
         const merged = capabilities.get(candidate) || {};
         for (const [key, value] of Object.entries(row.capabilities)) {
-          if (bridgeCapability === "generic_responses" && !["text", "generic_responses"].includes(key)) continue;
+          if (bridgeCapability === "generic_responses" && !["text", "generic_responses", "generic_tools"].includes(key)) continue;
           if (value === true) merged[key] = true;
           else if (!(key in merged) && value === false) merged[key] = false;
         }
@@ -250,6 +250,11 @@ export async function handleChat(request, clientRawRequest = null, options = {})
       if (!apiKey || !await isValidApiKey(apiKey)) return withChatGptWebNoFallback(errorResponse(401, "Valid API key required for ChatGPT Web"));
       const invalid = validateBrowserPublicRequest(body, new URL(request.url).pathname);
       if (invalid) return invalid;
+      if (browserRequestUsesTools(clientRawRequest?.body || body)) {
+        requiredCapabilities.delete("search");
+        requiredCapabilities.delete("tools");
+        requiredCapabilities.add("generic_tools");
+      }
       if ((settings.comboStrategies?.[modelStr]?.fallbackStrategy || settings.comboStrategy) === "fusion") return browserRequestErrorResponse({ code: "unsupported_browser_request", status: 400, message: "ChatGPT Web does not support fusion requests" });
     }
     // Check for combo-specific strategy first, fallback to global
@@ -368,6 +373,12 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       }
       const requiredCapabilities = detectRequiredCapabilities(body);
       const bridgeCapability = bridgeCapabilityForRequest(chatGptWebAuthority);
+      if (!chatGptWebAuthority && browserRequestUsesTools(clientRawRequest?.body || body)
+        && (await Promise.all(comboModels.map(model => getModelInfo(model)))).some(info => info.provider === "chatgpt-web")) {
+        requiredCapabilities.delete("search");
+        requiredCapabilities.delete("tools");
+        requiredCapabilities.add("generic_tools");
+      }
       const augmentedModels = augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, chatSettings);
       const adapterAdded = augmentedModels.filter((m) => !comboModels.includes(m));
       const liveCapabilities = await loadChatGptWebComboCapabilities(augmentedModels, bridgeCapability);
@@ -445,7 +456,12 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   if (typeof nativeMetadata === "string") { try { nativeMetadata = JSON.parse(nativeMetadata); } catch { nativeMetadata = null; } }
   const cgwCompaction = body?._compact === true || nativeMetadata?.request_kind === "compaction"
     || (Array.isArray(body?.input) && body.input.some(item => item?.type === "compaction_trigger"));
-  if (provider === "chatgpt-web" && !cgwCompaction && Array.isArray(body?.tools) && body.tools.length) requiredCapabilities.add("tools");
+  const browserTools = provider === "chatgpt-web" && !chatGptWebAuthority && browserRequestUsesTools(clientRawRequest?.body || body);
+  if (browserTools) {
+    requiredCapabilities.delete("search");
+    requiredCapabilities.delete("tools");
+    requiredCapabilities.add("generic_tools");
+  } else if (provider === "chatgpt-web" && !cgwCompaction && Array.isArray(body?.tools) && body.tools.length) requiredCapabilities.add("tools");
   const bridgeCapability = bridgeCapabilityForRequest(chatGptWebAuthority);
   if (provider === "chatgpt-web" && await getChatGptWebLegacyConversation({ headers: clientRawRequest?.headers, body })) {
     return new Response(JSON.stringify({ error: { type: "runtime_error", code: "legacy_conversation_unavailable", message: "Start a new canonical task after profile login; legacy socket conversations cannot resume", retryable: false } }),
@@ -492,7 +508,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       if (excludeConnectionIds.size === 0) {
         log.warn("AUTH", `No active credentials for provider: ${provider}`);
         const unavailable = provider === "chatgpt-web" && !chatGptWebAuthority
-          ? Response.json({ error: { type: "runtime_error", code: "generic_model_unavailable", message: "No verified Browser-only model is available. Verify the profile, select Browser-only, or upgrade the runtime.", retryable: false, submission_state: "not_sent" } }, { status: 503 })
+          ? Response.json({ error: { type: "runtime_error", code: browserTools ? "browser_tools_unavailable" : "generic_model_unavailable", message: browserTools ? "No eligible Browser-only model supports client function tools" : "No verified Browser-only model is available. Verify the profile, select Browser-only, or upgrade the runtime.", retryable: false, submission_state: "not_sent" } }, { status: browserTools ? 400 : 503 })
           : errorResponse(HTTP_STATUS.NOT_FOUND, `No active credentials for provider: ${provider}`);
         return provider === "chatgpt-web" ? withChatGptWebNoFallback(unavailable) : unavailable;
       }

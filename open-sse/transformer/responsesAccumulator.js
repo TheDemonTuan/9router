@@ -52,6 +52,7 @@ export class ResponsesAccumulator {
       status: "in_progress",
       model,
       usage: null,
+      error: null,
       items: new Map(),
       text: new Map(),
       calls: new Map(),
@@ -71,6 +72,7 @@ export class ResponsesAccumulator {
     if (response.model) this.state.model = response.model;
     if (response.status) this.state.status = response.status;
     if (response.usage) this.state.usage = normalizeResponsesUsage(response.usage);
+    if (response.error) this.state.error = response.error;
   }
 
   observeRecord(record) {
@@ -185,7 +187,7 @@ export class ResponsesAccumulator {
     return buildResponseSnapshot(this.state, {
       status: disconnected ? "failed" : this.state.status,
       output: this.recoveredOutput({ enrich: true }),
-      error: disconnected ? { type: "stream_error", code: "stream_disconnected", message: "stream closed before response.completed" } : null,
+      error: disconnected ? { type: "stream_error", code: "stream_disconnected", message: "stream closed before response.completed" } : this.state.error,
       usage: this.state.usage,
     });
   }

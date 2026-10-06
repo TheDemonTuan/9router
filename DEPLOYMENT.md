@@ -44,6 +44,16 @@ Caller pin release của `TheDemonTuan/vps-deploy`, commit `630272ccb6c4377748e4
 
 `.deploy/app.yml` là manifest được operator đăng ký theo commit, không chứa host paths/secrets; khi đổi manifest cần operator review và đăng ký lại. Workflow `deploy.yml` chạy `.deploy/verify.sh`, reusable build xuất immutable digest sau `.deploy/smoke-image.sh`, rồi job deployment có environment `production` gọi composite action platform để yêu cầu engine trên host cutover. Không gửi GitHub token hoặc shell/script ứng dụng lên host.
 
+### ChatGPT Web: CLI tools do client thực thi
+
+Browser-only nhận standard function tools qua `/v1/chat/completions` và `/v1/responses`, cả JSON và SSE, khi exact model/account row có `generic_tools: true`. CLI dùng base URL OpenAI-compatible `/v1` và gateway API key thông thường; không cần Codex CLI, companion hoặc MCP connector. Public catalog project `tools: true` cho capability này; không cấp native `exec`/`mcp_tools`.
+
+Client thực thi tool calls trên workspace/sandbox của client rồi resubmit toàn bộ history và matching results. Giữ nguyên call IDs; mỗi call cần đúng một result trước message mới. Chat dùng assistant `tool_calls` + role `tool`; Responses có thể replay nguyên returned `output` rồi append `function_call_output`. Hỗ trợ `auto`/`none`/`required`/named choice và `parallel_tool_calls`; chỉ function tools, không hosted/custom/native tools, opaque reasoning replay hoặc `previous_response_id`.
+
+Tool rounds buffer private JSON decision tới browser completion, validate toàn batch/schema trước public emission; malformed decision trả `browser_tool_output_invalid`, không retry/fallback. Runtime cũ thiếu `generic_tools` trả `browser_tools_unavailable` trước Send; text-only vẫn dùng đường cũ. Chưa chứng minh compatibility của một CLI/version cụ thể nếu chưa chạy nó.
+
+Smoke client độc lập: `bun tests/integration/chatgpt-web-client-tools-smoke.mjs --base-url <gateway>/v1 --api-key-file <private-file> --model <exact-catalog-id> --wire chat --stream true`. Endpoint ngoài loopback bắt buộc `CGW_LIVE=1` và `--live`. Driver chỉ Read/Edit/Exec trong fixture temporary riêng, bắt buộc fail-before/pass-after và final `CGW_CLIENT_TOOLS_OK`; API key không được đặt trên command line.
+
 ## 3. Cấu hình Cloudflare Tunnel (Thực hiện trên Cloudflare Zero Trust)
 
 Truy cập Cloudflare Zero Trust -> **Networks** -> **Tunnels** (Tunnel đang kết nối tới VPS):

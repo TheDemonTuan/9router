@@ -22,6 +22,12 @@ describe("/v1/models runtime catalog", () => {
     mocks.getChatGptWebCatalog.mockResolvedValueOnce(webCatalog()).mockResolvedValueOnce(webCatalog([webModel({ supported_reasoning_levels: ["high", "xhigh"], default_reasoning_level: "high", context_window: 64000, auto_compact_token_limit: 50000, max_output: 8000, capabilities: { native_responses: true, tools: true, subagents: true } })]));
     expect(await publicModels()).toEqual([expect.objectContaining({ supported_reasoning_levels: ["medium", "high", "xhigh"], context_length: 64000, auto_compact_token_limit: 50000, max_completion_tokens: 8000, capabilities: expect.objectContaining({ tools: true, subagents: true }) })]);
   });
+  it("advertises client functions on a public copy without native authority", async () => {
+    const catalog = webCatalog([webModel({ capabilities: { text: true, generic_responses: true, generic_tools: true, tools: false, exec: false, mcp_tools: false } })]);
+    mocks.getChatGptWebCatalog.mockResolvedValue(catalog);
+    expect(await publicModels()).toEqual([expect.objectContaining({ capabilities: expect.objectContaining({ tools: true, generic_tools: true, exec: false, mcp_tools: false }) })]);
+    expect(catalog.models[0].capabilities.tools).toBe(false);
+  });
   it("does not advertise unverified custom IDs or aliases when all probes fail", async () => {
     mocks.getChatGptWebCatalog.mockRejectedValue(new Error("login_required"));
     mocks.getCustomModels.mockResolvedValue([{ providerAlias: "cgw", id: "chatgpt-web/unverified" }]);
