@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { networkInterfaces } from "node:os";
 import { connect } from "node:net";
 import { startRuntime } from "../src/server";
+import { NativeBrowserProcess } from "../src/browser/native-process";
 import type { BrowserTurnLease } from "../src/browser/manager";
 import type { BrowserContext } from "playwright-core";
 import { MAX_SESSION_TRANSFER_BYTES, parseChatGptWebSessionTransfer } from "../session-transfer.js";
@@ -26,6 +27,24 @@ interface NativeGeometry { pageId: string; sequence: number; authenticated: bool
 const geometry = new Map<string, NativeGeometry>();
 const signedIn = new Set<string>();
 const persisted = new Set<string>();
+const shutdownDiagnostics: unknown[] = [];
+const launchNative = NativeBrowserProcess.launch.bind(NativeBrowserProcess);
+NativeBrowserProcess.launch = async (...args) => {
+  const browser = await launchNative(...args);
+  const requestClose = Reflect.get(browser, "requestWindowClose").bind(browser);
+  Reflect.set(browser, "requestWindowClose", async () => {
+    const requested = await requestClose();
+    shutdownDiagnostics.push({ requested });
+    return requested;
+  });
+  const close = browser.close.bind(browser);
+  browser.close = async () => {
+    const start = Date.now();
+    await close();
+    shutdownDiagnostics.push({ exitCode: browser.child.exitCode, signal: browser.child.signalCode, elapsed: Date.now() - start });
+  };
+  return browser;
+};
 let currentId = "";
 const preparedManagers = new WeakSet<object>();
 const preparedContexts = new WeakSet<BrowserContext>();
@@ -351,6 +370,7 @@ try {
   console.log("CGW_PROVIDER_ONBOARDING_SMOKE_OK");
 } catch (error) {
   console.error("CGW_PROVIDER_ONBOARDING_SMOKE_FAILED", error);
+  console.error("SYNTHETIC_SHUTDOWN_DIAGNOSTICS", JSON.stringify(shutdownDiagnostics));
   if (inspection) await inspection.page.screenshot({ path: join(proof, "provider-failed.png"), fullPage: true }).catch(() => {});
   throw error;
 } finally {
