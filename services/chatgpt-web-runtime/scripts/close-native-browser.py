@@ -9,6 +9,12 @@ def close_windows(display_name, pid):
     window = ctypes.c_ulong
     atom = ctypes.c_ulong
     pointer = ctypes.c_void_p
+    # Chrome and the window manager can destroy windows while the tree is walked.
+    # Xlib's default handler exits the helper on that normal BadWindow race.
+    error_handler_type = ctypes.CFUNCTYPE(ctypes.c_int, pointer, pointer)
+    error_handler = error_handler_type(lambda _display, _error: 0)
+    x11.XSetErrorHandler.argtypes = [error_handler_type]
+    x11.XSetErrorHandler(error_handler)
     x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
     x11.XOpenDisplay.restype = pointer
     x11.XDefaultRootWindow.argtypes = [pointer]
