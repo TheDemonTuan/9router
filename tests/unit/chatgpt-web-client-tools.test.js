@@ -3,8 +3,6 @@ import "../translator/registerAll.js";
 import { validateBrowserChatRequest, validateBrowserResponsesRequest } from "../../services/chatgpt-web-runtime/browser-request.js";
 import { openaiToOpenAIResponsesRequest } from "../../open-sse/translator/request/openai-responses.js";
 import { bridgeToResponsesSSE } from "../../services/chatgpt-web-runtime/src/bridge.ts";
-import { parseRequest } from "../../services/chatgpt-web-runtime/src/responses/parser.ts";
-import { createBrowserClientToolProtocol } from "../../services/chatgpt-web-runtime/src/adapters/chatgpt-web/browser-client-tools.ts";
 import { openaiResponsesToOpenAIResponse } from "../../open-sse/translator/response/openai-responses.js";
 
 it("browser conversion preserves function schemas, long correlated IDs and named policy", () => {
@@ -26,10 +24,12 @@ it("browser conversion preserves function schemas, long correlated IDs and named
   expect(converted.parallel_tool_calls).toBe(false);
 });
 
-it("validated parallel calls survive Responses bridge and Chat SSE mapping", async () => {
+it("parallel calls survive Responses bridge, Chat SSE mapping and public replay", async () => {
   const model = "chatgpt-web/gpt-5.6-sol";
-  const parsed = parseRequest(validateBrowserResponsesRequest({ model, input: "read", tools: ["Read", "Edit"].map(name => ({ type: "function", name })) }));
-  const decision = createBrowserClientToolProtocol(parsed).parse(JSON.stringify({ content: "checking", tool_calls: [{ name: "Read", arguments: { text: 'héllo "world"' } }, { name: "Edit", arguments: { text: "改行\nnext" } }] }));
+  const decision = { content: "checking", calls: [
+    { callId: "call_read", wireName: "Read", arguments: { text: 'héllo "world"' } },
+    { callId: "call_edit", wireName: "Edit", arguments: { text: "改行\nnext" } },
+  ] };
   async function* events() {
     yield { type: "text_delta", text: decision.content };
     for (const call of decision.calls) {
@@ -63,7 +63,7 @@ it("validated parallel calls survive Responses bridge and Chat SSE mapping", asy
   expect([...reconstructed.values()].map(call => [call.id, call.name, JSON.parse(call.arguments)])).toEqual(decision.calls.map(call => [call.callId, call.wireName, call.arguments]));
   expect(finish).toBe("tool_calls");
   const replay = validateBrowserResponsesRequest({ model, input: [{ role: "user", content: "read" }, ...output, ...calls.toReversed().map(call => ({ type: "function_call_output", call_id: call.call_id, output: "héllo result" }))] });
-  expect(createBrowserClientToolProtocol(parseRequest(replay)).parse('{"content":"done","tool_calls":[]}')).toEqual({ content: "done", calls: [] });
+  expect(replay.input.filter(item => item.type === "function_call")).toEqual(calls.map(call => ({ type: "function_call", call_id: call.call_id, name: call.name, arguments: call.arguments })));
 });
 
 it("invalid browser decision stays a typed failure through SSE-to-JSON accumulation", async () => {

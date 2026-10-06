@@ -277,7 +277,7 @@ describe("Request-local browser adapter lifecycle", () => {
       settle.resolve(); await running;
       expect(chatGptTurnSessions.physicalWorkCount()).toBe(0);
       expect(chatGptTurnSessions.activeCount()).toBe(0);
-      expect(events.some(event => event.type === "completed" || event.type === "tool_call_done")).toBe(false);
+      expect(events.some(event => event.type === "done" || event.type === "tool_call_start" || event.type === "tool_call_end")).toBe(false);
     } finally { controller.abort(); settle.resolve(); await running?.catch(() => {}); mock.restore(); await closeChatGptBrowserWorkers(); rmSync(root, { recursive: true, force: true }); }
   });
   test("pre-aborted request never starts a browser submission", async () => {
