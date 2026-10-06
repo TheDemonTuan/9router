@@ -380,6 +380,7 @@ try {
 } finally {
   mkdirSync(proof, { recursive: true });
   writeFileSync(join(proof, "cookie-diagnostics.json"), JSON.stringify(cookieDiagnostics), { mode: 0o644 });
+  chmodSync(join(proof, "cookie-diagnostics.json"), 0o644);
   // These are synthetic offline fixtures, not real-account screenshots or credentials.
   for (const name of ["result.json", "provider-failed.png", "provider-embedded-login.png", "provider-connected-ready.png", "provider-import-ready.png", "provider-import-mobile.png", "provider-model-test.png", "provider-model-test-mobile.png"]) {
     const path = join(proof, name);
