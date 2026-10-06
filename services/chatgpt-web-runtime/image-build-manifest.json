@@ -25,23 +25,23 @@
   },
   "browser": {
     "distribution": "google-chrome-for-testing",
-    "version": "154.0.8037.92",
-    "installRoot": "/opt/cgw-browser/154.0.8037.92",
+    "version": "154.0.8037.97",
+    "installRoot": "/opt/cgw-browser/154.0.8037.97",
     "terms": "https://www.google.com/chrome/terms/",
     "metadataSource": "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json",
     "distributionPolicy": "Operator-approved direct download from Google by the same public runtime image's Docker browser-init service; no browser payload in OCI layers or artifacts. Provision an immutable version directory in a Docker-managed cache volume and mount the cache read-only in runtime.",
     "platforms": {
       "amd64": {
-        "url": "https://storage.googleapis.com/chrome-for-testing-public/154.0.8037.92/linux64/chrome-linux64.zip",
-        "sha256": "ff43322f335e436b2f4dcdfeeec5db032299e335a7e8c1c618b326e100ce8732",
+        "url": "https://storage.googleapis.com/chrome-for-testing-public/154.0.8037.97/linux64/chrome-linux64.zip",
+        "sha256": "487c3b0e89f786d9257a6265a29bacf18b893e90f29c0ef6f7be9706ecc8c7a2",
         "member": "chrome-linux64/chrome",
-        "binarySha256": "439f367a9a24dde467dca9c4e4c2feedd3266899c5a8e3eb17b68b05d4da9f5f"
+        "binarySha256": "ed599daf8ec0a9d1b80325723dfcbe0e8bf7e191dd68a74f665999309f73fb83"
       },
       "arm64": {
-        "url": "https://storage.googleapis.com/chrome-for-testing-public/154.0.8037.92/linux-arm64/chrome-linux-arm64.zip",
-        "sha256": "c0af361aab66b24c72e36a4326dce4d7edf4bc23f9aede8af988c2cb6ea3fec0",
+        "url": "https://storage.googleapis.com/chrome-for-testing-public/154.0.8037.97/linux-arm64/chrome-linux-arm64.zip",
+        "sha256": "1625448bc3f03f715ba699c8a7071e5b0e5e14a8b1d14ce2c21e75f1ea95475e",
         "member": "chrome-linux-arm64/chrome",
-        "binarySha256": "736975a0fccea922ba700f191002ed6675d60de4b37121b0905875f171243d23"
+        "binarySha256": "de77a3ddc1220424775183995e82d70f3faedcbfd08abede1efdcc6aa85ad0d8"
       }
     }
   },
