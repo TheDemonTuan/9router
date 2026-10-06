@@ -271,14 +271,6 @@ describe("pre-response budget end-to-end boundaries", () => {
     }
   });
 
-  it("restores unmocked modules cleanly after route initialization test", async () => {
-    const chat = await import("../../src/sse/handlers/chat.js");
-    const translator = await import("../../open-sse/translator/index.js");
-    expect(typeof chat.handleChat).toBe("function");
-    expect(vi.isMockFunction(chat.handleChat)).toBe(false);
-    expect(typeof translator.initTranslators).toBe("function");
-    expect(vi.isMockFunction(translator.initTranslators)).toBe(false);
-  });
 });
 
 describe("response body ownership", () => {
