@@ -1,8 +1,9 @@
-import { activateChatGptEffortMenu, parseChatGptEffortSliderState, readChatGptModelAnnouncements } from "../../chatgpt-session";
+import { parseChatGptEffortSliderState, readChatGptModelAnnouncements } from "../../chatgpt-session";
+import type { ChatGptEffortActivation } from "../../chatgpt-session";
 import type { ChatGptWebAdapterEffort, ChatGptWebModelFamily } from "../../chatgpt-web-models";
 import { ChatGptWebAdapterError } from "./adapter-error";
 
-type EffortMenu = Awaited<ReturnType<typeof activateChatGptEffortMenu>>;
+type EffortMenu = ChatGptEffortActivation;
 
 function familyError(family: ChatGptWebModelFamily, cause?: unknown): ChatGptWebAdapterError {
   return new ChatGptWebAdapterError(
@@ -36,12 +37,12 @@ export async function selectChatGptModelFamily(
     if (await powerView.count() === 1) {
       const view = await powerView.getAttribute("data-model-picker-view");
       if (view === "simple") {
-        const trigger = powerView.locator('[data-model-picker-view-toggle="true"][aria-hidden="false"]');
+        const trigger = powerView.locator('[data-model-picker-view-toggle="true"]:not([aria-hidden="true"], [aria-hidden="true"] *, [inert], [inert] *, [hidden], [hidden] *)').filter({ visible: true });
         if (await trigger.count() !== 1) throw familyError(family);
         await trigger.click({ timeout: 5_000 });
       } else if (view !== "advanced") throw familyError(family);
     } else {
-      const trigger = menu.menu.locator('[role="menuitem"][aria-expanded][aria-hidden="false"]');
+      const trigger = menu.menu.locator('[role="menuitem"][aria-expanded]:not([aria-hidden="true"], [aria-hidden="true"] *, [inert], [inert] *, [hidden], [hidden] *)').filter({ visible: true });
       if (await powerView.count() !== 0 || await trigger.count() !== 1) throw familyError(family);
       if (await trigger.getAttribute("aria-expanded") === "false") await trigger.click({ timeout: 5_000 });
     }

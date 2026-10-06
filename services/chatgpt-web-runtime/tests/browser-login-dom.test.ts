@@ -3,7 +3,8 @@ import { createHmac } from "node:crypto";
 import { chromium, type Page } from "playwright-core";
 import { probeBrowserLoginSession } from "../src/browser-login";
 import { activateChatGptEffortMenu, detectChatGptAccountCapabilities } from "../src/chatgpt-session";
-import { assertChatGptModelFamily } from "../src/adapters/chatgpt-web/model-selection";
+import type { ChatGptEffortActivation } from "../src/chatgpt-session";
+import { assertChatGptModelFamily, selectChatGptModelFamily } from "../src/adapters/chatgpt-web/model-selection";
 
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -157,6 +158,58 @@ describe.skipIf(!executablePath)("Chromium login DOM", () => {
       });
     }, 90_000);
   }
+  test("family transition uses the active ancestor-visible toggle and verifies every Sol effort", async () => {
+    await fixture({}, async page => {
+      await page.locator("#picker").evaluate(element => {
+        element.innerHTML = `<div data-model-picker-view="simple">
+          <div aria-hidden="false"><div role="menuitem" data-model-picker-view-toggle="true"><span data-menu-row-content>6 Pro</span></div>
+            <div role="menuitem" tabindex="0" aria-describedby="family-announcement"><span data-model-picker-power-slider><span role="slider" aria-valuemin="0" aria-valuemax="4" aria-valuenow="4"></span></span></div></div>
+          <div aria-hidden="true"><div role="menuitem" data-model-picker-view-toggle="true">Hidden duplicate</div></div>
+          <div id="families" hidden><div role="menuitemradio" aria-checked="true">Latest</div><div role="menuitemradio" aria-checked="false">GPT-5.6 Sol</div></div>
+          <span id="family-announcement">Pro, 5 of 5.</span></div>`;
+        const view = element.querySelector("[data-model-picker-view]")!;
+        const families = element.querySelector("#families") as HTMLElement;
+        const header = element.querySelector("[data-menu-row-content]")!;
+        const slider = element.querySelector('[role="slider"]')!;
+        let family = "6", value = 4;
+        const render = () => {
+          const mode = ["Instant", "Medium", "High", "Extra High", "Pro"][value];
+          slider.setAttribute("aria-valuenow", String(value));
+          header.replaceChildren(document.createTextNode(family), document.createTextNode(" " + mode));
+          element.querySelector("#family-announcement")!.textContent = mode + ", " + (value + 1) + " of 5.";
+        };
+        element.querySelector('[aria-hidden="false"] [data-model-picker-view-toggle]')!.addEventListener("click", () => {
+          view.setAttribute("data-model-picker-view", "advanced"); families.hidden = false;
+        });
+        for (const row of families.children) row.addEventListener("click", () => {
+          family = row.textContent === "Latest" ? "6" : "5.6";
+          for (const candidate of families.children) candidate.setAttribute("aria-checked", String(candidate === row));
+          view.setAttribute("data-model-picker-view", "simple"); families.hidden = true; render();
+        });
+        slider.closest('[role="menuitem"]')!.addEventListener("keydown", event => {
+          const key = (event as KeyboardEvent).key;
+          if (key === "ArrowRight" || key === "ArrowLeft") {
+            value = Math.max(0, Math.min(4, value + (key === "ArrowRight" ? 1 : -1))); render(); event.preventDefault(); event.stopPropagation();
+          }
+        });
+        (element as HTMLElement).hidden = false;
+      });
+      const surface: ChatGptEffortActivation = { method: "already-open", menu: page.locator("#picker"), sliderContainer: page.locator('[data-model-picker-power-slider]'), slider: page.locator('[role="slider"]') };
+      const selected = await selectChatGptModelFamily(surface, "5.6", async () => surface);
+      const owner = selected.slider.locator("xpath=ancestor::*[@role='menuitem'][1]");
+      for (let i = 0; i < 4; i++) await owner.press("ArrowLeft");
+      for (const [index, effort] of (["low", "medium", "high", "xhigh"] as const).entries()) {
+        await assertChatGptModelFamily(selected, "5.6", effort, index);
+        await owner.press("ArrowRight");
+      }
+      await selectChatGptModelFamily(surface, "6", async () => surface);
+      await assertChatGptModelFamily(surface, "6", "max", 4);
+      await page.locator('[aria-hidden="true"] [data-model-picker-view-toggle]').evaluate(element => {
+        element.parentElement!.setAttribute("aria-hidden", "false");
+      });
+      await expect(selectChatGptModelFamily(surface, "5.6", async () => surface)).rejects.toMatchObject({ code: "model_version_unavailable" });
+    });
+  }, 90_000);
   test("semantic slider keyboard owner selects High and verifies header-only family", async () => {
     await fixture({ pointerOnly: true, semanticSlider: true, headerOnlyModel: true }, async page => {
       const surface = await high(page);
