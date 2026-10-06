@@ -222,7 +222,7 @@ try {
   await canvas.focus();
   let typed = "";
   for (const character of "viewer-keyboard-proof") {
-    await page.keyboard.type(character);
+    await canvas.press(character);
     typed += character;
     await until(() => geometry.get(id)?.value === typed, "Keyboard input did not reach native Chrome");
   }
