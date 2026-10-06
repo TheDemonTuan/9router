@@ -1,6 +1,4 @@
 import { strict as assert } from "node:assert";
-import { Database } from "bun:sqlite";
-import { NativeBrowserProcess } from "../src/browser/native-process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -28,18 +26,6 @@ interface NativeGeometry { pageId: string; sequence: number; authenticated: bool
 const geometry = new Map<string, NativeGeometry>();
 const signedIn = new Set<string>();
 const persisted = new Set<string>();
-const cookieDiagnostics: unknown[] = [];
-const nativeLaunch = NativeBrowserProcess.launch.bind(NativeBrowserProcess);
-NativeBrowserProcess.launch = async (...args) => {
-  const browser = await nativeLaunch(...args);
-  const requestClose = Reflect.get(browser, "requestWindowClose").bind(browser);
-  Reflect.set(browser, "requestWindowClose", async () => {
-    const requested = await requestClose();
-    cookieDiagnostics.push({ gracefulCloseRequested: requested });
-    return requested;
-  });
-  return browser;
-};
 let currentId = "";
 const preparedManagers = new WeakSet<object>();
 const preparedContexts = new WeakSet<BrowserContext>();
@@ -89,16 +75,7 @@ const prepare = async (id: string) => {
     manager.restoreManualLogin = (_url, onExit) => restore(`${nativeOrigin}/login/${id}`, onExit);
     const automated = manager.ensureContext.bind(manager);
     manager.ensureContext = async () => {
-      if (signedIn.has(id)) {
-        const path = join(Reflect.get(manager, "directory"), "Default", "Cookies");
-        if (existsSync(path)) {
-          const db = new Database(path, { readonly: true });
-          try { cookieDiagnostics.push({ beforeRestart: db.query("SELECT count(*) AS count, hex(substr(encrypted_value, 1, 3)) AS encryption FROM cookies WHERE name = 'offline_account' GROUP BY encryption").all() }); }
-          finally { db.close(); }
-        } else cookieDiagnostics.push({ cookieDatabaseMissing: true });
-      }
       const context = await automated();
-      if (signedIn.has(id)) cookieDiagnostics.push({ afterRestart: (await context.cookies(nativeOrigin)).filter(cookie => cookie.name === "offline_account").map(cookie => ({ present: true, matches: cookie.value === id })) });
       if (!preparedContexts.has(context)) {
         await context.exposeBinding("syntheticObserveSend", () => { physicalSends++; });
         await context.addInitScript(() => {
@@ -374,13 +351,9 @@ try {
   console.log("CGW_PROVIDER_ONBOARDING_SMOKE_OK");
 } catch (error) {
   console.error("CGW_PROVIDER_ONBOARDING_SMOKE_FAILED", error);
-  console.error("SYNTHETIC_COOKIE_DIAGNOSTICS", JSON.stringify(cookieDiagnostics));
   if (inspection) await inspection.page.screenshot({ path: join(proof, "provider-failed.png"), fullPage: true }).catch(() => {});
   throw error;
 } finally {
-  mkdirSync(proof, { recursive: true });
-  writeFileSync(join(proof, "cookie-diagnostics.json"), JSON.stringify(cookieDiagnostics), { mode: 0o644 });
-  chmodSync(join(proof, "cookie-diagnostics.json"), 0o644);
   // These are synthetic offline fixtures, not real-account screenshots or credentials.
   for (const name of ["result.json", "provider-failed.png", "provider-embedded-login.png", "provider-connected-ready.png", "provider-import-ready.png", "provider-import-mobile.png", "provider-model-test.png", "provider-model-test-mobile.png"]) {
     const path = join(proof, name);

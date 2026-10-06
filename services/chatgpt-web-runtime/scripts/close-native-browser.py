@@ -51,6 +51,16 @@ def close_windows(display_name, pid):
                 if data.value:
                     x11.XFree(data)
             if owned:
+                protocol_type, protocol_format = atom(), ctypes.c_int()
+                protocol_items, protocol_after, protocol_data = ctypes.c_ulong(), ctypes.c_ulong(), pointer()
+                protocol_result = x11.XGetWindowProperty(display, current, protocols, 0, 1024, False, 4, ctypes.byref(protocol_type), ctypes.byref(protocol_format), ctypes.byref(protocol_items), ctypes.byref(protocol_after), ctypes.byref(protocol_data))
+                try:
+                    supports_close = protocol_result == 0 and protocol_type.value == 4 and protocol_format.value == 32 and protocol_data.value and delete.value in ctypes.cast(protocol_data, ctypes.POINTER(ctypes.c_ulong))[:protocol_items.value]
+                finally:
+                    if protocol_data.value:
+                        x11.XFree(protocol_data)
+                if not supports_close:
+                    continue
                 event = Event()
                 event.client.type = 33  # ClientMessage
                 event.client.display = display

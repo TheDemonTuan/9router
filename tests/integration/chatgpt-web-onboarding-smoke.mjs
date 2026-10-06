@@ -80,7 +80,6 @@ try {
   if (flags["--proof-dir"]) {
     const destination = resolve(flags["--proof-dir"]); mkdirSync(destination, { recursive: true });
     for (const name of ["result.json", "provider-embedded-login.png", "provider-connected-ready.png", "provider-import-ready.png", "provider-import-mobile.png"]) copyFileSync(join(proofs, name), join(destination, name));
-    copyFileSync(join(proofs, "cookie-diagnostics.json"), join(destination, "cookie-diagnostics.json"));
   }
 } finally {
   spawnSync("docker", ["rm", "-f", runtime], { stdio: "ignore", timeout: 30000 });
