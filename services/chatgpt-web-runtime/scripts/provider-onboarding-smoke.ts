@@ -1,4 +1,5 @@
 import { strict as assert } from "node:assert";
+import { Database } from "bun:sqlite";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -75,7 +76,17 @@ const prepare = async (id: string) => {
     manager.restoreManualLogin = (_url, onExit) => restore(`${nativeOrigin}/login/${id}`, onExit);
     const automated = manager.ensureContext.bind(manager);
     manager.ensureContext = async () => {
+      if (signedIn.has(id)) {
+        const directory = Reflect.get(manager, "directory");
+        const path = join(directory, "Default", "Cookies");
+        if (existsSync(path)) {
+          const db = new Database(path, { readonly: true });
+          try { console.log(JSON.stringify({ syntheticCookieBeforeRestart: db.query("SELECT count(*) AS count, hex(substr(encrypted_value, 1, 3)) AS encryption FROM cookies WHERE name = 'offline_account' GROUP BY encryption").all() })); }
+          finally { db.close(); }
+        } else console.log(JSON.stringify({ syntheticCookieDatabaseMissing: true }));
+      }
       const context = await automated();
+      if (signedIn.has(id)) console.log(JSON.stringify({ syntheticCookieAfterRestart: (await context.cookies(nativeOrigin)).filter(cookie => cookie.name === "offline_account").map(cookie => ({ present: true, matches: cookie.value === id })) }));
       if (!preparedContexts.has(context)) {
         await context.exposeBinding("syntheticObserveSend", () => { physicalSends++; });
         await context.addInitScript(() => {
