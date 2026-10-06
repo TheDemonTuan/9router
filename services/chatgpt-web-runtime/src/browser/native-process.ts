@@ -17,6 +17,8 @@ export class NativeBrowserProcess {
     const owner = `CGW_NATIVE_BROWSER_OWNER=${randomUUID()}`;
     const child = spawn(executable, [
       `--user-data-dir=${directory}`, "--no-first-run", "--no-default-browser-check",
+      // Use the same cookie encryption backend as Playwright's persistent context.
+      "--password-store=basic",
       "--window-size=1280,900", startUrl,
     ], { env: { ...process.env, CGW_NATIVE_BROWSER_OWNER: owner.slice(owner.indexOf("=") + 1), ...(display ? { DISPLAY: display } : {}) }, stdio: "ignore", shell: false, detached: grouped });
     const owned = new NativeBrowserProcess(child, grouped, owner, display);
