@@ -57,6 +57,7 @@
     "tailwindcss": "^4.3.3"
   },
   "overrides": {
-    "dompurify": "^3.4.16"
+    "dompurify": "^3.4.16",
+    "source-map-js": "1.2.2"
   }
 }
