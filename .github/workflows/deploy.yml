@@ -53,6 +53,16 @@ jobs:
           DATA_DIR: ${{ runner.temp }}/9router-home/data
         run: bash .deploy/verify.sh
 
+  runtime-gates:
+    name: ChatGPT Web offline release gates
+    needs: activation-fence
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/chatgpt-web-runtime.yml
+    with:
+      verification_only: true
+
   security-source:
     name: Trivy source security gate
     needs: activation-fence
@@ -72,6 +82,7 @@ jobs:
     needs:
       - verify
       - security-source
+      - runtime-gates
     permissions:
       contents: read
       packages: write

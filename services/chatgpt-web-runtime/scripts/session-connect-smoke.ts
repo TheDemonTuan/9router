@@ -7,7 +7,6 @@ import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import type { BrowserContext, CDPSession, Page, Request as PlaywrightRequest } from "playwright-core";
 import { z } from "zod";
-import type { Unzipped } from "fflate";
 import type { RuntimeService } from "../src/server";
 
 // All stateful runtime imports happen after full home/data isolation. This runner
@@ -284,8 +283,9 @@ let collectionCalls = 0, onCollected: (() => Promise<void>) | undefined;
   await assistant().getByRole("link", { name: "Download Chrome helper", exact: true }).click();
   const archiveDownload = await downloading; assert.equal(archiveDownload.suggestedFilename(), "chatgpt-web-session-export.zip");
   const archive = join(root, "helper.zip"); await archiveDownload.saveAs(archive);
-  // fflate belongs to the root build dependency, not the isolated runtime package.
-  const { unzipSync } = await import(join(worktree, "node_modules/fflate/esm/index.mjs")) as { unzipSync(bytes: Uint8Array): Unzipped };
+  // fflate belongs to the root build dependency; keep its type contract local
+  // so the runtime can be typechecked before gateway dependencies are installed.
+  const { unzipSync } = await import(join(worktree, "node_modules/fflate/esm/index.mjs")) as { unzipSync(bytes: Uint8Array): Record<string, Uint8Array> };
   const files = unzipSync(new Uint8Array(readFileSync(archive)));
   assert.deepEqual(Object.keys(files).sort(), ["background.js", "manifest.json", "popup.html", "popup.js"].map(name => `chatgpt-web-session-export/${name}`).sort());
   const extensionDir = join(root, "chatgpt-web-session-export"); mkdirSync(extensionDir, { mode: 0o700 });
