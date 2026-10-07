@@ -14,6 +14,8 @@ Deployment security patch: override `fast-uri` to published `3.1.8` with its npm
 
 Deployment security patch: override the MCP SDK/Express transitive `proxy-addr` dependency to published `2.0.8` with its npm SHA-512 integrity, replacing frozen `2.0.7` flagged by Trivy as CVE-2026-90711 (CRITICAL). Gateway already resolves `2.0.8`; runtime Bun, SDK and Express pins remain unchanged. Native runtime/browser vulnerability scans remain unsuppressed release gates.
 
+Deployment security patch: pin the MCP SDK to patched `1.31.0` and regenerate the runtime lock with Bun `1.4.0`, replacing `1.30.0` flagged by Trivy as CVE-2026-104850 (HIGH, OAuth client credential forwarding). The frozen upstream source revision and existing transitive security overrides remain unchanged. Native MCP stdio/browser compatibility and unsuppressed amd64/ARM64 image scans remain release gates.
+
 Adapted boundaries: `config.ts`, `server.ts`, `browser-login.ts`, `process.ts`, `tunnel.ts`, `adapters/chatgpt-web/index.ts`, `browser-worker.ts`, `thread-environment.ts`, `turn-execution.ts`, `conversation-key.ts`, `compaction-handoff.ts`, and `native-compaction-control.ts`.
 
 New remote-runtime responsibilities: `protocol.js`, `src/authority.ts`, `src/profiles.ts`, `src/runtime-state.ts`, `src/browser/manager.ts`, and `src/companion/`. The read-only `src/companion/codex-config-reader.ts` extracts upstream top-level assignment parsing; it has no config-writing API.
