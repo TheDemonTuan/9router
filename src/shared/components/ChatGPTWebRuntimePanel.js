@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import PropTypes from "prop-types";
 import Button from "./Button";
 import Input from "./Input";
@@ -14,10 +14,19 @@ const BASE = "/api/providers/chatgpt-web/runtime";
 const DEFAULT_SETTINGS = { mode: "browser-only", experimentalBiggerContext: false, experimentalFreshConversationPerTurn: false, useSavedChats: false, autoApproveToolCalls: false, connectorName: "Codex Native2" };
 const BIGGER_CONTEXT_ROUTES = new Set(["chatgpt-web/gpt-5.6-sol-instant", "chatgpt-web/gpt-5.6-sol", "chatgpt-web/gpt-5.6-pro", "chatgpt-web/gpt-6-pro"]);
 const IMPORT_ERRORS = {
-  invalid_session_transfer: "Invalid ChatGPT session file. Export a new file with the 9Router Chrome exporter.",
+  invalid_session_transfer: "Invalid ChatGPT session JSON. Use the Chrome helper to export cookies; access tokens and /api/auth/session JSON cannot be imported.",
   session_transfer_expired: "The exported cookies have expired. Sign in in Chrome and export again.",
-  session_transfer_too_large: "The session file exceeds the 256 KiB limit.",
+  session_transfer_too_large: "The session exceeds the 256 KiB limit.",
 };
+const IMPORT_REQUEST = "9router:chatgpt-session-import-request";
+const IMPORT_RESULT = "9router:chatgpt-session-import-result";
+const ATTEMPT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const PROFILE_ID = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
+const unknownImport = () => ({ ok: false, status: 0, code: "import_result_unknown" });
+const failedImport = cause => ({ ok: false, status: Number.isInteger(cause?.status) ? cause.status : 0, code: /^[a-z0-9_]{1,64}$/.test(cause?.code || "") ? cause.code : "import_result_unknown" });
+function dispatchImportResult(target, outcome) {
+  document.dispatchEvent(new CustomEvent(IMPORT_RESULT, { detail: { version: 1, attemptId: target.attemptId, profileId: target.profileId, revision: target.revision, ...outcome } }));
+}
 async function request(action, init, signal) {
   const response = await fetch(`${BASE}/${action}`, { cache: "no-store", ...init, signal });
   const data = await response.json();
@@ -37,7 +46,7 @@ function validLease(value, profileId, loginId) {
 }
 
 // Profile/status reads never send a model or tool request. Human sign-in is verified only on request.
-export default function ChatGPTWebRuntimePanel({ connectionName, profileId, selectedProfileId = profileId, onProfileSelected, onChanged, onViewerOpenChange, autoStartLogin = false }) {
+export default function ChatGPTWebRuntimePanel({ connectionName, profileId, selectedProfileId = profileId, onProfileSelected, onChanged, onViewerOpenChange, autoStartLogin = false, autoOpenSessionImport = false }) {
   const [profiles, setProfiles] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState("");
@@ -50,7 +59,19 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
   const [lease, setLease] = useState(null);
   const [refresh, setRefresh] = useState(0);
   const [viewerOpen, setViewerOpen] = useState(false);
-  const [fileSelected, setFileSelected] = useState(false);
+  const [fileSelected, setFileSelected] = useState(null);
+  const [assistantOpen, setAssistantOpen] = useState(autoOpenSessionImport);
+  const [importMode, setImportMode] = useState("extension");
+  const [pastedSession, setPastedSession] = useState("");
+  const [directTarget, setDirectTarget] = useState(null);
+  const [targetConsumed, setTargetConsumed] = useState(false);
+  const [clipboardNotice, setClipboardNotice] = useState("");
+  const targetElement = useRef(null);
+  const targetRef = useRef(null);
+  const consumedRef = useRef(false);
+  const hasConsumedAttempt = useRef(false);
+  const directInFlight = useRef(null);
+  const prepareOnLoad = useRef(autoOpenSessionImport);
   const fileInput = useRef(null);
   const sessionFile = useRef(null);
   const autoStarted = useRef(false);
@@ -63,7 +84,32 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
   const lastProfileEvidence = useRef(null);
   const profile = profiles.find(item => item.profileId === profileId);
 
-  useEffect(() => () => { sessionFile.current = null; if (fileInput.current) fileInput.current.value = ""; }, [profileId]);
+  const clearSessionFile = useCallback(() => {
+    sessionFile.current = null; setFileSelected(null); setPastedSession("");
+    if (fileInput.current) fileInput.current.value = "";
+  }, []);
+  const invalidateTarget = useCallback(() => {
+    prepareOnLoad.current = false;
+    targetRef.current = null; consumedRef.current = false;
+    targetElement.current?.removeAttribute("data-9router-chatgpt-session-target");
+    targetElement.current?.removeAttribute("data-9router-chatgpt-session-consumed");
+    setDirectTarget(null); setTargetConsumed(false);
+  }, []);
+  useEffect(() => { hasConsumedAttempt.current = false; }, [profileId]);
+  useEffect(() => {
+    prepareOnLoad.current = autoOpenSessionImport && !hasConsumedAttempt.current;
+  }, [profileId, autoOpenSessionImport]);
+  useLayoutEffect(() => {
+    const input = fileInput.current;
+    const element = targetElement.current;
+    return () => {
+      sessionFile.current = null;
+      if (input) input.value = "";
+      targetRef.current = null; consumedRef.current = false;
+      element?.removeAttribute("data-9router-chatgpt-session-target");
+      element?.removeAttribute("data-9router-chatgpt-session-consumed");
+    };
+  }, [profileId, assistantOpen]);
   useEffect(() => {
     onViewerOpenChange(viewerOpen);
     return () => onViewerOpenChange(false);
@@ -149,12 +195,14 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
   }, [profileId, refresh, endViewer, onChanged]);
   const act = useCallback(async (action, body, label, method = "POST") => {
     const controller = lifetime.current;
-    if (!controller || controller.signal.aborted || busyRef.current) return;
+    if (!controller || controller.signal.aborted) return unknownImport();
+    if (busyRef.current) return { ok: false, status: 409, code: "session_import_in_progress" };
+    if (action !== "session/import") invalidateTarget();
     busyRef.current = true; setBusy(label); setError(""); setNotice("");
     setNoticeIsReadiness(false);
     try {
       const data = await request(action, { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) }, controller.signal);
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted) return unknownImport();
       setConnectionStatusWarning(typeof data.connectionStatusWarning === "string" ? data.connectionStatusWarning : "");
       if (["login/start", "login/complete", "login/close", "browser/view"].includes(action)) {
         if (!validLease(data, profileId, body.loginId) || (action === "login/complete" && data.state === "waiting" && !data.manualLogin)) throw new Error("Private browser session does not match this connection.");
@@ -167,7 +215,7 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
       if (["login/start", "login/complete", "login/close", "session/verify", "session/import", "browser/restart", "smoke"].includes(action) || method === "PATCH") {
         // A completed lease alone is not readiness evidence. Reconcile the exact saved profile.
         const status = await request("profiles", {}, controller.signal);
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted) return unknownImport();
         updated = status.profiles?.find(item => item.profileId === profileId);
         if (!updated) throw new Error("invalid_runtime_response");
       }
@@ -181,6 +229,7 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
         ? getChatGptWebProfileNotice(updated)
         : data.message || (data.loginId ? (data.state === "waiting" ? "" : leaseNotice(data.state)) : `${label} completed.`));
       onChanged();
+      return { ok: true, status: 200, code: null };
     } catch (cause) {
       if (!controller.signal.aborted) {
         setError(cause.message);
@@ -198,14 +247,14 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
           // after the explicit action; never silently submit another verification.
           try {
             const status = await request(`login/status?loginId=${encodeURIComponent(body.loginId)}`, {}, controller.signal);
-            if (controller.signal.aborted) return;
+            if (controller.signal.aborted) return unknownImport();
             if (!validLease(status, profileId, body.loginId) || (status.state === "waiting" && !status.manualLogin)) throw new Error("Invalid sign-in session status.");
             leaseRef.current = status; setLease(status);
             setViewerOpen(previous => previous && status.state === "waiting");
             if (status.state !== "waiting") {
               if (status.state === "completed") {
                 const fresh = await request("profiles", {}, controller.signal);
-                if (controller.signal.aborted) return;
+                if (controller.signal.aborted) return unknownImport();
                 setProfiles(fresh.profiles);
                 setNotice(getChatGptWebProfileNotice(fresh.profiles.find(item => item.profileId === profileId)));
                 setNoticeIsReadiness(true);
@@ -230,10 +279,11 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
           if (cause.status === 409) setNotice("Refresh the profile, review the latest settings, then reapply your changes. Nothing was overwritten.");
         }
       }
+      return controller.signal.aborted ? unknownImport() : failedImport(cause);
     } finally {
       if (!controller.signal.aborted) { busyRef.current = false; setBusy(""); }
     }
-  }, [onChanged, profile, profileId, endViewer]);
+  }, [onChanged, profile, profileId, endViewer, invalidateTarget]);
   useEffect(() => {
     if (!autoStartLogin || autoStarted.current) return;
     const timer = setTimeout(() => {
@@ -244,6 +294,7 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
   }, [autoStartLogin, profileId, act]);
 
   const change = (key, value) => {
+    invalidateTarget();
     if (!dirtyRef.current) baseRevision.current = profile?.revision ?? null;
     dirtyRef.current = true; setDirty(true);
     setDraft(previous => ({ ...previous, [key]: value, ...(key === "mode" && value === "browser-only" ? { autoApproveToolCalls: false } : {}) }));
@@ -254,37 +305,121 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
   const biggerSupported = profile?.models.some(model => !model.legacy && BIGGER_CONTEXT_ROUTES.has(model.id)) === true;
   const waiting = lease?.state === "waiting";
   const needsLogin = !waiting && ["unconfigured", "login_required", "error"].includes(profile?.state);
-  const sessionDisabled = disabled || active || waiting || !loaded || !profile;
+  const sessionDisabled = disabled || active || waiting || viewerOpen || profile?.state === "probing" || !loaded || !profile;
   const verifySession = () => act("session/verify", { profileId, revision: profile.revision }, "Use Saved Session");
   const secureImportOrigin = typeof window !== "undefined" && (window.location.protocol === "https:" || (window.location.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(window.location.hostname.toLowerCase())));
-  const clearSessionFile = () => {
-    sessionFile.current = null; setFileSelected(false);
-    if (fileInput.current) fileInput.current.value = "";
-  };
-  const importSession = async () => {
-    if (sessionDisabled || !secureImportOrigin || busyRef.current || !sessionFile.current) return;
-    const file = sessionFile.current;
+  const importContext = useRef(null);
+  useLayoutEffect(() => {
+    importContext.current = { profileId, selectedProfileId, connectionName, blocked: active || waiting || viewerOpen || fenced || profile?.state === "probing" || !loaded || !profile || !secureImportOrigin };
+  }, [profileId, selectedProfileId, connectionName, active, waiting, viewerOpen, fenced, profile, loaded, secureImportOrigin]);
+  const prepareConnection = useCallback(() => {
+    if (sessionDisabled || !secureImportOrigin || busyRef.current || dirty || selectedProfileId !== profileId) return;
+    clearSessionFile();
+    const target = Object.freeze({ version: 1, attemptId: crypto.randomUUID(), profileId, revision: profile.revision, connectionName, expiresAt: new Date(Date.now() + 300000).toISOString() });
+    prepareOnLoad.current = false;
+    targetRef.current = target; consumedRef.current = false;
+    setDirectTarget(target); setTargetConsumed(false);
+  }, [sessionDisabled, secureImportOrigin, dirty, selectedProfileId, profileId, profile, connectionName, clearSessionFile]);
+  const previousContext = useRef({ profileId, selectedProfileId, connectionName });
+  useEffect(() => {
+    const previous = previousContext.current;
+    previousContext.current = { profileId, selectedProfileId, connectionName };
+    if (previous.profileId !== profileId || previous.selectedProfileId !== selectedProfileId || previous.connectionName !== connectionName) {
+      clearSessionFile(); invalidateTarget();
+    }
+  }, [profileId, selectedProfileId, connectionName, clearSessionFile, invalidateTarget]);
+  useEffect(() => {
+    const target = targetRef.current;
+    if (target && (importContext.current.blocked || (busy && directInFlight.current !== target.attemptId) || dirty || selectedProfileId !== target.profileId || (profile?.revision !== target.revision && !directInFlight.current) || (Date.parse(target.expiresAt) <= Date.now() && !directInFlight.current))) invalidateTarget();
+    if (assistantOpen && importMode === "extension" && prepareOnLoad.current && !sessionDisabled && secureImportOrigin && !dirty && selectedProfileId === profileId) prepareConnection();
+  }, [assistantOpen, importMode, sessionDisabled, busy, active, waiting, viewerOpen, loaded, profile?.state, secureImportOrigin, dirty, selectedProfileId, profileId, profile?.revision, prepareConnection, invalidateTarget]);
+  useEffect(() => {
+    if (!directTarget) return;
+    const timer = setTimeout(() => { if (targetRef.current === directTarget && !directInFlight.current) invalidateTarget(); }, Math.max(0, Date.parse(directTarget.expiresAt) - Date.now()));
+    return () => clearTimeout(timer);
+  }, [directTarget, invalidateTarget]);
+  const importSession = async (source = "file", target = null) => {
+    // Capture credentials and revision at the explicit click/event, before any asynchronous read.
+    const file = source === "paste" ? null : sessionFile.current;
+    const text = source === "paste" ? pastedSession : null;
+    const snapshot = target || { profileId, revision: profile?.revision };
     const controller = lifetime.current;
-    if (!controller || controller.signal.aborted) return;
-    busyRef.current = true; setBusy("Read session file"); setError(""); setNotice("");
+    let outcome = unknownImport();
+    let ownsBusy = false;
     try {
-      if (file.size > MAX_SESSION_TRANSFER_BYTES) throw new SessionTransferError("session_transfer_too_large", 413);
+      if (busyRef.current) throw new SessionTransferError("session_import_in_progress", 409);
+      if (sessionDisabled || !secureImportOrigin || selectedProfileId !== snapshot.profileId || snapshot.profileId !== profileId || !controller || controller.signal.aborted) throw new SessionTransferError("session_target_unavailable", 409);
+      if (source !== "extension") invalidateTarget();
+      busyRef.current = true; ownsBusy = true;
+      setBusy(source === "paste" ? "Read pasted session" : "Read session file"); setError(""); setNotice("");
+      let raw;
+      if (source === "paste") {
+        if (new TextEncoder().encode(text).byteLength > MAX_SESSION_TRANSFER_BYTES) throw new SessionTransferError("session_transfer_too_large", 413);
+        raw = text;
+      } else {
+        if (!file) throw new SessionTransferError("invalid_session_transfer", 400);
+        if (file.size > MAX_SESSION_TRANSFER_BYTES) throw new SessionTransferError("session_transfer_too_large", 413);
+        try { raw = new TextDecoder("utf-8", { fatal: true }).decode(await file.arrayBuffer()); }
+        catch { throw new SessionTransferError("invalid_session_transfer", 400); }
+      }
+      if (controller.signal.aborted) return outcome;
+      const current = importContext.current;
+      if (current.blocked || current.profileId !== snapshot.profileId || current.selectedProfileId !== snapshot.profileId || (source === "extension" && (targetRef.current !== target || current.connectionName !== target.connectionName))) throw new SessionTransferError("session_target_unavailable", 409);
       let value;
-      try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(await file.arrayBuffer())); }
+      try { value = JSON.parse(raw); }
       catch { throw new SessionTransferError("invalid_session_transfer", 400); }
-      if (controller.signal.aborted) return;
-      const body = { profileId, revision: profile.revision, session: { format: "9router-chatgpt-session", version: 1, cookies: parseChatGptWebSessionTransfer(value) } };
+      const body = { profileId: snapshot.profileId, revision: snapshot.revision, session: { format: "9router-chatgpt-session", version: 1, cookies: parseChatGptWebSessionTransfer(value) } };
       if (new TextEncoder().encode(JSON.stringify(body)).byteLength > MAX_SESSION_TRANSFER_BYTES) throw new SessionTransferError("session_transfer_too_large", 413);
       busyRef.current = false;
-      await act("session/import", body, "Import session");
+      outcome = await act("session/import", body, "Import session");
+      return outcome;
     } catch (cause) {
-      if (!controller.signal.aborted) setError(IMPORT_ERRORS[cause.code] || IMPORT_ERRORS.invalid_session_transfer);
+      outcome = controller?.signal.aborted ? unknownImport() : failedImport(cause);
+      if (!controller?.signal.aborted) setError(IMPORT_ERRORS[cause.code] || (cause.code === "session_import_in_progress" ? "A session import is already in progress." : "The session target is unavailable. Wait for an idle profile and prepare the connection again."));
+      return outcome;
     } finally {
       clearSessionFile();
-      if (!controller.signal.aborted) { busyRef.current = false; setBusy(""); }
+      if (ownsBusy) { busyRef.current = false; if (!controller?.signal.aborted) setBusy(""); }
+      if (source === "extension" && target) {
+        directInFlight.current = null;
+        dispatchImportResult(target, outcome);
+      }
     }
   };
+  useEffect(() => {
+    const handleRequest = event => {
+      const detail = event.detail;
+      if (!detail || detail.version !== 1 || !ATTEMPT_ID.test(detail.attemptId || "") || !PROFILE_ID.test(detail.profileId || "") || !Number.isSafeInteger(detail.revision) || detail.revision < 1) return;
+      const target = targetRef.current;
+      let code = "session_target_unavailable";
+      if (busyRef.current || directInFlight.current || (target?.attemptId === detail.attemptId && consumedRef.current)) code = "session_import_in_progress";
+      else if (target?.attemptId === detail.attemptId && Date.parse(target.expiresAt) <= Date.now()) code = "session_target_expired";
+      else if (target?.attemptId === detail.attemptId && (detail.revision !== target.revision || profile?.revision !== target.revision)) code = "profile_revision_conflict";
+      else if (assistantOpen && importMode === "extension" && target && !consumedRef.current && target.attemptId === detail.attemptId && target.profileId === detail.profileId && target.connectionName === connectionName && selectedProfileId === detail.profileId && profileId === detail.profileId && detail.revision === target.revision && profile?.revision === target.revision && !sessionDisabled && secureImportOrigin && !dirty && !busyRef.current && fileInput.current?.files?.length === 1) {
+        // Consume before await; the File ref is captured synchronously by the shared importer.
+        consumedRef.current = true; hasConsumedAttempt.current = true; setTargetConsumed(true);
+        targetElement.current?.setAttribute("data-9router-chatgpt-session-consumed", "true");
+        sessionFile.current = fileInput.current.files[0];
+        directInFlight.current = target.attemptId;
+        void importSession("extension", target);
+        return;
+      }
+      clearSessionFile();
+      dispatchImportResult(detail, { ok: false, status: 409, code });
+    };
+    document.addEventListener(IMPORT_REQUEST, handleRequest);
+    return () => document.removeEventListener(IMPORT_REQUEST, handleRequest);
+  });
+  const openAssistant = () => {
+    if (assistantOpen) return;
+    clearSessionFile(); invalidateTarget();
+    prepareOnLoad.current = !hasConsumedAttempt.current;
+    setImportMode("extension"); setAssistantOpen(true);
+  };
+  const closeAssistant = () => { clearSessionFile(); invalidateTarget(); setAssistantOpen(false); };
+  const changeImportMode = mode => { clearSessionFile(); invalidateTarget(); setImportMode(mode); };
   const openBrowser = () => {
+    clearSessionFile(); invalidateTarget(); setAssistantOpen(false);
     if (waiting && Date.parse(lease.expiresAt) <= Date.now()) { endViewer("expired"); return; }
     if (waiting) { setError(""); setNotice(""); setViewerOpen(true); }
     else void act(needsLogin ? "login/start" : "browser/view", { profileId }, needsLogin ? "Start login" : "View browser");
@@ -306,19 +441,82 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
       <p className="text-xs text-text-muted">Browser-only: API key text requests. Full: signed Codex companion required.</p>
       <Button aria-label={needsLogin ? "Sign In" : "Open Browser"} disabled={disabled || (!profile && !waiting) || (needsLogin && active)} loading={busy === "Start login" || busy === "View browser"} onClick={openBrowser}>{needsLogin ? "Sign In" : "Open Browser"}</Button>
       {profile?.state !== "ready" && !waiting && <Button variant="secondary" disabled={sessionDisabled} loading={busy === "Use Saved Session"} onClick={verifySession}>Use Saved Session</Button>}
-      <Button variant="secondary" disabled={sessionDisabled || !secureImportOrigin} onClick={() => fileInput.current?.click()}>Import Chrome Session</Button>
-      <input ref={fileInput} type="file" accept=".json,application/json" aria-label="Chrome session file" hidden disabled={sessionDisabled || !secureImportOrigin} onChange={event => { sessionFile.current = event.target.files?.[0] || null; setFileSelected(!!sessionFile.current); }} />
-      <p className="text-xs text-text-muted">Session files are credentials. Import only into your trusted dashboard, then delete the local file. An existing connection accepts only the same ChatGPT account; use a new connection for another account.</p>
-      {!secureImportOrigin && <p role="status" className="text-xs text-amber-500">Session import requires HTTPS except for loopback development.</p>}
-      {fileSelected && <div className="flex flex-wrap gap-2">
-        <Button disabled={sessionDisabled || !secureImportOrigin} loading={busy === "Read session file" || busy === "Import session"} onClick={importSession}>Import selected session</Button>
-        <Button variant="secondary" disabled={!!busy} onClick={clearSessionFile}>Cancel import</Button>
-      </div>}
+      <Button variant="secondary" onClick={openAssistant}>Import Chrome Session</Button>
+      {assistantOpen && <section aria-label="Connect ChatGPT session" className="min-w-0 space-y-4 rounded-lg border border-border bg-surface p-3 sm:p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-sm font-medium">Connect ChatGPT session</h3>
+          <Button size="sm" variant="secondary" disabled={!!busy} onClick={closeAssistant}>Close session assistant</Button>
+        </div>
+        <p className="text-xs text-text-muted">Sessions are credentials. Connect only to your trusted dashboard. Never send session files or JSON to support. Existing connections accept only the same ChatGPT account; use a new connection for another account.</p>
+        <div role="tablist" aria-label="Session import method" className="flex flex-wrap gap-2" onKeyDown={event => {
+          if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+          const tabs = Array.from(event.currentTarget.querySelectorAll('[role="tab"]:not(:disabled)'));
+          const index = tabs.indexOf(document.activeElement);
+          if (index < 0) return;
+          event.preventDefault();
+          const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+          tabs[next].focus(); tabs[next].click();
+        }}>
+          {[["extension", "Connect automatically"], ["paste", "Paste JSON"], ["file", "Upload file"]].map(([mode, label]) => <Button key={mode} id={`session-import-tab-${mode}`} role="tab" tabIndex={importMode === mode ? 0 : -1} aria-selected={importMode === mode} aria-controls={`session-import-panel-${mode}`} variant={importMode === mode ? "primary" : "secondary"} disabled={!!busy} onClick={() => changeImportMode(mode)}>{label}</Button>)}
+        </div>
+        {!secureImportOrigin && <p role="status" className="text-xs text-amber-500">Session import requires HTTPS except for loopback development. Open this dashboard over HTTPS to connect; download and setup instructions remain available.</p>}
+        {sessionDisabled && secureImportOrigin && <p role="status" className="text-xs text-text-muted">Import is available when this profile is loaded and idle, with no private viewer or active turn. Finish or close the viewer and wait for the profile before importing.</p>}
+        <div ref={targetElement} {...{ "data-9router-chatgpt-session-target": directTarget ? JSON.stringify(directTarget) : undefined, "data-9router-chatgpt-session-consumed": directTarget && targetConsumed ? "true" : undefined }} className="min-w-0 space-y-3">
+          <input ref={fileInput} type="file" accept=".json,application/json" aria-label="Chrome session file" {...{ "data-9router-chatgpt-session-file": "" }} hidden disabled={sessionDisabled || !secureImportOrigin} onChange={event => {
+            const file = event.target.files?.length === 1 ? event.target.files[0] : null;
+            sessionFile.current = file;
+            setFileSelected(file ? { name: file.name, size: file.size } : null);
+          }} />
+          {importMode === "extension" && <div id="session-import-panel-extension" role="tabpanel" aria-labelledby="session-import-tab-extension" className="space-y-3 text-sm">
+            <p>The desktop Chrome helper sends your signed-in session directly to this connection after you confirm the server and connection in its popup. Opening the helper does not send cookies.</p>
+            <a href="/downloads/chatgpt-web-session-export.zip" download="chatgpt-web-session-export.zip" className="inline-block rounded-lg border border-border px-3 py-2 text-brand-500 hover:bg-surface-2">Download Chrome helper</a>
+            <details className="space-y-2 rounded-lg border border-border p-3">
+              <summary className="cursor-pointer font-medium">First-time setup or update</summary>
+              <ol className="list-decimal space-y-2 pl-5">
+                <li>Download the Chrome helper above and extract the ZIP into a folder. For an update, replace the old extracted helper and reload it in Chrome.</li>
+                <li>Copy <code className="break-all">chrome://extensions</code> into Chrome’s address bar. <Button size="sm" variant="secondary" onClick={async () => {
+                  try { await navigator.clipboard.writeText("chrome://extensions"); setClipboardNotice("Extensions address copied."); }
+                  catch { setClipboardNotice("Copy was blocked. Type chrome://extensions in the address bar."); }
+                }}>Copy extensions address</Button></li>
+                <li>Enable Developer mode, choose Load unpacked, and select the extracted <code className="break-all">chatgpt-web-session-export</code> folder containing <code>manifest.json</code>.</li>
+                <li>Sign in at <a href="https://chatgpt.com" target="_blank" rel="noopener noreferrer" className="text-brand-500 underline">chatgpt.com</a> using this same Chrome profile. Complete sign-in or MFA yourself.</li>
+                <li>Return to this dashboard tab. Open the helper with its extension icon or <kbd>Alt+Shift+9</kbd>.</li>
+                <li>Check the server address and connection below against the helper, then choose <strong>Connect to this 9Router</strong> in its popup.</li>
+              </ol>
+              {clipboardNotice && <p role="status" className="text-xs text-text-muted">{clipboardNotice}</p>}
+            </details>
+            <div className="space-y-1 rounded-lg bg-surface-2 p-3 text-xs break-all">
+              <p>Server: <strong>{typeof window !== "undefined" ? window.location.origin : ""}</strong></p>
+              <p>Connection: <strong>{connectionName}</strong></p>
+              <p>Profile ID: <strong>{profileId}</strong></p>
+            </div>
+            <p role="status" className="text-xs text-text-muted">{directTarget ? targetConsumed ? "This attempt has been consumed. Check the connection status; use Prepare connection only for a new explicit attempt." : "Connection prepared for five minutes. Confirm these details in the Chrome helper." : "No connection attempt is prepared. Choose Prepare connection when the saved profile is idle."}</p>
+            <Button variant="secondary" disabled={sessionDisabled || !secureImportOrigin || dirty || selectedProfileId !== profileId} onClick={prepareConnection}>Prepare connection</Button>
+            <p className="text-xs text-text-muted">Desktop Chrome is the supported helper browser. On mobile, Firefox, or Safari, use the private browser below, or paste/upload a session exported from desktop Chrome. The dashboard does not detect whether the helper is installed.</p>
+          </div>}
+          {importMode === "paste" && <div id="session-import-panel-paste" role="tabpanel" aria-labelledby="session-import-tab-paste" className="space-y-3">
+            <p className="text-sm text-text-muted">Choose Copy Session JSON in the Chrome helper, paste it here, then explicitly import. Pasting alone sends nothing. Clipboard history may retain this credential.</p>
+            <textarea aria-label="Session JSON" autoComplete="off" spellCheck={false} value={pastedSession} onChange={event => setPastedSession(event.target.value)} disabled={sessionDisabled || !secureImportOrigin} rows={6} className="w-full min-w-0 rounded-lg border border-border bg-surface-2 p-3 font-mono text-xs text-text-main" />
+            <Button disabled={sessionDisabled || !secureImportOrigin || !pastedSession.trim()} loading={busy === "Read pasted session" || busy === "Import session"} onClick={() => void importSession("paste")}>Import pasted session</Button>
+          </div>}
+          {importMode === "file" && <div id="session-import-panel-file" role="tabpanel" aria-labelledby="session-import-tab-file" className="space-y-3">
+            <p className="text-sm text-text-muted">Choose Export ChatGPT Session in the Chrome helper, then select its JSON file. Selection alone does not read or upload it. Delete the local credential file after import.</p>
+            <Button variant="secondary" disabled={sessionDisabled || !secureImportOrigin} onClick={() => fileInput.current?.click()}>Choose session file</Button>
+            {fileSelected && <p className="break-all text-xs text-text-muted">{fileSelected.name} · {fileSelected.size.toLocaleString()} bytes</p>}
+            <Button disabled={sessionDisabled || !secureImportOrigin || !fileSelected} loading={busy === "Read session file" || busy === "Import session"} onClick={() => void importSession("file")}>Import selected session</Button>
+          </div>}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="secondary" disabled={!!busy} onClick={() => { clearSessionFile(); invalidateTarget(); }}>Cancel import</Button>
+          <Button variant="secondary" disabled={disabled || (!profile && !waiting) || (needsLogin && active)} onClick={openBrowser}>Use private browser instead</Button>
+        </div>
+        <p className="text-xs text-text-muted">The private browser needs no exported session. Sign in or complete MFA in its viewer, then choose Finish Sign In to verify and save the session.</p>
+      </section>}
       {viewerOpen && waiting && <ChatGPTWebViewer key={lease.loginId} connectionName={connectionName} loginId={lease.loginId} profileId={profileId} expiresAt={lease.expiresAt} manualLogin={lease.manualLogin} verifying={busy === "Finish Sign In"} error={error} onFinish={finishLogin} onClose={() => setViewerOpen(false)} onEnded={endViewer} />}
       <details className="space-y-4">
         <summary className="cursor-pointer text-sm text-text-muted">Advanced</summary>
         <Input label="Selected profile ID" aria-label="Selected profile ID" value={selectedProfileId} readOnly />
-        {!!profiles.length && <Select label="Existing profiles" value={selectedProfileId} options={profiles.map(item => ({ value: item.profileId, label: `${item.profileId} — ${item.state.replaceAll("_", " ")}` }))} onChange={event => onProfileSelected(event.target.value)} disabled={!!busy} hint="Selecting changes the connection draft only. Save the connection above to switch profiles. Shared profiles share browser settings and the five-turn limit." />}
+        {!!profiles.length && <Select label="Existing profiles" value={selectedProfileId} options={profiles.map(item => ({ value: item.profileId, label: `${item.profileId} — ${item.state.replaceAll("_", " ")}` }))} onChange={event => { clearSessionFile(); invalidateTarget(); onProfileSelected(event.target.value); }} disabled={!!busy} hint="Selecting changes the connection draft only. Save the connection above to switch profiles. Shared profiles share browser settings and the five-turn limit." />}
         <Button size="sm" variant="secondary" disabled={!!busy} onClick={() => setRefresh(value => value + 1)}>Refresh</Button>
         {loaded && !profile && <p className="text-sm text-text-muted">The saved runtime profile is unavailable. Refresh or contact the operator; no replacement profile will be created silently.</p>}
         {profile && <>
@@ -339,7 +537,7 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
         <div className="flex flex-wrap gap-2">
           {profile.state === "ready" && <Button size="sm" variant="secondary" disabled={sessionDisabled} loading={busy === "Use Saved Session"} onClick={verifySession}>Use Saved Session</Button>}
           <Button size="sm" variant="secondary" disabled={disabled || active || waiting} loading={busy === "Start login"} onClick={() => act("login/start", { profileId }, "Start login")}>Start Login</Button>
-          <Button size="sm" variant="secondary" disabled={disabled} loading={busy === "View browser"} onClick={() => waiting ? setViewerOpen(true) : act("browser/view", { profileId }, "View browser")}>View Browser</Button>
+          <Button size="sm" variant="secondary" disabled={disabled} loading={busy === "View browser"} onClick={() => { clearSessionFile(); invalidateTarget(); setAssistantOpen(false); if (waiting) setViewerOpen(true); else void act("browser/view", { profileId }, "View browser"); }}>View Browser</Button>
           <Button size="sm" variant="secondary" disabled={disabled || active || waiting} loading={busy === "Restart browser"} onClick={() => act("browser/restart", { profileId }, "Restart browser")}>Restart Browser</Button>
         </div>
         <p className="text-xs text-text-muted">Login and restart require an idle profile. View Browser opens the existing private desktop for approvals, without restarting active turns.</p>
@@ -370,4 +568,4 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
     </section>
   );
 }
-ChatGPTWebRuntimePanel.propTypes = { connectionName: PropTypes.string.isRequired, profileId: PropTypes.string.isRequired, selectedProfileId: PropTypes.string, onProfileSelected: PropTypes.func.isRequired, onChanged: PropTypes.func.isRequired, onViewerOpenChange: PropTypes.func.isRequired, autoStartLogin: PropTypes.bool };
+ChatGPTWebRuntimePanel.propTypes = { connectionName: PropTypes.string.isRequired, profileId: PropTypes.string.isRequired, selectedProfileId: PropTypes.string, onProfileSelected: PropTypes.func.isRequired, onChanged: PropTypes.func.isRequired, onViewerOpenChange: PropTypes.func.isRequired, autoStartLogin: PropTypes.bool, autoOpenSessionImport: PropTypes.bool };

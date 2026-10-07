@@ -38,12 +38,14 @@ if (!extensionDir || !output || !isAbsolute(extensionDir) || !isAbsolute(output)
 }
 const manifest = JSON.parse(readFileSync(join(extensionDir, "manifest.json"), "utf8"));
 assert.equal(manifest.manifest_version, 3);
-assert.equal(manifest.name, "9Router ChatGPT Session Export");
-assert.equal(manifest.version, "1.0.0");
-assert.deepEqual(manifest.permissions, ["cookies"]);
+assert.deepEqual([...manifest.permissions].sort(), ["activeTab", "cookies", "scripting"]);
 assert.deepEqual(manifest.host_permissions, ["https://chatgpt.com/*"]);
-assert.deepEqual(manifest.action, { default_popup: "popup.html" });
-for (const field of ["background", "content_scripts", "externally_connectable", "web_accessible_resources", "optional_permissions", "optional_host_permissions"]) {
+assert.equal(typeof manifest.action?.default_popup, "string");
+assert.equal(manifest.background?.type, "module");
+assert.equal(typeof manifest.background?.service_worker, "string");
+assert.equal(manifest.commands?._execute_action?.suggested_key?.default, "Alt+Shift+9");
+assert(manifest.content_security_policy.extension_pages.includes("connect-src 'none'"));
+for (const field of ["content_scripts", "externally_connectable", "web_accessible_resources", "optional_permissions", "optional_host_permissions"]) {
   assert.equal(manifest[field], undefined, `Unexpected extension capability: ${field}`);
 }
 assert.equal(typeof manifest.key, "string");
@@ -108,7 +110,7 @@ try {
     headless: true,
     chromiumSandbox: true,
     acceptDownloads: true,
-    serviceWorkers: "block",
+    serviceWorkers: "allow",
     args: [
       `--disable-extensions-except=${extensionDir}`,
       `--load-extension=${extensionDir}`,
@@ -121,7 +123,7 @@ try {
   });
   await context.routeWebSocket("**/*", socket => socket.close());
   const page = await context.newPage();
-  await page.goto(`${extensionOrigin}/popup.html`);
+  await page.goto(`${extensionOrigin}/${manifest.action.default_popup}`);
   let downloads = 0;
   page.on("download", () => { downloads += 1; });
   await page.getByRole("button", { name: "Export ChatGPT Session", exact: true }).click();

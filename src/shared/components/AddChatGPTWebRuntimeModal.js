@@ -14,6 +14,7 @@ export default function AddChatGPTWebRuntimeModal({ isOpen, connection, onClose,
   const [profileId, setProfileId] = useState(connection?.providerSpecificData?.profileId || "");
   const [saving, setSaving] = useState(false);
   const [autoStartLogin, setAutoStartLogin] = useState(false);
+  const [autoOpenSessionImport, setAutoOpenSessionImport] = useState(false);
   const [viewerOpen, setViewerOpen] = useState(false);
   const [uncertain, setUncertain] = useState(false);
   const [error, setError] = useState("");
@@ -48,6 +49,7 @@ export default function AddChatGPTWebRuntimeModal({ isOpen, connection, onClose,
       setSavedConnection(data.connection);
       setProfileId(data.connection.providerSpecificData.profileId);
       setAutoStartLogin(!editing && authMethod === "browser");
+      setAutoOpenSessionImport(!editing && authMethod === "import");
       onSaved();
     } catch (cause) {
       if (!current.signal.aborted) {
@@ -72,7 +74,7 @@ export default function AddChatGPTWebRuntimeModal({ isOpen, connection, onClose,
           {(!savedConnection || hasChanges) && <Button aria-label={savedConnection ? "Save connection" : "Add Connection and Sign In"} onClick={() => save("browser")} loading={saving} disabled={uncertain || !name.trim() || (!!savedConnection && !PROFILE_ID.test(profileId.trim()))}>{savedConnection ? "Save connection" : "Add Connection & Sign In"}</Button>}
           {!savedConnection && <Button variant="secondary" aria-label="Add Connection and Import Session" onClick={() => save("import")} loading={saving} disabled={uncertain || !name.trim()}>Add Connection & Import Session</Button>}
         </div>
-        {isOpen && savedConnection && <ChatGPTWebRuntimePanel key={savedConnection.providerSpecificData.profileId} connectionName={name.trim() || savedConnection.name} profileId={savedConnection.providerSpecificData.profileId} selectedProfileId={profileId} autoStartLogin={autoStartLogin} onProfileSelected={setProfileId} onViewerOpenChange={setViewerOpen} onChanged={onSaved} />}
+        {isOpen && savedConnection && <ChatGPTWebRuntimePanel key={savedConnection.providerSpecificData.profileId} connectionName={name.trim() || savedConnection.name} profileId={savedConnection.providerSpecificData.profileId} selectedProfileId={profileId} autoStartLogin={autoStartLogin} autoOpenSessionImport={autoOpenSessionImport} onProfileSelected={setProfileId} onViewerOpenChange={setViewerOpen} onChanged={onSaved} />}
       </div>
     </Modal>
   );

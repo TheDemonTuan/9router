@@ -68,6 +68,8 @@ try {
     "-e", "ENABLE_REQUEST_LOGS=false", flags["--gateway-image"]]);
   createdGateway = true;
   command(["exec", gateway, "bun", "-e", "const end=Date.now()+30000;for(;;){try{const r=await fetch('http://127.0.0.1:20128/api/health');if(r.ok)break;}catch{}if(Date.now()>end)process.exit(1);await Bun.sleep(200);}"], 45000);
+  // Exercise the shipped standalone public tree, not a checkout-local asset.
+  command(["exec", gateway, "bun", "-e", "const r=await fetch('http://127.0.0.1:20128/downloads/chatgpt-web-session-export.zip',{redirect:'error'});if(!r.ok)process.exit(1);const b=new Uint8Array(await r.arrayBuffer());if(b.length<4||b[0]!==0x50||b[1]!==0x4b||b[2]!==3||b[3]!==4)process.exit(1);"]);
   command(["run", "--rm", "--name", runtime, "--network", `container:${gateway}`, "--read-only", "--cap-drop", "ALL",
     "--security-opt", "no-new-privileges:true", "--security-opt", `seccomp=${join(repository, "services/chatgpt-web-runtime/security/seccomp.json")}`,
     "--cpus", "1", "--memory", "2g", "--shm-size", "1g", "--tmpfs", "/tmp:rw,nosuid,nodev,size=512m,mode=1777",

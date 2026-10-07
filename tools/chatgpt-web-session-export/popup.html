@@ -12,16 +12,23 @@
     button { width: 100%; padding: 10px; border: 0; border-radius: 6px; background: #173e89; color: #fff; font: inherit; cursor: pointer; }
     button:disabled { opacity: .6; cursor: wait; }
     button:focus-visible { outline: 3px solid #738fcd; outline-offset: 3px; }
+    button { margin-top: 8px; }
+    dd { margin: 0 0 8px; overflow-wrap: anywhere; }
+    dt { font-weight: 600; }
     #status { min-height: 42px; }
   </style>
 </head>
 <body>
-  <h1>Export ChatGPT Session</h1>
-  <p>Use the Chrome profile signed in to the ChatGPT account you want to connect. If that session has expired, sign in to ChatGPT in Chrome first.</p>
-  <p class="warning">This file is a credential: it can grant access to your ChatGPT session. Keep it private, import it only into your trusted 9Router dashboard, then delete the local file.</p>
-  <p>Only unpartitioned ChatGPT cookies are exported. Google sign-in, passwords and other browser storage are not included. This does not bypass authentication or prevent session expiry or revocation.</p>
+  <h1>Connect ChatGPT Session</h1>
+  <p>Sign in to ChatGPT in this Chrome profile first. Return to the trusted 9Router dashboard's session assistant, then open this helper.</p>
+  <p class="warning">Your session is a credential. Connect only to a dashboard you trust. Clipboard history and exported files can retain credentials; never send them to support.</p>
+  <dl aria-label="Connection target"><dt>Server</dt><dd id="origin">Unavailable</dd><dt>Connection</dt><dd id="connection-name">Unavailable</dd><dt>Profile</dt><dd id="profile-id">Unavailable</dd></dl>
+  <p id="target-help">Checking the active dashboard tab…</p>
+  <button id="connect" type="button" disabled>Connect to this 9Router</button>
+  <button id="copy" type="button">Copy Session JSON</button>
+  <p>Only unpartitioned ChatGPT cookies are included, including HttpOnly session parts. Google cookies, passwords, storage and access-token APIs are not read. This does not bypass login or MFA.</p>
   <button id="export" type="button">Export ChatGPT Session</button>
   <p id="status" role="status" aria-live="polite"></p>
-  <script src="popup.js"></script>
+  <script type="module" src="popup.js"></script>
 </body>
 </html>

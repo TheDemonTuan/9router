@@ -5,10 +5,11 @@
   "private": true,
   "packageManager": "bun@1.4.2",
   "scripts": {
-    "dev": "bun --bun next dev --port 20127",
-    "dev:webpack": "bun --bun next dev --webpack --port 20127",
-    "build": "bun --bun next build",
-    "build:webpack": "bun --bun next build --webpack",
+    "prepare:chatgpt-session-export": "bun scripts/build-chatgpt-session-export.mjs",
+    "dev": "bun run prepare:chatgpt-session-export && bun --bun next dev --port 20127",
+    "dev:webpack": "bun run prepare:chatgpt-session-export && bun --bun next dev --webpack --port 20127",
+    "build": "bun run prepare:chatgpt-session-export && bun --bun next build",
+    "build:webpack": "bun run prepare:chatgpt-session-export && bun --bun next build --webpack",
     "postbuild": "bun scripts/copy-standalone-assets.mjs",
     "start": "bun custom-server.js --port 20127",
     "start:standalone": "bun ./.next/standalone/custom-server.js",
@@ -53,6 +54,7 @@
     "@tailwindcss/postcss": "^4.3.3",
     "eslint": "^9",
     "eslint-config-next": "16.3.7",
+    "fflate": "0.8.3",
     "postcss": "^8.5.28",
     "tailwindcss": "^4.3.3"
   },

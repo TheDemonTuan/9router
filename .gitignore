@@ -103,3 +103,7 @@ graphify-out/*
 .start-dev.ps1
 start-dev-silent.cjs
 debug.log
+
+# Generated ChatGPT session helper (source lives in tools/)
+/public/downloads/chatgpt-web-session-export/
+/public/downloads/chatgpt-web-session-export.zip

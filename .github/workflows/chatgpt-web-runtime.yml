@@ -20,6 +20,7 @@ on:
       - jsconfig.json
       - postcss.config.mjs
       - scripts/copy-standalone-assets.mjs
+      - scripts/build-chatgpt-session-export.mjs
       - scripts/docker-entrypoint.sh
       - .github/workflows/chatgpt-web-runtime.yml
   pull_request:
@@ -41,6 +42,7 @@ on:
       - jsconfig.json
       - postcss.config.mjs
       - scripts/copy-standalone-assets.mjs
+      - scripts/build-chatgpt-session-export.mjs
       - scripts/docker-entrypoint.sh
       - .github/workflows/chatgpt-web-runtime.yml
   workflow_dispatch:
@@ -236,6 +238,9 @@ jobs:
         id: onboarding
         run: |
           set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y xvfb xdotool
+          export CGW_GATEWAY_BUN="$(command -v bun)"
           export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/cgw-export-browser"
           "$RUNNER_TEMP/cgw-bun-1.4.0" services/chatgpt-web-runtime/node_modules/playwright-core/cli.js install chromium
           # Ubuntu restricts user namespaces for downloaded Chrome. Allow only this
@@ -248,7 +253,12 @@ jobs:
           sudo apparmor_parser -a "$sandbox_profile"
           trap 'sudo apparmor_parser -R "$sandbox_profile"; rm -f "$sandbox_profile"' EXIT
           "$RUNNER_TEMP/cgw-bun-1.4.0" services/chatgpt-web-runtime/scripts/session-export-smoke.ts \
-            --extension-dir "$PWD/tools/chatgpt-web-session-export" --output "$RUNNER_TEMP/cgw-synthetic-session.json"
+            --extension-dir "$PWD/public/downloads/chatgpt-web-session-export" --output "$RUNNER_TEMP/cgw-synthetic-session.json"
+          xvfb-run -a "$RUNNER_TEMP/cgw-bun-1.4.0" services/chatgpt-web-runtime/scripts/session-connect-smoke.ts \
+            --worktree "$PWD" --proof-dir "$RUNNER_TEMP/cgw-session-connect-proof"
+          xvfb-run -a "$RUNNER_TEMP/cgw-bun-1.4.0" services/chatgpt-web-runtime/scripts/session-connect-smoke.ts \
+            --worktree "$PWD" --gateway-entry "$PWD/.next/standalone/custom-server.js" \
+            --proof-dir "$RUNNER_TEMP/cgw-session-connect-standalone-proof"
           gateway="cgw-onboarding-gateway:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}"
           docker build -f Dockerfile -t "$gateway" .
           bun tests/integration/chatgpt-web-onboarding-smoke.mjs --gateway-image "$gateway" \
@@ -260,6 +270,16 @@ jobs:
         with:
           name: cgw-provider-onboarding-${{ matrix.arch }}
           path: ${{ runner.temp }}/cgw-onboarding-proof
+          if-no-files-found: error
+          retention-days: 7
+      - name: Preserve synthetic direct connection proof
+        if: ${{ !cancelled() && (steps.onboarding.outcome == 'success' || steps.onboarding.outcome == 'failure') }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cgw-session-connect-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/cgw-session-connect-proof
+            ${{ runner.temp }}/cgw-session-connect-standalone-proof
           if-no-files-found: error
           retention-days: 7
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
