@@ -55,7 +55,7 @@ COPY services/chatgpt-web-runtime/LICENSE ./LICENSE
 COPY services/chatgpt-web-runtime/LICENSES/ ./LICENSES/
 COPY services/chatgpt-web-runtime/image-build-manifest.json ./image-build-manifest.json
 COPY services/chatgpt-web-runtime/security/seccomp.json ./security/seccomp.json
-ENV HOME=/home/cgw CGW_DATA_DIR=/data CGW_PORT=17841 CGW_CHROMIUM_EXECUTABLE=/opt/cgw-browser/154.0.8037.97/chrome \
+ENV HOME=/home/cgw CGW_DATA_DIR=/data CGW_PORT=17841 CGW_CHROMIUM_EXECUTABLE=/opt/cgw-browser/155.0.8059.39/chrome \
     XDG_CACHE_HOME=/tmp/cgw-cache XDG_CONFIG_HOME=/tmp/cgw-config XDG_RUNTIME_DIR=/run/cgw \
     PATH=/usr/local/bin:/usr/bin:/bin
 USER 10001:10001
