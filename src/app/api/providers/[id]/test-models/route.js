@@ -59,7 +59,7 @@ export async function POST(request, { params }) {
     const [first, ...rest] = models;
     const options = { ...(providerId === "chatgpt-web" ? { connectionId: id } : {}), signal: request.signal };
     const probe = model => providerId === "chatgpt-web" && !model.generic
-      ? Promise.resolve({ ok: false, status: 400, latencyMs: 0, error: "Full models require the signed Codex companion; select Browser-only for API-key text tests" })
+      ? Promise.resolve({ ok: false, status: 400, latencyMs: 0, error: "No verified generic text route is available; verify the saved session and runtime prerequisites before sending a model test" })
       : pingModelByKind(`${alias}/${model.id}`, model.kind || model.type || "llm", baseUrl, options);
     const firstResult = await probe(first);
     const results = [{ modelId: first.id, name: first.name || first.id, ...firstResult }];

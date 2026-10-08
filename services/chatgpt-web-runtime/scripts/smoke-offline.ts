@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startRuntime } from "../src/server";
@@ -42,6 +42,27 @@ try {
   const catalogResponse = await fetch(`${base}/v1/web-models`, { headers: { authorization: data, "x-cgw-profile-id": "offline-fixture" } });
   const catalog = await catalogResponse.json();
   assert(catalogResponse.ok && catalog.models.some((row: { id: string }) => row.id === "chatgpt-web/gpt-5.6-sol"), "Dotted model route missing after actual browser probe");
+  const harnessGet = () => fetch(`${base}/admin/harness/status?profileId=offline-fixture`, { headers: { authorization: admin } });
+  const initialHarness = await (await harnessGet()).json();
+  assert(initialHarness.source === "none" && !initialHarness.keyConfigured && initialHarness.configRevision === 0 && Number(physicalSends) === 0, "Read-only harness status launched work or invented provisioning");
+  const harnessScope = { profileId: "offline-fixture", revision: runtime.state.profile("offline-fixture").revision, configRevision: 0 };
+  const tunnelId = `tunnel_${"a".repeat(32)}`, syntheticRuntimeKey = "synthetic-harness-runtime-key-".repeat(3);
+  const firstMissingKey = await post("/admin/harness/configure", { ...harnessScope, tunnelId }, admin);
+  assert(firstMissingKey.status === 400, "First managed configuration accepted no runtime key");
+  const unauthorizedHarness = await post("/admin/harness/configure", { ...harnessScope, tunnelId, runtimeApiKey: syntheticRuntimeKey });
+  assert(unauthorizedHarness.status === 401, "Data token granted admin tunnel provisioning");
+  const configuredResponse = await post("/admin/harness/configure", { ...harnessScope, tunnelId, runtimeApiKey: syntheticRuntimeKey }, admin);
+  const configuredText = await configuredResponse.text(), configured = JSON.parse(configuredText);
+  assert(configuredResponse.ok && configured.configRevision === 1 && configured.source === "managed" && !configuredText.includes(syntheticRuntimeKey), "Managed provisioning failed or leaked its key");
+  const secretPath = join(root, "profiles", "offline-fixture", "secrets", "harness.json");
+  assert((statSync(secretPath).mode & 0o777) === 0o600 && (statSync(join(secretPath, "..")).mode & 0o777) === 0o700, "Managed harness secret permissions are not private");
+  const beforeConflict = readFileSync(secretPath, "utf8");
+  const staleConfig = await post("/admin/harness/configure", { ...harnessScope, tunnelId, runtimeApiKey: "different-synthetic-runtime-key-".repeat(3) }, admin);
+  assert(staleConfig.status === 409 && readFileSync(secretPath, "utf8") === beforeConflict, "Stale config overwrote committed runtime credentials");
+  const failedVerification = await post("/admin/harness/verify", { ...harnessScope, configRevision: 1 }, admin);
+  assert(!failedVerification.ok && runtime.profiles.ready("offline-fixture") && Number(physicalSends) === 0, "Failed connector verification destroyed a verified browser session or sent inference");
+  const savedHarness = await (await harnessGet()).json();
+  assert(savedHarness.tunnelState === "stopped" && !savedHarness.canEnableFull && savedHarness.keyConfigured && Number(physicalSends) === 0, "Unverified managed tunnel advertised Full readiness");
   const threadId = "01a06c66-4232-7ae1-9108-69b5f70e0671", turnId = "01a06c66-4380-75c6-a0df-318f890ef6de";
   const bindingResponse = await post("/v1/thread-bindings/resolve", { clientId: "offline-client", threadId, candidateProfileIds: ["offline-fixture"] });
   const binding = await bindingResponse.json(); assert(bindingResponse.ok, "Durable thread binding failed");
@@ -138,6 +159,7 @@ try {
     "Expired generic profile reached Send or reported false completion");
   console.info(JSON.stringify({ gate: "runtime-offline-browser", protocolVersion: 1, platform: process.platform,
     chromiumVersion: context.browser()?.version(), authenticatedHttp: true, modelEffortReadback: true, composerCleared: true,
+    managedConfigurationHttp: true, managedSecretPermissions: true, harnessReadOnlyZeroSend: true, failedConnectorPreservesBrowserSession: true,
     parallelReplayRejected: true, unsupportedEffortNotSent: true, expiredSessionNotSent: true, genericStreamAndJson: true, genericHistoryIsolated: true, genericPhysicalRetirement: true, physicalSends,
     terminal: "completed", liveChatGpt: false, outerCodexToolE2e: false }));
 } finally {

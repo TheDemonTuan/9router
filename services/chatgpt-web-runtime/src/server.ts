@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { Server } from "bun";
 import { RuntimeSingletonLock } from "./process";
 import { RuntimeState, RuntimeStateError } from "./runtime-state";
 import { RuntimeProfiles } from "./profiles";
+import { browserProfileWork } from "./browser/manager";
 import { ViewerTransport, LOGIN_ID_PATTERN, VIEWER_MAX_MESSAGE, VIEWER_MAX_BUFFER } from "./viewer-transport";
 import { browserProviderConfig, loadRuntimeConfig, providerConfig, tokenMatches } from "./config";
 import type { RuntimeConfig } from "./config";
@@ -25,17 +27,20 @@ import { bridgeToResponsesSSE, buildResponseJSON } from "./bridge";
 import { readJsonRequestBody } from "./http-body";
 import { namespacedToolName } from "./types";
 import type { AdapterEvent, CodexParsedRequest } from "./types";
-import { PROTOCOL_VERSION, SERVICE_NAME, UPSTREAM_REVISION, validateProfileId } from "../protocol.js";
+import { MAX_BROWSER_TURNS, PROTOCOL_VERSION, SERVICE_NAME, UPSTREAM_REVISION, validateProfileId } from "../protocol.js";
 import { VERSION } from "./version";
 import { runtimeExecutionScope } from "./runtime-scope";
 import { readChatGptWebSessionImport, SessionTransferError } from "../session-transfer.js";
 import { BrowserRequestError, validateBrowserResponsesRequest } from "../browser-request.js";
+import { AgentRequestError, validateAgentResponsesRequest } from "../agent-request.js";
+import { AgentTurnError, closeAgentTurnBrokers } from "./agent-turns";
+import { createChatGptWebAgentAdapter } from "./agent-adapter";
 
 export interface BrowserRuntimeEnvelope {
   protocolVersion: 1; profileId: string; profileEpoch: string; request: Record<string, unknown>;
   effectiveModel: string; effectiveReasoning: string; transformedRequestSha256: string;
 }
-export function validateBrowserRuntimeEnvelope(value: unknown, headerProfile: string | null): BrowserRuntimeEnvelope {
+export function validateBrowserRuntimeEnvelope(value: unknown, headerProfile: string | null, mode: "browser" | "agent" = "browser"): BrowserRuntimeEnvelope {
   const envelope = record(value);
   const allowed = ["protocolVersion", "profileId", "profileEpoch", "request", "effectiveModel", "effectiveReasoning", "transformedRequestSha256"];
   if (Object.keys(envelope).length !== allowed.length || Object.keys(envelope).some(key => !allowed.includes(key))
@@ -50,7 +55,7 @@ export function validateBrowserRuntimeEnvelope(value: unknown, headerProfile: st
   const request = record(envelope.request);
   const transformedRequestSha256 = sha256(JSON.stringify(request));
   if (envelope.transformedRequestSha256 !== transformedRequestSha256) throw new RuntimeStateError("transformed_body_mismatch", "Internal request integrity mismatch", 400);
-  const normalized = validateBrowserResponsesRequest(request);
+  const normalized = mode === "agent" ? validateAgentResponsesRequest(request) : validateBrowserResponsesRequest(request);
   if (normalized.model !== envelope.effectiveModel || normalized.reasoning?.effort !== undefined && normalized.reasoning.effort !== envelope.effectiveReasoning) {
     throw new RuntimeStateError("model_scope_mismatch", "Effective browser model or reasoning mismatch", 400);
   }
@@ -105,6 +110,7 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
   try { profiles = new RuntimeProfiles(config, state, loadProfileTunnelConfigs(tunnelFile, config.dataDir)); }
   catch (error) { state.close(); singleton.close(); throw error; }
   let activeHttpRequests = 0;
+  const agentAborts = new Set<AbortController>();
   let shuttingDown = false;
   let initializing = true;
   let childrenInitialized = false;
@@ -116,14 +122,14 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
     lifecycleTail = operation.catch(() => {});
     return operation;
   };
-  const activity = () => ({ activeHttpRequests, activeBrowserTurns: chatGptTurnSessions.activeCount(), pendingToolCalls: brokerWorkSnapshot().pendingToolCalls });
+  const activity = () => ({ activeHttpRequests, activeBrowserTurns: state.listProfiles().reduce((count, profile) => count + browserProfileWork(profile.profileId).activeTurns, 0), pendingToolCalls: brokerWorkSnapshot().pendingToolCalls });
   const hasPhysicalWork = () => {
     const broker = brokerWorkSnapshot();
-    return activeHttpRequests > 0 || chatGptTurnSessions.physicalWorkCount() > 0 || broker.owners > 0
+    return activeHttpRequests > 0 || agentAborts.size > 0 || chatGptTurnSessions.physicalWorkCount() > 0 || broker.owners > 0
       || broker.pendingToolCalls > 0 || broker.activeMcpRequests > 0 || broker.openSockets > 0 || !profiles.physicalIdle();
   };
   const errorResponse = (error: unknown) => {
-    const typed = error instanceof RuntimeStateError || error instanceof AuthorityError || error instanceof SessionTransferError || error instanceof BrowserRequestError;
+    const typed = error instanceof RuntimeStateError || error instanceof AuthorityError || error instanceof SessionTransferError || error instanceof BrowserRequestError || error instanceof AgentRequestError || error instanceof AgentTurnError;
     const code = typed ? error.code : "runtime_request_failed";
     const status = typed ? error.status : 500;
     return Response.json({ error: { type: "runtime_error", code, message: typed ? error.message : "Runtime request failed",
@@ -230,13 +236,13 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
     return Response.json({ output: buildCompactV1Output(extractCompactUserMessages(envelope.request.input), summary) });
     });
   };
-  const handleBrowserResponse = async (request: Request): Promise<Response> => {
+  const handleUnsignedResponse = async (request: Request, mode: "browser" | "agent"): Promise<Response> => {
     if (state.fence() || shuttingDown) throw new RuntimeStateError("runtime_draining", "Runtime is draining", 503);
-    const envelope = validateBrowserRuntimeEnvelope(await readJsonRequestBody(request), request.headers.get("x-cgw-profile-id"));
+    const envelope = validateBrowserRuntimeEnvelope(await readJsonRequestBody(request), request.headers.get("x-cgw-profile-id"), mode);
     await profiles.refreshReadiness(envelope.profileId);
     if (state.fence() || shuttingDown) throw new RuntimeStateError("runtime_draining", "Runtime is draining", 503);
     const profile = state.profile(envelope.profileId);
-    if (profile.settings.mode !== "browser-only") throw new RuntimeStateError("codex_authority_required", "Full profiles require signed Codex companion authority", 400);
+    if (mode === "agent" && profile.settings.mode !== "full") throw new RuntimeStateError("agent_tools_unavailable", "Coding tools require a verified Full profile", 503);
     if (profile.epoch !== envelope.profileEpoch) throw new RuntimeStateError("profile_epoch_mismatch", "Account epoch changed", 409);
     const evidence = profiles.evidence(profile.profileId);
     const row = evidence.models.find(row => row.id === envelope.effectiveModel);
@@ -244,19 +250,25 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
       || !row.supported_reasoning_levels.includes(envelope.effectiveReasoning)) {
       throw new RuntimeStateError("model_version_unavailable", "Exact Browser-only model and reasoning route unavailable", 400);
     }
+    if (mode === "agent" && row.capabilities.generic_tools !== true) throw new RuntimeStateError("agent_tools_unavailable", "Generic tool handoff has not passed runtime compatibility checks", 503);
     const route = requireChatGptWebModelRoute(envelope.effectiveModel, evidence.capabilities, envelope.effectiveReasoning);
     if (route.interactionMode !== "automatic") throw new RuntimeStateError("model_version_unavailable", "Manual routes are not supported", 400);
+    if (browserProfileWork(profile.profileId).activeTurns >= MAX_BROWSER_TURNS) throw new RuntimeStateError("provider_busy", "ChatGPT profile has five physical browser turns", 503);
     const requestId = randomUUID();
-    return runtimeExecutionScope.run({ profileId: profile.profileId, profileEpoch: profile.epoch, clientId: `browser:${requestId}` }, async () => {
-      const parsed = parseRequest(envelope.request);
+    return runtimeExecutionScope.run({ profileId: profile.profileId, profileEpoch: profile.epoch, clientId: `${mode}:${requestId}` }, async () => {
+      const parsed = parseRequest(envelope.request, { preserveInstructionOrder: mode === "agent" });
       parsed._chatgptEffectiveModelIdentity = { routeId: route.slug, browserFamily: route.modelFamily || route.backendModel, reasoning: envelope.effectiveReasoning };
       parsed._chatgptModelFamily = route.modelFamily;
       parsed.modelId = route.backendModel; parsed.options.reasoning = route.adapterEffort;
       const provider = browserProviderConfig({ profileId: profile.profileId, profileEpoch: profile.epoch, requestId,
         settings: profile.settings, capabilities: evidence.capabilities, dataDir: config.dataDir, contextWindow: row.context_window });
-      const adapter = createChatGptWebAdapter(provider, { browserRequestId: requestId });
+      const adapter = mode === "agent" ? createChatGptWebAgentAdapter(provider, { requestId, profileId: profile.profileId,
+        profileEpoch: profile.epoch, model: envelope.effectiveModel, effort: envelope.effectiveReasoning,
+        socketPath: join(config.dataDir, "profiles", profile.profileId, "run", "agent-turns.sock") })
+        : createChatGptWebAdapter(provider, { browserRequestId: requestId });
       const queue = new AsyncEventQueue<AdapterEvent>();
       const abort = new AbortController();
+      if (mode === "agent") agentAborts.add(abort);
       const onDisconnect = () => abort.abort();
       request.signal.addEventListener("abort", onDisconnect, { once: true });
       if (request.signal.aborted) onDisconnect();
@@ -271,6 +283,7 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
           if (["login_required", "session_expired", "model_version_unavailable"].includes(code)) profiles.invalidate(profile.profileId, code);
           queue.push({ type: "error", message: "ChatGPT Web browser turn failed", code, retryable: false });
         } finally {
+          agentAborts.delete(abort);
           request.signal.removeEventListener("abort", onDisconnect);
           queue.close();
         }
@@ -330,12 +343,14 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
           return Response.json(state.resolveBinding({ clientId: body.clientId, threadId: body.threadId, candidateProfileIds: body.candidateProfileIds,
             ...(typeof body.requestedProfileId === "string" ? { requestedProfileId: body.requestedProfileId } : {}), ready: id => profiles.ready(id) }));
         }
-        if (request.method === "POST" && (path === "/v1/responses" || path === "/v1/responses/compact" || path === "/v1/browser/responses")) {
+        if (request.method === "POST" && (path === "/v1/responses" || path === "/v1/responses/compact" || path === "/v1/browser/responses" || path === "/v1/agent/responses")) {
           activeHttpRequests++;
           let counted = true;
           const release = () => { if (counted) { counted = false; activeHttpRequests--; } };
           try {
-            const response = path === "/v1/browser/responses" ? await handleBrowserResponse(request) : await handleResponse(request, path.endsWith("/compact"));
+            const response = path === "/v1/browser/responses" || path === "/v1/agent/responses"
+              ? await handleUnsignedResponse(request, path === "/v1/agent/responses" ? "agent" : "browser")
+              : await handleResponse(request, path.endsWith("/compact"));
             if (!response.body) { release(); return response; }
             const reader = response.body.getReader();
             return new Response(new ReadableStream({ async pull(controller) {
@@ -365,6 +380,24 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
           return Response.json({ cancelled: browser.cancelled + compaction.cancelled });
         }
         if (admin) {
+          if (path === "/admin/harness/status") {
+            const ids = url.searchParams.getAll("profileId");
+            if (request.method !== "GET" || ids.length !== 1 || [...url.searchParams.keys()].some(key => key !== "profileId")) throw new RuntimeStateError("invalid_request", "Exact profile ID required", 400);
+            return Response.json(profiles.harnessStatus(validateProfileId(ids[0])), { headers: { "Cache-Control": "no-store" } });
+          }
+          const harnessAction = /^\/admin\/harness\/(configure|start|verify|activate|disconnect)$/.exec(path);
+          if (harnessAction) {
+            if (request.method !== "POST" || url.search) throw new RuntimeStateError("method_not_allowed", "Harness mutations require POST without query parameters", 405);
+            const body = record(await readJsonRequestBody(request));
+            const configuring = harnessAction[1] === "configure";
+            const allowed = configuring ? ["profileId", "revision", "configRevision", "tunnelId", "runtimeApiKey"] : ["profileId", "revision", "configRevision"];
+            if (Object.keys(body).some(key => !allowed.includes(key)) || !Object.hasOwn(body, "profileId")
+              || !Number.isSafeInteger(body.revision) || Number(body.revision) < 1 || !Number.isSafeInteger(body.configRevision) || Number(body.configRevision) < 0
+              || configuring && (typeof body.tunnelId !== "string" || body.runtimeApiKey !== undefined && typeof body.runtimeApiKey !== "string")) throw new RuntimeStateError("invalid_request", "Invalid harness configuration request", 400);
+            const profileId = validateProfileId(body.profileId);
+            return await lifecycle(async () => Response.json(await profiles.harnessAction(harnessAction[1] as "configure" | "start" | "verify" | "activate" | "disconnect", profileId, body.revision as number, body.configRevision as number,
+              configuring ? { tunnelId: body.tunnelId as string, ...(body.runtimeApiKey !== undefined ? { runtimeApiKey: body.runtimeApiKey as string } : {}) } : undefined), { headers: { "Cache-Control": "no-store" } }));
+          }
           if (request.method === "GET" && path === "/admin/profiles" && !state.fence()) await Promise.all(state.listProfiles().map(profile => profiles.refreshReadiness(profile.profileId)));
           if (request.method === "GET" && path === "/admin/profiles") return Response.json({
             profiles: state.listProfiles().map(profile => profiles.status(profile.profileId)), protocolVersion: PROTOCOL_VERSION,
@@ -389,7 +422,7 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
           }
           if (request.method === "POST" && path === "/admin/profiles") { state.createProfile(validateProfileId(body.profileId)); return Response.json(profiles.status(body.profileId as string)); }
           const profilePatch = /^\/admin\/profiles\/([a-z0-9-]+)$/.exec(path);
-          if (request.method === "PATCH" && profilePatch) return Response.json(await profiles.patch(profilePatch[1]!, Number(body.revision), body.settings));
+          if (request.method === "PATCH" && profilePatch) return await lifecycle(async () => Response.json(await profiles.patch(profilePatch[1]!, Number(body.revision), body.settings)));
           if (request.method === "POST" && ["/admin/login/start", "/admin/browser/view"].includes(path)) {
             const profileId = validateProfileId(body.profileId);
             let traceId: string | undefined;
@@ -406,17 +439,22 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
             return await lifecycle(async () => Response.json(await profiles.startViewer(profileId, path.endsWith("/start"), traceId), { headers: { "Cache-Control": "no-store" } }));
           }
           if (request.method === "POST" && path === "/admin/browser/restart") {
-            const manager = profiles.manager(validateProfileId(body.profileId)); if (!manager.isIdle) throw new RuntimeStateError("profile_active", "Browser restart requires idle profile");
-            await manager.close(); await profiles.probe(body.profileId as string); return Response.json(profiles.status(body.profileId as string));
+            return await lifecycle(async () => {
+              const manager = profiles.manager(validateProfileId(body.profileId)); if (!manager.isIdle) throw new RuntimeStateError("profile_active", "Browser restart requires idle profile");
+              await manager.close(); await profiles.probe(body.profileId as string); return Response.json(profiles.status(body.profileId as string));
+            });
           }
           if (request.method === "POST" && path === "/admin/smoke") {
             if (body.kind !== "browser" && body.kind !== "harness") throw new RuntimeStateError("invalid_smoke", "Explicit browser or harness smoke required", 400);
             const profileId = validateProfileId(body.profileId);
-            if (body.kind === "harness") await profiles.harnessSmoke(profileId); else await profiles.probe(profileId);
-            return Response.json({ profile: profiles.status(profileId), outerToolE2eVerified: false });
+            return await lifecycle(async () => {
+              if (body.kind === "harness") await profiles.harnessSmoke(profileId); else await profiles.probe(profileId);
+              return Response.json({ profile: profiles.status(profileId), outerToolE2eVerified: false });
+            });
           }
           if (request.method === "POST" && path === "/admin/drain") return await lifecycle(async () => {
             const result = state.drain(String(body.operationId || ""));
+            for (const abort of agentAborts) abort.abort(new RuntimeStateError("runtime_draining", "Runtime is draining", 503));
             await profiles.closeViewer();
             return Response.json(result);
           });
@@ -425,7 +463,7 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
             await initialized.catch(() => {});
             if (hasPhysicalWork()) throw new RuntimeStateError("runtime_busy", "Logical and physical work must settle");
             childrenInitialized = false;
-            await profiles.close(); await closeTurnBrokers(); closeResponseState(); state.quiesce(String(body.operationId || ""));
+            await profiles.close(); await closeTurnBrokers(); await closeAgentTurnBrokers(); closeResponseState(); state.quiesce(String(body.operationId || ""));
             return Response.json({ operationId: body.operationId, state: "quiesced" });
           });
           if (request.method === "POST" && path === "/admin/resume") return await lifecycle(async () => {
@@ -459,11 +497,12 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
     if (closing) return closing;
     shuttingDown = true;
     if (!state.fence()) state.drain(`shutdown-${randomUUIDForShutdown()}`);
+    for (const abort of agentAborts) abort.abort(new RuntimeStateError("runtime_draining", "Runtime is draining", 503));
     closing = lifecycle(async () => {
       await initialized.catch(() => {});
       await profiles.closeViewer();
       while (hasPhysicalWork()) await Bun.sleep(50);
-      await profiles.close(); await closeTurnBrokers(); closeResponseState(); state.close(); await server.stop(); singleton.close();
+      await profiles.close(); await closeTurnBrokers(); await closeAgentTurnBrokers(); closeResponseState(); state.close(); await server.stop(); singleton.close();
     });
     return closing;
   };

@@ -390,8 +390,8 @@ describe("dashboard guard helpers", () => {
   });
 });
 
-describe("ChatGPT Web runtime dashboard-only administration", () => {
-  const path = "/api/providers/chatgpt-web/runtime/profiles";
+describe.each(["profiles", "harness/status", "harness/configure", "harness/start", "harness/verify", "harness/activate", "harness/disconnect"])("ChatGPT Web runtime dashboard-only administration: %s", action => {
+  const path = `/api/providers/chatgpt-web/runtime/${action}`;
   beforeEach(() => {
     vi.clearAllMocks();
     delete process.env.API_HOST;
@@ -412,6 +412,10 @@ describe("ChatGPT Web runtime dashboard-only administration", () => {
     mocks.verifyDashboardAuthToken.mockResolvedValue(false);
     mocks.verifyCloudflareAccessJwt.mockResolvedValue(true);
     expect(await proxy(request(path, { "cf-access-jwt-assertion": "access-jwt" }))).toBe(mocks.nextResponse);
+  });
+  it("does not trust an unverified Access JWT or an API key combined with that header", async () => {
+    expect((await proxy(request(path, { authorization: "Bearer valid-api-key", "cf-access-jwt-assertion": "unverified-jwt" }))).status).toBe(401);
+    expect(mocks.verifyCloudflareAccessJwt).toHaveBeenCalledWith("unverified-jwt");
   });
   it("excludes the public API domain even with valid dashboard authentication", async () => {
     process.env.API_HOST = "api.example.com";

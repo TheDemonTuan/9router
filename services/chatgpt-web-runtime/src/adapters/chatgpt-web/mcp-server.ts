@@ -8,6 +8,7 @@ import type { ChatGptTurnEnvironment } from "./environment";
 import { CODEX_COMPACTION_CONTROL_WIRE_NAME } from "./native-compaction-control";
 import { callTurnBroker, TurnBrokerTimeoutError, type BrokerToolResult } from "./turn-broker";
 import { observeMcpToolCalls } from "./mcp-observation";
+import { AgentTurnError, submitAgentToolCalls } from "../../agent-turns";
 
 interface ClaimedTurn {
   bindingId: string;
@@ -411,6 +412,7 @@ function execCommandGatewayProgram(
 
 export async function runChatGptMcpServer(options: {
   brokerSocketPath: string;
+  agentBrokerSocketPath?: string;
   contract?: ChatGptMcpContract;
 }): Promise<void> {
   const contract = options.contract ?? "native";
@@ -419,6 +421,27 @@ export async function runChatGptMcpServer(options: {
     { name: "codex-native", version: VERSION },
     undefined,
   );
+
+  if (options.agentBrokerSocketPath) {
+    const agentSocket = options.agentBrokerSocketPath;
+    server.registerTool("router_submit_tool_calls", {
+      title: "Propose a batch of outer API client tool calls",
+      description: "Submit exactly one batch of function-call proposals using the current request_token. This only queues proposals for the outer OpenAI-compatible API client: it does not execute tools, commands or filesystem operations. After receiving queued:true, executed:false, stop calling tools and end the browser response. The outer client owns execution and approval and supplies results in a new complete-history API request. Native Codex turn tokens are not accepted.",
+      inputSchema: {
+        request_token: z.string().min(1).max(64),
+        calls: z.array(z.object({ name: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/), arguments: z.record(z.string(), z.unknown()) }).strict()).min(1).max(128),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    }, async (input, extra) => {
+      try {
+        const receipt = await submitAgentToolCalls(agentSocket, input.request_token, input.calls, extra.signal);
+        return result({ ...receipt, next_action: "End the browser response. Tools have not been executed." });
+      } catch (error) {
+        const safe = error instanceof AgentTurnError ? error : new AgentTurnError("agent_request_expired");
+        return result({ code: safe.code, message: safe.message }, true);
+      }
+    });
+  }
 
   const claimTurn = async (
     toolName: string,
@@ -888,5 +911,6 @@ export async function runChatGptMcpServer(options: {
 
   
 
-  await server.connect(observeMcpToolCalls(new StdioServerTransport(), BRIDGE_TOOL_NAMES));
+  const observedTools = new Set([...BRIDGE_TOOL_NAMES, ...(options.agentBrokerSocketPath ? ["router_submit_tool_calls"] : [])]);
+  await server.connect(observeMcpToolCalls(new StdioServerTransport(), observedTools));
 }

@@ -1,7 +1,9 @@
 import { beforeEach, expect, it, vi } from "vitest";
+import "../translator/registerAll.js";
 const mocks = vi.hoisted(() => ({ getChatGptWebCatalog: vi.fn(), requestChatGptWebRuntime: vi.fn(), hasChatGptWebModel: (catalog, model) => catalog.models.some(row => row.id === model) }));
 vi.mock("open-sse/services/chatgptWebRuntimeClient.js", () => mocks);
 const { ChatGPTWebExecutor, isChatGptWebRetryable } = await import("../../open-sse/executors/chatgpt-web.js");
+const { translateRequest } = await import("../../open-sse/translator/index.js");
 const row = { id: "chatgpt-web/gpt-5.6-sol", supported_reasoning_levels: ["medium", "high"], default_reasoning_level: "high", capabilities: { native_responses: true, tools: false } };
 beforeEach(() => { vi.clearAllMocks(); mocks.getChatGptWebCatalog.mockResolvedValue({ profileId: "fixture", profileEpoch: "epoch", stale: false, models: [row] }); });
 it.each([[429, "", "not_sent", 1, false], [429, "quota_exhausted", "not_sent", 1, false], [503, "provider_busy", "not_sent", 1, false], [429, "rate_limited", "sent", 1, false], [429, "rate_limited", "unknown", 1, false], [429, "rate_limited", "not_sent", 0, false], [429, "rate_limited", "not_sent", 1, true], [503, "temporarily_unavailable", "not_sent", 1, true]])("retry %s/%s/%s requires positive proven pre-send evidence", (status, code, submission_state, retry_after, expected) => {
@@ -44,6 +46,56 @@ it("generic rejects unsupported bodies before catalog/transport and never upgrad
   const mixed = await executor.execute({ model: row.id, body: { input: "hello" }, credentials: { chatGptWebRequestMode: "browser", chatGptWebAuthority: { purpose: "responses" } } });
   expect(mixed.response.status).toBe(400);
 });
+it("agent mode rejects unsupported bodies before catalog/transport and never upgrades authority", async () => {
+  const executor = new ChatGPTWebExecutor();
+  for (const extra of [
+    { previous_response_id: "prior" },
+    { authority: {} },
+    { max_output_tokens: 2 },
+    { client_metadata: { cwd: "/tmp" } },
+    { tools: [{ type: "function", name: "bad tool name" }] },
+    { tools: [{ type: "function", name: "exec", parameters: { $ref: "https://evil.com/schema.json" } }] },
+  ]) {
+    const result = await executor.execute({ model: row.id, body: { input: "hello", ...extra }, credentials: { chatGptWebRequestMode: "agent" } });
+    expect(result.response.status).toBe(400);
+    expect((await result.response.json()).error.code).toBe("unsupported_agent_request");
+  }
+  expect(mocks.getChatGptWebCatalog).not.toHaveBeenCalled();
+  expect(mocks.requestChatGptWebRuntime).not.toHaveBeenCalled();
+  const mixed = await executor.execute({ model: row.id, body: { input: "hello" }, credentials: { chatGptWebRequestMode: "agent", chatGptWebAuthority: { purpose: "responses" } } });
+  expect(mixed.response.status).toBe(400);
+});
+it("agent mode routes to /v1/agent/responses, fails closed on missing generic_tools capability", async () => {
+  const executor = new ChatGPTWebExecutor();
+  const args = {
+    model: row.id,
+    body: {
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hello" }] }],
+      tools: [{ type: "function", name: "read_file", parameters: { type: "object", properties: { path: { type: "string" } } } }],
+    },
+    credentials: { chatGptWebRequestMode: "agent", chatGptWebProfileEpoch: "epoch" },
+  };
+  let result = await executor.execute(args);
+  expect(result.response.status).toBe(503);
+  expect((await result.response.json()).error.code).toBe("agent_tools_unavailable");
+  expect(mocks.requestChatGptWebRuntime).not.toHaveBeenCalled();
+  mocks.getChatGptWebCatalog.mockResolvedValue({ profileId: "fixture", profileEpoch: "epoch", stale: false,
+    models: [{ ...row, capabilities: { generic_tools: true, generic_responses: false, text: true } }] });
+  result = await executor.execute(args);
+  expect(result.response.status).toBe(503);
+  expect((await result.response.json()).error.code).toBe("agent_tools_unavailable");
+  expect(mocks.requestChatGptWebRuntime).not.toHaveBeenCalled();
+
+  mocks.getChatGptWebCatalog.mockResolvedValue({
+    profileId: "fixture",
+    profileEpoch: "epoch",
+    stale: false,
+    models: [{ ...row, capabilities: { ...row.capabilities, generic_tools: true, generic_responses: true, text: true } }],
+  });
+  mocks.requestChatGptWebRuntime.mockResolvedValue(new Response(JSON.stringify({ id: "resp_1" }), { status: 200 }));
+  result = await executor.execute(args);
+  expect(result.response.status).toBe(200);
+});
 it("generic fails closed on native-only catalog, upgrade and unknown submission", async () => {
   const executor = new ChatGPTWebExecutor();
   const args = { model: row.id, body: { input: "hello" }, credentials: { chatGptWebRequestMode: "browser", chatGptWebProfileEpoch: "epoch" } };
@@ -61,4 +113,39 @@ it("generic fails closed on native-only catalog, upgrade and unknown submission"
   expect(result.response.status).toBe(502);
   expect((await result.response.json()).error).toMatchObject({ code: "submission_unknown", retryable: false, submission_state: "unknown" });
   expect(mocks.requestChatGptWebRuntime).toHaveBeenCalledTimes(2);
+});
+it.each(["browser", "agent"])("%s preserves translated effort instead of falling back to the catalog default", async mode => {
+  mocks.getChatGptWebCatalog.mockResolvedValue({ profileId: "fixture", profileEpoch: "epoch", stale: false,
+    models: [{ ...row, capabilities: { generic_responses: true, generic_tools: true, text: true } }] });
+  mocks.requestChatGptWebRuntime.mockImplementation(async (_credentials, _path, options) => {
+    const envelope = JSON.parse(options.body);
+    return Response.json({}, { status: envelope.effectiveReasoning === "medium" && envelope.request.reasoning?.effort === "medium" ? 200 : 400 });
+  });
+  const credentials = { chatGptWebRequestMode: mode, chatGptWebProfileEpoch: "epoch" };
+  const executor = new ChatGPTWebExecutor();
+  for (const effort of ["medium", "xhigh"]) {
+    mocks.requestChatGptWebRuntime.mockClear();
+    const body = translateRequest("openai", "openai-responses", row.id,
+      { messages: [{ role: "user", content: "offline fixture" }], reasoning_effort: effort,
+        ...(mode === "agent" ? { tools: [{ type: "function", function: { name: "read_file", parameters: { type: "object", properties: {} } } }] } : {}) },
+      true, credentials, "chatgpt-web");
+    const result = await executor.execute({ model: row.id, body, credentials });
+    if (effort === "medium") expect(result.response.status).toBe(200);
+    else {
+      expect((await result.response.json()).error.code).toBe("model_version_unavailable");
+      expect(mocks.requestChatGptWebRuntime).not.toHaveBeenCalled();
+    }
+  }
+});
+it("generic Chat preserves instruction priority and canonical exact function choice", async () => {
+  const { validateAgentResponsesRequest } = await import("../../services/chatgpt-web-runtime/agent-request.js");
+  const messages = [{ role: "system", content: "System policy" }, { role: "user", content: "Earlier task" },
+    { role: "developer", content: "Developer policy" }, { role: "assistant", content: "Earlier answer" }, { role: "user", content: "Read fixture" }];
+  const translated = translateRequest("openai", "openai-responses", row.id, { messages,
+    tools: [{ type: "function", function: { name: "read_file", parameters: { type: "object", properties: {} } } }],
+    tool_choice: { type: "function", function: { name: "read_file" } } }, true, { chatGptWebRequestMode: "agent" }, "chatgpt-web");
+  const normalized = validateAgentResponsesRequest(translated);
+  expect(normalized.input.map(item => item.role)).toEqual(messages.map(item => item.role));
+  expect(normalized.input.filter(item => ["system", "developer"].includes(item.role)).map(item => item.content.map(part => part.text).join(""))).toEqual(["System policy", "Developer policy"]);
+  expect(normalized.tool_choice).toEqual({ type: "function", name: "read_file" });
 });

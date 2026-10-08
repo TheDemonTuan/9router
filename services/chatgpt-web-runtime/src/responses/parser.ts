@@ -276,7 +276,7 @@ function findToolById(messages: CodexMessage[], callId: string): { name: string;
 
 const REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
-export function parseRequest(body: unknown): CodexParsedRequest {
+export function parseRequest(body: unknown, { preserveInstructionOrder = false } = {}): CodexParsedRequest {
   const replayedInputPrefixLength = previousResponseReplayPrefixLength(body);
   const parsed = responsesRequestSchema.safeParse(body);
   if (!parsed.success) {
@@ -391,6 +391,10 @@ export function parseRequest(body: unknown): CodexParsedRequest {
           case "system": {
             pendingReasoning.length = 0;
             const text = inputContentParts(msg.content as unknown[] | string | undefined);
+            if (preserveInstructionOrder) {
+              messages.push({ role: "system", content: text, timestamp: now });
+              break;
+            }
             const flat = typeof text === "string" ? text : text.map(p => (p.type === "text" ? p.text : "")).join("");
             if (flat.length > 0) systemPrompt.push(flat);
             break;

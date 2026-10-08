@@ -1505,7 +1505,7 @@ export default function ProviderDetailPage() {
   const handleTestModel = async (modelId) => {
     if (testingModelIds.has(modelId)) return;
     if (providerId === "chatgpt-web" && liveModels.find(model => model.id === modelId)?.capabilities?.generic_responses !== true) {
-      setModelsTestError("This model requires a signed Codex companion. Select Browser-only for API-key text tests.");
+      setModelsTestError("No verified generic text route is available for this model. Verify the saved session and runtime prerequisites before sending a test prompt.");
       return;
     }
     setTestingModelIds((prev) => new Set(prev).add(modelId));
@@ -2202,7 +2202,7 @@ export default function ProviderDetailPage() {
           <p className={`text-xs mb-3 break-words ${providerId === "alitp-intl" ? "text-text-muted" : "text-red-500"}`}>{liveModelsError}</p>
         )}
         {providerId === "chatgpt-web" && connections.some(connection => connection.isActive !== false && connection.chatGptWebRuntime?.mode === "full") && (
-          <p role="status" className="text-xs mb-3 break-words text-amber-500">Full: signed Codex companion required. Browser sign-in alone does not enable local tools or ordinary API-key inference. Select Browser-only for API key text requests.</p>
+          <p role="status" className="text-xs mb-3 break-words text-amber-500">Full: OpenAI-compatible function handoff requires verified generic tools; Codex native requires the signed companion. API-key text requests remain available on verified routes. Browser sign-in alone does not verify local tool execution.</p>
         )}
         {providerId === "codex" && connections.length > 0 && (
           <div className="mb-3 flex flex-wrap items-center gap-3">

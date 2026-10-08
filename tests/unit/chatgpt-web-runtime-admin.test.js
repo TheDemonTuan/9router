@@ -342,3 +342,162 @@ describe("runtime mutation connection reconciliation", () => {
     expect(mocks.admin.mock.calls.map(([path]) => path)).toEqual(["/admin/profiles", `/admin/login/status?loginId=${loginId}`]);
   });
 });
+
+describe("managed harness admin boundaries", () => {
+  const tunnelId = `tunnel_ab12_${"a".repeat(32)}`;
+  const key = "fixture-runtime-key-not-a-real-secret";
+  const target = () => ({ profileId: "personal", revision: 3, configRevision: 0 });
+  const configure = () => ({ ...target(), tunnelId, runtimeApiKey: key });
+  const status = (overrides = {}) => ({ ...target(), source: "managed", tunnelId, keyConfigured: true, buildCompatible: true, tunnelState: "ready", connectorState: "verified", canEnableFull: true, lastError: null, ...overrides });
+  const mutations = ["configure", "start", "verify", "activate", "disconnect"];
+  const bodyFor = name => name === "configure" ? configure() : target();
+
+  it.each(["status", ...mutations])("requires dashboard authentication before harness/%s", async name => {
+    mocks.authorize.mockResolvedValue(false);
+    const action = `harness/${name}`;
+    const response = name === "status" ? await GET(request(`${action}?profileId=personal`), context(action)) : await POST(request(action, "POST", bodyFor(name)), context(action));
+    expect(response.status).toBe(401);
+    expect(mocks.admin).not.toHaveBeenCalled();
+  });
+  it.each(mutations)("requires an explicit same-origin POST for harness/%s", async name => {
+    const action = `harness/${name}`;
+    expect((await GET(request(action), context(action))).status).toBe(405);
+    for (const headers of [{ origin: "https://foreign.test" }, { "sec-fetch-site": "cross-site" }]) {
+      expect((await POST(request(action, "POST", bodyFor(name), headers), context(action))).status).toBe(403);
+    }
+    const missingOrigin = request(action, "POST", bodyFor(name)); missingOrigin.headers.delete("origin");
+    expect((await POST(missingOrigin, context(action))).status).toBe(403);
+    expect(mocks.admin).not.toHaveBeenCalled();
+  });
+  it("status reads one exact profile snapshot without invalidating, probing, or synchronizing connections", async () => {
+    mocks.admin.mockResolvedValue(Response.json({ ...status(), runtimeApiKey: key, keyFile: "/private/key", stderr: key }));
+    const response = await GET(request("harness/status?profileId=personal"), context("harness/status"));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual(status());
+    expect(mocks.admin).toHaveBeenCalledExactlyOnceWith("/admin/harness/status?profileId=personal", expect.objectContaining({ method: "GET" }), expect.any(Object));
+    expect(mocks.invalidate).not.toHaveBeenCalled();
+    expect(mocks.connections).not.toHaveBeenCalled();
+    expect(mocks.update).not.toHaveBeenCalled();
+  });
+  it.each(["", "?profileId=personal&profileId=other", "?profileId=../escape", "?profileId=personal&probe=true", "?revision=3"])("rejects status query %s before contacting runtime", async suffix => {
+    expect((await GET(request(`harness/status${suffix}`), context("harness/status"))).status).toBe(400);
+    expect(mocks.admin).not.toHaveBeenCalled();
+  });
+  it("rejects status POST and mutation query options", async () => {
+    expect((await POST(request("harness/status", "POST", target()), context("harness/status"))).status).toBe(405);
+    expect((await POST(request("harness/start?probe=true", "POST", target()), context("harness/start"))).status).toBe(400);
+    expect(mocks.admin).not.toHaveBeenCalled();
+  });
+  it.each(mutations)("requires exact profile and both integer CAS revisions for harness/%s", async name => {
+    const action = `harness/${name}`, good = bodyFor(name);
+    for (const bad of [{ ...good, revision: undefined }, { ...good, configRevision: undefined }, { ...good, revision: -1 }, { ...good, configRevision: -1 }, { ...good, revision: 1.5 }, { ...good, configRevision: Number.MAX_SAFE_INTEGER + 1 }, { ...good, profileId: "../escape" }, { ...good, runtimeUrl: "https://foreign.test" }, ...(name === "configure" ? [] : [{ ...good, runtimeApiKey: key }])]) {
+      expect((await POST(request(action, "POST", bad), context(action))).status).toBe(400);
+    }
+    expect(mocks.admin).not.toHaveBeenCalled();
+  });
+  it("trims key and complete namespaced Tunnel ID, never echoes secrets, and does not start or probe on save", async () => {
+    mocks.admin.mockResolvedValue(Response.json({ ...status({ configRevision: 1, tunnelState: "stopped", connectorState: "unverified", canEnableFull: false }), runtimeApiKey: key, secretPath: "/private/key", stdout: key }));
+    const response = await POST(request("harness/configure", "POST", { ...configure(), tunnelId: `  ${tunnelId}  `, runtimeApiKey: `  ${key}  ` }), context("harness/configure"));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(status({ configRevision: 1, tunnelState: "stopped", connectorState: "unverified", canEnableFull: false }));
+    expect(mocks.admin).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(mocks.admin.mock.calls[0][1].body)).toEqual(configure());
+    expect(mocks.connections).not.toHaveBeenCalled();
+    expect(mocks.invalidate).toHaveBeenCalledExactlyOnceWith("personal");
+  });
+  it("forwards an omitted key so the runtime can retain it, but maps first-save rejection safely without retry", async () => {
+    const body = { ...target(), tunnelId };
+    mocks.admin.mockResolvedValueOnce(Response.json(status()));
+    expect((await POST(request("harness/configure", "POST", body), context("harness/configure"))).status).toBe(200);
+    expect(JSON.parse(mocks.admin.mock.calls[0][1].body)).toEqual(body);
+    mocks.admin.mockResolvedValueOnce(Response.json({ error: { code: "harness_key_required", message: key } }, { status: 400 }));
+    const response = await POST(request("harness/configure", "POST", body), context("harness/configure"));
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toMatchObject({ code: "harness_key_required", message: expect.not.stringContaining(key) });
+    expect(mocks.admin).toHaveBeenCalledTimes(2);
+    expect(mocks.update).not.toHaveBeenCalled();
+  });
+  it.each([null, "", " ", "x".repeat(31), "x".repeat(4097), "é".repeat(2049), `sk-admin-${"a".repeat(32)}`, ` ${key}\n`, `${key}\r`, `${key}\0`, `${key}\u2028`, 42])("rejects invalid runtime key without forwarding it", async runtimeApiKey => {
+    const response = await POST(request("harness/configure", "POST", { ...configure(), runtimeApiKey }), context("harness/configure"));
+    expect(response.status).toBe(400);
+    expect((await response.json()).error.code).toBe("invalid_admin_request");
+    expect(mocks.admin).not.toHaveBeenCalled();
+  });
+  it.each([`tunnel_${"a".repeat(31)}`, `tunnel_AB12_${"a".repeat(32)}`, `tunnel_ab12_${"A".repeat(32)}`, "../tunnel", "tunnel_ab12_../../key", null])("rejects noncanonical Tunnel IDs", async value => {
+    expect((await POST(request("harness/configure", "POST", { ...configure(), tunnelId: value }), context("harness/configure"))).status).toBe(400);
+    expect(mocks.admin).not.toHaveBeenCalled();
+  });
+  it("counts key bytes, not characters, and supports the contract bounds", async () => {
+    mocks.admin.mockImplementation(async () => Response.json(status()));
+    for (const runtimeApiKey of ["x".repeat(32), "x".repeat(4096), "é".repeat(2048)]) {
+      expect((await POST(request("harness/configure", "POST", { ...configure(), runtimeApiKey }), context("harness/configure"))).status).toBe(200);
+    }
+  });
+  it("requires secure credential input even for updates omitting the key and distrusts forwarding headers", async () => {
+    const http = host => new Request(`http://${host}/api/providers/chatgpt-web/runtime/harness/configure`, { method: "POST", headers: { host, origin: `http://${host}`, "content-type": "application/json", "x-forwarded-proto": "https", "x-forwarded-for": "127.0.0.1" }, body: JSON.stringify({ ...target(), tunnelId }) });
+    for (const host of ["admin.example.test", "localhost", "127.0.0.1", "[::1]"]) {
+      const response = await POST(http(host), context("harness/configure"));
+      expect(response.status).toBe(403);
+      expect((await response.json()).error.code).toBe("secure_origin_required");
+    }
+    expect(mocks.admin).not.toHaveBeenCalled();
+    mocks.local.mockReturnValue(true); mocks.admin.mockImplementation(async () => Response.json(status()));
+    for (const host of ["localhost", "127.0.0.1", "[::1]"]) expect((await POST(http(host), context("harness/configure"))).status).toBe(200);
+    expect((await POST(http("admin.example.test"), context("harness/configure"))).status).toBe(403);
+  });
+  it("rejects encoded or oversized harness configuration before forwarding", async () => {
+    expect((await POST(request("harness/configure", "POST", configure(), { "content-encoding": "gzip" }), context("harness/configure"))).status).toBe(415);
+    expect((await POST(request("harness/configure", "POST", { ...configure(), runtimeApiKey: "x".repeat(32768) }), context("harness/configure"))).status).toBe(413);
+    expect(mocks.admin).not.toHaveBeenCalled();
+  });
+  it.each(["start", "verify"])("harness/%s keeps browser-only session evidence separate from harness diagnostics", async name => {
+    const action = `harness/${name}`;
+    mocks.admin.mockResolvedValue(Response.json(status({ connectorState: "unavailable", canEnableFull: false, lastError: { code: "connector_unavailable", message: key } })));
+    const response = await POST(request(action, "POST", target()), context(action));
+    expect(response.status).toBe(200);
+    expect((await response.json()).lastError.message).not.toContain(key);
+    expect(mocks.admin).toHaveBeenCalledTimes(1);
+    expect(mocks.connections).not.toHaveBeenCalled();
+    expect(mocks.update).not.toHaveBeenCalled();
+  });
+  it.each(["activate", "disconnect"])("harness/%s returns observed profile and status and reconciles only its connection", async name => {
+    const action = `harness/${name}`, updated = { ...fixture(), revision: 4, settings: { ...settings, mode: name === "activate" ? "full" : "browser-only" } };
+    mocks.admin.mockImplementation(async path => Response.json(path === "/admin/profiles" ? { protocolVersion: 1, profiles: [updated] } : { profile: updated, status: status({ revision: 4 }), runtimeApiKey: key }));
+    const response = await POST(request(action, "POST", target()), context(action));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ profile: { revision: 4, settings: updated.settings }, status: status({ revision: 4 }) });
+    expect(mocks.connections).toHaveBeenCalledExactlyOnceWith({ provider: "chatgpt-web" });
+    expect(mocks.invalidate).toHaveBeenCalledExactlyOnceWith("personal");
+  });
+  it.each(["harness_config_conflict", "harness_config_revision_conflict", "harness_config_required", "harness_operator_managed", "harness_tunnel_id_unsupported", "profile_active", "viewer_busy", "runtime_draining", "harness_compatibility_unverified", "connector_unavailable"])("maps %s without replay, DB change, or secret leakage", async code => {
+    mocks.admin.mockResolvedValue(Response.json({ error: { code, message: `${key} /private/key stderr` } }, { status: 409 }));
+    const response = await POST(request("harness/activate", "POST", target()), context("harness/activate"));
+    expect(response.status).toBe(409);
+    const data = await response.json(); expect(data.error.code).toBe(code);
+    expect(JSON.stringify(data)).not.toMatch(/fixture-runtime-key|\/private\/key|stderr/);
+    expect(mocks.admin).toHaveBeenCalledTimes(1);
+    expect(mocks.update).not.toHaveBeenCalled();
+    expect(mocks.invalidate).toHaveBeenCalledExactlyOnceWith("personal");
+  });
+  it.each([{ profileId: "other" }, { revision: -1 }, { configRevision: 0.5 }, { tunnelState: "healthy" }, { connectorState: "ready" }, { source: "external" }, { keyConfigured: "true" }, { buildCompatible: null }, { canEnableFull: 1 }, { tunnelId: "../private/key" }])("rejects malformed or foreign status safely", async bad => {
+    mocks.admin.mockResolvedValue(Response.json(status(bad)));
+    expect((await GET(request("harness/status?profileId=personal"), context("harness/status"))).status).toBe(502);
+  });
+  it("rejects a mismatched activate profile/status pair and never claims rollback after failed activation", async () => {
+    mocks.admin.mockResolvedValueOnce(Response.json({ profile: fixture(), status: status({ revision: 4 }) }));
+    expect((await POST(request("harness/activate", "POST", target()), context("harness/activate"))).status).toBe(502);
+    mocks.admin.mockResolvedValueOnce(Response.json({ error: { code: "profile_probe_failed", message: key } }, { status: 502 }));
+    const response = await POST(request("harness/activate", "POST", target()), context("harness/activate"));
+    expect(response.status).toBe(502);
+    expect(await response.json()).toMatchObject({ error: { code: "profile_probe_failed" } });
+    expect(mocks.admin).toHaveBeenCalledTimes(2);
+    expect(mocks.update).not.toHaveBeenCalled();
+  });
+  it("preserves generic capability booleans in profile rows without exposing unknown capability metadata", async () => {
+    const value = fixture(); value.models[0].capabilities = { generic_tools: true, generic_responses: false, native_authority: key };
+    mocks.admin.mockResolvedValue(Response.json({ profiles: [value] }));
+    const response = await GET(request("profiles"), context("profiles"));
+    expect((await response.json()).profiles[0].models[0].capabilities).toEqual({ generic_tools: true, generic_responses: false });
+  });
+});

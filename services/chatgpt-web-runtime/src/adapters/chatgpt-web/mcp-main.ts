@@ -13,6 +13,8 @@ function option(args: string[], name: string, fallback: string): string {
 export async function runChatGptMcpMain(args: string[]): Promise<void> {
   const remaining = [...args];
   const brokerSocketPath = resolveBrokerEndpoint(option(remaining, "--broker-socket", defaultBrokerEndpoint()));
+  const agentBrokerOption = option(remaining, "--agent-broker-socket", "");
+  const agentBrokerSocketPath = agentBrokerOption ? resolveBrokerEndpoint(agentBrokerOption) : undefined;
   const requestedContract = option(remaining, "--contract", "native");
   if (requestedContract !== "native") {
     throw new Error(`--contract must be native, received ${requestedContract}`);
@@ -20,6 +22,7 @@ export async function runChatGptMcpMain(args: string[]): Promise<void> {
   if (remaining.length > 0) throw new Error(`Unknown MCP arguments: ${remaining.join(" ")}`);
   await runChatGptMcpServer({
     brokerSocketPath,
+    agentBrokerSocketPath,
     contract: requestedContract as ChatGptMcpContract,
   });
 }

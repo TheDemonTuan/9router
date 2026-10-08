@@ -27,6 +27,18 @@ const keys = (value, allowed, field) => {
   for (const key of Object.keys(value)) if (!allowed.includes(key)) fail(`${field}.${key}`);
 };
 const roles = ["system", "developer", "user", "assistant"];
+/** Shared text normalization; callers supply their own safe error type. */
+export function normalizeBrowserTextContent(value, role, chat, reject = fail) {
+  const canonicalType = chat ? "text" : role === "assistant" ? "output_text" : "input_text";
+  if (typeof value === "string") return chat ? value : [{ type: canonicalType, text: value }];
+  if (!Array.isArray(value)) reject("message.content");
+  return value.map(part => {
+    if (!part || typeof part !== "object" || Array.isArray(part)) reject("content");
+    if (Object.keys(part).some(key => !["type", "text"].includes(key))) reject("content");
+    if (!(chat ? ["text"] : ["text", canonicalType]).includes(part.type) || typeof part.text !== "string") reject("content.type");
+    return { type: canonicalType, text: part.text };
+  });
+}
 function messages(value, chat) {
   if (!Array.isArray(value) || !value.length) fail(chat ? "messages" : "input");
   let userText = false;
@@ -34,17 +46,8 @@ function messages(value, chat) {
     object(item, "message");
     keys(item, chat ? ["role", "content"] : ["type", "role", "content"], "message");
     if (!roles.includes(item.role) || !chat && item.type !== undefined && item.type !== "message") fail("message.role");
-    const canonicalType = chat ? "text" : item.role === "assistant" ? "output_text" : "input_text";
-    let content;
-    if (typeof item.content === "string") content = [{ type: canonicalType, text: item.content }];
-    else if (Array.isArray(item.content)) content = item.content.map(part => {
-      object(part, "content"); keys(part, ["type", "text"], "content");
-      const allowed = chat ? ["text"] : ["text", canonicalType];
-      if (!allowed.includes(part.type) || typeof part.text !== "string") fail("content.type");
-      return { type: canonicalType, text: part.text };
-    });
-    else fail("message.content");
-    if (item.role === "user" && content.some(part => part.text.trim())) userText = true;
+    const content = normalizeBrowserTextContent(item.content, item.role, chat);
+    if (item.role === "user" && (typeof content === "string" ? content.trim() : content.some(part => part.text.trim()))) userText = true;
     return chat ? { role: item.role, content: typeof item.content === "string" ? item.content : content }
       : { type: "message", role: item.role, content };
   });

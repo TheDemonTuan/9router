@@ -124,7 +124,24 @@ const targetSelector = "[data-9router-chatgpt-session-target]";
 const inputSelector = "[data-9router-chatgpt-session-file]";
 const requestEvent = "9router:chatgpt-session-import-request", resultEvent = "9router:chatgpt-session-import-result";
 const assistant = () => page.getByRole("region", { name: "Connect ChatGPT session", exact: true });
-const tab = (name: string) => assistant().getByRole("tab", { name, exact: true });
+const disclosure = (name: string) => page.locator("details").filter({ has: page.locator("summary").filter({ hasText: new RegExp(`^${name}$`) }) }).first();
+async function showSignInMethod(method: "extension" | "browser") {
+  await page.getByRole("tab", { name: "Connection", exact: true }).click();
+  const details = disclosure("Change sign-in method");
+  if (!(await details.evaluate(element => (element as HTMLDetailsElement).open))) await details.locator("summary").click();
+  await details.getByRole("button", { name: method === "extension" ? "Chrome extension" : "Private browser", exact: true }).click();
+}
+async function showImportMethod(method: "extension" | "paste" | "file") {
+  if (!await assistant().count()) await showSignInMethod("extension");
+  const details = assistant().locator("details").filter({ has: page.locator("summary").filter({ hasText: /^Manual import$/ }) });
+  const open = await details.evaluate(element => (element as HTMLDetailsElement).open);
+  if (method === "extension") {
+    if (open) await details.locator("summary").click();
+  } else {
+    if (!open) await details.locator("summary").click();
+    await details.getByRole("button", { name: method === "paste" ? "Paste JSON" : "Select file", exact: true }).click();
+  }
+}
 const noPost = async (before: number) => { await Bun.sleep(300); assert.equal(imports.length, before, "Invalid/unfinished input must not POST"); };
 const targetSchema = z.object({ version: z.literal(1), attemptId: z.string().uuid(), profileId: z.string().min(1), revision: z.number().int().positive(), connectionName: z.string(), expiresAt: z.string() }).strict();
 const readTarget = async () => targetSchema.parse(await page.locator(targetSelector).evaluate(element => JSON.parse(element.getAttribute("data-9router-chatgpt-session-target")!)));
@@ -133,11 +150,11 @@ const clearDraft = async () => {
   // Response/readiness can precede exact-profile reconciliation and importer
   // finally. Observe eventual cleanup without clearing or overwriting any input.
   await until(async () => {
-    const filesEmpty = await page.locator(inputSelector).evaluate((element: HTMLInputElement) => (element.files?.length ?? 0) === 0);
+    const filesEmpty = await page.locator(inputSelector).count() === 0 || await page.locator(inputSelector).evaluate((element: HTMLInputElement) => (element.files?.length ?? 0) === 0);
     const pasteEmpty = await textarea.count() === 0 || await textarea.inputValue() === "";
     return filesEmpty && pasteEmpty;
   }, "App-owned importer did not clear credential drafts after settling", 30000);
-  assert.equal(await page.locator(inputSelector).evaluate((element: HTMLInputElement) => element.files?.length ?? 0), 0);
+  if (await page.locator(inputSelector).count()) assert.equal(await page.locator(inputSelector).evaluate((element: HTMLInputElement) => element.files?.length ?? 0), 0);
   if (await textarea.count()) assert.equal(await textarea.inputValue(), "");
   assert.equal(await page.evaluate(() => Reflect.get(window, "__offlineSafeEvents") !== false), true, "Transfer events may contain only safe metadata");
 };
@@ -151,15 +168,29 @@ async function openConnection() {
   const row = page.locator("div.group").filter({ has: page.getByText(connection.name, { exact: true }) }).filter({ has: page.getByRole("button", { name: /Edit/i }) });
   assert.equal(await row.count(), 1, "Exactly one named connection row must reopen");
   await row.getByRole("button", { name: /Edit/i }).click();
-  await page.getByRole("dialog", { name: "ChatGPT Web Connection", exact: true }).waitFor();
-  if (!await assistant().count()) await page.getByRole("button", { name: "Import Chrome Session", exact: true }).click();
+  await page.getByRole("dialog").filter({ has: page.getByRole("tab", { name: "Connection", exact: true }) }).waitFor();
+  await showSignInMethod("extension");
   await assistant().waitFor();
 }
 async function prepare() {
-  if (!await assistant().count()) await page.getByRole("button", { name: "Import Chrome Session", exact: true }).click();
-  await tab("Connect automatically").click();
+  if (!await assistant().count()) await showSignInMethod("extension");
+  await showImportMethod("extension");
+  const metadata = await assistant().getAttribute("data-9router-chatgpt-session-assistant");
+  if (metadata && JSON.parse(metadata).reason === "consumed") {
+    const verify = page.waitForResponse(response => response.url().endsWith("/runtime/session/verify") && response.request().method() === "POST");
+    await assistant().getByRole("button", { name: "Verify saved session", exact: true }).click();
+    assert.equal((await verify).status(), 200);
+    await until(async () => {
+      const fresh = await assistant().getAttribute("data-9router-chatgpt-session-assistant");
+      const reason = fresh ? JSON.parse(fresh).reason : "loading";
+      return reason !== "consumed" && reason !== "probing" && reason !== "loading"
+        && (await page.locator(targetSelector).count() === 1 || await assistant().getByRole("button", { name: "Prepare connection", exact: true }).isEnabled());
+    }, "Saved-session verification must settle before explicit preparation", 120000);
+  }
   const button = assistant().getByRole("button", { name: "Prepare connection", exact: true });
-  if (await button.count() && await button.isEnabled()) await button.click();
+  // Auto-prepare can replace its CTA before Playwright resolves the click;
+  // either surface is metadata-only. Never leave a stale click waiting to replay.
+  if (await button.count() && await button.isEnabled()) await button.or(page.locator(targetSelector)).first().click();
   await page.locator(targetSelector).waitFor();
   await until(async () => await page.locator(targetSelector).count() === 1 && !(await page.locator(targetSelector).getAttribute("data-9router-chatgpt-session-consumed")), "Fresh direct attempt required");
   return readTarget();
@@ -244,7 +275,12 @@ async function popup() {
   return target;
 }
 async function clickPopup(popup: AttachedTarget, id: string) {
-  const box = await popup.evaluate<{ x: number; y: number; width: number; height: number }>(`(()=>{const b=document.querySelector(${JSON.stringify(`#${id}`)});if(!b||b.disabled)throw Error('Button unavailable');b.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});const r=b.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2,width:window.innerWidth,height:window.innerHeight}})()`);
+  if (id === "connect") await until(async () => popup.evaluate<boolean>("!document.querySelector('#connect').disabled"), "Actual popup must confirm the current target before Connect");
+  if (["copy", "export"].includes(id) && await popup.evaluate<boolean>(`!document.querySelector(${JSON.stringify(`#${id}`)}).closest('details').open`)) await clickPopupElement(popup, "details > summary");
+  await clickPopupElement(popup, `#${id}`);
+}
+async function clickPopupElement(popup: AttachedTarget, selector: string) {
+  const box = await popup.evaluate<{ x: number; y: number; width: number; height: number }>(`(()=>{const b=document.querySelector(${JSON.stringify(selector)});if(!b||b.disabled)throw Error('Control unavailable');b.scrollIntoView({block:'center',inline:'nearest',behavior:'instant'});const r=b.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2,width:window.innerWidth,height:window.innerHeight}})()`);
   assert(box.x >= 0 && box.x < box.width && box.y >= 0 && box.y < box.height, "Actual popup button must be inside its viewport before mouse gesture");
   await popup.send("Input.dispatchMouseEvent", { type: "mousePressed", x: box.x, y: box.y, button: "left", clickCount: 1 });
   await popup.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: box.x, y: box.y, button: "left", clickCount: 1 });
@@ -252,7 +288,7 @@ async function clickPopup(popup: AttachedTarget, id: string) {
 async function outcome(popup: AttachedTarget, pattern: RegExp) {
   try {
     await until(async () => {
-      const state = await popup.evaluate<{ connectDisabled: boolean; copyDisabled: boolean; exportDisabled: boolean; statusPhase: string; safeCode: string | null; matches: boolean }>(`(()=>{const connect=document.querySelector('#connect'),copy=document.querySelector('#copy'),exportButton=document.querySelector('#export'),text=document.querySelector('#status')?.textContent??'';const code=/Import failed \\(([a-z0-9_]{1,64})\\)/.exec(text)?.[1]??null;return{connectDisabled:!!connect?.disabled,copyDisabled:!!copy?.disabled,exportDisabled:!!exportButton?.disabled,statusPhase:/^(Connecting|Preparing|Checking)/i.test(text)?'pending':/result is unknown/i.test(text)?'unknown':/completed|copied|download started/i.test(text)?'completed':'error',safeCode:code,matches:new RegExp(${JSON.stringify(pattern.source)},${JSON.stringify(pattern.flags)}).test(text)}})()`);
+      const state = await popup.evaluate<{ connectDisabled: boolean; copyDisabled: boolean; exportDisabled: boolean; statusPhase: string; safeCode: string | null; matches: boolean }>(`(()=>{const connect=document.querySelector('#connect'),copy=document.querySelector('#copy'),exportButton=document.querySelector('#export'),text=document.querySelector('#status')?.textContent??'';const code=/Import failed \\(([a-z0-9_]{1,64})\\)/.exec(text)?.[1]??(/target changed or is unavailable/.test(text)?'session_target_unavailable':/result is unknown/.test(text)?'import_result_unknown':/Sign in to the 9Router dashboard/.test(text)?'dashboard_auth_required':/profile changed/.test(text)?'profile_revision_conflict':/target expired/.test(text)?'session_target_expired':/already used or is in progress/.test(text)?'session_import_in_progress':null);return{connectDisabled:!!connect?.disabled,copyDisabled:!!copy?.disabled,exportDisabled:!!exportButton?.disabled,statusPhase:/^(Connecting|Preparing|Checking)/i.test(text)?'pending':/result is unknown/i.test(text)?'unknown':/completed|copied|download started/i.test(text)?'completed':'error',safeCode:code,matches:new RegExp(${JSON.stringify(pattern.source)},${JSON.stringify(pattern.flags)}).test(text)}})()`);
       outcomeFailure = { ...state, importsCount: imports.length, lastStatus: imports.at(-1)?.status ?? null, collectionCalls };
       return !state.copyDisabled && !state.exportDisabled && state.matches;
     }, "Popup did not report a settled safe outcome", 135000);
@@ -276,10 +312,12 @@ let collectionCalls = 0, onCollected: (() => Promise<void>) | undefined;
   await page.goto(`${origin}/dashboard/providers/chatgpt-web`, { waitUntil: "networkidle" });
   await page.getByRole("button", { name: /Add Connection/ }).click();
   await page.getByRole("textbox", { name: "Connection name", exact: true }).fill("Offline direct account");
+  await page.getByRole("radio", { name: /^Chrome extension/ }).check();
   const creation = page.waitForResponse(response => new URL(response.url()).pathname === "/api/providers" && response.request().method() === "POST");
-  await page.getByRole("button", { name: "Add Connection and Import Session", exact: true }).click();
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
   const created = await creation; assert.equal(created.status(), 201); connection = (await created.json()).connection;
   await assistant().waitFor();
+  await assistant().locator("details").filter({ has: page.locator("summary").filter({ hasText: /^Install or update helper$/ }) }).locator("summary").click();
   const downloading = page.waitForEvent("download");
   await assistant().getByRole("link", { name: "Download Chrome helper", exact: true }).click();
   const archiveDownload = await downloading; assert.equal(archiveDownload.suggestedFilename(), "chatgpt-web-session-export.zip");
@@ -385,9 +423,97 @@ let collectionCalls = 0, onCollected: (() => Promise<void>) | undefined;
   const source = await workerCdp.send("Debugger.getScriptSource", { scriptId: workerScriptId }); assert(source.scriptSource);
   const lines = source.scriptSource.split("\n");
   const collectionLine = lines.findIndex(line => /session\s*=\s*await collectChatGptSession\(\)/.test(line));
-  assert(collectionLine >= 0, "Bundled collector await must be observable");
-  collectedBreakpoint = z.string().parse((await workerCdp.send("Debugger.setBreakpoint", { location: { scriptId: workerScriptId, lineNumber: collectionLine + 1 } })).breakpointId);
+  const confirmationLine = lines.findIndex((line, index) => index > collectionLine && /checked\s*=\s*await inspect\(\)/.test(line));
+  assert(collectionLine >= 0 && confirmationLine > collectionLine, "Bundled post-collection confirmation must be observable");
+  collectedBreakpoint = z.string().parse((await workerCdp.send("Debugger.setBreakpoint", { location: { scriptId: workerScriptId, lineNumber: confirmationLine } })).breakpointId);
   await login(page); await context.addCookies(cookies()); await openConnection();
+  await record("popup opened before target recovers with read-only refresh", async () => {
+    const target = await prepare(), before = imports.length, collects = collectionCalls;
+    // Withhold only public target metadata in the actual dashboard document to
+    // reproduce the preparation/hydration race. Chrome APIs and the packaged
+    // popup remain untouched. The old one-shot probe cannot pass this case.
+    const holder = page.locator(targetSelector);
+    await holder.evaluate(element => element.removeAttribute("data-9router-chatgpt-session-target"));
+    const action = await popup();
+    assert(await action.evaluate<boolean>("document.querySelector('#connect').disabled"));
+    await action.send("Page.enable");
+    const blocked = await action.send("Page.captureScreenshot"); assert(blocked.data);
+    writeFileSync(join(proof, "extension-popup-unprepared.png"), Buffer.from(blocked.data, "base64"), { mode: 0o600 });
+    await assistant().locator("input[data-9router-chatgpt-session-file]").evaluate((input, target) => input.parentElement!.setAttribute("data-9router-chatgpt-session-target", JSON.stringify(target)), target);
+    // No focus/check click: recovery must come from the visible read-only timer.
+    await until(async () => action.evaluate<boolean>("!document.querySelector('#connect').disabled"), "One-shot popup recovery failed: prepared target never became selectable");
+    assert(!await action.evaluate<boolean>("document.querySelector('#check').disabled"));
+    assert.equal(await action.evaluate<string>("document.querySelector('#origin').textContent"), origin);
+    assert.equal(await action.evaluate<string>("document.querySelector('#profile-id').textContent"), target.profileId);
+    assert.equal(collectionCalls, collects, "Read-only recovery must not collect cookies");
+    await noPost(before); assert.equal(physicalSends, 0); await action.close();
+  });
+  await record("visible popup expires consent without cookies or handoff", async () => {
+    await prepare(); const before = imports.length, collects = collectionCalls;
+    const action = await popup();
+    await until(async () => action.evaluate<boolean>("!document.querySelector('#connect').disabled"), "Expiry fixture needs a confirmed target before shortening its public metadata");
+    // Shorten this synthetic public consent snapshot, never the runtime's lease
+    // or Chrome clock. This exercises the actual popup expiry timer/validator.
+    await page.locator(targetSelector).evaluate(element => {
+      const target = JSON.parse(element.getAttribute("data-9router-chatgpt-session-target")!);
+      target.expiresAt = new Date(Date.now() + 3500).toISOString();
+      element.setAttribute("data-9router-chatgpt-session-target", JSON.stringify(target));
+    });
+    await until(async () => action.evaluate<boolean>("document.querySelector('#connect').disabled && /expired/i.test(document.querySelector('#target-help').textContent)"), "Visible expired popup must revoke consent immediately");
+    assert.equal(collectionCalls, collects); await noPost(before); await action.close(); await openConnection();
+  });
+  await record("Extension to Paste or File and back prepares a fresh idle target", async () => {
+    const initial = await prepare(), before = imports.length, collects = collectionCalls;
+    let chooserCount = 0;
+    const onChooser = () => { chooserCount++; };
+    page.on("filechooser", onChooser);
+    try {
+      await showImportMethod("paste");
+      await page.getByRole("textbox", { name: "Session JSON", exact: true }).fill(JSON.stringify(transfer()));
+      assert.equal(await page.locator(targetSelector).count(), 0);
+      await showImportMethod("extension");
+      await page.locator(targetSelector).waitFor();
+      const afterPaste = await readTarget(); assert.notEqual(afterPaste.attemptId, initial.attemptId);
+      await clearDraft();
+      await showImportMethod("file");
+      await page.locator(inputSelector).setInputFiles({ name: "offline-session.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(transfer())) });
+      assert.equal(await page.locator(targetSelector).count(), 0);
+      await showImportMethod("extension");
+      await page.locator(targetSelector).waitFor();
+      const afterFile = await readTarget(); assert.notEqual(afterFile.attemptId, afterPaste.attemptId);
+      await clearDraft(); assert.equal(chooserCount, 0, "Extension and mode choice must not open a file chooser");
+      assert.equal(collectionCalls, collects); await noPost(before); assert.equal(physicalSends, 0);
+    } finally { page.off("filechooser", onChooser); }
+  });
+  await record("runtime action invalidates old extension consent without Send", async () => {
+    const target = await prepare(), before = imports.length, collects = collectionCalls;
+    await page.getByRole("tab", { name: "Diagnostics", exact: true }).click();
+    assert.equal(await page.locator(targetSelector).count(), 0, "Leaving Connection must invalidate consent");
+    const restarted = page.waitForResponse(response => response.url().endsWith("/runtime/browser/restart") && response.request().method() === "POST");
+    await page.getByRole("button", { name: "Restart browser", exact: true }).click();
+    // This unauthenticated fixture may fail the post-restart session probe.
+    // Consent must still be invalidated independently of probe success.
+    await restarted;
+    await until(async () => page.getByRole("tab", { name: "Connection", exact: true }).isEnabled(), "Runtime action must settle before returning to Connection", 120000);
+    await page.getByRole("tab", { name: "Connection", exact: true }).click();
+    const renewed = await prepare(); assert.notEqual(renewed.attemptId, target.attemptId);
+    assert.equal(collectionCalls, collects); await noPost(before); assert.equal(physicalSends, 0); await clearDraft();
+  });
+  await record("dashboard five-minute expiry requires explicit preparation", async () => {
+    const target = await prepare(), before = imports.length, collects = collectionCalls;
+    const action = await popup();
+    await until(async () => {
+      const metadata = await assistant().getAttribute("data-9router-chatgpt-session-assistant");
+      return await page.locator(targetSelector).count() === 0 && !!metadata && JSON.parse(metadata).reason === "expired";
+    }, "Dashboard must invalidate its actual expired target", Math.max(15000, Date.parse(target.expiresAt) - Date.now() + 15000));
+    await until(async () => action.evaluate<boolean>("document.querySelector('#connect').disabled"), "Popup must reject dashboard expiry");
+    assert.equal(collectionCalls, collects); await noPost(before); await action.close();
+    await showImportMethod("paste"); await showImportMethod("extension");
+    await Bun.sleep(1100);
+    assert.equal(await page.locator(targetSelector).count(), 0, "Method switching must not renew an expired attempt automatically");
+    const renewed = await prepare(); assert.notEqual(renewed.attemptId, target.attemptId);
+    await clearDraft(); await noPost(before); assert.equal(physicalSends, 0);
+  });
   await record("direct authenticated multipart import", async () => {
     const target = await prepare(), before = imports.length, collects = collectionCalls;
     activeCase = "direct authenticated multipart import: opening settled action popup";
@@ -429,20 +555,18 @@ let collectionCalls = 0, onCollected: (() => Promise<void>) | undefined;
     assert(catalog.models.some((model: { id: string }) => model.id === "chatgpt-web/gpt-5.6-sol"));
     await clearDraft(); assert.equal(downloads, 0); assert.equal(nativeStarts, 0);
     activeCase = "direct authenticated multipart import: consumed attempt requires explicit preparation";
-    await assistant().getByRole("button", { name: "Close session assistant", exact: true }).click();
-    await page.getByRole("button", { name: "Import Chrome Session", exact: true }).click();
-    await assistant().waitFor(); await tab("Connect automatically").click();
+    await showSignInMethod("browser");
+    await showSignInMethod("extension");
+    await assistant().waitFor(); await showImportMethod("extension");
     assert.equal(await page.locator(targetSelector).count(), 0, "Reopening assistant must not mint a fresh consumed attempt");
-    await assistant().getByRole("button", { name: "Prepare connection", exact: true }).click();
-    await page.locator(targetSelector).waitFor();
-    const renewed = await readTarget(); assert.notEqual(renewed.attemptId, target.attemptId);
+    const renewed = await prepare(); assert.notEqual(renewed.attemptId, target.attemptId);
     assert.equal(renewed.profileId, target.profileId); await noPost(before + 1); await clearDraft();
   });
   await record("desktop mobile accessibility and credential boundary", async () => {
     await prepare(); await page.keyboard.press("Tab");
     assert(await page.evaluate(() => document.activeElement !== document.body), "Keyboard focus must reach an assistant control");
-    await tab("Paste JSON").click(); assert.equal(await page.getByRole("textbox", { name: "Session JSON", exact: true }).getAttribute("autocomplete"), "off");
-    await tab("Connect automatically").click();
+    await showImportMethod("paste"); assert.equal(await page.getByRole("textbox", { name: "Session JSON", exact: true }).getAttribute("autocomplete"), "off");
+    await showImportMethod("extension");
     await page.setViewportSize({ width: 390, height: 844 });
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), "Mobile controls overflow");
     await page.screenshot({ path: join(proof, "dashboard-assistant-mobile.png"), fullPage: true });
@@ -452,7 +576,7 @@ let collectionCalls = 0, onCollected: (() => Promise<void>) | undefined;
     assert(!exposed.textNodes.includes("-import") && !exposed.attributes.includes("-import"), "Multipart cookie value must not be a DOM text/attribute value");
     assert(!/["']value["']\s*:\s*["']-import["']/.test(exposed.text + exposed.attributes.join("\n")), "Serialized multipart cookie credentials must not appear in DOM");
   });
-  const localReject = async (mutate: () => Promise<void>, allowed = /session_target_unavailable|session_target_expired|profile_revision_conflict|dashboard_auth_required|return|prepare|dashboard/i, afterConsent = false) => {
+  const localReject = async (mutate: () => Promise<void>) => {
     await prepare(); const action = await popup(), before = imports.length, collects = collectionCalls;
     await mutate();
     const currentTargets = await rootCdp!.send("Target.getTargets");
@@ -464,8 +588,10 @@ let collectionCalls = 0, onCollected: (() => Promise<void>) | undefined;
       await noPost(before); assert.equal(collectionCalls, collects, "Dismissed consent must not collect cookies");
       return;
     }
-    if (await action.evaluate<boolean>("document.querySelector('#connect').disabled")) assert(!afterConsent);
-    else { await clickPopup(action, "connect"); await outcome(action, allowed); }
+    if (!await action.evaluate<boolean>("document.querySelector('#connect').disabled")) {
+      await clickPopup(action, "connect"); await outcome(action, /./);
+      assert(await action.evaluate<boolean>("document.querySelector('#connect').disabled && document.querySelector('#status').textContent.trim() !== ''"), "Rejected precheck must revoke consent");
+    }
     await noPost(before); assert.equal(collectionCalls, collects, "Failed precheck must not collect cookies"); await action.close();
   };
   await record("missing and ambiguous targets", async () => {
@@ -496,13 +622,13 @@ let collectionCalls = 0, onCollected: (() => Promise<void>) | undefined;
   await record("navigation and import mode switch between consent and handoff", async () => {
     await localReject(async () => { await page.goto(`${origin}/dashboard`); });
     await openConnection();
-    await localReject(async () => { await tab("Paste JSON").click(); });
+    await localReject(async () => { await showImportMethod("paste"); });
     await openConnection();
   });
   await record("changing selected profile draft invalidates consent", async () => {
     await localReject(async () => {
-      const advanced = page.locator("section[aria-label='ChatGPT Web connection'] > details");
-      if (!(await advanced.getAttribute("open"))) await advanced.locator("summary").click();
+      const advanced = disclosure("Connection details");
+      if (!(await advanced.evaluate(element => (element as HTMLDetailsElement).open))) await advanced.locator("summary").click();
       await advanced.locator("select").filter({ has: page.locator('option[value="offline-switch"]') }).selectOption("offline-switch");
     });
     const untouched = await (await runtime.profiles.manager("offline-switch").ensureContext()).cookies();
@@ -542,9 +668,13 @@ let collectionCalls = 0, onCollected: (() => Promise<void>) | undefined;
   });
   await record("target change after collection rejects before handoff", async () => {
     await prepare(); const before = imports.length, collects = collectionCalls, action = await popup();
-    onCollected = async () => { await page.locator(targetSelector).evaluate(element => element.removeAttribute("data-9router-chatgpt-session-target")); };
-    await clickPopup(action, "connect"); await outcome(action, /session_target_unavailable|prepare|dashboard/i);
-    await noPost(before); assert.equal(collectionCalls, collects + 1); assert(!debuggerFailure); await action.close(); await clearDraft(); await openConnection();
+    let revoked = false;
+    onCollected = async () => { await page.locator(targetSelector).evaluate(element => element.removeAttribute("data-9router-chatgpt-session-target")); revoked = true; };
+    await clickPopup(action, "connect");
+    await until(() => revoked || !!debuggerFailure, "Post-collection barrier must invalidate the target before the second authenticated confirmation");
+    assert(!debuggerFailure);
+    await outcome(action, /session_target_unavailable|prepare|dashboard/i);
+    await noPost(before); assert.equal(collectionCalls, collects + 1); await action.close(); await clearDraft(); await openConnection();
   });
   await record("closing popup during authenticated readonly precheck does not cancel", async () => {
     await prepare(); const action = await popup(), before = imports.length;
@@ -556,7 +686,7 @@ let collectionCalls = 0, onCollected: (() => Promise<void>) | undefined;
       await Promise.race([arrived, Bun.sleep(15000).then(() => { throw new Error("Readonly precheck was not observed"); })]);
       await action.close(); release();
       await until(() => imports.length === before + 1 && imports.at(-1)!.status === 200, "Worker must continue independently of popup", 120000);
-      await until(async () => assistant().getByRole("button", { name: "Prepare connection", exact: true }).isEnabled(), "Popup-close importer must release app busy state", 120000);
+      await until(async () => assistant().getByRole("button", { name: "Verify saved session", exact: true }).isEnabled(), "Popup-close importer must release app busy state", 120000);
       await clearDraft();
     } finally { release(); }
   });
@@ -580,7 +710,7 @@ let collectionCalls = 0, onCollected: (() => Promise<void>) | undefined;
       }, { target, event: requestEvent });
       await action.close(); release();
       await until(() => imports.length === before + 1 && imports.at(-1)!.status === 200, "Owned importer must finish after popup closes", 120000);
-      await until(async () => assistant().getByRole("button", { name: "Prepare connection", exact: true }).isEnabled(), "App-owned import must settle busy state before the next attempt", 120000);
+      await until(async () => assistant().getByRole("button", { name: "Verify saved session", exact: true }).isEnabled(), "App-owned import must settle busy state before the next attempt", 120000);
       await page.getByText("Connected and ready.", { exact: true }).waitFor({ timeout: 120000 });
       assert.equal(imports.length, before + 1); await clearDraft();
     } finally { authSessionGate = undefined; release(); }
@@ -596,7 +726,7 @@ let collectionCalls = 0, onCollected: (() => Promise<void>) | undefined;
     safeFailureMetadata = { expectedImports: before + 1, actualImports: imports.length, expectedStatus: 409, actualStatus: imports[before]?.status ?? null };
     assert.equal(imports.length, before + 1); assert.equal(imports[before]?.status, 409);
     safeFailureMetadata = undefined;
-    await until(async () => assistant().getByRole("button", { name: "Prepare connection", exact: true }).isEnabled(), "Revision-race importer must settle busy state", 120000);
+    await until(async () => assistant().getByRole("button", { name: "Verify saved session", exact: true }).isEnabled(), "Revision-race importer must settle busy state", 120000);
     await noPost(before + 1); await clearDraft();
     await openConnection();
   });
@@ -610,7 +740,7 @@ let collectionCalls = 0, onCollected: (() => Promise<void>) | undefined;
     assert.deepEqual(runtime.state.profile(id), identity); assert.deepEqual(await (await runtime.profiles.manager(id).ensureContext()).cookies(), saved);
     assert.equal(runtime.profiles.ready(id), false); await clearDraft();
     const verify = page.waitForResponse(response => response.url().endsWith("/runtime/session/verify") && response.request().method() === "POST");
-    await page.getByRole("button", { name: "Use Saved Session", exact: true }).click(); assert.equal((await verify).status(), 200); assert(runtime.profiles.ready(id));
+    await page.getByRole("button", { name: "Verify saved session", exact: true }).click(); assert.equal((await verify).status(), 200); assert(runtime.profiles.ready(id));
     await context!.clearCookies({ domain: "chatgpt.com" }); await context!.addCookies(cookies());
   });
   await record("copy paste and denied clipboard are explicit actions", async () => {
@@ -619,7 +749,7 @@ let collectionCalls = 0, onCollected: (() => Promise<void>) | undefined;
     await context!.grantPermissions(["clipboard-read", "clipboard-write"]);
     await clickPopup(action, "copy"); await outcome(action, /copied/i);
     const json = await page.evaluate(() => navigator.clipboard.readText()); assert.equal(JSON.parse(json).format, "9router-chatgpt-session");
-    await action.close(); await tab("Paste JSON").click();
+    await action.close(); await showImportMethod("paste");
     await page.getByRole("textbox", { name: "Session JSON", exact: true }).fill(json); await noPost(before);
     await page.getByRole("button", { name: "Import pasted session", exact: true }).click();
     activeCase = "copy paste and denied clipboard: paste response and app-owned cleanup settling";
@@ -634,6 +764,7 @@ let collectionCalls = 0, onCollected: (() => Promise<void>) | undefined;
     // when focus leaves. No script/API/manifest mutation is involved.
     const deniedPage = await context!.newPage();
     await deniedPage.goto(`chrome-extension://${extensionId}/popup.html`);
+    await deniedPage.locator("details > summary").click();
     await deniedPage.getByRole("button", { name: "Copy Session JSON", exact: true }).waitFor();
     const targets = (await rootCdp!.send("Target.getTargets")).targetInfos.filter((target: { url: string }) => target.url === `chrome-extension://${extensionId}/popup.html`);
     assert.equal(targets.length, 1, "Only the owned packaged extension document may handle the denied Copy");
@@ -669,41 +800,42 @@ let collectionCalls = 0, onCollected: (() => Promise<void>) | undefined;
     const download = [...browserDownloads.values()].at(-1)!; assert.equal(download.name, "chatgpt-session.json");
     const path = join(downloadDir, download.name); assert(existsSync(path)); await action.close();
     activeCase = "export select explicit upload: selecting session file without mutation";
-    await tab("Upload file").click();
+    await showImportMethod("file");
     const choosing = page.waitForEvent("filechooser"); await page.getByRole("button", { name: "Choose session file", exact: true }).click(); await (await choosing).setFiles(path); await noPost(before);
     activeCase = "export select explicit upload: explicit file import and app-owned cleanup";
     await page.getByRole("button", { name: "Import selected session", exact: true }).click();
     await until(() => imports.length === before + 1 && imports.at(-1)!.status === 200, "Selected file import failed", 120000); await clearDraft();
-    await page.locator(inputSelector).setInputFiles(path); await tab("Paste JSON").click(); await clearDraft();
+    await page.locator(inputSelector).setInputFiles(path); await showImportMethod("paste"); await clearDraft();
     await page.getByRole("textbox", { name: "Session JSON", exact: true }).fill(JSON.stringify(transfer()));
-    await tab("Upload file").click(); await clearDraft(); await noPost(before + 1);
+    await showImportMethod("file"); await clearDraft(); await noPost(before + 1);
   });
   await record("invalid manual formats sizes UTF8 and expired cookies never POST", async () => {
     const values = ["raw-access-token", JSON.stringify({ accessToken: "offline-token", user: { id: "offline" } }), "{", JSON.stringify({ ...transfer(), cookies: cookies().map(cookie => ({ ...cookie, expires: 1 })) }), "x".repeat(262145)];
     for (const value of values) {
-      await prepare(); await tab("Paste JSON").click(); const before = imports.length;
+      await prepare(); await showImportMethod("paste"); const before = imports.length;
       await page.getByRole("textbox", { name: "Session JSON", exact: true }).fill(value);
       await page.getByRole("button", { name: "Import pasted session", exact: true }).click();
       await until(async () => await page.getByRole("textbox", { name: "Session JSON", exact: true }).inputValue() === "", "Rejected paste must be cleared"); await noPost(before); await clearDraft();
-      await tab("Upload file").click();
+      await showImportMethod("file");
       await page.locator(inputSelector).setInputFiles({ name: "invalid-session.json", mimeType: "application/json", buffer: Buffer.from(value) });
       await page.getByRole("button", { name: "Import selected session", exact: true }).click();
       await until(async () => await page.locator(inputSelector).evaluate((element: HTMLInputElement) => !element.files?.length), "Rejected file must be cleared");
       await noPost(before); await clearDraft();
     }
-    await tab("Upload file").click(); const before = imports.length;
+    await showImportMethod("file"); const before = imports.length;
     await page.locator(inputSelector).setInputFiles({ name: "invalid.json", mimeType: "application/json", buffer: Buffer.from([0xff, 0xfe]) });
     await page.getByRole("button", { name: "Import selected session", exact: true }).click();
     await until(async () => await page.locator(inputSelector).evaluate((element: HTMLInputElement) => !element.files?.length), "Invalid UTF8 file must be cleared"); await noPost(before);
     await page.locator(inputSelector).setInputFiles({ name: "pending.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(transfer())) });
-    await assistant().getByRole("button", { name: "Cancel import", exact: true }).click(); await noPost(before); await clearDraft();
-    await tab("Paste JSON").click(); await page.getByRole("textbox", { name: "Session JSON", exact: true }).fill(JSON.stringify(transfer()));
-    await assistant().getByRole("button", { name: "Cancel import", exact: true }).click(); await noPost(before); await clearDraft();
+    await showImportMethod("extension"); await noPost(before); await clearDraft();
+    await showImportMethod("paste"); await page.getByRole("textbox", { name: "Session JSON", exact: true }).fill(JSON.stringify(transfer()));
+    await showImportMethod("extension"); await noPost(before); await clearDraft();
+    await showImportMethod("paste");
     await page.getByRole("textbox", { name: "Session JSON", exact: true }).fill(JSON.stringify(transfer()));
-    await assistant().getByRole("button", { name: "Close session assistant", exact: true }).click(); await noPost(before);
-    await page.getByRole("button", { name: "Import Chrome Session", exact: true }).click(); await tab("Paste JSON").click(); await clearDraft();
+    await showSignInMethod("browser"); await noPost(before);
+    await showSignInMethod("extension"); await showImportMethod("paste"); await clearDraft();
     await page.getByRole("textbox", { name: "Session JSON", exact: true }).fill(JSON.stringify(transfer()));
-    await page.getByRole("button", { name: "Close", exact: true }).last().click(); await noPost(before); await openConnection(); await tab("Paste JSON").click(); await clearDraft();
+    await page.getByRole("button", { name: "Close", exact: true }).last().click(); await noPost(before); await openConnection(); await showImportMethod("paste"); await clearDraft();
   });
   await record("spoofed success does not confer readiness", async () => {
     const id = connection.providerSpecificData.profileId; runtime.profiles.invalidate(id, "login_required");
@@ -716,11 +848,18 @@ let collectionCalls = 0, onCollected: (() => Promise<void>) | undefined;
     await page.route("**/runtime/session/import", async route => { await route.fetch(); await route.abort("failed"); }, { times: 1 });
     await clickPopup(action, "connect"); await outcome(action, /import_result_unknown|dashboard|saved session/i); await action.close();
     assert.equal(imports.length, before + 1); await clearDraft();
-    const advanced = page.locator("section[aria-label='ChatGPT Web connection'] > details");
-    if (!(await advanced.getAttribute("open"))) await advanced.locator("summary").click();
-    await page.getByRole("button", { name: "Use Saved Session", exact: true }).waitFor();
+    await openConnection();
+    await until(async () => {
+      const metadata = await assistant().getAttribute("data-9router-chatgpt-session-assistant");
+      return !!metadata && JSON.parse(metadata).reason === "consumed";
+    }, "Unknown import recovery fence must survive dashboard remount without a new target");
+    assert.equal(await page.locator(targetSelector).count(), 0);
+    await noPost(before + 1);
+    const advanced = disclosure("Connection details");
+    if (!(await advanced.evaluate(element => (element as HTMLDetailsElement).open))) await advanced.locator("summary").click();
+    await page.getByRole("button", { name: "Verify saved session", exact: true }).waitFor();
     const verify = page.waitForResponse(response => response.url().endsWith("/runtime/session/verify") && response.request().method() === "POST");
-    await page.getByRole("button", { name: "Use Saved Session", exact: true }).click(); assert.equal((await verify).status(), 200);
+    await page.getByRole("button", { name: "Verify saved session", exact: true }).click(); assert.equal((await verify).status(), 200);
     assert.equal(imports.length, before + 1);
   });
   await record("lost result observer returns unknown without replay", async () => {

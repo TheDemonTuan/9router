@@ -5,15 +5,33 @@ import { MAX_SESSION_TRANSFER_BYTES, SessionTransferError } from "../../services
 // and the authenticated read, never from a marker-provided URL or endpoint.
 export async function inspectDashboard({ expected = null, origin = null, checkProfiles = false } = {}) {
   const failure = (code = "session_target_unavailable", status = 409) => ({ ok: false, status, code });
-  if (window !== window.top || location.pathname !== "/dashboard/providers/chatgpt-web"
-    || !(location.protocol === "https:" || location.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname.toLowerCase()))
-    || origin !== null && location.origin !== origin) return failure();
+  if (window !== window.top || location.pathname !== "/dashboard/providers/chatgpt-web") return failure("dashboard_tab_required");
+  if (!(location.protocol === "https:" || location.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname.toLowerCase()))) return failure("secure_origin_required");
+  if (origin !== null && location.origin !== origin) return failure();
+  // Metadata explains an unavailable target; it never authorizes a transfer.
+  const assistants = document.querySelectorAll("[data-9router-chatgpt-session-assistant]");
+  let reason = null;
+  if (assistants.length === 1) {
+    try {
+      const metadata = JSON.parse(assistants[0].getAttribute("data-9router-chatgpt-session-assistant"));
+      if (metadata?.version === 1 && ["loading", "active_turns", "viewer_waiting", "viewer_open", "draining", "probing", "insecure_origin", "unsaved_changes", "profile_mismatch", "expired", "consumed"].includes(metadata.reason)) reason = metadata.reason;
+    } catch { /* Malformed metadata cannot grant consent. */ }
+  }
+  const blocked = () => ({ ...failure("session_target_blocked"), reason });
   const markers = document.querySelectorAll("[data-9router-chatgpt-session-target]");
-  if (markers.length !== 1) return failure();
+  if (markers.length > 1) return failure("session_target_ambiguous");
+  if (!markers.length) {
+    if (assistants.length > 1) return failure("session_target_ambiguous");
+    if (!assistants.length) return failure("session_assistant_required");
+    if (reason === "expired") return failure("session_target_expired");
+    if (reason === "consumed") return failure("session_import_in_progress");
+    return reason ? blocked() : failure("session_target_unprepared");
+  }
   const marker = markers[0];
   if (marker.getAttribute("data-9router-chatgpt-session-consumed") === "true") return failure("session_import_in_progress");
   const inputs = marker.querySelectorAll("input[data-9router-chatgpt-session-file]");
-  if (inputs.length !== 1 || inputs[0].type !== "file" || inputs[0].disabled) return failure();
+  if (inputs.length > 1) return failure("session_target_ambiguous");
+  if (inputs.length !== 1 || inputs[0].type !== "file" || inputs[0].disabled) return blocked();
   let target;
   try { target = JSON.parse(marker.getAttribute("data-9router-chatgpt-session-target")); } catch { return failure(); }
   if (!target || Object.keys(target).sort().join(",") !== "attemptId,connectionName,expiresAt,profileId,revision,version"
@@ -35,7 +53,8 @@ export async function inspectDashboard({ expected = null, origin = null, checkPr
       const profile = data.profiles?.find(item => item.profileId === target.profileId);
       if (!profile) return failure();
       if (profile.revision !== target.revision) return failure("profile_revision_conflict");
-      if (profile.activeTurns !== 0 || ["probing", "draining"].includes(profile.state)) return failure();
+      if (profile.activeTurns !== 0) return { ...failure("session_target_blocked"), reason: "active_turns" };
+      if (["probing", "draining"].includes(profile.state)) return { ...failure("session_target_blocked"), reason: profile.state };
       // The read may have taken long enough for navigation, expiry or UI changes.
       if (location.origin !== (origin || location.origin) || location.pathname !== "/dashboard/providers/chatgpt-web" || !marker.isConnected
         || document.querySelectorAll("[data-9router-chatgpt-session-target]").length !== 1
@@ -108,8 +127,15 @@ async function connect(message) {
   try {
     const target = { tabId: message.tabId, documentIds: [message.documentId] };
     const inspect = async () => {
+      // Action popups can be the focused Chrome window without owning a tab.
+      // Resolve the last focused browser window, then fence its exact active tab.
+      const window = await chrome.windows.getLastFocused({ windowTypes: ["normal"] });
+      const active = await chrome.tabs.query({ active: true, windowId: window.id });
+      if (active.length !== 1 || active[0].id !== message.tabId) return unavailable;
       const results = await chrome.scripting.executeScript({ target, world: "ISOLATED", func: inspectDashboard, args: [{ expected: message.target, origin: message.origin, checkProfiles: true }] });
-      if (results.length !== 1 || results[0].frameId !== 0 || results[0].documentId !== message.documentId) return unavailable;
+      const latestWindow = await chrome.windows.getLastFocused({ windowTypes: ["normal"] });
+      const current = await chrome.tabs.query({ active: true, windowId: latestWindow.id });
+      if (current.length !== 1 || current[0].id !== message.tabId || results.length !== 1 || results[0].frameId !== 0 || results[0].documentId !== message.documentId) return unavailable;
       return results[0].result || unavailable;
     };
     let checked = await inspect();

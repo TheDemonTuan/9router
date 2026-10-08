@@ -17,12 +17,24 @@ import { RuntimeState, RuntimeStateError } from "./runtime-state";
 import { ProfileTunnel } from "./tunnel";
 import type { ProfileTunnelConfig } from "./tunnel";
 import { MAX_BROWSER_TURNS, PROTOCOL_VERSION, validateProfileId } from "../protocol.js";
-import { harnessBuildCompatible } from "./harness-compatibility";
+import { harnessBuildCompatible, genericToolHandoffBuildCompatible } from "./harness-compatibility";
 import { ChatGptBrowserWorker } from "./adapters/chatgpt-web/browser-worker";
 import { TurnBroker } from "./adapters/chatgpt-web/turn-broker";
 import { defaultBrokerEndpoint, atomicWriteFile } from "./config";
 import { ChatGptWebAdapterError } from "./adapters/chatgpt-web/adapter-error";
 import { parseChatGptWebSessionTransfer, SessionTransferError } from "../session-transfer.js";
+import { HarnessConfigStore } from "./harness-config";
+import { AgentTurnBroker } from "./agent-turns";
+
+const HARNESS_MESSAGES: Record<string, string> = {
+  harness_compatibility_unverified: "This runtime build has not passed harness compatibility checks",
+  harness_config_required: "Enter a Platform Tunnel ID and a runtime API key before starting coding tools",
+  connector_unavailable: "Check the owned tunnel, then create or install Codex Native2 in the correct ChatGPT workspace and verify again",
+  harness_config_revision_conflict: "Tunnel configuration changed; refresh before trying again",
+  profile_revision_conflict: "Profile changed; refresh before trying again",
+  harness_operator_managed: "This profile is provisioned by the operator; dashboard configuration cannot replace it",
+  harness_tunnel_id_unsupported: "This pinned tunnel client does not support namespaced Tunnel IDs; an operator-reviewed targeted runtime upgrade is required",
+};
 
 export interface WebModelRow {
   id: string; display_name: string; supported_reasoning_levels: string[]; default_reasoning_level: string;
@@ -52,8 +64,13 @@ export class RuntimeProfiles {
   private viewerGeneration = 0;
   private nextDisplay = 100;
   private readonly approvalWaits = new Map<string, { traceId: string; promptInstance: string }>();
-  private readonly harnessEvidence = new Map<string, { epoch: string; connector: boolean }>();
-  constructor(readonly config: RuntimeConfig, readonly state: RuntimeState, readonly tunnelConfigs: Record<string, ProfileTunnelConfig> = {}) {}
+  private readonly harnessEvidence = new Map<string, { epoch: string; configRevision: number; tunnelId: string; connector: boolean }>();
+  private readonly harnessErrors = new Map<string, string>();
+  private readonly harnessMutations = new Set<string>();
+  readonly harnessConfig: HarnessConfigStore;
+  constructor(readonly config: RuntimeConfig, readonly state: RuntimeState, readonly tunnelConfigs: Record<string, ProfileTunnelConfig> = {}) {
+    this.harnessConfig = new HarnessConfigStore(config.dataDir, tunnelConfigs);
+  }
   async ensureProfileBrowser(profileId: string): Promise<BrowserManager> {
     this.state.profile(profileId);
     await this.ensureDisplay(profileId);
@@ -67,20 +84,33 @@ export class RuntimeProfiles {
         if (profile.settings.mode === "full") await this.harnessSmoke(profile.profileId, true);
         await this.probe(profile.profileId, true, true);
       } catch (error) {
+        if (error instanceof ChatGptWebAdapterError && error.code === "connector_not_found") error = new RuntimeStateError("connector_unavailable", HARNESS_MESSAGES.connector_unavailable!, 503);
         this.invalidate(profile.profileId, error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : "profile_probe_failed");
-        if (!(error instanceof RuntimeStateError || error instanceof ChatGptWebAdapterError) || !["login_required", "session_expired", "model_version_unavailable", "harness_compatibility_unverified", "profile_probe_failed"].includes(error.code || "")) throw error;
+        if (!(error instanceof RuntimeStateError || error instanceof ChatGptWebAdapterError) || !["login_required", "session_expired", "model_version_unavailable", "harness_compatibility_unverified", "harness_config_required", "harness_config_missing", "harness_storage_invalid", "connector_unavailable", "profile_probe_failed"].includes(error.code || "")) throw error;
       }
     }
   }
   private fullReady(profileId: string): boolean {
     const profile = this.state.profile(profileId);
     const evidence = this.harnessEvidence.get(profileId);
+    let config;
+    try { config = this.harnessConfig.describe(profileId); }
+    catch (error) {
+      if (!(error instanceof RuntimeStateError) || error.code !== "harness_storage_invalid") throw error;
+      this.harnessEvidence.delete(profileId);
+      this.harnessErrors.set(profileId, error.code);
+      return false;
+    }
     return harnessBuildCompatible() && evidence?.epoch === profile.epoch && evidence.connector
+      && evidence.configRevision === config.configRevision && evidence.tunnelId === config.tunnelId
       && this.tunnels.get(profileId)?.diagnostic().ready === true;
   }
   async refreshReadiness(profileId: string): Promise<void> {
-    if (this.state.profile(profileId).settings.mode === "full") {
-      if (!await this.tunnels.get(profileId)?.ready()) this.invalidate(profileId, "connector_unavailable");
+    const full = this.state.profile(profileId).settings.mode === "full";
+    if ((full || this.tunnels.has(profileId)) && !await this.tunnels.get(profileId)?.ready()) {
+      this.harnessEvidence.delete(profileId); this.harnessErrors.set(profileId, "connector_unavailable");
+      if (full) this.invalidate(profileId, "connector_unavailable");
+      await AgentTurnBroker.forSocket(join(this.config.dataDir, "profiles", profileId, "run", "agent-turns.sock")).close();
     }
   }
   physicalIdle(): boolean {
@@ -142,6 +172,7 @@ export class RuntimeProfiles {
     }
   }
   ready(profileId: string): boolean {
+    if (this.harnessMutations.has(profileId)) return false;
     if (this.state.fence() || this.viewer?.profileId === profileId && this.viewer.manualLogin || this.viewerStarting) return false;
     let profile;
     try { profile = this.state.profile(profileId); } catch { return false; }
@@ -150,6 +181,7 @@ export class RuntimeProfiles {
       && (profile.settings.mode !== "full" || this.fullReady(profileId));
   }
   evidence(profileId: string): ProfileProbe {
+    if (this.harnessMutations.has(profileId)) throw new RuntimeStateError("profile_active", "Profile setup is in progress");
     if (this.viewer?.profileId === profileId && this.viewer.manualLogin) throw new RuntimeStateError("login_required", "Finish human sign-in before model operations");
     const profile = this.state.profile(profileId);
     const probe = this.probes.get(profileId);
@@ -253,14 +285,14 @@ export class RuntimeProfiles {
           finally { await page.keyboard.press("Escape").catch(() => {}); }
         }
         const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, { ...evidence.capabilities, experimentalBiggerContext: profile.settings.experimentalBiggerContext });
-        const full = profile.accountFingerprint === evidence.accountFingerprint && profile.settings.mode === "full" && harnessBuildCompatible()
-          && this.harnessEvidence.get(profileId)?.epoch === profile.epoch && await this.tunnels.get(profileId)?.ready() === true;
+        const full = profile.accountFingerprint === evidence.accountFingerprint && profile.settings.mode === "full" && this.fullReady(profileId);
         models.push({ id: route.slug, display_name: route.displayName,
           supported_reasoning_levels: [...chatGptWebRouteEfforts(route, evidence.capabilities)], default_reasoning_level: route.codexEffort,
           ...(route.modelFamily ? { model_family: route.modelFamily } : {}), legacy: route.legacy === true,
           context_window: limits.contextWindow, auto_compact_token_limit: limits.autoCompactTokenLimit,
           capabilities: { text: true, vision: true, reasoning: true, compact: route.backendModel !== CHATGPT_WEB_LUNA_BACKEND_MODEL,
-            streaming: true, responses: true, native_responses: true, generic_responses: profile.settings.mode === "browser-only",
+            streaming: true, responses: true, native_responses: true, generic_responses: true,
+            generic_tools: full && genericToolHandoffBuildCompatible(),
             tools: full, mcp_tools: full, exec: full, subagents: full, computer_use: false, browser_tool: false } });
       }
       if (!models.length) throw new RuntimeStateError("model_version_unavailable", "Authenticated profile has no verified model route");
@@ -272,6 +304,8 @@ export class RuntimeProfiles {
         this.harnessEvidence.delete(profileId);
         await this.tunnels.get(profileId)?.stop(); this.tunnels.delete(profileId);
         await TurnBroker.forSocket(defaultBrokerEndpoint(join(this.config.dataDir, "profiles", profileId))).close();
+        await AgentTurnBroker.forSocket(join(this.config.dataDir, "profiles", profileId, "run", "agent-turns.sock")).close();
+        await this.harnessConfig.cleanup(profileId);
         await manager.discardRetained();
       }
       // Import can only bind a first account or preserve the old one; its revision may
@@ -388,11 +422,12 @@ export class RuntimeProfiles {
       state: this.state.fence() ? "draining" : this.approvalWaits.has(profileId) ? "waiting_for_chatgpt_tool_approval"
         : this.ready(profileId) ? "ready" : this.errors.get(profileId) === "login_required" ? "login_required" : this.errors.has(profileId) ? "error" : "login_required",
       models: probe?.models ?? [], activeTurns: browserProfileWork(profileId).activeTurns, maxConcurrency: MAX_BROWSER_TURNS,
-      connectorReady: profile.settings.mode === "full" && this.fullReady(profileId),
+      connectorReady: this.fullReady(profileId),
       lastError: this.errors.get(profileId) || null };
   }
   async patch(profileId: string, revision: number, value: unknown): Promise<unknown> {
     if (this.state.fence()) throw new RuntimeStateError("runtime_draining", "Profile settings denied while drained", 503);
+    if (this.harnessMutations.has(profileId)) throw new RuntimeStateError("profile_active", "Profile setup is in progress");
     const manager = this.manager(profileId);
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new RuntimeStateError("invalid_settings", "Settings object required", 400);
     await manager.maintenance("settings update", async () => {
@@ -407,38 +442,133 @@ export class RuntimeProfiles {
         await this.tunnels.get(profileId)?.ready();
         if (!this.fullReady(profileId)) throw new RuntimeStateError("connector_unavailable", "Run the explicit Full connector smoke after compatibility gates and tunnel provisioning");
       }
-      if (settings.mode === "browser-only") { await this.tunnels.get(profileId)?.stop(); this.tunnels.delete(profileId); }
+      if (current.settings.mode === "full" && settings.mode === "browser-only") await this.stopHarness(profileId);
       this.state.patchProfile(profileId, revision, settings);
       this.probes.delete(profileId);
       await manager.discardRetained();
     });
     return this.status(profileId);
   }
-  async harnessSmoke(profileId: string, initializing = false): Promise<void> {
-    if (!harnessBuildCompatible()) throw new RuntimeStateError("harness_compatibility_unverified", "Build compatibility gates have not been recorded", 503);
-    const config = this.tunnelConfigs[profileId];
-    if (!config) throw new RuntimeStateError("connector_unavailable", "Operator tunnel provisioning required", 503);
-    const evidence = await this.probe(profileId, true, initializing);
-    await TurnBroker.forSocket(defaultBrokerEndpoint(join(this.config.dataDir, "profiles", profileId))).listen();
-    let tunnel = this.tunnels.get(profileId);
-    if (!tunnel) {
-      tunnel = new ProfileTunnel(config); this.tunnels.set(profileId, tunnel);
-      try { await tunnel.start(); }
-      catch (error) { if (this.tunnels.get(profileId) === tunnel) this.tunnels.delete(profileId); throw error; }
-    } else if (!await tunnel.ready()) throw new RuntimeStateError("connector_unavailable", "Owned tunnel is not ready", 503);
-    const profile = this.state.profile(profileId);
+  harnessStatus(profileId: string) {
+    const profile = this.state.profile(profileId), saved = this.harnessConfig.describe(profileId);
+    const tunnel = this.tunnels.get(profileId)?.diagnostic();
+    const proof = this.harnessEvidence.get(profileId);
+    const verified = proof?.epoch === profile.epoch && proof.configRevision === saved.configRevision
+      && proof.tunnelId === saved.tunnelId && proof.connector;
+    const buildCompatible = harnessBuildCompatible();
+    const code = this.harnessErrors.get(profileId) || (!buildCompatible ? "harness_compatibility_unverified" : !saved.keyConfigured ? "harness_config_required" : null);
+    return { profileId, revision: profile.revision, ...saved, buildCompatible,
+      tunnelState: tunnel?.ready ? "ready" : tunnel?.error ? "error" : tunnel?.running ? "starting" : "stopped",
+      connectorState: verified && tunnel?.ready ? "verified" : this.harnessErrors.get(profileId) === "connector_unavailable" ? "unavailable" : "unverified",
+      canEnableFull: !!(buildCompatible && verified && tunnel?.ready),
+      lastError: code ? { code, message: HARNESS_MESSAGES[code] || "Coding tools setup failed; refresh and verify the prerequisites" } : null };
+  }
+  private assertHarnessScope(profileId: string, revision: number, configRevision: number): void {
+    if (this.state.fence()) throw new RuntimeStateError("runtime_draining", "Profile setup denied while drained", 503);
+    if (this.viewer?.profileId === profileId || this.viewerStarting || this.viewerClosing) throw new RuntimeStateError("viewer_busy", "Close the private viewer before changing coding tools");
+    if (!this.manager(profileId).isIdle) throw new RuntimeStateError("profile_active", "Profile setup requires physical browser settlement");
+    if (!Number.isSafeInteger(revision) || revision !== this.state.profile(profileId).revision) throw new RuntimeStateError("profile_revision_conflict", "Profile revision changed");
+    if (!Number.isSafeInteger(configRevision) || configRevision < 0 || configRevision !== this.harnessConfig.describe(profileId).configRevision) throw new RuntimeStateError("harness_config_revision_conflict", "Tunnel configuration revision changed");
+  }
+  private async stopHarness(profileId: string): Promise<void> {
+    this.harnessEvidence.delete(profileId);
+    await this.tunnels.get(profileId)?.stop(); this.tunnels.delete(profileId);
+    await TurnBroker.forSocket(defaultBrokerEndpoint(join(this.config.dataDir, "profiles", profileId))).close();
+    await AgentTurnBroker.forSocket(join(this.config.dataDir, "profiles", profileId, "run", "agent-turns.sock")).close();
+    await this.harnessConfig.cleanup(profileId);
+  }
+  private async startHarness(profileId: string): Promise<void> {
+    if (!harnessBuildCompatible()) throw new RuntimeStateError("harness_compatibility_unverified", "This runtime build has not passed harness compatibility checks", 503);
+    const profile = this.state.profile(profileId), session = this.probes.get(profileId);
+    if (!session || session.epoch !== profile.epoch || session.revision !== profile.revision) throw new RuntimeStateError("login_required", "Verify the saved session before starting coding tools");
+    const existing = this.tunnels.get(profileId);
+    if (existing && await existing.ready()) return;
+    if (existing) await this.stopHarness(profileId);
+    const tunnel = new ProfileTunnel(await this.harnessConfig.processConfig(profileId));
+    this.tunnels.set(profileId, tunnel);
+    try {
+      await TurnBroker.forSocket(defaultBrokerEndpoint(join(this.config.dataDir, "profiles", profileId))).listen();
+      await AgentTurnBroker.forSocket(join(this.config.dataDir, "profiles", profileId, "run", "agent-turns.sock")).listen();
+      await tunnel.start();
+    }
+    catch (error) { await this.stopHarness(profileId); throw error instanceof RuntimeStateError ? error : new RuntimeStateError("connector_unavailable", "Owned tunnel could not start", 503); }
+  }
+  private async verifyHarness(profileId: string): Promise<void> {
+    if (!harnessBuildCompatible()) throw new RuntimeStateError("harness_compatibility_unverified", "This runtime build has not passed harness compatibility checks", 503);
+    if (!await this.tunnels.get(profileId)?.ready()) throw new RuntimeStateError("connector_unavailable", "Start the owned tunnel before verifying Codex Native2", 503);
+    const profile = this.state.profile(profileId), saved = this.harnessConfig.describe(profileId);
+    const evidence = this.probes.get(profileId);
+    if (!evidence || evidence.epoch !== profile.epoch || evidence.revision !== profile.revision) throw new RuntimeStateError("login_required", "Verify the saved session before configuring coding tools");
+    try {
     await ChatGptBrowserWorker.forProvider({ adapter: "chatgpt-web", baseUrl: "https://chatgpt.com", chatgptWeb: {
       profileId, profileEpoch: profile.epoch, clientId: "operator-connector-smoke", browserProfilePath: join(this.config.dataDir, "profiles", profileId, "browser"),
       chromeExecutablePath: this.config.chromiumExecutable, headed: true, appName: profile.settings.connectorName,
       brokerSocketPath: defaultBrokerEndpoint(join(this.config.dataDir, "profiles", profileId)), localToolsEnabled: true,
       solAvailable: evidence.capabilities.solAvailable, proAvailable: evidence.capabilities.proAvailable, extraHighAvailable: evidence.capabilities.extraHighAvailable,
     } }).verifyConnector();
-    if (this.state.profile(profileId).epoch !== profile.epoch || this.state.profile(profileId).revision !== profile.revision) throw new RuntimeStateError("profile_revision_conflict", "Stale connector probe discarded");
-    this.harnessEvidence.set(profileId, { epoch: profile.epoch, connector: true });
-    if (!await this.tunnels.get(profileId)!.ready()) { this.harnessEvidence.delete(profileId); throw new RuntimeStateError("connector_unavailable", "Owned tunnel lost readiness", 503); }
-    atomicWriteFile(join(this.config.dataDir, "profiles", profileId, "state", "harness-evidence.json"), JSON.stringify({ protocolVersion: 1, profileEpoch: profile.epoch, verifiedAt: new Date().toISOString(), connector: true }));
+    } catch (error) {
+      if (error instanceof ChatGptWebAdapterError && error.code === "connector_not_found") throw new RuntimeStateError("connector_unavailable", HARNESS_MESSAGES.connector_unavailable!, 503);
+      throw error;
+    }
+    const current = this.state.profile(profileId), config = this.harnessConfig.describe(profileId);
+    if (current.epoch !== profile.epoch || current.revision !== profile.revision || config.configRevision !== saved.configRevision || config.tunnelId !== saved.tunnelId) throw new RuntimeStateError("profile_revision_conflict", "Stale connector proof discarded");
+    if (!await this.tunnels.get(profileId)!.ready()) throw new RuntimeStateError("connector_unavailable", "Owned tunnel lost readiness", 503);
+    this.harnessEvidence.set(profileId, { epoch: profile.epoch, configRevision: saved.configRevision, tunnelId: saved.tunnelId!, connector: true });
+    atomicWriteFile(join(this.config.dataDir, "profiles", profileId, "state", "harness-evidence.json"), JSON.stringify({ protocolVersion: 1, profileEpoch: profile.epoch, configRevision: saved.configRevision, tunnelId: saved.tunnelId, verifiedAt: new Date().toISOString(), connector: true }));
+  }
+  async harnessAction(action: "configure" | "start" | "verify" | "activate" | "disconnect", profileId: string, revision: number, configRevision: number, input?: { tunnelId: string; runtimeApiKey?: string }): Promise<unknown> {
+    this.assertHarnessScope(profileId, revision, configRevision);
+    if (this.harnessMutations.has(profileId)) throw new RuntimeStateError("profile_active", "Profile setup is already in progress");
+    this.harnessMutations.add(profileId);
+    const manager = this.manager(profileId);
+    try {
+      if (action === "configure") await manager.maintenance("tunnel configuration", async () => {
+        this.harnessConfig.validateConfiguration(profileId, configRevision, input!);
+        await this.stopHarness(profileId);
+        this.harnessConfig.configure(profileId, configRevision, input!);
+      });
+      else if (action === "start") await manager.maintenance("tunnel start", () => this.startHarness(profileId));
+      else if (action === "disconnect") {
+        await manager.maintenance("tunnel disconnect", async () => {
+          await this.stopHarness(profileId);
+          const profile = this.state.profile(profileId);
+          this.state.patchProfile(profileId, revision, { ...profile.settings, mode: "browser-only" });
+          await manager.discardRetained();
+        });
+        await this.probe(profileId);
+      } else {
+        await this.verifyHarness(profileId);
+        if (action === "activate") {
+          await manager.maintenance("coding tools activation", async () => {
+            const profile = this.state.profile(profileId);
+            this.state.patchProfile(profileId, revision, { ...profile.settings, mode: "full" });
+            await manager.discardRetained();
+          });
+          await this.probe(profileId);
+        }
+      }
+      this.harnessErrors.delete(profileId);
+    } catch (error) {
+      this.harnessErrors.set(profileId, error instanceof RuntimeStateError || error instanceof ChatGptWebAdapterError ? error.code || "connector_unavailable" : "connector_unavailable");
+      if (action === "verify" || action === "activate") this.harnessEvidence.delete(profileId);
+      throw error;
+    } finally { this.harnessMutations.delete(profileId); }
+    const status = this.harnessStatus(profileId);
+    return action === "activate" || action === "disconnect" ? { profile: this.status(profileId), status } : status;
+  }
+  async harnessSmoke(profileId: string, initializing = false): Promise<void> {
+    await this.probe(profileId, true, initializing);
+    if (initializing) {
+      await this.startHarness(profileId);
+      await this.verifyHarness(profileId);
+    } else {
+      const revision = this.state.profile(profileId).revision, configRevision = this.harnessConfig.describe(profileId).configRevision;
+      await this.harnessAction("start", profileId, revision, configRevision);
+      await this.harnessAction("verify", profileId, revision, configRevision);
+    }
   }
   async startViewer(profileId: string, login: boolean, traceId?: string): Promise<unknown> {
+    if (this.harnessMutations.has(profileId)) throw new RuntimeStateError("profile_active", "Profile setup is in progress");
     if (this.viewer?.profileId === profileId && !traceId && (!login || this.viewer.manualLogin)) {
       const loginId = this.viewer.loginId;
       this.viewerSession(loginId);
@@ -629,6 +759,7 @@ export class RuntimeProfiles {
     await Promise.all(this.displayStarts.values());
     await closeBrowserManagers();
     await Promise.all([...this.tunnels.values()].map(tunnel => tunnel.stop())); this.tunnels.clear();
+    await Promise.all(this.state.listProfiles().map(profile => this.harnessConfig.cleanup(profile.profileId)));
     for (const display of this.displays.values()) {
       for (const child of [display.wm, display.child]) if (child.exitCode === null && child.signalCode === null) { const exited = once(child, "exit"); child.kill("SIGTERM"); await exited; }
     }

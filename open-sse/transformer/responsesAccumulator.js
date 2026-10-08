@@ -83,6 +83,8 @@ export class ResponsesAccumulator {
   observe(type, event) {
     this.state.events++;
     this.updateResponse(event?.response);
+    const error = event?.error || event?.response?.error;
+    if (error) this.state.error = error;
     if (isOpenAIResponsesTerminalEvent(type, event) && Array.isArray(event?.response?.output)) {
       this.state.terminalOutput = event.response.output;
       this.state.terminalOutputBefore = event.response.output.length;
@@ -185,7 +187,7 @@ export class ResponsesAccumulator {
     return buildResponseSnapshot(this.state, {
       status: disconnected ? "failed" : this.state.status,
       output: this.recoveredOutput({ enrich: true }),
-      error: disconnected ? { type: "stream_error", code: "stream_disconnected", message: "stream closed before response.completed" } : null,
+      error: disconnected ? { type: "stream_error", code: "stream_disconnected", message: "stream closed before response.completed" } : this.state.error || null,
       usage: this.state.usage,
     });
   }

@@ -525,4 +525,80 @@ describe("Responses Structured Outputs & Multi-hop Translation", () => {
       expect(finalSchema.additionalProperties).toBe(false);
     });
   });
+
+  describe("OpenAI-compatible Agent Request Translation", () => {
+    it("preserves function tool declarations, tool_choice, and parallel_tool_calls in openaiToOpenAIResponsesRequest", () => {
+      const chatReq = {
+        model: "cgw/chatgpt-web/gpt-5.6-sol",
+        messages: [
+          { role: "system", content: "You are an agent." },
+          { role: "user", content: "Check the file." },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_abc123",
+                type: "function",
+                function: { name: "read_file", arguments: JSON.stringify({ path: "/tmp/foo" }) },
+              },
+            ],
+          },
+          { role: "tool", tool_call_id: "call_abc123", content: "file content" },
+        ],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "read_file",
+              description: "Read a file from disk",
+              parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+              strict: true,
+            },
+          },
+        ],
+        tool_choice: "auto",
+        parallel_tool_calls: true,
+      };
+
+      const responsesReq = openaiToOpenAIResponsesRequest(
+        "chatgpt-web/gpt-5.6-sol",
+        chatReq,
+        true,
+        { chatGptWebRequestMode: "agent" }
+      );
+
+      expect(responsesReq.model).toBe("chatgpt-web/gpt-5.6-sol");
+      expect(responsesReq.instructions).toBe("You are an agent.");
+      expect(responsesReq.tool_choice).toBe("auto");
+      expect(responsesReq.parallel_tool_calls).toBe(true);
+      expect(responsesReq.tools).toEqual([
+        {
+          type: "function",
+          name: "read_file",
+          description: "Read a file from disk",
+          parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+          strict: true,
+        },
+      ]);
+      expect(responsesReq.input).toEqual([
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "Check the file." }],
+        },
+        {
+          type: "function_call",
+          call_id: "call_abc123",
+          name: "read_file",
+          arguments: JSON.stringify({ path: "/tmp/foo" }),
+        },
+        {
+          type: "function_call_output",
+          call_id: "call_abc123",
+          output: "file content",
+        },
+      ]);
+    });
+  });
 });

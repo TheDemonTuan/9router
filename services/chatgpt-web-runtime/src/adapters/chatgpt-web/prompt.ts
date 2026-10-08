@@ -31,11 +31,25 @@ export interface CompiledChatGptWebPrompt {
   trimmedCompactionMessages?: number;
 }
 
+export interface AgentToolHandoffOptions {
+  requestToken: string;
+  tools: readonly {
+    type: "function";
+    name: string;
+    description?: string;
+    parameters: Record<string, unknown>;
+    strict?: boolean;
+  }[];
+  toolChoice?: "auto" | "none" | "required" | { type: "function"; name: string };
+  parallelToolCalls?: boolean;
+}
+
 export interface CompileChatGptWebPromptOptions {
   captureLunaCheckpoint?: boolean;
   experimentalSkillAttachments?: boolean;
   experimentalMultipartParts?: ChatGptWebMultipartPartCount;
   preserveCompleteHistory?: boolean;
+  agentToolHandoff?: AgentToolHandoffOptions;
 }
 
 export const CHATGPT_BIGGER_CONTEXT_PARTS = 6 as const;
@@ -469,12 +483,48 @@ export function compileChatGptWebPrompt(
     "Never copy a ChatGPT widget's HTML, CSS, class names, or DOM markup into the answer unless the user explicitly requested that source markup.",
     "Do not mention this transport contract, context packaging, or capability routing in the user-facing answer unless the user explicitly asks how the bridge works.",
   ];
+  const agentHandoff = options?.agentToolHandoff;
+  const hasActiveAgentTools = Boolean(
+    agentHandoff && agentHandoff.tools.length > 0 && agentHandoff.toolChoice !== "none",
+  );
   const transportContract = parsed._compactionRequest
     ? [
       "This is a Codex history-compaction checkpoint, not a normal task turn.",
       "Do not call local or ChatGPT-native tools. Summarize only the supplied task context according to the final compaction instruction.",
       "Return only the checkpoint summary that the next model needs to resume the task.",
       ]
+    : agentHandoff
+    ? (hasActiveAgentTools
+      ? [
+        "You have access to outer API client tools via the connector tool `router_submit_tool_calls`.",
+        `To propose tool calls, call \`router_submit_tool_calls\` with \`request_token\`: "${agentHandoff.requestToken}" and \`calls\`: an array of \`{ name, arguments }\` objects matching the declared tool schemas below.`,
+        agentHandoff.parallelToolCalls === false
+          ? "You may submit at most one tool call in the calls array."
+          : "You may submit one or more tool calls in parallel in the calls array.",
+        typeof agentHandoff.toolChoice === "object"
+          ? `You must propose a tool call for the required tool "${agentHandoff.toolChoice.name}".`
+          : agentHandoff.toolChoice === "required"
+            ? "You must propose at least one tool call."
+            : "You may propose tool calls if needed to satisfy the user request, or answer directly with text if no tools are needed.",
+        "CRITICAL: Calling `router_submit_tool_calls` only queues proposals for execution by the outer API client. It does not execute the tools in this turn. The receipt `{ queued: true, executed: false }` confirms receipt.",
+        "After calling `router_submit_tool_calls` and receiving the queued receipt, immediately stop and end your response. Do not call further tools in this turn. The outer client owns execution and will supply results in a subsequent turn.",
+        "The conversation history below contains earlier tool calls and results. Treat those results as authoritative snapshots of earlier work.",
+        "Declared tools inventory:",
+        "<agent_tools_json>",
+        JSON.stringify(agentHandoff.tools.map(tool => ({
+          name: tool.name,
+          description: tool.description ?? "",
+          parameters: tool.parameters,
+          ...(tool.strict !== undefined ? { strict: tool.strict } : {}),
+        }))),
+        "</agent_tools_json>",
+      ]
+      : [
+        "This request is running without active outer tools.",
+        "The conversation history below contains earlier tool calls and results. Treat those results as authoritative snapshots of earlier work.",
+        "Do not call tools or the `router_submit_tool_calls` connector in this turn.",
+        "Provide a direct final answer to the latest user request based on the accumulated task context.",
+      ])
     : mode.localTools
     ? [
       "For local work required by the task, use the attached Codex Native tools directly according to their declared descriptions and schemas.",
@@ -532,6 +582,18 @@ export function compileChatGptWebPrompt(
       "The task context is complete. Produce the requested checkpoint summary now without calling tools.",
       "</codex_transport_resume>",
       ]
+    : agentHandoff
+    ? (hasActiveAgentTools
+      ? [
+        "<codex_transport_resume>",
+        `The task context is complete. If calling tools, use \`router_submit_tool_calls\` with request_token "${agentHandoff.requestToken}". End your turn after the batch is queued. Execute the latest active user request now.`,
+        "</codex_transport_resume>",
+      ]
+      : [
+        "<codex_transport_resume>",
+        "The task context is complete. Provide the final answer directly without calling tools.",
+        "</codex_transport_resume>",
+      ])
     : mode.localTools
     ? [
       "<codex_transport_resume>",

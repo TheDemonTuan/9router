@@ -39,6 +39,7 @@ export type CodexMessage =
   | CodexAgentMessage
   | CodexAssistantMessage
   | CodexDeveloperMessage
+  | CodexSystemMessage
   | CodexToolResultMessage;
 
 export interface CodexUserMessage {
@@ -69,6 +70,12 @@ export interface CodexAssistantMessage {
 
 export interface CodexDeveloperMessage {
   role: "developer";
+  content: string | CodexContentPart[];
+  timestamp: number;
+}
+
+export interface CodexSystemMessage {
+  role: "system";
   content: string | CodexContentPart[];
   timestamp: number;
 }

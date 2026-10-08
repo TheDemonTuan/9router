@@ -6,8 +6,8 @@
  *   --runtime-bun /absolute/path/to/bun-1.4.0 --chromium /absolute/path/to/chromium
  * Or: --image cgw-runtime:check --browser-volume 9router-cgw-browser --gateway-port 21127 (native Linux Docker only).
  * Requires gateway Bun 1.4.2, runtime dependencies installed with its frozen lock,
- * and an existing gateway build. When BUILD_ID is absent, isolated Next dev builds
- * are used and explicitly reported. No account, production DB, Codex auth or live
+ * and an existing gateway build. Missing BUILD_ID fails before launching processes;
+ * this runner never compiles the gateway implicitly. No account, production DB, Codex auth or live
  * tunnel is used. Outer tools execute only inside the newly owned fixture workspace.
  */
 import assert from "node:assert/strict";
@@ -22,7 +22,7 @@ import { createServer } from "node:net";
 const options = {};
 for (let index = 2; index < process.argv.length; index += 2) {
   const key = process.argv[index];
-  assert(["--runtime-url", "--gateway-port", "--image", "--browser-volume", "--runtime-bun", "--chromium"].includes(key), "Unknown smoke flag");
+  assert(["--runtime-url", "--gateway-port", "--image", "--browser-volume", "--runtime-bun", "--chromium", "--opencode", "--proof-dir"].includes(key), "Unknown smoke flag");
   assert(process.argv[index + 1] && !process.argv[index + 1].startsWith("--"), "Smoke flag requires a value");
   assert(!Object.hasOwn(options, key), "Duplicate smoke flag"); options[key] = process.argv[index + 1];
 }
@@ -34,8 +34,11 @@ assert(Number.isInteger(gatewayPort) && gatewayPort > 1024 && gatewayPort < 6553
 assert(!(options["--image"] && options["--runtime-url"]), "Select --image OR --runtime-url");
 const runtimeUrl = new URL(options["--runtime-url"] || "http://127.0.0.1:17841");
 assert(runtimeUrl.protocol === "http:" && runtimeUrl.hostname === "127.0.0.1" && runtimeUrl.pathname === "/" && runtimeUrl.port && !runtimeUrl.search && !runtimeUrl.hash && !runtimeUrl.username && !runtimeUrl.password, "Runtime fixture URL must be exact loopback HTTP with port");
+assert(existsSync(join(repository, process.env.NEXT_DIST_DIR || ".next", "BUILD_ID")), "BLOCKED: a completed production gateway artifact is required; implicit local builds are disabled");
+const proofDirectory = options["--proof-dir"] ? resolve(options["--proof-dir"]) : null;
+if (proofDirectory) mkdirSync(proofDirectory, { recursive: true, mode: 0o700 });
 const root = mkdtempSync(join(tmpdir(), "9router-cgw-gateway-"));
-const children = [], logFiles = [], devDirectories = [];
+const children = [], logFiles = [];
 const resources = { container: null, probe: null, extraction: null, network: null, volume: null };
 const suffix = randomUUID().replaceAll("-", "");
 const previousEnvironment = { ...process.env };
@@ -156,7 +159,7 @@ try {
     assert(chromium && existsSync(chromium), "BLOCKED: set CGW_CHROMIUM_EXECUTABLE or --chromium to an installed sandbox-capable Chromium");
     await freePort(Number(runtimeUrl.port));
     runtimeOwner = start(runtimeBun, [join(runtimePackage, "scripts/gateway-smoke-fixture.ts")], { ...isolated,
-      CGW_RUNTIME_TOKEN_FILE: dataFile, CGW_ADMIN_TOKEN_FILE: adminFile, CGW_PORT: runtimeUrl.port, CGW_FIXTURE_CONTROL_PORT: String(controlPort), CGW_CHROMIUM_EXECUTABLE: chromium }, "runtime");
+      CGW_RUNTIME_TOKEN_FILE: dataFile, CGW_ADMIN_TOKEN_FILE: adminFile, CGW_PORT: runtimeUrl.port, CGW_FIXTURE_CONTROL_PORT: String(controlPort), CGW_CHROMIUM_EXECUTABLE: chromium, CGW_FIXTURE_HOST_DISPLAY: "1" }, "runtime");
   }
   assert(command(runtimeBun, ["--version"]) === "1.4.0", "BLOCKED: runtime/companion require Bun 1.4.0");
   stage = "companion keygen and provisioning";
@@ -181,16 +184,11 @@ try {
     connections.push(await db.createProviderConnection({ provider: "chatgpt-web", authType: "bridge", name: `offline-row-${index}`, priority: index + 1, isActive: true, testStatus: "active", providerSpecificData: { profileId } }));
   }
   const gatewayEnv = { ...isolated, CHATGPT_WEB_RUNTIME_URL: runtimeUrl.origin, CHATGPT_WEB_RUNTIME_TOKEN_FILE: dataFile, CHATGPT_WEB_RUNTIME_ADMIN_TOKEN_FILE: adminFile, CHATGPT_WEB_CLIENT_KEYS_FILE: clientKeysFile };
-  gatewayMode = existsSync(join(repository, process.env.NEXT_DIST_DIR || ".next", "BUILD_ID")) ? "production-custom-server" : "next-dev-build-missing";
+  gatewayMode = "production-custom-server";
   const gateways = [];
   for (const [index, color] of ["blue", "green"].entries()) {
     const env = { ...gatewayEnv, PORT: String(gatewayPort + index), HOSTNAME: "127.0.0.1" };
-    let args;
-    if (gatewayMode === "production-custom-server") args = [join(repository, "custom-server.js"), "-p", env.PORT, "-H", "127.0.0.1"];
-    else {
-      const directory = `.next-cgw-${suffix}-${color}`; env.NEXT_DIST_DIR = directory; devDirectories.push(join(repository, directory));
-      args = [join(repository, "node_modules/next/dist/bin/next"), "dev", "--webpack", "-p", env.PORT, "-H", "127.0.0.1"];
-    }
+    const args = [join(repository, "custom-server.js"), "-p", env.PORT, "-H", "127.0.0.1"];
     stage = `${color} actual Next startup`; const owner = start(process.execPath, args, env, color);
     const base = `http://127.0.0.1:${gatewayPort + index}`; await waitFor(base + "/v1/models", { headers: { authorization: `Bearer ${apiKey}` } }, owner);
     gateways.push({ base, owner });
@@ -201,7 +199,7 @@ try {
     const owner = start(runtimeBun, [join(runtimePackage, "src/companion/main.ts")], { ...isolated, CGW_COMPANION_CONFIG_FILE: configFile }, `companion-${index}`);
     const base = `http://127.0.0.1:${port}`; stage = "actual companion startup"; await waitFor(base + "/v1/models", {}, owner); companions.push(base);
   }
-  const control = (path = "/evidence", method = "GET") => fetch(controlUrl + path, { method, headers: { authorization: `Bearer ${adminToken}` }, signal: AbortSignal.timeout(120000) }).then(response => json(response, "fixture evidence"));
+  const control = (path = "/evidence", method = "GET", body) => fetch(controlUrl + path, { method, headers: { authorization: `Bearer ${adminToken}`, ...(body ? { "content-type": "application/json" } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(120000) }).then(response => json(response, "fixture evidence"));
   stage = "public catalog";
   const models = await json(await fetch(companions[0] + "/v1/models"), "public models");
   const sol = models.data.find(model => model.id === "cgw/chatgpt-web/gpt-5.6-sol");
@@ -365,20 +363,242 @@ try {
   assert(cancelled.cancelled === 1, "Signed interrupt did not cancel exact pending browser owner");
   const settledHealth = await json(await fetch(runtimeUrl.origin + "/healthz", { headers: { authorization: `Bearer ${dataToken}` } }), "interrupt physical settlement");
   assert(settledHealth.activeBrowserTurns === 0 && settledHealth.pendingToolCalls === 0, "Interrupt returned before physical MCP/browser settlement");
+  stage = "generic standard-function four public wires";
+  await control("/agent-fixture", "POST");
+  writeFileSync(clientKeysFile, JSON.stringify({ version: 1, clients: [] }), { mode: 0o600 });
+  const genericTools = [
+    { type: "function", name: "read_file", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"], additionalProperties: false } },
+    { type: "function", name: "write_file", parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"], additionalProperties: false } },
+  ];
+  const genericEvidence = await control();
+  for (const path of ["/v1/chat/completions", "/v1/responses"]) for (const stream of [false, true]) {
+    const chat = path.endsWith("completions");
+    const local = mkdtempSync(join(workspace, "generic-"));
+    writeFileSync(join(local, "input.txt"), "CGW_AGENT_FIXTURE_INPUT\n", { mode: 0o600 });
+    let history = chat ? [{ role: "user", content: "Read input.txt, create output.txt containing the same text plus VERIFIED, then read it back." }]
+      : [{ type: "message", role: "user", content: "Read input.txt, create output.txt containing the same text plus VERIFIED, then read it back." }];
+    const callIds = new Set();
+    for (let round = 0; round < 4; round++) {
+      const body = { model: "cgw/chatgpt-web/gpt-5.6-sol", stream, parallel_tool_calls: false,
+        ...(round === 0 ? { tool_choice: chat ? { type: "function", function: { name: "read_file" } } : { type: "function", name: "read_file" } } : {}),
+        ...(chat ? { reasoning_effort: "high", tools: genericTools.map(({ type, ...fn }) => ({ type, function: fn })), messages: history }
+          : { reasoning: { effort: "high" }, tools: genericTools, input: history }) };
+      const response = await post(gateways[round % 2].base, path, body, auth);
+      if (!response.ok) {
+        const failure = await response.json();
+        const code = /^[a-z0-9_]+$/.test(failure.error?.code || "") ? failure.error.code : "unknown";
+        assert.fail(`Generic ${chat ? "Chat" : "Responses"} round ${round} rejected (${response.status}:${code})`);
+      }
+      assert(response.headers.get("x-9router-connection-id") !== browserConnection, "Generic tools selected browser-only account");
+      let calls, answer, assistant;
+      if (chat) {
+        let message, finish;
+        if (!stream) {
+          const result = await response.json(); message = result.choices[0].message; finish = result.choices[0].finish_reason;
+        } else {
+          const wire = await response.text(); assert(wire.includes("data: [DONE]"), "Generic Chat missing DONE");
+          const chunks = wire.split(/\r?\n/).filter(line => line.startsWith("data: ") && line !== "data: [DONE]").map(line => JSON.parse(line.slice(6)));
+          const collected = new Map(); let content = "";
+          for (const chunk of chunks) {
+            const choice = chunk.choices?.[0]; if (choice?.finish_reason) finish = choice.finish_reason;
+            content += choice?.delta?.content || "";
+            for (const call of choice?.delta?.tool_calls || []) {
+              const value = collected.get(call.index) || { id: "", type: "function", function: { name: "", arguments: "" } };
+              if (call.id) value.id = call.id;
+              value.function.name += call.function?.name || ""; value.function.arguments += call.function?.arguments || "";
+              collected.set(call.index, value);
+            }
+          }
+          message = { role: "assistant", content: content || null, ...(collected.size ? { tool_calls: [...collected.values()] } : {}) };
+        }
+        calls = (message.tool_calls || []).map(call => ({ call_id: call.id, name: call.function.name, arguments: call.function.arguments }));
+        assert(finish === (round < 3 ? "tool_calls" : "stop"), "Generic Chat finish_reason does not match tool/final boundary");
+        assistant = message; answer = message.content;
+      } else {
+        const result = stream ? responseFromSse(await response.text()) : await response.json();
+        assert(result.status === "completed", "Generic Responses did not complete");
+        calls = result.output.filter(item => item.type === "function_call");
+        answer = result.output.filter(item => item.type === "message").flatMap(item => item.content).map(item => item.text || "").join("");
+      }
+      if (round === 3) { assert(calls.length === 0 && answer.includes("Verification complete"), "Generic tool loop did not reach final answer"); break; }
+      assert(calls.length === 1, "Generic function batch boundary changed");
+      const call = calls[0]; assert(!callIds.has(call.call_id), "Generic call ID was reused"); callIds.add(call.call_id);
+      const args = JSON.parse(call.arguments);
+      assert(call.name === (round === 1 ? "write_file" : "read_file") && args.path === (round === 0 ? "input.txt" : "output.txt"), "Unexpected client tool/path proposal");
+      let output;
+      if (round === 1) {
+        assert(args.content === "CGW_AGENT_FIXTURE_INPUT\nVERIFIED\n", "Generic write content was not derived from client read result");
+        writeFileSync(join(local, args.path), args.content, { flag: "wx", mode: 0o600 }); output = "WRITE_SUCCESS";
+      } else {
+        output = readFileSync(join(local, args.path), "utf8");
+        if (round === 2) { assert(output === "CGW_AGENT_FIXTURE_INPUT\nVERIFIED\n", "Generic read-back failed"); output = "READ_BACK_SUCCESS\n" + output; }
+      }
+      history = chat ? [...history, assistant, { role: "tool", tool_call_id: call.call_id, content: output }]
+        : [...history, { type: "function_call", call_id: call.call_id, name: call.name, arguments: call.arguments }, { type: "function_call_output", call_id: call.call_id, output }];
+    }
+    assert(callIds.size === 3 && readFileSync(join(local, "output.txt"), "utf8") === "CGW_AGENT_FIXTURE_INPUT\nVERIFIED\n", "Generic physical client file evidence missing");
+  }
+  const afterGeneric = await control();
+  assert(afterGeneric.physicalSends - genericEvidence.physicalSends === 16 && afterGeneric.mcpCalls - genericEvidence.mcpCalls === 12, "Generic rounds did not use fresh physical turns/actual MCP batches");
+  stage = "required-tool failures remain structured and terminal for Chat clients";
+  await control("/agent-cli", "POST", { calls: [], answer: "No proposed tools." });
+  const beforeRequired = await control();
+  for (const stream of [false, true]) {
+    const response = await post(gateways[0].base, "/v1/chat/completions", { model: "cgw/chatgpt-web/gpt-5.6-sol", stream,
+      reasoning_effort: "high", tool_choice: "required", tools: genericTools.map(({ type, ...fn }) => ({ type, function: fn })),
+      messages: [{ role: "user", content: "Offline required-tool error fixture." }] }, { ...auth, "x-connection-id": connections[1].id });
+    if (stream) {
+      const wire = await response.text();
+      const frames = wire.split("\n").filter(line => line.startsWith("data: ") && !line.includes("[DONE]")).map(line => JSON.parse(line.slice(6)));
+      assert(frames.find(frame => frame.error)?.error.code === "agent_tool_choice_unsatisfied", "Streaming Chat lost typed required-tool failure");
+      assert(!wire.includes("[Error]") && !frames.some(frame => frame.choices?.[0]?.finish_reason), "Streaming Chat fabricated a successful error answer");
+    } else {
+      const result = await response.json();
+      assert(response.status === 502 && result.error?.code === "agent_tool_choice_unsatisfied" && !result.choices, "Nonstream Chat lost typed required-tool failure");
+      assert(response.headers.get("x-9router-no-fallback") === "true", "Nonstream tool failure lost replay protection");
+    }
+  }
+  assert((await control()).physicalSends - beforeRequired.physicalSends === 2, "Required-tool failures retried physical submission");
+  stage = "native and generic shared physical capacity/cancellation";
+  writeFileSync(clientKeysFile, JSON.stringify(provisioned), { mode: 0o600 });
+  await control("/agent-cli", "POST", { calls: [], answer: "Held offline capacity turn completed.", delayMs: 300000 });
+  const capacityStart = await control();
+  const capacityNative = nativeRequest({ name: "mixed-capacity" });
+  const capacityIdentity = capacityNative.client_metadata["x-codex-turn-metadata"];
+  const nativeCapacityAbort = new AbortController();
+  const nativePending = fetch(gateways[0].base + "/v1/responses", { method: "POST", headers: { ...auth, "content-type": "application/json", "x-connection-id": connections[1].id, "x-9router-cgw-attestation": sign(capacityNative) }, body: JSON.stringify(capacityNative), signal: nativeCapacityAbort.signal }).then(async response => { await response.arrayBuffer(); }).catch(error => { assert(nativeCapacityAbort.signal.aborted, "Unexpected native capacity failure"); });
+  const genericBody = { model: "cgw/chatgpt-web/gpt-5.6-sol", stream: false, reasoning_effort: "high", tool_choice: "none", tools: genericTools.map(({ type, ...fn }) => ({ type, function: fn })), messages: [{ role: "user", content: "Hold the offline capacity fixture." }] };
+  const capacityAborts = Array.from({ length: 4 }, () => new AbortController());
+  const genericPending = capacityAborts.map(controller => fetch(gateways[0].base + "/v1/chat/completions", { method: "POST", headers: { ...auth, "content-type": "application/json", "x-connection-id": connections[1].id }, body: JSON.stringify(genericBody), signal: controller.signal }).then(async response => { await response.arrayBuffer(); }).catch(error => { assert(controller.signal.aborted, "Unexpected generic capacity failure"); }));
+  const health = () => fetch(runtimeUrl.origin + "/healthz", { headers: { authorization: `Bearer ${dataToken}` } }).then(response => json(response, "mixed physical health"));
+  const waitPhysical = async (count, timeout = 20000) => {
+    const until = Date.now() + timeout;
+    while (Date.now() < until) { if ((await health()).activeBrowserTurns === count) return; await sleep(100); }
+    throw new assert.AssertionError({ message: `Mixed-client physical turn count did not reach ${count}` });
+  };
+  try {
+    await waitPhysical(5);
+    const beforeOverflow = await control();
+    stage = "sixth mixed-client physical turn overflow";
+    const overflow = await post(gateways[1].base, "/v1/chat/completions", genericBody, { ...auth, "x-connection-id": connections[1].id });
+    const overflowBody = await overflow.json();
+    const overflowCode = typeof overflowBody.error?.code === "string" && /^[a-z0-9_]+$/.test(overflowBody.error.code) ? overflowBody.error.code : "unknown";
+    assert(overflow.status === 503 && overflowCode === "provider_busy", `Sixth mixed-client turn did not fail typed busy (HTTP ${overflow.status}, ${overflowCode})`);
+    assert((await control()).physicalSends === beforeOverflow.physicalSends, "Sixth mixed-client turn reached Send");
+    stage = "generic physical cancellation settlement";
+    capacityAborts[0].abort(); await genericPending[0]; await waitPhysical(4);
+    stage = "native physical cancellation settlement";
+    const interrupt = await json(await post(companions[0], "/v1/cgw/interrupt-turn", { threadId: capacityIdentity.thread_id, turnId: capacityIdentity.turn_id }), "mixed native cancellation");
+    assert(interrupt.cancelled === 1, "Mixed native cancellation missed its physical owner");
+    await nativePending; await waitPhysical(3);
+    stage = "reclaimed generic physical slot";
+    await control("/agent-cli", "POST", { calls: [], answer: "Reclaimed physical slot completed." });
+    const reclaimed = await json(await post(gateways[1].base, "/v1/chat/completions", genericBody, { ...auth, "x-connection-id": connections[1].id }), "reclaimed generic capacity");
+    assert(reclaimed.choices[0].finish_reason === "stop", "Cancelled physical slot could not run another generic turn");
+  } finally {
+    capacityAborts.forEach(controller => controller.abort());
+    nativeCapacityAbort.abort();
+    await Promise.all(genericPending); await nativePending;
+  }
+  await waitPhysical(0);
+  const capacityEnd = await control();
+  assert(capacityEnd.physicalSends >= capacityStart.physicalSends + 1, "Mixed-client smoke did not physically submit the reclaimed slot");
+  writeFileSync(clientKeysFile, JSON.stringify({ version: 1, clients: [] }), { mode: 0o600 });
+  let actualOpenCode = null;
+  if (options["--opencode"]) {
+    stage = "actual OpenCode CLI project-scoped read/write/read-back";
+    stage = "OpenCode executable version prerequisite";
+    const version = command(options["--opencode"], ["--version"]);
+    const project = mkdtempSync(join(workspace, "opencode-"));
+    assert(spawnSync("git", ["init", "--quiet"], { cwd: project, env: { ...isolated, PWD: project }, stdio: "ignore" }).status === 0, "Owned CLI fixture initialization failed");
+    writeFileSync(join(project, "input.txt"), "CGW_AGENT_FIXTURE\n", { mode: 0o600 });
+    const cliCalls = [
+      { name: "read", arguments: { filePath: join(project, "input.txt") } },
+      { name: "apply_patch", arguments: { patchText: `*** Begin Patch\n*** Add File: ${join(project, "output.txt")}\n+CGW_AGENT_FIXTURE\n+VERIFIED\n*** End Patch` } },
+      { name: "read", arguments: { filePath: join(project, "output.txt") } },
+    ];
+    const fields = new Set(); let requests = 0, proxyFailure, gatewayFailure, proxyStage = "idle";
+    const proxy = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+      try {
+        const url = new URL(request.url);
+        if (request.method === "POST") {
+          proxyStage = "decode-client-request";
+          const body = await request.clone().json(); Object.keys(body).forEach(key => fields.add(key));
+          assert(!["temperature", "top_p", "top_k", "max_tokens", "max_completion_tokens", "max_output_tokens"].some(key => Object.hasOwn(body, key)), "Generated OpenCode plugin left unsupported controls on the wire");
+          assert(body.reasoning_effort === "high" && requests < 4, "OpenCode lost requested effort or repeated a turn");
+          if (requests > 0) assert(body.messages.filter(message => message.role === "tool").length === requests, "OpenCode did not supply complete tool-result history");
+          const next = cliCalls[requests];
+          if (next) assert(body.tools.some(tool => tool.function?.name === next.name), "OpenCode native read/write inventory missing");
+          proxyStage = "configure-offline-browser";
+          await control("/agent-cli", "POST", { calls: next ? [next] : [], answer: next ? "Client operation queued." : "Verification complete: output.txt contains CGW_AGENT_FIXTURE and VERIFIED." });
+          requests++;
+        }
+        proxyStage = "forward-to-gateway";
+        const response = await fetch(gateways[0].base + url.pathname + url.search, { method: request.method, headers: request.headers, body: request.body, redirect: "error", signal: request.signal });
+        if (!response.ok) {
+          const failure = await response.clone().json().catch(() => null);
+          const code = failure?.error?.code || failure?.error?.type;
+          gatewayFailure = { status: response.status, code: typeof code === "string" && /^[a-z0-9_]{1,64}$/.test(code) ? code : "unknown" };
+        }
+        return response;
+      } catch (error) { proxyFailure = error; return Response.json({ error: { message: "Offline CLI fixture assertion failed" } }, { status: 500 }); }
+    } });
+    try {
+      const { buildChatGptWebClientConfig } = await import(join(repository, "src/shared/utils/chatgptWebClientConfig.js"));
+      stage = "OpenCode generated project configuration: build template";
+      const catalogSol = { ...sol, id: sol.id.replace(/^cgw\//, ""), context_window: sol.context_length,
+        ...(sol.max_completion_tokens !== undefined ? { max_output: sol.max_completion_tokens } : {}) };
+      const snippet = buildChatGptWebClientConfig(catalogSol, `http://127.0.0.1:${proxy.port}`, "high");
+      const config = JSON.parse(snippet.openCodeConfig);
+      config.permission = { "*": "deny", read: { "*": "deny", "input.txt": "allow", "output.txt": "allow" }, edit: { "*": "deny", "output.txt": "allow" } };
+      // Keep this deterministic tool fixture scoped to the requested task, not
+      // OpenCode's separate background title-generation conversation.
+      config.agent = { title: { disable: true } };
+      writeFileSync(join(project, "opencode.json"), JSON.stringify(config), { mode: 0o600 });
+      mkdirSync(join(project, ".opencode/plugins"), { recursive: true, mode: 0o700 });
+      writeFileSync(join(project, ".opencode/plugins/9router-cgw.js"), snippet.openCodePlugin, { mode: 0o600 });
+      const fd = openSync(join(root, "opencode.private.log"), "w", 0o600); logFiles.push(fd);
+      const cli = spawn(options["--opencode"], ["run", "--format", "json", "--model", "9router-cgw/cgw/chatgpt-web/gpt-5.6-sol", "Read input.txt, create output.txt containing the same text plus VERIFIED, then read it back."],
+        { cwd: project, env: { ...isolated, PWD: project, NINE_ROUTER_API_KEY: apiKey, OPENCODE_DISABLE_MODELS_FETCH: "1", OPENCODE_DISABLE_AUTOUPDATE: "1" }, stdio: ["ignore", fd, fd], detached: process.platform !== "win32" });
+      children.push(cli);
+      const completion = Promise.withResolvers(); cli.once("error", completion.reject); cli.once("exit", completion.resolve);
+      stage = "OpenCode actual client execution";
+      const timeout = setTimeout(() => completion.reject(new assert.AssertionError({ message: `OpenCode CLI deadline after ${requests} completed request admissions` })), 180000);
+      let code;
+      try { code = await completion.promise; } finally { clearTimeout(timeout); }
+      const opencodeLog = readFileSync(join(root, "opencode.private.log"), "utf8");
+      const cliFailure = /Configuration is invalid/.test(opencodeLog) ? "invalid client configuration"
+        : /ProviderModelNotFoundError/.test(opencodeLog) ? "client model unavailable" : "client execution failed";
+      const transportName = ["TypeError", "AbortError", "TimeoutError", "SyntaxError"].includes(proxyFailure?.name) ? proxyFailure.name : "Error";
+      const safeProxyReason = proxyFailure instanceof assert.AssertionError ? proxyFailure.message.split("\n")[0] : proxyFailure ? `fixture ${proxyStage} ${transportName}` : code === 0 ? "none" : cliFailure;
+      assert(!proxyFailure && code === 0 && requests === 4, `Actual OpenCode CLI failed (exit ${code}, rounds ${requests}, ${safeProxyReason}${gatewayFailure ? `, gateway ${gatewayFailure.status} ${gatewayFailure.code}` : ""})`);
+      stage = "OpenCode physical output verification";
+      assert(existsSync(join(project, "output.txt")), "Actual OpenCode did not create its physical output");
+      assert(readFileSync(join(project, "output.txt"), "utf8") === "CGW_AGENT_FIXTURE\nVERIFIED\n", "Actual OpenCode write/read-back file missing");
+      const events = readFileSync(join(root, "opencode.private.log"), "utf8").split(/\r?\n/).filter(line => line.startsWith("{")).flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } });
+      assert(events.filter(event => event.type === "tool_use" && event.part?.state?.status === "completed").length === 3, "Actual OpenCode tool execution output missing");
+      assert(events.some(event => event.type === "text" && event.part?.text?.includes("Verification complete")), "Actual OpenCode final answer missing");
+      actualOpenCode = { version, nativeClientTools: true, projectRestrictedPermissions: true, readWriteReadBack: true, completeHistory: true, unsupportedControlsAbsent: true, wireFieldNames: [...fields].sort() };
+    } finally { proxy.stop(true); }
+  }
   outcome = { gate: "gateway-runtime-offline-e2e", gatewayMode, gatewayBun: Bun.version, runtimeBun: afterHarness.bunVersion, chromium: afterHarness.chromiumVersion,
     publicDottedReasoningCatalog: true, canonicalRootAndChild: true, missingAndPoisonedRolloutRejected: true, unsignedBodyModelPathRevokedRejectedBeforeSend: true,
     normalStreamingTerminal: "completed", compactSignatureBeforeRewrite: true, signedInterruptAfterRolloutRemoval: true, noFallbackHeader: true,
     signedPendingToolInterruptSettled: true,
     genericPublicFourWires: true, emptyCompanionProvisioningGeneric: true, codexUserAgentDoesNotGrantAuthority: true,
+    genericFunctionFourWires: true, genericFreshBrowserSends: 16, genericActualMcpCalls: 12, genericLocalReadWriteReadBack: true, actualOpenCode,
+    nativeGenericSharedFivePhysicalSlots: true, sixthTurnTypedBusyNoSend: true, genericCancellationSettled: true, nativeCancellationSettled: true, cancelledSlotReclaimed: true,
     actualGatewayProcesses: 2, duplicateConnectionRowsOneProfile: true, durableBlueGreenBinding: true, parallelJtiReplayDenied: true,
     browserOnlyCandidateSkippedForTools: true, allRowsDisabledTypedNoFallbackNoSend: true,
     actualPersistentChromium: true, actualMcpStdio: true, nativeNamespacedCall: true, nativeFreeformPatch: true, localOuterExecutions: executed.size, sameBrowserToolContinuationSends: 1,
     nativeImageSandboxGate: !!options["--image"], realCodex: false, outboundOpenAiTunnel: false, liveChatGpt: false };
 } catch (error) {
   // Never print gateway logs, wire input/output, attestation or secret configuration.
-  console.error(JSON.stringify({ gate: "gateway-runtime-offline-e2e", outcome: "failed-or-blocked", stage,
+  const failure = { gate: "gateway-runtime-offline-e2e", outcome: "failed-or-blocked", stage,
     reason: error.code === "EADDRINUSE" ? "BLOCKED: requested port is occupied; existing services are never reused or stopped"
-      : error instanceof assert.AssertionError ? error.message.split("\n")[0] : `Operation failed at ${stage}`, liveChatGpt: false }));
+      : error instanceof assert.AssertionError ? error.message.split("\n")[0] : `Operation failed at ${stage}`, liveChatGpt: false };
+  if (proofDirectory) writeFileSync(join(proofDirectory, "failure.json"), JSON.stringify(failure, null, 2) + "\n", { mode: 0o600 });
+  console.error(JSON.stringify(failure));
   process.exitCode = 1;
 } finally {
   if (controlUrl) {
@@ -410,7 +630,6 @@ try {
   try {
     closeDatabase?.();
     for (const fd of logFiles) closeSync(fd);
-    for (const directory of devDirectories) rmSync(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
     rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   } catch { cleanupFailed = true; }
   finally {
@@ -423,4 +642,8 @@ try {
     console.error(JSON.stringify({ gate: "gateway-runtime-offline-e2e", outcome: "owned-resource-cleanup-failed", liveChatGpt: false }));
   }
 }
-if (outcome && process.exitCode !== 1) console.info(JSON.stringify({ ...outcome, ownedResourcesCleaned: true }));
+if (outcome && process.exitCode !== 1) {
+  const result = { ...outcome, ownedResourcesCleaned: true };
+  if (proofDirectory) writeFileSync(join(proofDirectory, "result.json"), JSON.stringify(result, null, 2) + "\n", { mode: 0o600 });
+  console.info(JSON.stringify(result));
+}

@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { Agent, fetch as undiciFetch } from "undici";
-import { MAX_BROWSER_TURNS, MODEL_SLUG_PATTERN, PROTOCOL_VERSION, REASONING_LEVELS, SERVICE_NAME, validateProfileId } from "../../services/chatgpt-web-runtime/protocol.js";
+import { MAX_BROWSER_TURNS, MODEL_SLUG_PATTERN, PROTOCOL_VERSION, REASONING_LEVELS, RUNTIME_PATHS, SERVICE_NAME, validateProfileId } from "../../services/chatgpt-web-runtime/protocol.js";
 
 const CATALOG_TTL_MS = 30_000;
 const HEALTH_TIMEOUT_MS = 3000;
@@ -8,9 +8,14 @@ const CATALOG_TIMEOUT_MS = 5000;
 const MAX_CACHE_ENTRIES = 64;
 const cache = new Map();
 const dispatcher = new Agent();
-const CAPABILITY_KEYS = ["text", "vision", "reasoning", "tools", "search", "compact", "native_responses", "generic_responses", "mcp_tools", "exec", "subagents", "computer_use", "browser_tool", "streaming"];
-const DATA_PATHS = ["/healthz", "/readyz", "/v1/web-models", "/v1/thread-bindings/resolve", "/v1/responses", "/v1/browser/responses", "/v1/responses/compact", "/v1/interrupt-turn"];
+const CAPABILITY_KEYS = ["text", "vision", "reasoning", "tools", "search", "compact", "native_responses", "generic_responses", "generic_tools", "mcp_tools", "exec", "subagents", "computer_use", "browser_tool", "streaming"];
+const DATA_PATHS = ["/healthz", "/readyz", "/v1/web-models", "/v1/thread-bindings/resolve", "/v1/responses", "/v1/browser/responses", RUNTIME_PATHS.agentResponses, "/v1/responses/compact", "/v1/interrupt-turn"];
 const ADMIN_PATHS = ["/admin/profiles", "/admin/session/verify", "/admin/session/import", "/admin/login/start", "/admin/login/complete", "/admin/login/status", "/admin/login/session", "/admin/login/close", "/admin/browser/view", "/admin/browser/restart", "/admin/smoke", "/admin/drain", "/admin/quiesce", "/admin/resume", "/admin/interrupt-turn"];
+const HARNESS_ADMIN_METHODS = {
+  [RUNTIME_PATHS.harnessStatus]: "GET", [RUNTIME_PATHS.harnessConfigure]: "POST",
+  [RUNTIME_PATHS.harnessStart]: "POST", [RUNTIME_PATHS.harnessVerify]: "POST",
+  [RUNTIME_PATHS.harnessActivate]: "POST", [RUNTIME_PATHS.harnessDisconnect]: "POST",
+};
 export const CHATGPT_WEB_MAX_CONCURRENCY = MAX_BROWSER_TURNS;
 export function validateChatGptWebProfileId(value) { return validateProfileId(value); }
 export function sanitizeChatGptWebMaxConcurrency(value) { return value === MAX_BROWSER_TURNS ? MAX_BROWSER_TURNS : null; }
@@ -30,8 +35,16 @@ async function token(admin) {
 }
 async function runtimeRequest(path, init, options, admin, profileId) {
   const url = new URL(path, "http://internal.invalid");
-  const allowed = admin ? ADMIN_PATHS.includes(url.pathname) || /^\/admin\/profiles\/[a-z0-9-]+$/.test(url.pathname) : DATA_PATHS.includes(url.pathname);
-  if (!allowed || url.origin !== "http://internal.invalid" || url.hash || url.search && !(admin && ["/admin/login/status", "/admin/login/session"].includes(url.pathname))) throw new Error("Unsupported internal runtime endpoint");
+  const allowed = admin ? ADMIN_PATHS.includes(url.pathname) || Object.hasOwn(HARNESS_ADMIN_METHODS, url.pathname) || /^\/admin\/profiles\/[a-z0-9-]+$/.test(url.pathname) : DATA_PATHS.includes(url.pathname);
+  if (!allowed || url.origin !== "http://internal.invalid" || url.hash || url.search && !(admin && ["/admin/login/status", "/admin/login/session", RUNTIME_PATHS.harnessStatus].includes(url.pathname))) throw new Error("Unsupported internal runtime endpoint");
+  if (admin && Object.hasOwn(HARNESS_ADMIN_METHODS, url.pathname)) {
+    if ((init.method || "GET").toUpperCase() !== HARNESS_ADMIN_METHODS[url.pathname]) throw new Error("Unsupported internal runtime method");
+    if (url.pathname === RUNTIME_PATHS.harnessStatus) {
+      const ids = url.searchParams.getAll("profileId");
+      if (ids.length !== 1 || [...url.searchParams.keys()].some(key => key !== "profileId")) throw new Error("Invalid internal runtime query");
+      validateProfileId(ids[0]);
+    }
+  }
   const headers = new Headers(init.headers);
   for (const name of [...headers.keys()]) if (name.startsWith("x-cgw-") || name === "x-9router-cgw-attestation" || name === "authorization" || name === "x-codex-turn-metadata") headers.delete(name);
   headers.set("authorization", `Bearer ${await token(admin)}`);

@@ -90,6 +90,8 @@ function assertSession(value: unknown): asserts value is TransferSession {
 }
 
 async function downloadSession(page: Page, name: string): Promise<TransferSession> {
+  const manual = page.locator("details").filter({ has: page.locator("summary").filter({ hasText: /^Manual transfer$/ }) });
+  if (!(await manual.evaluate(element => (element as HTMLDetailsElement).open))) await manual.locator("summary").click();
   const downloading = page.waitForEvent("download", { timeout: 15000 });
   await page.getByRole("button", { name: "Export ChatGPT Session", exact: true }).click();
   const download = await downloading;
@@ -126,6 +128,7 @@ try {
   await page.goto(`${extensionOrigin}/${manifest.action.default_popup}`);
   let downloads = 0;
   page.on("download", () => { downloads += 1; });
+  await page.locator("summary").filter({ hasText: "Manual transfer" }).click();
   await page.getByRole("button", { name: "Export ChatGPT Session", exact: true }).click();
   await page.getByRole("status").getByText(/No valid unexpired ChatGPT cookies/).waitFor();
   assert.equal(downloads, 0, "Empty cookie store must not produce a session file");

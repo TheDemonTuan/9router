@@ -1,7 +1,7 @@
 name: ChatGPT Web runtime gates
 on:
   push:
-    branches: [master]
+    branches: [master, feat/chatgpt-web-experience]
     paths:
       - services/chatgpt-web-runtime/**
       - tools/chatgpt-web-session-export/**
@@ -118,6 +118,11 @@ jobs:
         run: |
           set -euo pipefail
           bun run test --config vitest.config.js unit/model-test-routing.test.js
+      - name: Exercise task-modal setup and client boundaries
+        working-directory: tests
+        run: |
+          set -euo pipefail
+          bun run test --config vitest.config.js unit/chatgpt-web-client-config.test.js unit/chatgpt-web-extension-recovery.test.js unit/chatgpt-web-runtime-admin-client.test.js unit/chatgpt-web-runtime-admin.test.js unit/chatgpt-web-connection-state.test.js unit/chatgpt-web-credential-selection.test.js unit/chatgpt-web-executor-capabilities.test.js unit/chatgpt-web-terminal-failures.test.js unit/providers-chatgpt-web-crud.test.js integration/chatgpt-web.test.js translator/golden-response-stream.test.js
       - name: Exercise binary viewer authorization and transport on Node and Bun
         run: |
           set -euo pipefail
@@ -210,8 +215,8 @@ jobs:
             --tmpfs /run:rw,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700 \
             --mount "type=volume,src=$volume,dst=/opt/cgw-browser" \
             "$CGW_CHECK_IMAGE" python3 scripts/install-browser.py --manifest image-build-manifest.json
-      # The evidence producer runs image-smoke itself before emitting compatibility evidence.
-      - name: Prove physical sandbox, native binaries and actual browser HTTP fixture
+      # Only the producer emits native and generic compatibility after actual physical browser/MCP gates.
+      - name: Prove sandbox, managed setup, native loop and generic batch handoff
         env:
           ARCH: ${{ matrix.arch }}
         run: |
@@ -227,15 +232,41 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.2
-      - name: Build isolated gateway and exercise real companion HTTP cutover
+      - name: Install checksum-pinned native OpenCode for the disposable client gate
+        run: |
+          set -euo pipefail
+          case "$ARCH:$(uname -m)" in
+            amd64:x86_64) asset=opencode-linux-x64.tar.gz; sha=c8f888b451f5494a18f858fffb0e0b68f4e4baa9c241761c5f206884f0fa640d ;;
+            arm64:aarch64) asset=opencode-linux-arm64.tar.gz; sha=f7f2ba59ee8aa94d388f9696575a32d20e71c2ee48def9f80fc693a60fec6c72 ;;
+            *) echo 'Native OpenCode runner mismatch' >&2; exit 1 ;;
+          esac
+          directory="$RUNNER_TEMP/cgw-opencode-1.18.35"
+          mkdir -p "$directory"
+          curl --fail --location --output "$directory/$asset" "https://github.com/anomalyco/opencode/releases/download/v1.18.35/$asset"
+          printf '%s  %s\n' "$sha" "$directory/$asset" | sha256sum --check --strict
+          tar -xzf "$directory/$asset" -C "$directory"
+          test "$("$directory/opencode" --version)" = 1.18.35
+          printf 'CGW_OPENCODE_BINARY=%s/opencode\n' "$directory" >> "$GITHUB_ENV"
+      - name: Build isolated production gateway on the CI runner only
+        id: gateway_build
         run: |
           set -euo pipefail
           test "$(bun --version)" = 1.4.2
           bun install --frozen-lockfile
           bun run build
-          bun tests/integration/chatgpt-web-runtime-smoke.mjs --image "$CGW_CHECK_IMAGE" --browser-volume "$CGW_BROWSER_VOLUME" --gateway-port 21127
-      - name: Exercise native login and Chrome session transfer onboarding
-        id: onboarding
+          test -f .next/BUILD_ID
+          test -f .next/standalone/custom-server.js
+      - name: Exercise actual gateway, companion, four generic wires and OpenCode CLI
+        id: gateway_e2e
+        if: ${{ !cancelled() && steps.gateway_build.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          bun tests/integration/chatgpt-web-runtime-smoke.mjs --image "$CGW_CHECK_IMAGE" --browser-volume "$CGW_BROWSER_VOLUME" --gateway-port 21127 --opencode "$CGW_OPENCODE_BINARY" --proof-dir "$RUNNER_TEMP/cgw-gateway-proof"
+      - name: Prepare sandboxed Chrome session onboarding prerequisites
+        id: onboarding_setup
+        if: ${{ !cancelled() && steps.gateway_build.outcome == 'success' }}
+        # Each smoke below owns a separate outcome; a failed gateway/tool gate
+        # must not prevent the production and standalone consent checks.
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -251,14 +282,35 @@ jobs:
           printf 'abi <abi/4.0>,\ninclude <tunables/global>\nprofile cgw-export-%s-%s "%s" flags=(unconfined) {\n  userns,\n}\n' \
             "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "${chrome[0]}" > "$sandbox_profile"
           sudo apparmor_parser -a "$sandbox_profile"
-          trap 'sudo apparmor_parser -R "$sandbox_profile"; rm -f "$sandbox_profile"' EXIT
+          printf 'CGW_GATEWAY_BUN=%s\nPLAYWRIGHT_BROWSERS_PATH=%s\nCGW_EXPORT_SANDBOX_PROFILE=%s\n' \
+            "$CGW_GATEWAY_BUN" "$PLAYWRIGHT_BROWSERS_PATH" "$sandbox_profile" >> "$GITHUB_ENV"
+      - name: Exercise actual Chrome session export
+        id: session_export
+        if: ${{ !cancelled() && steps.onboarding_setup.outcome == 'success' }}
+        run: |
+          set -euo pipefail
           "$RUNNER_TEMP/cgw-bun-1.4.0" services/chatgpt-web-runtime/scripts/session-export-smoke.ts \
             --extension-dir "$PWD/public/downloads/chatgpt-web-session-export" --output "$RUNNER_TEMP/cgw-synthetic-session.json"
+      - name: Exercise production dashboard and extension consent races
+        id: session_production
+        if: ${{ !cancelled() && steps.onboarding_setup.outcome == 'success' }}
+        run: |
+          set -euo pipefail
           xvfb-run -a "$RUNNER_TEMP/cgw-bun-1.4.0" services/chatgpt-web-runtime/scripts/session-connect-smoke.ts \
             --worktree "$PWD" --proof-dir "$RUNNER_TEMP/cgw-session-connect-proof"
+      - name: Exercise standalone dashboard and extension consent races
+        id: session_standalone
+        if: ${{ !cancelled() && steps.onboarding_setup.outcome == 'success' }}
+        run: |
+          set -euo pipefail
           xvfb-run -a "$RUNNER_TEMP/cgw-bun-1.4.0" services/chatgpt-web-runtime/scripts/session-connect-smoke.ts \
             --worktree "$PWD" --gateway-entry "$PWD/.next/standalone/custom-server.js" \
             --proof-dir "$RUNNER_TEMP/cgw-session-connect-standalone-proof"
+      - name: Exercise native image login and session transfer onboarding
+        id: onboarding
+        if: ${{ !cancelled() && steps.session_export.outcome == 'success' }}
+        run: |
+          set -euo pipefail
           gateway="cgw-onboarding-gateway:${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}"
           docker build -f Dockerfile -t "$gateway" .
           bun tests/integration/chatgpt-web-onboarding-smoke.mjs --gateway-image "$gateway" \
@@ -273,13 +325,21 @@ jobs:
           if-no-files-found: error
           retention-days: 7
       - name: Preserve synthetic direct connection proof
-        if: ${{ !cancelled() && (steps.onboarding.outcome == 'success' || steps.onboarding.outcome == 'failure') }}
+        if: ${{ !cancelled() && (steps.session_production.outcome == 'success' || steps.session_production.outcome == 'failure' || steps.session_standalone.outcome == 'success' || steps.session_standalone.outcome == 'failure') }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: cgw-session-connect-${{ matrix.arch }}
           path: |
             ${{ runner.temp }}/cgw-session-connect-proof
             ${{ runner.temp }}/cgw-session-connect-standalone-proof
+          if-no-files-found: error
+          retention-days: 7
+      - name: Preserve safe gateway and OpenCode acceptance evidence
+        if: ${{ !cancelled() && (steps.gateway_e2e.outcome == 'success' || steps.gateway_e2e.outcome == 'failure') }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cgw-gateway-opencode-${{ matrix.arch }}
+          path: ${{ runner.temp }}/cgw-gateway-proof
           if-no-files-found: error
           retention-days: 7
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -311,6 +371,10 @@ jobs:
             "cgw-browser-metadata-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}" \
             "cgw-compatibility-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}" 2>/dev/null || true
           if [[ -n "${CGW_BROWSER_VOLUME:-}" ]]; then docker volume rm "$CGW_BROWSER_VOLUME"; fi
+          if [[ -n "${CGW_EXPORT_SANDBOX_PROFILE:-}" && -f "$CGW_EXPORT_SANDBOX_PROFILE" ]]; then
+            sudo apparmor_parser -R "$CGW_EXPORT_SANDBOX_PROFILE"
+            rm -f "$CGW_EXPORT_SANDBOX_PROFILE"
+          fi
           rm -f "$RUNNER_TEMP/cgw-synthetic-session.json" "$RUNNER_TEMP/cgw-bun-1.4.0"
           rm -rf "$RUNNER_TEMP/cgw-export-browser"
       # No registry login, push, account-state artifact upload, reusable old platform

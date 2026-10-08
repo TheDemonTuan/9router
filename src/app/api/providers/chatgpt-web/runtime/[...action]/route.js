@@ -14,6 +14,42 @@ const LOGIN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const STATES = new Set(["unconfigured", "login_required", "probing", "ready", "draining", "waiting_for_chatgpt_tool_approval", "error"]);
 const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max", "ultra"]);
 const DEFAULT_SETTINGS = { mode: "browser-only", experimentalBiggerContext: false, experimentalFreshConversationPerTurn: false, useSavedChats: false, autoApproveToolCalls: false, connectorName: "Codex Native2" };
+const TUNNEL_ID = /^tunnel_(?:[a-z0-9]{4}_)?[a-z0-9]{32}$/;
+const HARNESS_MUTATIONS = ["harness/configure", "harness/start", "harness/verify", "harness/activate", "harness/disconnect"];
+
+function harnessRequest(value, configure) {
+  if (!exactKeys(value, ["profileId", "revision", "configRevision", ...(configure ? ["tunnelId"] : [])], configure ? ["runtimeApiKey"] : [])
+    || typeof value.profileId !== "string" || !PROFILE_ID.test(value.profileId)
+    || !Number.isSafeInteger(value.revision) || value.revision < 0
+    || !Number.isSafeInteger(value.configRevision) || value.configRevision < 0) throw new Error("invalid_harness_request");
+  const result = { profileId: value.profileId, revision: value.revision, configRevision: value.configRevision };
+  if (configure) {
+    if (typeof value.tunnelId !== "string" || !TUNNEL_ID.test(value.tunnelId.trim())) throw new Error("invalid_harness_request");
+    result.tunnelId = value.tunnelId.trim();
+    if (Object.hasOwn(value, "runtimeApiKey")) {
+      if (typeof value.runtimeApiKey !== "string" || /[\r\n\0\u2028\u2029]/.test(value.runtimeApiKey)) throw new Error("invalid_harness_request");
+      const key = value.runtimeApiKey.trim(), bytes = new TextEncoder().encode(key).byteLength;
+      if (bytes < 32 || bytes > 4096 || key.startsWith("sk-admin-")) throw new Error("invalid_harness_request");
+      result.runtimeApiKey = key;
+    }
+  }
+  return result;
+}
+
+function harnessStatus(value) {
+  if (!record(value) || typeof value.profileId !== "string" || !PROFILE_ID.test(value.profileId)
+    || !Number.isSafeInteger(value.revision) || value.revision < 0
+    || !Number.isSafeInteger(value.configRevision) || value.configRevision < 0
+    || !["none", "managed", "operator"].includes(value.source)
+    || !(value.tunnelId === null || typeof value.tunnelId === "string" && TUNNEL_ID.test(value.tunnelId))
+    || ["keyConfigured", "buildCompatible", "canEnableFull"].some(key => typeof value[key] !== "boolean")
+    || !["stopped", "starting", "ready", "error"].includes(value.tunnelState)
+    || !["unverified", "verified", "unavailable"].includes(value.connectorState)) throw new Error("invalid_runtime_response");
+  return { profileId: value.profileId, revision: value.revision, configRevision: value.configRevision,
+    source: value.source, tunnelId: value.tunnelId, keyConfigured: value.keyConfigured, buildCompatible: value.buildCompatible,
+    tunnelState: value.tunnelState, connectorState: value.connectorState, canEnableFull: value.canEnableFull,
+    lastError: chatGptWebDiagnostic(value.lastError) };
+}
 
 function fail(status, code, message) {
   return NextResponse.json({ error: { code, message } }, { status, headers: { "Cache-Control": "no-store" } });
@@ -53,7 +89,9 @@ function profile(value) {
   if (!record(value) || typeof value.profileId !== "string" || !PROFILE_ID.test(value.profileId) || !Number.isSafeInteger(value.revision) || value.revision < 0 || !STATES.has(value.state) || !Array.isArray(value.models) || value.models.length > 128 || !Number.isInteger(value.activeTurns) || value.activeTurns < 0 || value.activeTurns > 5 || value.maxConcurrency !== 5) throw new Error("invalid_runtime_response");
   return { profileId: value.profileId, revision: value.revision, state: value.state, settings: settings(value.settings), activeTurns: value.activeTurns, maxConcurrency: 5, connectorReady: value.connectorReady === true, lastError: chatGptWebDiagnostic(value.lastError), models: value.models.map(model => {
     if (!record(model) || typeof model.id !== "string" || !/^chatgpt-web\/[a-z0-9]+(?:[.-][a-z0-9]+)*$/.test(model.id) || model.id.length > 140 || !Array.isArray(model.supported_reasoning_levels) || model.supported_reasoning_levels.length > 6 || model.supported_reasoning_levels.some(effort => !EFFORTS.has(effort))) throw new Error("invalid_runtime_response");
-    return { id: model.id, display_name: typeof model.display_name === "string" ? model.display_name.slice(0, 160) : model.id, supported_reasoning_levels: [...new Set(model.supported_reasoning_levels)], default_reasoning_level: EFFORTS.has(model.default_reasoning_level) ? model.default_reasoning_level : null, model_family: ["5.6", "6"].includes(model.model_family) ? model.model_family : null, legacy: model.legacy === true, context_window: Number.isSafeInteger(model.context_window) && model.context_window > 0 ? model.context_window : null };
+    const capabilities = {};
+    for (const key of ["generic_tools", "generic_responses"]) if (typeof model.capabilities?.[key] === "boolean") capabilities[key] = model.capabilities[key];
+    return { id: model.id, display_name: typeof model.display_name === "string" ? model.display_name.slice(0, 160) : model.id, supported_reasoning_levels: [...new Set(model.supported_reasoning_levels)], default_reasoning_level: EFFORTS.has(model.default_reasoning_level) ? model.default_reasoning_level : null, model_family: ["5.6", "6"].includes(model.model_family) ? model.model_family : null, legacy: model.legacy === true, context_window: Number.isSafeInteger(model.context_window) && model.context_window > 0 ? model.context_window : null, ...(Object.keys(capabilities).length ? { capabilities } : {}) };
   }) };
 }
 function viewer(value, session = false) {
@@ -66,6 +104,13 @@ function viewer(value, session = false) {
   return result;
 }
 function output(action, method, data) {
+  if (action === "harness/activate" || action === "harness/disconnect") {
+    if (!record(data)) throw new Error("invalid_runtime_response");
+    const result = { profile: profile(data.profile), status: harnessStatus(data.status) };
+    if (result.profile.profileId !== result.status.profileId || result.profile.revision !== result.status.revision) throw new Error("invalid_runtime_response");
+    return result;
+  }
+  if (action === "harness/status" || HARNESS_MUTATIONS.includes(action)) return harnessStatus(data);
   if (action === "profiles" && method === "GET") {
     if (!record(data) || !Array.isArray(data.profiles) || data.profiles.length > 128) throw new Error("invalid_runtime_response");
     return { profiles: data.profiles.map(profile) };
@@ -116,11 +161,13 @@ async function handle(request, context) {
   if (!Array.isArray(segments) || segments.length > 2) return fail(404, "unknown_action", "Unknown runtime action.");
   const action = segments.join("/");
   const allowed = { profiles: ["GET", "POST"], "session/verify": ["POST"], "session/import": ["POST"], "login/start": ["POST"], "login/complete": ["POST"], "login/status": ["GET"], "login/session": ["GET"], "login/close": ["POST"], "browser/view": ["POST"], "browser/restart": ["POST"], smoke: ["POST"], drain: ["POST"], quiesce: ["POST"], resume: ["POST"], "interrupt-turn": ["POST"] };
+  allowed["harness/status"] = ["GET"];
+  for (const name of HARNESS_MUTATIONS) allowed[name] = ["POST"];
   const patch = segments.length === 2 && segments[0] === "profiles" && PROFILE_ID.test(segments[1]);
   const methods = patch ? ["PATCH"] : Object.hasOwn(allowed, action) ? allowed[action] : null;
   if (!methods) return fail(404, "unknown_action", "Unknown runtime action.");
   if (!methods.includes(request.method)) return fail(405, "method_not_allowed", "Method not allowed for this runtime action.");
-  if (action === "session/import" && originUrl.protocol !== "https:" && !(originUrl.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(originUrl.hostname.toLowerCase()) && isLocalRequest(request))) {
+  if (["session/import", "harness/configure"].includes(action) && originUrl.protocol !== "https:" && !(originUrl.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(originUrl.hostname.toLowerCase()) && isLocalRequest(request))) {
     return fail(403, "secure_origin_required", CHATGPT_WEB_RUNTIME_ERROR_MESSAGES.secure_origin_required);
   }
   const url = new URL(request.url);
@@ -130,14 +177,22 @@ async function handle(request, context) {
       const loginIds = url.searchParams.getAll("loginId");
       if ([...url.searchParams.keys()].some(key => key !== "loginId") || loginIds.length !== 1 || !LOGIN_ID.test(loginIds[0])) throw new Error("invalid_query");
       suffix = `?loginId=${encodeURIComponent(loginIds[0])}`;
+    } else if (action === "harness/status") {
+      // A readiness snapshot only: no tunnel launch, connector probe, or inference.
+      const profileIds = url.searchParams.getAll("profileId");
+      if ([...url.searchParams.keys()].some(key => key !== "profileId") || profileIds.length !== 1 || !PROFILE_ID.test(profileIds[0])) throw new Error("invalid_query");
+      suffix = `?profileId=${encodeURIComponent(profileIds[0])}`;
     } else if (url.search) throw new Error("invalid_query");
     if (request.method !== "GET") {
       if (action === "session/import") {
         body = await readChatGptWebSessionImport(request);
       } else {
         if (request.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !== "application/json") return fail(415, "json_required", "JSON required.");
-        body = await readJson(request, 8192);
-        if (patch) {
+        if (HARNESS_MUTATIONS.includes(action) && ![null, "identity"].includes(request.headers.get("content-encoding")?.trim().toLowerCase() ?? null)) return fail(415, "invalid_admin_request", "Invalid runtime action parameters.");
+        body = await readJson(request, HARNESS_MUTATIONS.includes(action) ? 32768 : 8192);
+        if (HARNESS_MUTATIONS.includes(action)) {
+          body = harnessRequest(body, action === "harness/configure");
+        } else if (patch) {
           if (!exactKeys(body, ["revision", "settings"]) || !Number.isSafeInteger(body.revision) || body.revision < 0) throw new Error("invalid_revision");
           body = { revision: body.revision, settings: settings(body.settings, true) };
         } else if (action === "session/verify") {
@@ -160,13 +215,13 @@ async function handle(request, context) {
     if (error instanceof SessionTransferError && Object.hasOwn(CHATGPT_WEB_RUNTIME_ERROR_MESSAGES, error.code)) return fail(error.status, error.code, CHATGPT_WEB_RUNTIME_ERROR_MESSAGES[error.code]);
     return fail(error.message === "body_too_large" ? 413 : 400, "invalid_admin_request", "Invalid runtime action parameters.");
   }
-  const stateMutation = request.method !== "GET" && (patch || ["profiles", "login/start", "login/complete", "login/close", "session/verify", "session/import", "browser/restart", "smoke", "resume", "drain", "quiesce"].includes(action));
+  const stateMutation = request.method !== "GET" && (patch || HARNESS_MUTATIONS.includes(action) || ["profiles", "login/start", "login/complete", "login/close", "session/verify", "session/import", "browser/restart", "smoke", "resume", "drain", "quiesce"].includes(action));
   const runtimeWide = ["resume", "drain", "quiesce"].includes(action);
   let affectedProfile = runtimeWide ? undefined : patch ? segments[1] : body?.profileId;
   let catalogInvalidated = false;
   try {
-    const response = await requestChatGptWebRuntimeAdmin(`/admin/${action}${suffix}`, { method: request.method, ...(body ? { headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {}), signal: request.signal }, { timeoutMs: ["smoke", "login/complete", "session/verify", "session/import"].includes(action) ? 120000 : 70000 });
-    if (["session/verify", "session/import"].includes(action) && response.status === 404 && response.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !== "application/json") return fail(503, "runtime_upgrade_required", CHATGPT_WEB_RUNTIME_ERROR_MESSAGES.runtime_upgrade_required);
+    const response = await requestChatGptWebRuntimeAdmin(`/admin/${action}${suffix}`, { method: request.method, ...(body ? { headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {}), signal: request.signal }, { timeoutMs: ["smoke", "login/complete", "session/verify", "session/import", "harness/start", "harness/verify", "harness/activate", "harness/disconnect"].includes(action) ? 120000 : 70000 });
+    if (["session/verify", "session/import", "harness/status", ...HARNESS_MUTATIONS].includes(action) && response.status === 404 && response.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !== "application/json") return fail(503, "runtime_upgrade_required", CHATGPT_WEB_RUNTIME_ERROR_MESSAGES.runtime_upgrade_required);
     const data = await readJson(response, 262144);
     if (!response.ok) {
       const code = typeof data?.error?.code === "string" && Object.hasOwn(CHATGPT_WEB_RUNTIME_ERROR_MESSAGES, data.error.code) ? data.error.code : "runtime_error";
@@ -176,11 +231,12 @@ async function handle(request, context) {
     const result = output(action, request.method, data);
     if (["login/status", "login/session", "login/close", "login/complete"].includes(action) && result.loginId !== (body?.loginId || url.searchParams.get("loginId"))) throw new Error("invalid_runtime_response");
     if (["session/verify", "session/import"].includes(action) && result.profileId !== body.profileId) throw new Error("invalid_runtime_response");
+    if ((action === "harness/status" || HARNESS_MUTATIONS.includes(action)) && (result.profileId || result.status?.profileId) !== (body?.profileId || url.searchParams.get("profileId"))) throw new Error("invalid_runtime_response");
     if (stateMutation) {
       if (!runtimeWide) affectedProfile = result.profileId || result.profile?.profileId || affectedProfile;
       invalidateChatGptWebCatalog(affectedProfile);
       catalogInvalidated = true;
-      try { await synchronizeConnectionStates(affectedProfile, request.signal); }
+      try { if (!["harness/configure", "harness/start", "harness/verify"].includes(action)) await synchronizeConnectionStates(affectedProfile, request.signal); }
       catch {
         result.connectionStatusWarning = "Runtime state changed; connection status could not be saved. Refresh connections.";
       }

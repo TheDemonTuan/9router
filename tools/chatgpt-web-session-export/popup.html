@@ -10,9 +10,13 @@
     p { margin: 12px 0; }
     .warning { padding: 12px; border: 1px solid #dba43a; border-radius: 6px; background: #fff7df; }
     button { width: 100%; padding: 10px; border: 0; border-radius: 6px; background: #173e89; color: #fff; font: inherit; cursor: pointer; }
-    button:disabled { opacity: .6; cursor: wait; }
+    button:disabled { opacity: .6; cursor: not-allowed; }
     button:focus-visible { outline: 3px solid #738fcd; outline-offset: 3px; }
     button { margin-top: 8px; }
+    .secondary { color: #173e89; background: #eef2f8; }
+    details { margin-top: 16px; }
+    summary { cursor: pointer; font-weight: 600; }
+    summary:focus-visible { outline: 3px solid #738fcd; outline-offset: 3px; }
     dd { margin: 0 0 8px; overflow-wrap: anywhere; }
     dt { font-weight: 600; }
     #status { min-height: 42px; }
@@ -20,14 +24,18 @@
 </head>
 <body>
   <h1>Connect ChatGPT Session</h1>
-  <p>Sign in to ChatGPT in this Chrome profile first. Return to the trusted 9Router dashboard's session assistant, then open this helper.</p>
+  <p>Sign in to ChatGPT in this Chrome profile first. Open the Chrome extension panel in your trusted 9Router dashboard, then open this helper on that dashboard tab, not on chatgpt.com.</p>
   <p class="warning">Your session is a credential. Connect only to a dashboard you trust. Clipboard history and exported files can retain credentials; never send them to support.</p>
   <dl aria-label="Connection target"><dt>Server</dt><dd id="origin">Unavailable</dd><dt>Connection</dt><dd id="connection-name">Unavailable</dd><dt>Profile</dt><dd id="profile-id">Unavailable</dd></dl>
-  <p id="target-help">Checking the active dashboard tab…</p>
-  <button id="connect" type="button" disabled>Connect to this 9Router</button>
-  <button id="copy" type="button">Copy Session JSON</button>
-  <p>Only unpartitioned ChatGPT cookies are included, including HttpOnly session parts. Google cookies, passwords, storage and access-token APIs are not read. This does not bypass login or MFA.</p>
-  <button id="export" type="button">Export ChatGPT Session</button>
+  <p id="target-help" role="status" aria-live="polite">Checking the active dashboard tab…</p>
+  <button id="connect" type="button" aria-describedby="target-help" disabled>Connect to this 9Router</button>
+  <button id="check" class="secondary" type="button">Check connection again</button>
+  <details>
+    <summary>Manual transfer</summary>
+    <p>Only unpartitioned ChatGPT cookies are included, including HttpOnly session parts. Google cookies, passwords, storage and access-token APIs are not read. This does not bypass login or MFA.</p>
+    <button id="copy" class="secondary" type="button">Copy Session JSON</button>
+    <button id="export" class="secondary" type="button">Export ChatGPT Session</button>
+  </details>
   <p id="status" role="status" aria-live="polite"></p>
   <script type="module" src="popup.js"></script>
 </body>

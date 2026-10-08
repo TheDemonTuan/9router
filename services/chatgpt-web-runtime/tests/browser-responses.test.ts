@@ -115,7 +115,7 @@ describe("Browser-only transport boundary", () => {
     expect(() => validateBrowserRuntimeEnvelope({ ...value, effectiveModel: "chatgpt-web/other" }, "fixture")).toThrow("mismatch");
     expect(() => validateBrowserRuntimeEnvelope({ ...value, effectiveReasoning: "low" }, "fixture")).toThrow("mismatch");
   });
-  test("actual runtime HTTP separates bearers and rejects unready, Full, stale epoch and fenced requests before Send", async () => {
+  test("actual runtime HTTP separates bearers and rejects unready, stale epoch and fenced requests before Send", async () => {
     const root = mkdtempSync(join(tmpdir(), "cgw-browser-http-"));
     const runtime = startRuntime({ dataDir: root, host: "127.0.0.1", port: 0, chromiumExecutable: join(root, "absent-chromium"),
       runtimeToken: Buffer.from("fixture-data-token-is-not-a-real-secret"), adminToken: Buffer.from("fixture-admin-token-is-not-a-real-secret") });
@@ -135,9 +135,6 @@ describe("Browser-only transport boundary", () => {
       expect((await unready.json()).error.code).toBe("login_required");
       const stale = await send({ ...value, profileEpoch: "stale" });
       expect(stale.status).toBe(409); expect((await stale.json()).error.code).toBe("profile_epoch_mismatch");
-      runtime.state.patchProfile("fixture", profile.revision, { ...profile.settings, mode: "full" });
-      const full = await send(value);
-      expect(full.status).toBe(400); expect((await full.json()).error.code).toBe("codex_authority_required");
       runtime.state.drain("fixture-fence");
       const fenced = await send(value);
       expect(fenced.status).toBe(503); expect((await fenced.json()).error.code).toBe("runtime_draining");

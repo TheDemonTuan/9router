@@ -68,8 +68,8 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     : (excludeConnectionIds ? new Set([excludeConnectionIds]) : new Set());
   const preferredConnectionId = options?.preferredConnectionId || null;
   const pinConnectionId = options?.pinConnectionId || null;
-  const bridgeCapability = options?.bridgeCapability === "generic_responses"
-    ? "generic_responses"
+  const bridgeCapability = options?.bridgeCapability === "generic_responses" || options?.bridgeCapability === "generic_tools"
+    ? options.bridgeCapability
     : "native_responses";
   const requiredCapabilities = options?.requiredCapabilities instanceof Set
     ? options.requiredCapabilities
@@ -139,6 +139,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
           const effort = options.chatGptWebReasoning ?? liveModel?.default_reasoning_level;
           if (!catalog.stale && hasChatGptWebModel(catalog, model)
             && liveModel?.capabilities?.[bridgeCapability] === true
+            && (bridgeCapability !== "generic_tools" || liveModel.capabilities.generic_responses === true)
             && chatGptWebModelSupportsCapabilities(liveModel, requiredCapabilities)) {
             if (liveModel?.supported_reasoning_levels?.includes(effort) !== true) {
               bridgeEffortRejected.add(connection.id);
@@ -186,7 +187,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     // Filter out model-locked, excluded, and capability-ineligible connections.
     const availableConnections = connections.filter(c => {
       if (excludeSet.has(c.id)) return false;
-      if (pinConnectionId && (providerId !== "chatgpt-web" || bridgeCapability === "generic_responses") && c.id !== pinConnectionId) return false;
+      if (pinConnectionId && (providerId !== "chatgpt-web" || bridgeCapability === "generic_responses" || bridgeCapability === "generic_tools") && c.id !== pinConnectionId) return false;
       if (providerId === "chatgpt-web" && model && !bridgeEligible.has(c.id)) return false;
       if (isModelLockActive(c, model)) return false;
       if (providerId === "antigravity" && model && !antigravityEligible.has(c.id)) return false;
@@ -212,7 +213,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     });
 
     if (availableConnections.length === 0) {
-      if (providerId === "chatgpt-web" && bridgeCapability === "generic_responses"
+      if (providerId === "chatgpt-web" && (bridgeCapability === "generic_responses" || bridgeCapability === "generic_tools")
         && connections.some(row => !excludeSet.has(row.id) && (!pinConnectionId || row.id === pinConnectionId) && bridgeEffortRejected.has(row.id))) {
         return { chatGptWebBindingError: Response.json({ error: { type: "runtime_error", code: "model_version_unavailable",
           message: "Requested reasoning effort is not verified for the selected Browser-only model", retryable: false, submission_state: "not_sent" } }, { status: 400 }) };
@@ -328,8 +329,8 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
 
     return {
       ...(profileBinding ? { chatGptWebProfileEpoch: profileBinding.profileEpoch } : {}),
-      ...(providerId === "chatgpt-web" && bridgeCapability === "generic_responses" && !options.chatGptWebAuthority
-        ? { chatGptWebRequestMode: "browser", chatGptWebProfileEpoch: bridgeEpochs.get(connection.id) } : {}),
+      ...(providerId === "chatgpt-web" && (bridgeCapability === "generic_responses" || bridgeCapability === "generic_tools") && !options.chatGptWebAuthority
+        ? { chatGptWebRequestMode: options.chatGptWebRequestMode || (bridgeCapability === "generic_tools" ? "agent" : "browser"), chatGptWebProfileEpoch: bridgeEpochs.get(connection.id) } : {}),
       authType: connection.authType,
       apiKey: connection.apiKey,
       accessToken: connection.accessToken,

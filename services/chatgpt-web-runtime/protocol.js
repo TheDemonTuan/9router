@@ -19,7 +19,11 @@ export const RUNTIME_PATHS = Object.freeze({
   health: "/healthz", ready: "/readyz", models: "/v1/web-models",
   bindings: "/v1/thread-bindings/resolve", responses: "/v1/responses",
   browserResponses: "/v1/browser/responses",
+  agentResponses: "/v1/agent/responses",
   compact: "/v1/responses/compact", interrupt: "/v1/interrupt-turn",
+  harnessStatus: "/admin/harness/status", harnessConfigure: "/admin/harness/configure",
+  harnessStart: "/admin/harness/start", harnessVerify: "/admin/harness/verify",
+  harnessActivate: "/admin/harness/activate", harnessDisconnect: "/admin/harness/disconnect",
 });
 export function validateProfileId(value) {
   if (typeof value !== "string" || !PROFILE_ID_PATTERN.test(value)) {

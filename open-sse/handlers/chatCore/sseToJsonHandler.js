@@ -187,8 +187,22 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
   // provider still receives chat SSE chunks, which must go through the standard path.
   const isCodexResponsesApi = isResponsesProvider(provider) || targetFormat === FORMATS.OPENAI_RESPONSES;
   if (isCodexResponsesApi) {
+    const noFallback = providerResponse.headers.get("x-9router-no-fallback") === "true";
+    const terminalFailure = error => {
+      const failure = createErrorResult(HTTP_STATUS.BAD_GATEWAY, error.message, null, { errorClass: error.code, retryable: false });
+      failure.terminalNoFallback = noFallback;
+      failure.response = Response.json({ error: { ...error, retryable: false } }, { status: HTTP_STATUS.BAD_GATEWAY,
+        headers: { "Access-Control-Allow-Origin": "*", ...(noFallback ? { "x-9router-no-fallback": "true", "x-should-retry": "false" } : {}) } });
+      return failure;
+    };
     try {
       const jsonResponse = await convertResponsesStreamToJson(providerResponse.body);
+      if (sourceFormat !== FORMATS.OPENAI_RESPONSES && (jsonResponse.error || jsonResponse.status === "failed")
+        || noFallback && (jsonResponse.error?.code === "stream_disconnected" || !["completed", "done", "failed", "incomplete"].includes(jsonResponse.status))) {
+        trackDone();
+        return terminalFailure(jsonResponse.error && !(noFallback && jsonResponse.error.code === "stream_disconnected") ? jsonResponse.error
+          : { code: "submission_unknown", type: "runtime_error", message: "The browser submission outcome is unknown", submission_state: "unknown" });
+      }
       const completed = jsonResponse.status === "completed" || jsonResponse.status === "done";
       if (completed && onRequestSuccess) await onRequestSuccess();
 
@@ -285,6 +299,7 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
       if (preResponse?.signal.aborted) throw preResponse.signal.reason;
       if (err?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" || err?.code === "CLIENT_ABORT") throw err;
       trackDone();
+      if (noFallback) return terminalFailure({ code: "submission_unknown", type: "runtime_error", message: "The browser submission outcome is unknown", submission_state: "unknown" });
       console.error("[ChatCore] Responses API SSE→JSON failed:", err);
       return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Failed to convert streaming response to JSON");
     }

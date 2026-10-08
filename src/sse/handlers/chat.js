@@ -27,6 +27,7 @@ import { updateProviderCredentials, checkAndRefreshToken } from "../services/tok
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy.js";
 import { assertChatGptWebAuthorityHeaderSize, chatGptWebAuthorityErrorResponse, chatGptWebAuthorityRequiredResponse, loadChatGptWebClientKeys, redactChatGptWebInternalHeaders, verifyChatGptWebAuthority } from "@/lib/chatgptWebAuthority.js";
 import { validateBrowserChatRequest, validateBrowserResponsesRequest } from "../../../services/chatgpt-web-runtime/browser-request.js";
+import { validateAgentChatRequest, validateAgentResponsesRequest } from "../../../services/chatgpt-web-runtime/agent-request.js";
 import { AUTHORITY_HEADER } from "../../../services/chatgpt-web-runtime/protocol.js";
 
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
@@ -91,8 +92,18 @@ function bridgeContinuationError(connectionId) {
  * Resolve account-scoped cgw capabilities before combo ordering. Unknown or stale rows stay
  * unsupported; a capability is usable when at least one verified active bridge can provide it.
  */
-function bridgeCapabilityForRequest(authority) {
-  return authority ? "native_responses" : "generic_responses";
+function hasAgentToolSignal(body) {
+  if (!body || typeof body !== "object") return false;
+  if (Array.isArray(body.tools) && body.tools.length > 0) return true;
+  if (body.tool_choice !== undefined && body.tool_choice !== "none") return true;
+  if (Array.isArray(body.messages) && body.messages.some(m => m?.role === "tool" || (Array.isArray(m?.tool_calls) && m.tool_calls.length > 0))) return true;
+  if (Array.isArray(body.input) && body.input.some(item => item?.type === "function_call" || item?.type === "function_call_output")) return true;
+  return false;
+}
+
+function bridgeCapabilityForRequest(authority, body = null) {
+  if (authority) return "native_responses";
+  return hasAgentToolSignal(body) ? "generic_tools" : "generic_responses";
 }
 
 function browserRequestErrorResponse(error) {
@@ -104,10 +115,15 @@ function validateBrowserPublicRequest(body, endpoint) {
   if (body?._compact === true || Object.keys(body || {}).some(key => key.startsWith("_chatgpt")
     || ["client_metadata", "authority", "cwd", "roots", "environment", "pathFlavor", "clientId", "nativeThreadId", "nativeTurnId"].includes(key))
     || body?.input?.some?.(item => item?.type === "compaction_trigger")) return chatGptWebAuthorityRequiredResponse();
+  const isAgent = hasAgentToolSignal(body);
   try {
-    if (["/v1/chat/completions", "/api/v1/chat/completions"].includes(endpoint)) validateBrowserChatRequest(body);
-    else if (["/v1/responses", "/api/v1/responses"].includes(endpoint)) validateBrowserResponsesRequest(body);
-    else return chatGptWebAuthorityRequiredResponse();
+    if (["/v1/chat/completions", "/api/v1/chat/completions"].includes(endpoint)) {
+      if (isAgent) validateAgentChatRequest(body);
+      else validateBrowserChatRequest(body);
+    } else if (["/v1/responses", "/api/v1/responses"].includes(endpoint)) {
+      if (isAgent) validateAgentResponsesRequest(body);
+      else validateBrowserResponsesRequest(body);
+    } else return chatGptWebAuthorityRequiredResponse();
   } catch (error) { return browserRequestErrorResponse(error); }
   return null;
 }
@@ -134,13 +150,15 @@ async function loadChatGptWebComboCapabilities(models, bridgeCapability = "gener
         const rowId = info.model;
         const row = catalog.models?.find((entry) => entry.id === rowId);
         if (row?.capabilities?.[bridgeCapability] !== true) continue;
+        if (bridgeCapability === "generic_tools" && row.capabilities.generic_responses !== true) continue;
         if (!row?.capabilities || typeof row.capabilities !== "object") continue;
         const merged = capabilities.get(candidate) || {};
         for (const [key, value] of Object.entries(row.capabilities)) {
-          if (bridgeCapability === "generic_responses" && !["text", "generic_responses"].includes(key)) continue;
+          if ((bridgeCapability === "generic_responses" || bridgeCapability === "generic_tools") && !["text", "generic_responses", "generic_tools"].includes(key)) continue;
           if (value === true) merged[key] = true;
           else if (!(key in merged) && value === false) merged[key] = false;
         }
+        if (bridgeCapability === "generic_tools") merged.tools = row.capabilities.generic_tools === true && row.capabilities.generic_responses === true;
         capabilities.set(candidate, merged);
       }
     } catch {
@@ -240,7 +258,7 @@ export async function handleChat(request, clientRawRequest = null, options = {})
   if (bypassResponse) return bypassResponse.response || bypassResponse;
 
   const requiredCapabilities = detectRequiredCapabilities(body);
-  const bridgeCapability = bridgeCapabilityForRequest(chatGptWebAuthority);
+  const bridgeCapability = bridgeCapabilityForRequest(chatGptWebAuthority, body);
 
   // Check if model is a combo (has multiple models with fallback)
   const comboModels = await getComboModels(modelStr);
@@ -367,7 +385,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         if (comboStrategy === "fusion") return browserRequestErrorResponse({ code: "unsupported_browser_request", status: 400, message: "ChatGPT Web does not support fusion requests" });
       }
       const requiredCapabilities = detectRequiredCapabilities(body);
-      const bridgeCapability = bridgeCapabilityForRequest(chatGptWebAuthority);
+      const bridgeCapability = bridgeCapabilityForRequest(chatGptWebAuthority, body);
       const augmentedModels = augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, chatSettings);
       const adapterAdded = augmentedModels.filter((m) => !comboModels.includes(m));
       const liveCapabilities = await loadChatGptWebComboCapabilities(augmentedModels, bridgeCapability);
@@ -446,7 +464,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   const cgwCompaction = body?._compact === true || nativeMetadata?.request_kind === "compaction"
     || (Array.isArray(body?.input) && body.input.some(item => item?.type === "compaction_trigger"));
   if (provider === "chatgpt-web" && !cgwCompaction && Array.isArray(body?.tools) && body.tools.length) requiredCapabilities.add("tools");
-  const bridgeCapability = bridgeCapabilityForRequest(chatGptWebAuthority);
+  const bridgeCapability = bridgeCapabilityForRequest(chatGptWebAuthority, body);
   if (provider === "chatgpt-web" && await getChatGptWebLegacyConversation({ headers: clientRawRequest?.headers, body })) {
     return new Response(JSON.stringify({ error: { type: "runtime_error", code: "legacy_conversation_unavailable", message: "Start a new canonical task after profile login; legacy socket conversations cannot resume", retryable: false } }),
       { status: 409, headers: { "content-type": "application/json", "x-9router-no-fallback": "true" } });
@@ -471,6 +489,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         requiredCapabilities,
         ...(explicitConnectionId ? { pinConnectionId: explicitConnectionId } : {}),
         ...(provider === "chatgpt-web" ? { bridgeCapability, chatGptWebAuthority, chatGptWebReasoning: body.reasoning?.effort ?? body.reasoning_effort,
+          chatGptWebRequestMode: bridgeCapability === "generic_tools" ? "agent" : "browser",
           signal: preResponse?.signal || request?.signal } : {}),
       });
     } catch (error) {
@@ -492,7 +511,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       if (excludeConnectionIds.size === 0) {
         log.warn("AUTH", `No active credentials for provider: ${provider}`);
         const unavailable = provider === "chatgpt-web" && !chatGptWebAuthority
-          ? Response.json({ error: { type: "runtime_error", code: "generic_model_unavailable", message: "No verified Browser-only model is available. Verify the profile, select Browser-only, or upgrade the runtime.", retryable: false, submission_state: "not_sent" } }, { status: 503 })
+          ? Response.json({ error: { type: "runtime_error", code: bridgeCapability === "generic_tools" ? "agent_tools_unavailable" : "generic_model_unavailable", message: bridgeCapability === "generic_tools" ? "OpenAI-compatible agent tools capability is not verified for the selected model" : "No verified generic text model is available. Verify the saved session and runtime prerequisites, or upgrade the runtime.", retryable: false, submission_state: "not_sent" } }, { status: 503 })
           : errorResponse(HTTP_STATUS.NOT_FOUND, `No active credentials for provider: ${provider}`);
         return provider === "chatgpt-web" ? withChatGptWebNoFallback(unavailable) : unavailable;
       }

@@ -38,6 +38,21 @@ describe("ChatGPT Web readiness snapshots", () => {
     mocks.admin.mockRejectedValueOnce(new Error("operator secret path"));
     await expect(getChatGptWebProfileStates()).rejects.toThrow("Runtime unavailable. Refresh connections after the runtime recovers.");
   });
+  it("retains generic capability flags while discarding unrelated model metadata", async () => {
+    mocks.admin.mockResolvedValue(Response.json({ protocolVersion: 1, profiles: [profile({ models: [{ ...model, capabilities: { generic_tools: false, generic_responses: true, privateAuthority: "fixture-secret", exec: true } }] })] }));
+    const states = await getChatGptWebProfileStates();
+    expect(states.get("personal").models[0]).toEqual({ ...model, capabilities: { generic_tools: false, generic_responses: true } });
+    expect(JSON.stringify([...states.values()])).not.toMatch(/fixture-secret|privateAuthority|exec/);
+  });
+  it.each(["harness_config_invalid", "harness_key_invalid", "harness_key_required", "harness_config_conflict", "harness_config_revision_conflict", "harness_operator_managed", "harness_config_missing", "harness_config_required", "harness_storage_invalid", "harness_tunnel_id_unsupported", "harness_compatibility_unverified", "connector_unavailable"])("maps harness diagnostic %s without exposing runtime text", code => {
+    expect(chatGptWebDiagnostic({ code, message: "fixture-key /private/harness.json Bearer stderr" })).toMatchObject({ code, message: expect.any(String) });
+    expect(JSON.stringify(chatGptWebDiagnostic({ code, message: "fixture-key /private/harness.json Bearer stderr" }))).not.toMatch(/fixture-key|\/private\/harness|Bearer|stderr/);
+  });
+  it("distinguishes missing configuration, connector installation, and build compatibility", () => {
+    expect(chatGptWebDiagnostic("harness_config_required").message).toContain("Tunnel ID");
+    expect(chatGptWebDiagnostic("connector_unavailable").message).toContain("Create and install Codex Native2");
+    expect(chatGptWebDiagnostic("harness_compatibility_unverified").message).toBe("This runtime build has not passed harness compatibility checks.");
+  });
 });
 
 describe("connection readiness mapping", () => {

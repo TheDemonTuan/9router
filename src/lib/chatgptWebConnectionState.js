@@ -4,8 +4,20 @@ export const CHATGPT_WEB_RUNTIME_ERROR_MESSAGES = {
   revision_conflict: "Settings changed elsewhere. Refresh the profile and apply your changes again.",
   profile_revision_conflict: "Settings changed elsewhere. Refresh the profile and apply your changes again.",
   profile_active: "Wait for all profile turns to settle before changing settings, logging in, or restarting.",
-  connector_unavailable: "Full mode requires an operator-provisioned, verified Native2 connector and tunnel.",
+  connector_unavailable: "Create and install Codex Native2 in the ChatGPT workspace, then verify the connector.",
   action_not_allowed: "The account or workspace does not permit this connector action.",
+  harness_compatibility_unverified: "This runtime build has not passed harness compatibility checks.",
+  harness_config_invalid: "Enter the complete Tunnel ID supplied by OpenAI Platform.",
+  harness_key_invalid: "Use a single-line runtime API key, not an admin key.",
+  harness_key_required: "Enter a runtime API key when saving the tunnel for the first time.",
+  harness_config_conflict: "Tunnel configuration changed elsewhere. Refresh before trying again.",
+  harness_operator_managed: "This profile uses operator-managed tunnel configuration. Ask the operator to migrate it before changing it here.",
+  harness_config_missing: "Save a Tunnel ID and runtime API key before starting the tunnel.",
+  harness_storage_invalid: "Runtime secret storage is unavailable. Contact the operator; no secret was returned.",
+  harness_config_required: "Save a Tunnel ID and runtime API key before starting the tunnel.",
+  harness_config_revision_conflict: "Tunnel configuration changed elsewhere. Refresh before trying again.",
+  harness_tunnel_id_unsupported: "This pinned runtime tunnel client does not support namespaced Tunnel IDs; an operator-reviewed targeted runtime upgrade is required.",
+  harness_unavailable: "Coding tools require a ready tunnel and verified Codex Native2 connector.",
   login_required: "Sign in using the private browser, then choose Finish Sign In to verify your account.",
   profile_probe_failed: "ChatGPT verification could not inspect the chat interface. Open Browser, wait for the page to finish loading, then choose Finish Sign In again.",
   model_version_unavailable: "ChatGPT sign-in was detected, but no supported model could be verified. Open Browser, check the model picker, then choose Finish Sign In again.",
@@ -21,8 +33,8 @@ export const CHATGPT_WEB_RUNTIME_ERROR_MESSAGES = {
   session_transfer_too_large: "The session file exceeds the 256 KiB limit.",
   session_account_mismatch: "The imported session belongs to another ChatGPT account. Use a new connection; the existing account was not replaced.",
   session_restore_failed: "The previous browser session could not be restored. Do not retry the import; contact the operator.",
-  secure_origin_required: "Session import requires HTTPS except for loopback development.",
-  runtime_upgrade_required: "Session transfer requires an updated ChatGPT Web runtime. Contact the operator.",
+  secure_origin_required: "Credential input requires HTTPS except for socket-trusted loopback development.",
+  runtime_upgrade_required: "This action requires an updated ChatGPT Web runtime. Contact the operator.",
   runtime_unavailable: "Runtime unavailable. Refresh connections after the runtime recovers.",
 };
 const STATES = new Set(["unconfigured", "login_required", "probing", "ready", "draining", "waiting_for_chatgpt_tool_approval", "error"]);
@@ -77,7 +89,9 @@ export async function getChatGptWebProfileStates({ signal } = {}) {
           || new Set(model.supported_reasoning_levels).size !== model.supported_reasoning_levels.length
           || !model.supported_reasoning_levels.includes(model.default_reasoning_level)) throw new Error();
         ids.add(model.id);
-        return { id: model.id, supported_reasoning_levels: [...model.supported_reasoning_levels], default_reasoning_level: model.default_reasoning_level };
+        const capabilities = {};
+        for (const key of ["generic_tools", "generic_responses"]) if (typeof model.capabilities?.[key] === "boolean") capabilities[key] = model.capabilities[key];
+        return { id: model.id, supported_reasoning_levels: [...model.supported_reasoning_levels], default_reasoning_level: model.default_reasoning_level, ...(Object.keys(capabilities).length ? { capabilities } : {}) };
       });
       states.set(item.profileId, { profileId: item.profileId, state: item.state, mode: item.settings.mode, models, lastError: chatGptWebDiagnostic(item.lastError) });
     }
