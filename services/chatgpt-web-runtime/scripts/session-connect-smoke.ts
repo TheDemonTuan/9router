@@ -177,7 +177,7 @@ async function prepare() {
   const metadata = await assistant().getAttribute("data-9router-chatgpt-session-assistant");
   if (metadata && JSON.parse(metadata).reason === "consumed") {
     const verify = page.waitForResponse(response => response.url().endsWith("/runtime/session/verify") && response.request().method() === "POST");
-    await assistant().getByRole("button", { name: "Verify saved session", exact: true }).click();
+    await page.getByRole("button", { name: "Verify saved session", exact: true }).click();
     assert.equal((await verify).status(), 200);
     await until(async () => {
       const fresh = await assistant().getAttribute("data-9router-chatgpt-session-assistant");
@@ -686,7 +686,7 @@ let collectionCalls = 0, onCollected: (() => Promise<void>) | undefined;
       await Promise.race([arrived, Bun.sleep(15000).then(() => { throw new Error("Readonly precheck was not observed"); })]);
       await action.close(); release();
       await until(() => imports.length === before + 1 && imports.at(-1)!.status === 200, "Worker must continue independently of popup", 120000);
-      await until(async () => assistant().getByRole("button", { name: "Verify saved session", exact: true }).isEnabled(), "Popup-close importer must release app busy state", 120000);
+      await until(async () => page.getByRole("button", { name: "Verify saved session", exact: true }).isEnabled(), "Popup-close importer must release app busy state", 120000);
       await clearDraft();
     } finally { release(); }
   });
@@ -710,7 +710,7 @@ let collectionCalls = 0, onCollected: (() => Promise<void>) | undefined;
       }, { target, event: requestEvent });
       await action.close(); release();
       await until(() => imports.length === before + 1 && imports.at(-1)!.status === 200, "Owned importer must finish after popup closes", 120000);
-      await until(async () => assistant().getByRole("button", { name: "Verify saved session", exact: true }).isEnabled(), "App-owned import must settle busy state before the next attempt", 120000);
+      await until(async () => page.getByRole("button", { name: "Verify saved session", exact: true }).isEnabled(), "App-owned import must settle busy state before the next attempt", 120000);
       await page.getByText("Connected and ready.", { exact: true }).waitFor({ timeout: 120000 });
       assert.equal(imports.length, before + 1); await clearDraft();
     } finally { authSessionGate = undefined; release(); }
@@ -726,7 +726,7 @@ let collectionCalls = 0, onCollected: (() => Promise<void>) | undefined;
     safeFailureMetadata = { expectedImports: before + 1, actualImports: imports.length, expectedStatus: 409, actualStatus: imports[before]?.status ?? null };
     assert.equal(imports.length, before + 1); assert.equal(imports[before]?.status, 409);
     safeFailureMetadata = undefined;
-    await until(async () => assistant().getByRole("button", { name: "Verify saved session", exact: true }).isEnabled(), "Revision-race importer must settle busy state", 120000);
+    await until(async () => page.getByRole("button", { name: "Verify saved session", exact: true }).isEnabled(), "Revision-race importer must settle busy state", 120000);
     await noPost(before + 1); await clearDraft();
     await openConnection();
   });
