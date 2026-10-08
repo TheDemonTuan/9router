@@ -569,7 +569,6 @@ describe("Responses Structured Outputs & Multi-hop Translation", () => {
       );
 
       expect(responsesReq.model).toBe("chatgpt-web/gpt-5.6-sol");
-      expect(responsesReq.instructions).toBe("You are an agent.");
       expect(responsesReq.tool_choice).toBe("auto");
       expect(responsesReq.parallel_tool_calls).toBe(true);
       expect(responsesReq.tools).toEqual([
@@ -582,6 +581,10 @@ describe("Responses Structured Outputs & Multi-hop Translation", () => {
         },
       ]);
       expect(responsesReq.input).toEqual([
+        {
+          role: "system",
+          content: "You are an agent.",
+        },
         {
           type: "message",
           role: "user",
