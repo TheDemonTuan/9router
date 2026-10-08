@@ -1,28 +1,14 @@
 name: ChatGPT Web runtime gates
 on:
   push:
-    branches: [master, feat/chatgpt-web-experience]
-    paths:
-      - services/chatgpt-web-runtime/**
-      - tools/chatgpt-web-session-export/**
-      - src/**
-      - open-sse/**
-      - public/**
-      - tests/**
-      - .deploy/**
-      - package.json
-      - bun.lock
-      - Dockerfile
-      - .dockerignore
-      - custom-server.js
-      - chatgpt-web-viewer-proxy.cjs
-      - next.config.mjs
-      - jsconfig.json
-      - postcss.config.mjs
-      - scripts/copy-standalone-assets.mjs
-      - scripts/build-chatgpt-session-export.mjs
-      - scripts/docker-entrypoint.sh
-      - .github/workflows/chatgpt-web-runtime.yml
+    branches: [feat/chatgpt-web-experience]
+  # Master pushes run these gates through Build and Deploy, once per source SHA.
+  workflow_call:
+    inputs:
+      verification_only:
+        type: boolean
+        default: true
+        description: Run offline gates only; never activate live accounts, publication or deployment
   pull_request:
     paths:
       - services/chatgpt-web-runtime/**
@@ -45,6 +31,7 @@ on:
       - scripts/build-chatgpt-session-export.mjs
       - scripts/docker-entrypoint.sh
       - .github/workflows/chatgpt-web-runtime.yml
+      - .github/workflows/deploy.yml
   workflow_dispatch:
     inputs:
       live_account:
@@ -61,24 +48,25 @@ on:
         description: Deploy the scanned immutable runtime after operator bootstrap/enrollment
 permissions:
   contents: read
-# Dispatch operations queue without replacement; automatic jobs supersede by ref below.
+# Reusable verification inherits the caller's event; isolate it explicitly from
+# operator dispatches and superseding PR jobs so queued deploys cannot be cancelled.
 concurrency:
-  group: ${{ github.event_name == 'workflow_dispatch' && 'cgw-runtime-operations' || format('cgw-runtime-ci-run-{0}', github.run_id) }}
+  group: ${{ inputs.verification_only && format('cgw-runtime-verification-run-{0}', github.run_id) || github.event_name == 'workflow_dispatch' && 'cgw-runtime-operations' || format('cgw-runtime-ci-run-{0}', github.run_id) }}
   queue: max
   cancel-in-progress: false
 jobs:
   activation-fence:
     concurrency:
-      group: ${{ format('cgw-runtime-activation-{0}', github.event_name == 'workflow_dispatch' && github.run_id || github.ref) }}
-      cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+      group: ${{ format('cgw-runtime-activation-{0}', (inputs.verification_only || github.event_name == 'workflow_dispatch') && github.run_id || github.ref) }}
+      cancel-in-progress: ${{ !inputs.verification_only && github.event_name != 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
       - name: Enforce explicit default-branch activation
         env:
-          LIVE_ACCOUNT: ${{ inputs.live_account || false }}
-          PUBLISH: ${{ inputs.publish || false }}
-          DEPLOY: ${{ inputs.deploy || false }}
+          LIVE_ACCOUNT: ${{ !inputs.verification_only && inputs.live_account || false }}
+          PUBLISH: ${{ !inputs.verification_only && inputs.publish || false }}
+          DEPLOY: ${{ !inputs.verification_only && inputs.deploy || false }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
@@ -89,8 +77,8 @@ jobs:
 
   gateway-contracts:
     concurrency:
-      group: ${{ format('cgw-runtime-gateway-{0}', github.event_name == 'workflow_dispatch' && github.run_id || github.ref) }}
-      cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+      group: ${{ format('cgw-runtime-gateway-{0}', (inputs.verification_only || github.event_name == 'workflow_dispatch') && github.run_id || github.ref) }}
+      cancel-in-progress: ${{ !inputs.verification_only && github.event_name != 'workflow_dispatch' }}
     needs: activation-fence
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -107,6 +95,8 @@ jobs:
           state_home="$RUNNER_TEMP/cgw-gateway-contracts"
           mkdir -p "$state_home/data"
           printf 'HOME=%s\nUSERPROFILE=%s\nAPPDATA=%s\nDATA_DIR=%s/data\nCGW_DATA_DIR=%s/data\nENABLE_REQUEST_LOGS=false\nNEXT_TELEMETRY_DISABLED=1\n' "$state_home" "$state_home" "$state_home" "$state_home" "$state_home" >> "$GITHUB_ENV"
+      - name: Verify release gate isolation and activation boundaries
+        run: bun test tests/unit/chatgpt-web-deploy-gates.test.cjs
       - name: Install frozen gateway and test dependencies
         run: |
           set -euo pipefail
@@ -135,8 +125,8 @@ jobs:
 
   native:
     concurrency:
-      group: ${{ format('cgw-runtime-native-{0}-{1}', github.event_name == 'workflow_dispatch' && github.run_id || github.ref, matrix.arch) }}
-      cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+      group: ${{ format('cgw-runtime-native-{0}-{1}', (inputs.verification_only || github.event_name == 'workflow_dispatch') && github.run_id || github.ref, matrix.arch) }}
+      cancel-in-progress: ${{ !inputs.verification_only && github.event_name != 'workflow_dispatch' }}
     needs: activation-fence
     timeout-minutes: 75
     strategy:
@@ -174,10 +164,9 @@ jobs:
           set -euo pipefail
           test "$(bun --version)" = 1.4.0
           install -m 0755 "$(command -v bun)" "$RUNNER_TEMP/cgw-bun-1.4.0"
+          bash ../../.deploy/verify-cgw-runtime.sh
+          # Onboarding later needs Playwright in the checkout, not in the cold copy.
           bun install --frozen-lockfile
-          bun run typecheck
-          bun run test
-          bun build src/server.ts src/companion/main.ts --target bun --external playwright-core --outdir "$RUNNER_TEMP/cgw-entrypoints"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - name: Build and load native image without emulation or push
         env:
@@ -382,7 +371,7 @@ jobs:
 
   live-staging:
     needs: [native, gateway-contracts]
-    if: github.event_name == 'workflow_dispatch' && inputs.live_account && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    if: github.event_name == 'workflow_dispatch' && !inputs.verification_only && inputs.live_account && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: [self-hosted, linux, ARM64, cgw-staging-disposable]
     environment: staging
     timeout-minutes: 60
@@ -420,7 +409,7 @@ jobs:
   security-source:
     name: Trivy CGW source gate
     needs: [activation-fence]
-    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    if: github.event_name == 'workflow_dispatch' && !inputs.verification_only && inputs.publish && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     permissions:
       contents: read
       packages: read
@@ -435,7 +424,7 @@ jobs:
   publish:
     name: Publish verified native CGW image
     needs: [security-source, native, gateway-contracts, live-staging]
-    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && needs.security-source.result == 'success' && needs.native.result == 'success' && needs.gateway-contracts.result == 'success' && (!inputs.live_account || needs.live-staging.result == 'success') }}
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && !inputs.verification_only && inputs.publish && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && needs.security-source.result == 'success' && needs.native.result == 'success' && needs.gateway-contracts.result == 'success' && (!inputs.live_account || needs.live-staging.result == 'success') }}
     permissions:
       contents: read
       packages: write
@@ -450,7 +439,7 @@ jobs:
   security-image:
     name: Trivy immutable CGW image gate
     needs: publish
-    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && needs.publish.result == 'success' }}
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && !inputs.verification_only && inputs.publish && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && needs.publish.result == 'success' }}
     permissions:
       contents: read
       packages: read
@@ -471,7 +460,7 @@ jobs:
       queue: max
       cancel-in-progress: false
     needs: [publish, security-image]
-    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.publish && inputs.deploy && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && needs.publish.result == 'success' && needs.security-image.result == 'success' }}
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && !inputs.verification_only && inputs.publish && inputs.deploy && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && needs.publish.result == 'success' && needs.security-image.result == 'success' }}
     runs-on: ubuntu-24.04
     environment: production
     timeout-minutes: 34
