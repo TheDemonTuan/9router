@@ -196,7 +196,7 @@ try {
   };
   const manualImport = async (mode: "file" | "paste") => {
     const section = page.getByRole("region", { name: "Connect ChatGPT session", exact: true });
-    const manual = section.locator("details").filter({ has: section.locator("summary").filter({ hasText: /^Manual import$/ }) });
+    const manual = section.locator("details").filter({ has: page.locator("summary").filter({ hasText: /^Manual import$/ }) });
     if (!await manual.evaluate(element => element.hasAttribute("open"))) await manual.locator("summary").click();
     await manual.getByRole("button", { name: mode === "file" ? "Select file" : "Paste JSON", exact: true }).click();
   };
