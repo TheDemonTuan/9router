@@ -191,7 +191,8 @@ async function hostMain() {
   const browser = process.env.CGW_CHROMIUM_EXECUTABLE;
   assert(browser && isAbsolute(browser) && existsSync(browser), "absolute_chromium_executable_required");
   const browserIdentity = spawnSync(browser, ["--version"], { encoding: "utf8", env: { PATH: process.env.PATH, LANG: "C.UTF-8" } });
-  assert(browserIdentity.status === 0 && /(?:Chrome|Chromium)\s+\d/.test(browserIdentity.stdout), "exact_chromium_version_unavailable");
+  assert(browserIdentity.status === 0 && /^(?:Google Chrome(?: for Testing)?|Chromium)\s+\d+\.\d+\.\d+\.\d+\s*$/.test(browserIdentity.stdout.trim()),
+    `exact_chromium_version_unavailable: status=${browserIdentity.status}; stdout=${browserIdentity.stdout.trim()}; stderr=${browserIdentity.stderr.trim()}`);
   const browserVersion = browserIdentity.stdout.trim();
   const browserSha256 = new Bun.CryptoHasher("sha256").update(await Bun.file(realpathSync(browser)).arrayBuffer()).digest("hex");
   const revision = spawnSync("git", ["-C", options.sourceRoot, "rev-parse", "HEAD"], { encoding: "utf8" });
