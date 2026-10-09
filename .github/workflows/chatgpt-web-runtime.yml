@@ -250,8 +250,11 @@ jobs:
           test "$(bun --version)" = 1.4.0
           test "$(uname -m)" = aarch64
           export CGW_CHROMIUM_EXECUTABLE="$CGW_LIFECYCLE_BROWSER"
-          bun scripts/benchmark-resource-lifecycle.ts --source-root "$CGW_LIFECYCLE_BASE" --profiles 3 --concurrency 1,3,5 --rounds 10 --idle-seconds 330 --samples 3 --output "$RUNNER_TEMP/cgw-lifecycle-proof/base.json"
-          bun scripts/benchmark-resource-lifecycle.ts --source-root "$GITHUB_WORKSPACE" --profiles 3 --concurrency 1,3,5 --rounds 10 --idle-seconds 330 --samples 3 --output "$RUNNER_TEMP/cgw-lifecycle-proof/candidate.json"
+          baseline_status=0
+          candidate_status=0
+          bun scripts/benchmark-resource-lifecycle.ts --source-root "$CGW_LIFECYCLE_BASE" --profiles 3 --concurrency 1,3,5 --rounds 10 --idle-seconds 330 --samples 3 --output "$RUNNER_TEMP/cgw-lifecycle-proof/base.json" || baseline_status=$?
+          bun scripts/benchmark-resource-lifecycle.ts --source-root "$GITHUB_WORKSPACE" --profiles 3 --concurrency 1,3,5 --rounds 10 --idle-seconds 330 --samples 3 --output "$RUNNER_TEMP/cgw-lifecycle-proof/candidate.json" || candidate_status=$?
+          test "$baseline_status:$candidate_status" = 0:0
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: ${{ always() }}
         with:

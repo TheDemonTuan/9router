@@ -501,7 +501,16 @@ async function workerMain() {
     assert(result.sends === coldSends, "cold_gets_sent_inference");
     if (features.lazy) assert(coldBrowsers === 0 && contexts.size === 0, "lazy_cold_gets_launched_browser");
     await snapshot("cold-gets");
-    const prepare = async (id: string) => {
+    const preparations = new Map<string, Promise<string>>();
+    const prepare = (id: string): Promise<string> => {
+      const existing = preparations.get(id);
+      if (existing) return existing;
+      const pending = prepareOnce(id);
+      preparations.set(id, pending);
+      void pending.finally(() => { if (preparations.get(id) === pending) preparations.delete(id); }).catch(() => {});
+      return pending;
+    };
+    const prepareOnce = async (id: string) => {
       if (features.lazy) {
         const profile = ownedRuntime.state.profile(id);
         const response = await post("/v1/profiles/prepare", { profileId: id, profileEpoch: profile.epoch }, id);
@@ -544,7 +553,7 @@ async function workerMain() {
           request: body, effectiveModel: model, effectiveReasoning: "high", transformedRequestSha256: sha256(JSON.stringify(body)) }, id), start);
         const completed = response.status === "completed";
         measurements.push({ elapsedMs: performance.now() - start, ttftMs, completed, code: completed ? null : safeCode(response.error?.code) });
-        if (completed && response.output) history.push(user, ...response.output);
+        if (completed && response.output) history.push(user, ...response.output.filter(item => item.type === "message").map(item => ({ type: "message", role: "assistant", content: Array.isArray(item.content) ? item.content.flatMap(part => part && typeof part === "object" && !Array.isArray(part) && part.type === "output_text" && typeof part.text === "string" ? [{ type: "output_text", text: part.text }] : []) : [] })));
         return completed ? response.output : null;
       } catch (error) { measurements.push({ elapsedMs: performance.now() - start, ttftMs: null, completed: false, code: safeCode(error instanceof Error ? error.message : null) }); return null; }
     };
