@@ -86,11 +86,11 @@ jobs:
     permissions:
       contents: read
       packages: write
-    uses: TheDemonTuan/vps-deploy/.github/workflows/build-docker.yml@3a31f12ce0c9e2aec4590f5c397692e60b595491
+    uses: TheDemonTuan/vps-deploy/.github/workflows/build-docker.yml@f9ba4e8f3235190cee08a3f0cff3ca59fa46bdd2
     with:
       app: 9router
       source-sha: ${{ github.sha }}
-      platform-ref: 3a31f12ce0c9e2aec4590f5c397692e60b595491
+      platform-ref: f9ba4e8f3235190cee08a3f0cff3ca59fa46bdd2
       config: .deploy/app.yml
 
   security-image:
