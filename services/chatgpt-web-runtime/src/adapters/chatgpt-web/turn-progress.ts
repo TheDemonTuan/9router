@@ -1,3 +1,72 @@
+export interface DomPollState {
+  signature: string;
+  externalRevision: number;
+  activeToolCalls: number;
+  acknowledgedToolBatch: boolean;
+  generationActive: boolean;
+  pendingApproval?: boolean;
+  pendingCompletionFence?: boolean;
+  pendingSubmission?: boolean;
+  pendingResultPublication?: boolean;
+}
+
+/** Back off only a causally proven, unchanged external-tool wait. */
+export class DomPollCadence {
+  private signature?: string;
+  private revision?: number;
+  private stablePolls = 0;
+  constructor(readonly adaptive = false) {}
+
+  reset(): void {
+    this.signature = undefined;
+    this.revision = undefined;
+    this.stablePolls = 0;
+  }
+
+  observe(state: DomPollState): number {
+    if (!state.acknowledgedToolBatch || state.activeToolCalls <= 0 || state.generationActive
+      || state.pendingApproval || state.pendingCompletionFence || state.pendingSubmission
+      || state.pendingResultPublication) {
+      this.reset();
+      return 250;
+    }
+    if (this.signature !== state.signature || this.revision !== state.externalRevision) {
+      this.signature = state.signature;
+      this.revision = state.externalRevision;
+      this.stablePolls = 0;
+      return 250;
+    }
+    this.stablePolls++;
+    return !this.adaptive || this.stablePolls < 4 ? 250 : this.stablePolls < 8 ? 500 : 1000;
+  }
+}
+
+/** Progress cancels the timer; timeout/abort cancels the losing progress waiter. */
+export async function waitForDomPoll(
+  delayMs: number,
+  progress?: ChatGptTurnProgressReader,
+  afterRevision = progress?.snapshot().revision ?? 0,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (signal?.aborted) throw signal.reason ?? new DOMException("DOM poll aborted", "AbortError");
+  const controller = new AbortController();
+  const waitSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  try {
+    const delay = new Promise<void>((resolve, reject) => {
+      onAbort = () => reject(waitSignal.reason ?? new DOMException("DOM poll aborted", "AbortError"));
+      waitSignal.addEventListener("abort", onAbort, { once: true });
+      timer = setTimeout(resolve, delayMs);
+    });
+    await (progress ? Promise.race([delay, progress.waitForChange(afterRevision, waitSignal).then(() => {})]) : delay);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    if (onAbort) waitSignal.removeEventListener("abort", onAbort);
+    controller.abort();
+  }
+}
+
 export type ChatGptProgressSource =
   | "mcp_call" | "mcp_result" | "tool_batch" | "tool_result"
   | "assistant_dom" | "multipart_ack" | "generation_transition" | "checkpoint";
@@ -110,6 +179,7 @@ export interface ChatGptExternalTurnProgressSnapshot {
   revision: number;
   lastToolBatchRevision: number;
   activeToolCalls: number;
+  pendingResultPublications?: number;
   lastProgressAt?: number;
 }
 
@@ -194,6 +264,7 @@ export class ChatGptExternalTurnProgress extends ChatGptTurnProgressBroadcaster 
   private lastToolBatchRevision = 0;
   private observedToolBatchRevision = 0;
   private activeToolCalls = 0;
+  private pendingResultPublications = 0;
   private lastProgressAt?: number;
   private retirementError?: Error;
   private readonly toolBatchObservationWaiters = new Set<ToolBatchObservationWaiter>();
@@ -216,6 +287,7 @@ export class ChatGptExternalTurnProgress extends ChatGptTurnProgressBroadcaster 
       revision: this.revision,
       lastToolBatchRevision: this.lastToolBatchRevision,
       activeToolCalls: this.activeToolCalls,
+      pendingResultPublications: this.pendingResultPublications,
       ...(this.lastProgressAt !== undefined ? { lastProgressAt: this.lastProgressAt } : {}),
     };
   }
@@ -261,6 +333,17 @@ export class ChatGptExternalTurnProgress extends ChatGptTurnProgressBroadcaster 
       }
       this.toolBatchObservationWaiters.add(waiter);
     });
+  }
+
+  beginResultPublication(): () => void {
+    this.assertNotRetired();
+    this.pendingResultPublications++;
+    let finished = false;
+    return () => {
+      if (finished) return;
+      finished = true;
+      this.pendingResultPublications--;
+    };
   }
 
   recordToolResult(now = Date.now()): void {

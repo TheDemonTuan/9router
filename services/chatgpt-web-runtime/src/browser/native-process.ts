@@ -4,6 +4,12 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 
 interface OwnedNativeProcess { pid: number; grouped: boolean; }
+export class NativeBrowserLaunchError extends Error {
+  constructor(readonly physicalOwner: NativeBrowserProcess, cause: unknown) {
+    super("Human browser launch cleanup did not physically settle", { cause });
+    this.name = "NativeBrowserLaunchError";
+  }
+}
 
 /** Only this spawn's process group or uniquely marked descendants may be signalled. */
 export class NativeBrowserProcess {
@@ -28,7 +34,8 @@ export class NativeBrowserProcess {
       if (!owned.running) throw new Error("Human login browser exited during startup");
       return owned;
     } catch (error) {
-      await owned.close();
+      try { await owned.close(); }
+      catch (cleanupError) { throw new NativeBrowserLaunchError(owned, cleanupError); }
       throw error;
     }
   }
@@ -129,7 +136,7 @@ export class NativeBrowserProcess {
         const timer = setTimeout(() => { this.child.off("exit", exited); reject(new Error("Owned human browser exit was not observed")); }, 2000);
         this.child.once("exit", exited);
       });
-    })();
+    })().catch(error => { this.closing = undefined; throw error; });
     return this.closing;
   }
 }

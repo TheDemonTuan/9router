@@ -10,9 +10,11 @@ vi.mock("@/lib/localDb", () => ({
 vi.mock("open-sse/services/chatgptWebRuntimeClient.js", async importOriginal => ({
   ...await importOriginal(),
   getChatGptWebCatalog: vi.fn(async connection => fixture.catalogs.get(connection.id)),
+  prepareChatGptWebProfile: vi.fn(async connection => fixture.catalogs.get(connection.id)),
   requestChatGptWebRuntime: fixture.nativeRuntime,
 }));
 const { getProviderCredentials } = await import("../../src/sse/services/auth.js");
+const { prepareChatGptWebProfile, getChatGptWebCatalog } = await import("../../open-sse/services/chatgptWebRuntimeClient.js");
 const model = "chatgpt-web/gpt-5.6-sol";
 beforeEach(() => {
   vi.clearAllMocks(); fixture.connections.length = 0; fixture.catalogs.clear();
@@ -44,4 +46,45 @@ it("ordinary text still selects the verified browser-only route", async () => {
   const selected = await getProviderCredentials("chatgpt-web", null, model, { bridgeCapability: "generic_responses" });
   expect(selected).toMatchObject({ connectionId: "browser-only", chatGptWebRequestMode: "browser" });
   expect(fixture.nativeRuntime).not.toHaveBeenCalled();
+});
+it("prepares only the selected eligible profile and stops before other accounts", async () => {
+  const selected = await getProviderCredentials("chatgpt-web", null, model, { bridgeCapability: "generic_tools", preferredConnectionId: "generic-full" });
+  expect(selected.connectionId).toBe("generic-full");
+  expect(prepareChatGptWebProfile).toHaveBeenCalledTimes(1);
+  expect(prepareChatGptWebProfile.mock.calls[0][0].id).toBe("generic-full");
+  expect(getChatGptWebCatalog).not.toHaveBeenCalled();
+});
+it("prepares candidates serially, retaining explicit pin and caller cancellation", async () => {
+  const controller = new AbortController();
+  let active = 0, peak = 0;
+  prepareChatGptWebProfile.mockImplementation(async connection => {
+    active++; peak = Math.max(peak, active);
+    await Promise.resolve(); active--;
+    return fixture.catalogs.get(connection.id);
+  });
+  await getProviderCredentials("chatgpt-web", null, model, { bridgeCapability: "generic_tools", signal: controller.signal });
+  expect(peak).toBe(1);
+  expect(prepareChatGptWebProfile.mock.calls.map(([connection]) => connection.id)).toEqual(["native-only", "browser-only", "generic-full"]);
+  for (const [, options] of prepareChatGptWebProfile.mock.calls) expect(options.signal).toBe(controller.signal);
+  prepareChatGptWebProfile.mockClear();
+  await getProviderCredentials("chatgpt-web", null, model, { bridgeCapability: "generic_tools", pinConnectionId: "native-only" });
+  expect(prepareChatGptWebProfile.mock.calls.map(([connection]) => connection.id)).toEqual(["native-only"]);
+});
+it("does not rotate after admission failure or swallow caller abort", async () => {
+  const denied = Response.json({ error: { code: "runtime_capacity_exceeded" } }, { status: 503 });
+  prepareChatGptWebProfile.mockRejectedValueOnce(Object.assign(new Error("busy"), { response: denied }));
+  expect((await getProviderCredentials("chatgpt-web", null, model)).chatGptWebBindingError).toBe(denied);
+  expect(prepareChatGptWebProfile).toHaveBeenCalledTimes(1);
+  prepareChatGptWebProfile.mockClear();
+  const controller = new AbortController(); controller.abort();
+  await expect(getProviderCredentials("chatgpt-web", null, model, { signal: controller.signal })).rejects.toThrow();
+  expect(prepareChatGptWebProfile).not.toHaveBeenCalled();
+});
+it("resolves native retained ownership before preparing only its bound profile", async () => {
+  fixture.nativeRuntime.mockResolvedValueOnce(Response.json({ profileId: "generic-full", profileEpoch: "epoch-generic-full" }));
+  const selected = await getProviderCredentials("chatgpt-web", null, model, { chatGptWebAuthority: { clientId: "client", threadId: "thread", turnId: "turn" } });
+  expect(selected.connectionId).toBe("generic-full");
+  expect(prepareChatGptWebProfile).toHaveBeenCalledTimes(1);
+  expect(prepareChatGptWebProfile.mock.calls[0][0]).toMatchObject({ id: "generic-full", chatGptWebProfileEpoch: "epoch-generic-full" });
+  expect(fixture.nativeRuntime.mock.invocationCallOrder[0]).toBeLessThan(prepareChatGptWebProfile.mock.invocationCallOrder[0]);
 });

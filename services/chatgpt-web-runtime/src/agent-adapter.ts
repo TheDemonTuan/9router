@@ -22,6 +22,7 @@ import type {
   CodexUsage,
 } from "./types";
 import type { ChatGptWebCapabilities } from "./adapters/chatgpt-web/model";
+import { ResourceCapacityError } from "./resource-budget";
 
 export interface ChatGptWebAgentAdapterDependencies {
   requestId: string;
@@ -30,6 +31,8 @@ export interface ChatGptWebAgentAdapterDependencies {
   model: string;
   effort?: string;
   socketPath: string;
+  onResourceAdmitted?: () => void;
+  onResourceAdmissionFailed?: (error: unknown) => void;
 }
 
 interface BufferedTraceEvent {
@@ -236,6 +239,7 @@ export function createChatGptWebAgentAdapter(
         capabilities: configuredCapabilities,
         nativeConnector: hasActiveTools,
         prepare: prepareTurn,
+        onPreparedSelected: () => dependencies.onResourceAdmitted?.(),
         abortSignal: browserAbort.signal,
         externalProgress: handle?.externalProgress,
         completionFence: handle?.completionFence,
@@ -337,6 +341,7 @@ export function createChatGptWebAgentAdapter(
         );
         emit({ type: "done", stopReason: "stop", endTurn: true, usage });
       } catch (error) {
+        dependencies.onResourceAdmissionFailed?.(error);
         const capabilityError = handle?.signal.aborted ? handle.signal.reason : undefined;
         handle?.revoke();
         await physicalSettlement;
@@ -347,6 +352,7 @@ export function createChatGptWebAgentAdapter(
             : new DOMException("The operation was aborted", "AbortError");
         }
         if (capabilityError instanceof AgentTurnError) error = capabilityError;
+        if (error instanceof ResourceCapacityError) throw error;
 
         if (error instanceof AgentTurnError) {
           emit({

@@ -94,6 +94,70 @@ export const profileSettingsSchema = z.object({
   experimentalBiggerContext: z.boolean(), experimentalFreshConversationPerTurn: z.boolean(),
   useSavedChats: z.boolean(), autoApproveToolCalls: z.boolean(), connectorName: z.literal("Codex Native2"),
 }).strict();
+
+export interface RuntimeResourceLimits {
+  maxGlobalBrowsers: number;
+  maxGlobalTurns: number;
+  maxGlobalTabs: number;
+  maxRetainedTabsPerProfile: number;
+  maxQueueSize: number;
+  queueTimeoutMs: number;
+  browserIdleTtlMs: number;
+  browserMode: "headed" | "headless-text";
+  adaptiveDomPolling: boolean;
+}
+
+export const DEFAULT_RUNTIME_RESOURCE_LIMITS: Readonly<RuntimeResourceLimits> = Object.freeze({
+  maxGlobalBrowsers: 2,
+  maxGlobalTurns: 2,
+  maxGlobalTabs: 10,
+  maxRetainedTabsPerProfile: 5,
+  maxQueueSize: 16,
+  queueTimeoutMs: 30_000,
+  browserIdleTtlMs: 300_000,
+  browserMode: "headed",
+  adaptiveDomPolling: false,
+});
+
+export function loadRuntimeResourceLimits(env: NodeJS.ProcessEnv = process.env): RuntimeResourceLimits {
+  const integer = (name: string, fallback: number, min: number, max: number): number => {
+    const raw = env[name];
+    if (raw === undefined) return fallback;
+    if (!/^(0|[1-9][0-9]*)$/.test(raw)) throw new Error(`Invalid ${name}: expected an integer ${min}..${max}`);
+    const value = Number(raw);
+    if (!Number.isSafeInteger(value) || value < min || value > max) throw new Error(`Invalid ${name}: expected an integer ${min}..${max}`);
+    return value;
+  };
+  const browserMode = env.CGW_BROWSER_MODE ?? "headed";
+  if (browserMode !== "headed" && browserMode !== "headless-text") throw new Error("Invalid CGW_BROWSER_MODE: expected headed or headless-text");
+  const adaptive = env.CGW_ADAPTIVE_DOM_POLLING ?? "false";
+  if (adaptive !== "true" && adaptive !== "false") throw new Error("Invalid CGW_ADAPTIVE_DOM_POLLING: expected true or false");
+  return {
+    maxGlobalBrowsers: integer("CGW_MAX_GLOBAL_BROWSERS", 2, 1, 32),
+    maxGlobalTurns: integer("CGW_MAX_GLOBAL_TURNS", 2, 1, 64),
+    maxGlobalTabs: integer("CGW_MAX_GLOBAL_TABS", 10, 5, 160),
+    maxRetainedTabsPerProfile: integer("CGW_MAX_RETAINED_TABS_PER_PROFILE", 5, 1, 5),
+    maxQueueSize: integer("CGW_MAX_QUEUE_SIZE", 16, 0, 128),
+    queueTimeoutMs: integer("CGW_QUEUE_TIMEOUT_MS", 30_000, 1_000, 120_000),
+    browserIdleTtlMs: integer("CGW_BROWSER_IDLE_TTL_MS", 300_000, 1_000, 3_600_000),
+    browserMode,
+    adaptiveDomPolling: adaptive === "true",
+  };
+}
+
+export type BrowserPurpose = "inference" | "inspection" | "login" | "viewer" | "connector";
+
+export function resolveProfileBrowserMode(
+  settings: ProfileSettings | undefined,
+  purpose: BrowserPurpose,
+  configuredMode: "headed" | "headless-text" = "headed",
+): "headed" | "headless" {
+  if (purpose === "login" || purpose === "viewer" || purpose === "connector") return "headed";
+  if (settings?.mode === "full") return "headed";
+  if (configuredMode === "headless-text" && (purpose === "inference" || purpose === "inspection")) return "headless";
+  return "headed";
+}
+
 export interface RuntimeConfig {
   dataDir: string;
   host: string;
@@ -101,7 +165,9 @@ export interface RuntimeConfig {
   chromiumExecutable: string;
   runtimeToken: Buffer;
   adminToken: Buffer;
+  resourceLimits?: RuntimeResourceLimits;
 }
+
 function secretFile(name: string): Buffer {
   const file = process.env[name]?.trim();
   if (!file) throw new Error(`${name} is required`);
@@ -109,32 +175,46 @@ function secretFile(name: string): Buffer {
   if (value.length < 32 || value.length > 4096 || /[\r\n\0]/.test(value)) throw new Error(`${name} contains an invalid bearer token`);
   return Buffer.from(value, "utf8");
 }
+
 export function loadRuntimeConfig(): RuntimeConfig {
   const port = Number(process.env.CGW_PORT || 17841);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid CGW_PORT");
   const runtimeToken = secretFile("CGW_RUNTIME_TOKEN_FILE");
   const adminToken = secretFile("CGW_ADMIN_TOKEN_FILE");
   if (runtimeToken.length === adminToken.length && timingSafeEqual(runtimeToken, adminToken)) throw new Error("Runtime and admin bearer tokens must differ");
-  return { dataDir: getConfigDir(), host: "0.0.0.0", port, chromiumExecutable: defaultChromeExecutable(), runtimeToken, adminToken };
+  return {
+    dataDir: getConfigDir(),
+    host: "0.0.0.0",
+    port,
+    chromiumExecutable: defaultChromeExecutable(),
+    runtimeToken,
+    adminToken,
+    resourceLimits: loadRuntimeResourceLimits(),
+  };
 }
+
 export function tokenMatches(header: string | null, secret: Buffer): boolean {
   if (!header?.startsWith("Bearer ")) return false;
   const supplied = Buffer.from(header.slice(7), "utf8");
   return supplied.length === secret.length && timingSafeEqual(supplied, secret);
 }
+
 export function providerConfig(options: {
   profileId: string; profileEpoch: string; clientId: string; pathFlavor: "win32" | "posix";
   settings: ProfileSettings; capabilities: ChatGptWebAccountCapabilities; verifiedEnvironment: ChatGptTurnEnvironment;
   dataDir: string; contextWindow: number;
+  browserMode?: "headed" | "headless-text";
+  chromiumExecutable?: string;
 }): CodexProviderConfig {
-  const { profileId, profileEpoch, clientId, pathFlavor, settings, capabilities, verifiedEnvironment, dataDir } = options;
+  const { profileId, profileEpoch, clientId, pathFlavor, settings, capabilities, verifiedEnvironment, dataDir, browserMode } = options;
   const profileRoot = join(dataDir, "profiles", profileId);
   const stateRoot = join(profileRoot, "state", createHash("sha256").update(JSON.stringify([profileId, profileEpoch, clientId])).digest("hex"));
+  const effectiveMode = resolveProfileBrowserMode(settings, "inference", browserMode ?? "headed");
   return {
     adapter: "chatgpt-web", baseUrl: "https://chatgpt.com", contextWindow: options.contextWindow,
     chatgptWeb: {
       profileId, profileEpoch, clientId, pathFlavor, verifiedEnvironment, browserProfilePath: join(profileRoot, "browser"),
-      chromeExecutablePath: defaultChromeExecutable(), headed: true, appName: settings.connectorName,
+      chromeExecutablePath: options.chromiumExecutable ?? defaultChromeExecutable(), headed: effectiveMode === "headed", appName: settings.connectorName,
       brokerSocketPath: defaultBrokerEndpoint(profileRoot),
       threadEnvironmentStatePath: join(stateRoot, "thread-environments.json"),
       lunaCheckpointStatePath: join(stateRoot, "luna-checkpoints.json"),
@@ -151,14 +231,17 @@ export function browserProviderConfig(options: {
   profileId: string; profileEpoch: string; requestId: string;
   settings: ProfileSettings; capabilities: ChatGptWebAccountCapabilities;
   dataDir: string; contextWindow: number;
+  browserMode?: "headed" | "headless-text";
+  chromiumExecutable?: string;
 }): CodexProviderConfig {
-  const { profileId, profileEpoch, requestId, settings, capabilities, dataDir } = options;
+  const { profileId, profileEpoch, requestId, settings, capabilities, dataDir, browserMode } = options;
+  const effectiveMode = resolveProfileBrowserMode(settings, "inference", browserMode ?? "headed");
   return {
     adapter: "chatgpt-web", baseUrl: "https://chatgpt.com", contextWindow: options.contextWindow,
     chatgptWeb: {
       profileId, profileEpoch, clientId: `browser:${requestId}`,
       browserProfilePath: join(dataDir, "profiles", profileId, "browser"),
-      chromeExecutablePath: defaultChromeExecutable(), headed: true,
+      chromeExecutablePath: options.chromiumExecutable ?? defaultChromeExecutable(), headed: effectiveMode === "headed",
       localToolsEnabled: false, autoApproveToolCalls: false,
       experimentalFreshConversationPerTurn: true, useSavedChats: false,
       experimentalBiggerContext: settings.experimentalBiggerContext,

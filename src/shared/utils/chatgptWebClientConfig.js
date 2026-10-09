@@ -131,6 +131,45 @@ export function buildChatGptWebClientConfig(catalogRow, apiOrigin, reasoningEffo
     'max_depth = 2',
     '',
   ].join("\n");
+  const modelDisplayName = typeof catalogRow.display_name === "string" ? catalogRow.display_name : catalogRow.id;
+  const ompConfig = [
+    "# Add under providers: in ~/.omp/agent/models.yml (or your models.yaml)",
+    "providers:",
+    `  ${PROVIDER_ID}:`,
+    `    baseUrl: ${serialize(apiBaseUrl)}`,
+    '    api: "openai-completions"',
+    '    apiKey: "NINE_ROUTER_API_KEY"',
+    '    headers:',
+    '      x-9router-token-saver: "off"',
+    '    models:',
+    `      - id: ${serialize(modelId)}`,
+    `        name: ${serialize(modelDisplayName)}`,
+    '        input:',
+    '          - "text"',
+    `        contextWindow: ${catalogRow.context_window}`,
+    ...(Number.isSafeInteger(catalogRow.max_output) && catalogRow.max_output > 0
+      ? [`        maxTokens: ${catalogRow.max_output}`]
+      : []),
+    '        omitMaxOutputTokens: true',
+    '        reasoning: true',
+    '        thinking:',
+    '          mode: "effort"',
+    `          efforts: [${catalogRow.supported_reasoning_levels.map(serialize).join(", ")}]`,
+    `          defaultLevel: ${serialize(effort)}`,
+    '          requiresEffort: true',
+    '        compat:',
+    '          supportsStore: true',
+    '          supportsSamplingParams: false',
+    '          supportsReasoningEffort: true',
+    '          thinkingFormat: "openai"',
+    '',
+  ].join("\n");
+  const ompCommand = `omp --model '${PROVIDER_ID}/${modelId}' --thinking '${effort}'`;
+  const ompInstructions = [
+    "Set NINE_ROUTER_API_KEY in your environment; no API key is included in configuration or command arguments.",
+    "Merge under the existing providers root in ~/.omp/agent/models.yml, or edit models.yaml if that is your active file. If 9router-cgw exists, merge the model by id. Preserve all other providers and models; do not overwrite your configuration.",
+    "Start omp with the generated command. Sampling/output-token omission is native to this configuration; no extension is required. Tools and approvals remain controlled by omp."
+  ].join("\n");
   return {
     apiBaseUrl,
     modelId,
@@ -142,6 +181,9 @@ export function buildChatGptWebClientConfig(catalogRow, apiOrigin, reasoningEffo
     companionCommand: `CGW_COMPANION_CONFIG_FILE=${CLIENT_DIRECTORY}/companion.json bun run companion`,
     interruptCommand: `CGW_COMPANION_CONFIG_FILE=${CLIENT_DIRECTORY}/companion.json bun run companion:interrupt --thread-id '<thread-id>' --turn-id '<turn-id>'`,
     clientKeysConfig,
+    ompConfig,
+    ompCommand,
+    ompInstructions,
     nativeInstructions: [
       "Run these commands from services/chatgpt-web-runtime on the Codex client machine, not on the gateway.",
       "1. Replace all absolute path placeholders, then generate the Ed25519 key pair. Keep the private PEM and 9Router API-key file client-local with owner-only permissions; never upload them.",

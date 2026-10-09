@@ -5,7 +5,7 @@ import { MAX_RATE_LIMIT_COOLDOWN_MS, HARD_QUOTA_UNKNOWN_RESET_MS } from "open-ss
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
 import { isAlitpModelAvailableForEdition } from "open-sse/providers/alibabaTokenPlanCatalog.js";
 import {
-  getChatGptWebCatalog,
+  prepareChatGptWebProfile,
   hasChatGptWebModel,
   chatGptWebModelSupportsCapabilities,
   requestChatGptWebRuntime,
@@ -59,7 +59,7 @@ function getUnavailabilityReason(connections, lockedConns, model) {
  * @param {string} provider - Provider name
  * @param {Set<string>|string|null} excludeConnectionIds - Connection ID(s) to exclude (for retry with next account)
  * @param {string|null} model - Model name for per-model rate limit filtering
- * @param {{ preferredConnectionId?: string, pinConnectionId?: string, requiredCapabilities?: Set<string>|string[], bridgeCapability?: "native_responses"|"generic_responses" }} options
+ * @param {{ preferredConnectionId?: string, pinConnectionId?: string, requiredCapabilities?: Set<string>|string[], bridgeCapability?: "native_responses"|"generic_responses"|"generic_tools", signal?: AbortSignal }} options
  */
 export async function getProviderCredentials(provider, excludeConnectionIds = null, model = null, options = {}) {
   // Normalize to Set for consistent handling
@@ -128,29 +128,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     }
 
 
-    const bridgeEligible = new Set();
     const bridgeEpochs = new Map();
-    const bridgeEffortRejected = new Set();
-    if (providerId === "chatgpt-web" && model) {
-      await Promise.all(connections.map(async (connection) => {
-        try {
-          const catalog = await getChatGptWebCatalog(connection);
-          const liveModel = catalog.models?.find((entry) => entry.id === model);
-          const effort = options.chatGptWebReasoning ?? liveModel?.default_reasoning_level;
-          if (!catalog.stale && hasChatGptWebModel(catalog, model)
-            && liveModel?.capabilities?.[bridgeCapability] === true
-            && (bridgeCapability !== "generic_tools" || liveModel.capabilities.generic_responses === true)
-            && chatGptWebModelSupportsCapabilities(liveModel, requiredCapabilities)) {
-            if (liveModel?.supported_reasoning_levels?.includes(effort) !== true) {
-              bridgeEffortRejected.add(connection.id);
-              return;
-            }
-            bridgeEligible.add(connection.id);
-            bridgeEpochs.set(connection.id, catalog.profileEpoch);
-          }
-        } catch { /* Offline/unknown bridges are not dispatch candidates. */ }
-      }));
-    }
     const antigravityEligible = new Set();
     if (providerId === "antigravity" && model) {
       await Promise.all(connections.map(async (connection) => {
@@ -187,8 +165,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     // Filter out model-locked, excluded, and capability-ineligible connections.
     const availableConnections = connections.filter(c => {
       if (excludeSet.has(c.id)) return false;
-      if (pinConnectionId && (providerId !== "chatgpt-web" || bridgeCapability === "generic_responses" || bridgeCapability === "generic_tools") && c.id !== pinConnectionId) return false;
-      if (providerId === "chatgpt-web" && model && !bridgeEligible.has(c.id)) return false;
+      if (pinConnectionId && c.id !== pinConnectionId) return false;
       if (isModelLockActive(c, model)) return false;
       if (providerId === "antigravity" && model && !antigravityEligible.has(c.id)) return false;
       // Alibaba Token Plan: Team-only models require a Team Edition connection
@@ -213,11 +190,6 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     });
 
     if (availableConnections.length === 0) {
-      if (providerId === "chatgpt-web" && (bridgeCapability === "generic_responses" || bridgeCapability === "generic_tools")
-        && connections.some(row => !excludeSet.has(row.id) && (!pinConnectionId || row.id === pinConnectionId) && bridgeEffortRejected.has(row.id))) {
-        return { chatGptWebBindingError: Response.json({ error: { type: "runtime_error", code: "model_version_unavailable",
-          message: "Requested reasoning effort is not verified for the selected Browser-only model", retryable: false, submission_state: "not_sent" } }, { status: 400 }) };
-      }
       if (providerId === "chatgpt-web" && options.chatGptWebAuthority) {
         const response = await requestChatGptWebRuntime(null, "/v1/thread-bindings/resolve", { method: "POST", signal: options.signal, headers: { "content-type": "application/json" },
           body: JSON.stringify({ clientId: options.chatGptWebAuthority.clientId, threadId: options.chatGptWebAuthority.threadId, candidateProfileIds: [] }) }, { timeoutMs: 5000 });
@@ -319,11 +291,50 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       const ordered = [connection, ...availableConnections.filter(row => row.id !== connection.id)];
       const response = await requestChatGptWebRuntime(null, "/v1/thread-bindings/resolve", { method: "POST", signal: options.signal, headers: { "content-type": "application/json" },
         body: JSON.stringify({ clientId: authority.clientId, threadId: authority.threadId,
-          candidateProfileIds: [...new Set(ordered.map(row => row.providerSpecificData?.profileId).filter(Boolean))], ...(requested ? { requestedProfileId: requested } : {}) }) }, { timeoutMs: 5000 });
+          candidateProfileIds: [...new Set(ordered.map(row => row.providerSpecificData?.profileId).filter(Boolean))], ...(requested ? { requestedProfileId: requested } : {}) }) }, { timeoutMs: 240000 });
       if (!response.ok) return { chatGptWebBindingError: response };
       profileBinding = await response.json();
       connection = ordered.find(row => row.providerSpecificData?.profileId === profileBinding.profileId);
       if (!connection) return { chatGptWebBindingError: Response.json({ error: { code: "profile_unavailable" } }, { status: 409 }) };
+    }
+    if (providerId === "chatgpt-web" && model) {
+      // Resolve ownership before waking a browser. Explicit pins/retained native bindings
+      // never prepare another account. Unpinned candidates are checked one at a time.
+      const candidates = pinConnectionId || profileBinding
+        ? [connection] : [connection, ...availableConnections.filter(row => row.id !== connection.id)];
+      let selected = null;
+      let effortRejected = false;
+      for (const candidate of candidates) {
+        options.signal?.throwIfAborted();
+        let catalog;
+        try {
+          catalog = await prepareChatGptWebProfile(profileBinding
+            ? { ...candidate, chatGptWebProfileEpoch: profileBinding.profileEpoch } : candidate, { signal: options.signal });
+        } catch (error) {
+          options.signal?.throwIfAborted();
+          // A failed admission/probe is not permission to rotate or replay elsewhere.
+          if (error.response) return { chatGptWebBindingError: error.response };
+          return { chatGptWebBindingError: Response.json({ error: { type: "runtime_error", code: "profile_not_prepared",
+            message: "Selected runtime profile could not be prepared", retryable: false, submission_state: "not_sent" } },
+          { status: 503, headers: { "x-9router-no-fallback": "true", "x-should-retry": "false" } }) };
+        }
+        const liveModel = catalog.models?.find(entry => entry.id === model);
+        if (catalog.stale || !hasChatGptWebModel(catalog, model) || liveModel?.capabilities?.[bridgeCapability] !== true
+          || bridgeCapability === "generic_tools" && liveModel.capabilities.generic_responses !== true
+          || !chatGptWebModelSupportsCapabilities(liveModel, requiredCapabilities)) continue;
+        const effort = options.chatGptWebReasoning ?? liveModel.default_reasoning_level;
+        if (!liveModel.supported_reasoning_levels.includes(effort)) { effortRejected = true; continue; }
+        bridgeEpochs.set(candidate.id, catalog.profileEpoch);
+        selected = candidate;
+        break;
+      }
+      if (!selected) {
+        if (effortRejected || profileBinding) return { chatGptWebBindingError: Response.json({ error: { type: "runtime_error",
+          code: "model_version_unavailable", message: "Requested model and reasoning effort are not verified for the selected profile",
+          retryable: false, submission_state: "not_sent" } }, { status: 400, headers: { "x-9router-no-fallback": "true", "x-should-retry": "false" } }) };
+        return pinConnectionId ? { pinnedConnectionUnavailable: true, connectionId: pinConnectionId } : null;
+      }
+      connection = selected;
     }
     const resolvedProxy = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
 

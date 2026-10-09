@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { AdapterEvent, CodexParsedRequest } from "../../types";
+import type { ResourceLease, RuntimeResourceBudget } from "../../resource-budget";
 import type { BrokerToolRequest } from "./turn-broker";
 import { ChatGptWebAdapterError, chatGptBrowserTabClosedError, chatGptTurnSupersededError } from "./adapter-error";
 import {
@@ -144,6 +145,9 @@ interface ChatGptTurnRuntimeBase {
   browser: Promise<string>;
   /** Physical Playwright settlement, including the owned page lease cleanup. */
   physicalSettlement: Promise<void>;
+  readonly resourceLease?: ResourceLease;
+  resourceBudget?: RuntimeResourceBudget;
+  resourceAdmission?: Promise<void>;
   trace: ChatGptTraceFeed;
   text: ChatGptTextFeed;
   usageInput?: CodexParsedRequest;
@@ -520,6 +524,15 @@ export class ChatGptTurnSessions {
     return [...this.entries.values()].find(session => session.runtime.executionNamespace === executionNamespace
       && session.nativeThreadId === threadId && session.nativeTurnId === turnId);
   }
+  hasActiveScopedParent(executionNamespace: string, threadId: string, budget: RuntimeResourceBudget): boolean {
+    for (const session of this.entries.values()) {
+      if (session.runtime.executionNamespace === executionNamespace
+        && session.nativeThreadId === threadId && session.runtime.resourceBudget === budget
+        && session.isActive() && !session.isPhysicallySettled()) return true;
+    }
+    return false;
+  }
+
 
   physicalWorkCount(): number {
     return this.activeCount() + this.retirements.size + this.ownerRetirements.size + this.conversationRetirements.size;

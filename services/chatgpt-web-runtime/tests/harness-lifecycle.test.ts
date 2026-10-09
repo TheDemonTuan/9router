@@ -3,9 +3,9 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RuntimeProfiles } from "../src/profiles";
-import { RuntimeState } from "../src/runtime-state";
+import { RuntimeState, RuntimeStateError } from "../src/runtime-state";
 import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
-import type { BrowserContext } from "playwright-core";
+import { ProfileTunnel } from "../src/tunnel";
 import { startRuntime } from "../src/server";
 import { AgentTurnBroker, submitAgentToolCalls } from "../src/agent-turns";
 
@@ -16,26 +16,32 @@ function fixture() {
   return { root, state, profiles, async close() { await profiles.close(); state.close(); rmSync(root, { recursive: true, force: true }); } };
 }
 
-test("missing connector on a Full profile does not prevent another profile from initializing", async () => {
+test("Full connector failures are deferred to selected preparation and do not prepare other profiles", async () => {
   const f = fixture();
   const first = f.state.createProfile("full-profile");
   f.state.patchProfile(first.profileId, first.revision, { ...first.settings, mode: "full" });
   f.state.createProfile("text-profile");
-  const manager = f.profiles.manager("full-profile");
-  const other = f.profiles.manager("text-profile");
   const browser = spyOn(f.profiles, "ensureProfileBrowser").mockImplementation(async id => f.profiles.manager(id));
-  const context = spyOn(manager, "ensureContext").mockResolvedValue({} as BrowserContext);
-  const otherContext = spyOn(other, "ensureContext").mockResolvedValue({} as BrowserContext);
   const smoke = spyOn(f.profiles, "harnessSmoke").mockRejectedValue(new ChatGptWebAdapterError("Missing installed connector", { code: "connector_not_found", status: 503, errorType: "runtime_error", retryable: false }));
-  let initializedText = false;
-  const probe = spyOn(f.profiles, "probe").mockImplementation(async id => { initializedText = id === "text-profile"; return {} as Awaited<ReturnType<RuntimeProfiles["probe"]>>; });
+  const probe = spyOn(f.profiles, "probe").mockRejectedValue(new RuntimeStateError("login_required", "Text fixture has not authenticated", 503));
   try {
     await f.profiles.initialize();
-    expect(initializedText).toBe(true);
-    expect(f.profiles.status("full-profile")).toMatchObject({ state: "error", lastError: "connector_unavailable" });
+    expect(browser).not.toHaveBeenCalled();
+    expect(smoke).not.toHaveBeenCalled();
+    expect(probe).not.toHaveBeenCalled();
+    expect(f.profiles.status("full-profile")).toMatchObject({ state: "session_unverified", browser_state: "sleeping", catalog_verified: false });
+    await expect(f.profiles.prepareForRequest("full-profile")).rejects.toMatchObject({ code: "connector_not_found", status: 503 });
+    expect(browser.mock.calls.map(([profileId]) => profileId)).toEqual(["full-profile"]);
+    expect(smoke.mock.calls[0]?.slice(0, 2)).toEqual(["full-profile", true]);
+    expect(probe).not.toHaveBeenCalled();
+    expect(f.profiles.status("text-profile")).toMatchObject({ state: "session_unverified", models: [] });
     smoke.mockRejectedValue(new Error("Unexpected connector programming failure"));
-    await expect(f.profiles.initialize()).rejects.toThrow("Unexpected connector programming failure");
-  } finally { probe.mockRestore(); smoke.mockRestore(); otherContext.mockRestore(); context.mockRestore(); browser.mockRestore(); await f.close(); }
+    await expect(f.profiles.prepareForRequest("full-profile")).rejects.toThrow("Unexpected connector programming failure");
+    await expect(f.profiles.prepareForRequest("text-profile")).rejects.toMatchObject({ code: "login_required" });
+    expect(probe.mock.calls.map(([profileId]) => profileId)).toEqual(["text-profile"]);
+    expect(f.profiles.ready("full-profile")).toBe(false);
+    expect(f.profiles.ready("text-profile")).toBe(false);
+  } finally { probe.mockRestore(); smoke.mockRestore(); browser.mockRestore(); await f.close(); }
 });
 
 test("browser-only preference saves preserve a prepared tunnel key and configuration", async () => {
@@ -66,7 +72,7 @@ test("malformed managed secrets fail closed without rejecting unrelated profile 
     expect(response.status).toBe(200);
     const snapshot = await response.json();
     expect(snapshot.profiles.find((profile: { profileId: string }) => profile.profileId === "broken").connectorReady).toBe(false);
-    expect(snapshot.profiles.find((profile: { profileId: string }) => profile.profileId === "unrelated")).toMatchObject({ state: "login_required", connectorReady: false, lastError: null });
+    expect(snapshot.profiles.find((profile: { profileId: string }) => profile.profileId === "unrelated")).toMatchObject({ state: "session_unverified", browser_state: "sleeping", catalog_verified: false, connectorReady: false, lastError: null });
     const diagnostic = await fetch(`http://127.0.0.1:${runtime.server.port}/admin/harness/status?profileId=broken`, { headers: { authorization: "Bearer fixture-admin" } });
     expect((await diagnostic.json()).error.code).toBe("harness_storage_invalid");
   } finally { await runtime.close(); rmSync(root, { recursive: true, force: true }); }
@@ -77,6 +83,14 @@ test("detected tunnel loss revokes an accepted generic batch before completion",
   try {
     const profile = f.state.createProfile("lost-tunnel");
     f.state.patchProfile(profile.profileId, profile.revision, { ...profile.settings, mode: "full" });
+    // A tracked but stopped tunnel represents a previously owned process that lost health;
+    // merely configuring a cold Full profile must not count as a detected tunnel loss.
+    const tunnel = new ProfileTunnel({ binaryPath: join(f.root, "absent-tunnel"), profileDir: join(f.root, "tunnel"),
+      profileName: profile.profileId, tunnelId: "tunnel_0123456789abcdef0123456789abcdef",
+      runtimeKeyFile: join(f.root, "fixture-key"), mcpEntrypoint: join(f.root, "fixture-mcp"), healthAddress: "127.0.0.1:1" });
+    // Fixture-only access seeds the real tunnel object without launching a process.
+    const internals = f.profiles as unknown as { tunnels: Map<string, ProfileTunnel> };
+    internals.tunnels.set(profile.profileId, tunnel);
     const broker = AgentTurnBroker.forSocket(join(f.root, "profiles", profile.profileId, "run", "agent-turns.sock"));
     await broker.listen();
     const handle = broker.register({ profileId: profile.profileId, profileEpoch: profile.epoch, requestId: "request", model: "gpt-5.6-sol",

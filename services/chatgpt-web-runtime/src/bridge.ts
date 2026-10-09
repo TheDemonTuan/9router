@@ -53,6 +53,7 @@ function adapterFailureFromEvent(event: Extract<AdapterEvent, { type: "error" }>
   const error = classifyError(httpStatus, event.errorType ?? fallback.error.type, event.message);
   if (event.errorType !== undefined) error.type = event.errorType;
   if (event.code !== undefined) error.code = event.code;
+  if (event.submission_state !== undefined) error.submission_state = event.submission_state;
   return { httpStatus, error };
 }
 

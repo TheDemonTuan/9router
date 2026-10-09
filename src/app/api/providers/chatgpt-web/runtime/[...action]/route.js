@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 import { authorizeChatGptWebRuntimeAdmin, isLocalRequest } from "@/dashboardGuard";
-import { requestChatGptWebRuntimeAdmin } from "open-sse/services/chatgptWebRuntimeClient.js";
+import { requestChatGptWebRuntimeAdmin, parseChatGptWebResourceLimits } from "open-sse/services/chatgptWebRuntimeClient.js";
 import { invalidateChatGptWebCatalog } from "open-sse/services/chatgptWebRuntimeClient.js";
 import { getProviderConnections, updateProviderConnection } from "@/lib/db/index.js";
-import { CHATGPT_WEB_RUNTIME_ERROR_MESSAGES, chatGptWebDiagnostic, getChatGptWebProfileStates, chatGptWebConnectionStatusUpdate } from "@/lib/chatgptWebConnectionState";
+import { CHATGPT_WEB_RUNTIME_ERROR_MESSAGES, chatGptWebDiagnostic, getChatGptWebProfileStates, chatGptWebConnectionStatusUpdate, parseChatGptWebLifecycleState } from "@/lib/chatgptWebConnectionState";
 import { SessionTransferError, readChatGptWebSessionImport } from "../../../../../../../services/chatgpt-web-runtime/session-transfer.js";
 
 export const runtime = "nodejs";
@@ -11,7 +11,7 @@ export const dynamic = "force-dynamic";
 const PROFILE_ID = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const ID = /^[a-zA-Z0-9_-]{1,128}$/;
 const LOGIN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const STATES = new Set(["unconfigured", "login_required", "probing", "ready", "draining", "waiting_for_chatgpt_tool_approval", "error"]);
+const STATES = new Set(["unconfigured", "session_unverified", "login_required", "probing", "ready", "draining", "waiting_for_chatgpt_tool_approval", "error"]);
 const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max", "ultra"]);
 const DEFAULT_SETTINGS = { mode: "browser-only", experimentalBiggerContext: false, experimentalFreshConversationPerTurn: false, useSavedChats: false, autoApproveToolCalls: false, connectorName: "Codex Native2" };
 const TUNNEL_ID = /^tunnel_(?:[a-z0-9]{4}_)?[a-z0-9]{32}$/;
@@ -87,7 +87,7 @@ async function readJson(input, limit) {
 }
 function profile(value) {
   if (!record(value) || typeof value.profileId !== "string" || !PROFILE_ID.test(value.profileId) || !Number.isSafeInteger(value.revision) || value.revision < 0 || !STATES.has(value.state) || !Array.isArray(value.models) || value.models.length > 128 || !Number.isInteger(value.activeTurns) || value.activeTurns < 0 || value.activeTurns > 5 || value.maxConcurrency !== 5) throw new Error("invalid_runtime_response");
-  return { profileId: value.profileId, revision: value.revision, state: value.state, settings: settings(value.settings), activeTurns: value.activeTurns, maxConcurrency: 5, connectorReady: value.connectorReady === true, lastError: chatGptWebDiagnostic(value.lastError), models: value.models.map(model => {
+  return { profileId: value.profileId, revision: value.revision, state: value.state, ...parseChatGptWebLifecycleState(value), settings: settings(value.settings), activeTurns: value.activeTurns, maxConcurrency: 5, connectorReady: value.connectorReady === true, lastError: chatGptWebDiagnostic(value.lastError), models: value.models.map(model => {
     if (!record(model) || typeof model.id !== "string" || !/^chatgpt-web\/[a-z0-9]+(?:[.-][a-z0-9]+)*$/.test(model.id) || model.id.length > 140 || !Array.isArray(model.supported_reasoning_levels) || model.supported_reasoning_levels.length > 6 || model.supported_reasoning_levels.some(effort => !EFFORTS.has(effort))) throw new Error("invalid_runtime_response");
     const capabilities = {};
     for (const key of ["generic_tools", "generic_responses"]) if (typeof model.capabilities?.[key] === "boolean") capabilities[key] = model.capabilities[key];
@@ -103,7 +103,30 @@ function viewer(value, session = false) {
   }
   return result;
 }
+function resourceCounts(value, keys) {
+  if (!record(value)) throw new Error("invalid_runtime_response");
+  return Object.fromEntries(keys.map(key => {
+    if (!Number.isSafeInteger(value[key]) || value[key] < 0) throw new Error("invalid_runtime_response");
+    return [key, value[key]];
+  }));
+}
+function resources(value) {
+  if (!record(value) || !Array.isArray(value.profiles) || value.profiles.length > 128) throw new Error("invalid_runtime_response");
+  const tabKeys = ["active", "retainedNative", "retainedGeneric", "inspection"];
+  const countKeys = ["browsers", "executingTurns", "waitingToolTurns", "queueDepth"];
+  const seen = new Set();
+  return { limits: parseChatGptWebResourceLimits(value.limits), ...resourceCounts(value, countKeys),
+    tabs: resourceCounts(value.tabs, tabKeys),
+    totals: resourceCounts(value.totals, ["admitted", "rejected", "queueWaitMs", "polls", "domCacheHits", "domCacheMisses"]),
+    profiles: value.profiles.map(item => {
+      if (!record(item) || typeof item.profileId !== "string" || !PROFILE_ID.test(item.profileId) || seen.has(item.profileId)
+        || !["sleeping", "waking", "awake", "error"].includes(item.browserState)) throw new Error("invalid_runtime_response");
+      seen.add(item.profileId);
+      return { profileId: item.profileId, browserState: item.browserState, ...resourceCounts(item, [...countKeys, "retainedSlots"]), tabs: resourceCounts(item.tabs, tabKeys) };
+    }) };
+}
 function output(action, method, data) {
+  if (action === "resources" && method === "GET") return resources(data);
   if (action === "harness/activate" || action === "harness/disconnect") {
     if (!record(data)) throw new Error("invalid_runtime_response");
     const result = { profile: profile(data.profile), status: harnessStatus(data.status) };
@@ -161,6 +184,7 @@ async function handle(request, context) {
   if (!Array.isArray(segments) || segments.length > 2) return fail(404, "unknown_action", "Unknown runtime action.");
   const action = segments.join("/");
   const allowed = { profiles: ["GET", "POST"], "session/verify": ["POST"], "session/import": ["POST"], "login/start": ["POST"], "login/complete": ["POST"], "login/status": ["GET"], "login/session": ["GET"], "login/close": ["POST"], "browser/view": ["POST"], "browser/restart": ["POST"], smoke: ["POST"], drain: ["POST"], quiesce: ["POST"], resume: ["POST"], "interrupt-turn": ["POST"] };
+  allowed.resources = ["GET"];
   allowed["harness/status"] = ["GET"];
   for (const name of HARNESS_MUTATIONS) allowed[name] = ["POST"];
   const patch = segments.length === 2 && segments[0] === "profiles" && PROFILE_ID.test(segments[1]);

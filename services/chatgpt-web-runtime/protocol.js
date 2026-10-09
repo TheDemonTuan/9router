@@ -17,6 +17,7 @@ export const PUBLIC_PATHS = Object.freeze({
 });
 export const RUNTIME_PATHS = Object.freeze({
   health: "/healthz", ready: "/readyz", models: "/v1/web-models",
+  prepare: "/v1/profiles/prepare",
   bindings: "/v1/thread-bindings/resolve", responses: "/v1/responses",
   browserResponses: "/v1/browser/responses",
   agentResponses: "/v1/agent/responses",

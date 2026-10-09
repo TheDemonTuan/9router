@@ -17,6 +17,21 @@ describe("ChatGPT Web readiness snapshots", () => {
     expect(states.get("personal")).toMatchObject({ state: "ready", mode: "browser-only", models: [model], lastError: { code: "runtime_error" } });
     expect(JSON.stringify([...states.values()])).not.toMatch(/fixture-cookie|fixture-fingerprint|fixture-epoch|fixture-secret|Bearer/);
   });
+  it("keeps unchecked sessions distinct from expired login and sleeping verified sessions ready", async () => {
+    mocks.admin.mockResolvedValueOnce(Response.json({ protocolVersion: 1, profiles: [profile({ state: "session_unverified", models: [], browser_state: "sleeping", catalog_verified: false })] }));
+    const unchecked = (await getChatGptWebProfileStates()).get("personal");
+    expect(applyChatGptWebProfileState(connection(), unchecked)).toMatchObject({ testStatus: "session_unverified", lastError: null, chatGptWebRuntime: { state: "session_unverified", browser_state: "sleeping", catalog_verified: false } });
+    expect(getChatGptWebProfileNotice(unchecked)).toBe("Session not checked since restart · Verify saved session");
+    const sleeping = profile({ browser_state: "sleeping", catalog_verified: true });
+    expect(applyChatGptWebProfileState(connection(), sleeping).testStatus).toBe("active");
+    expect(getChatGptWebProfileNotice(sleeping)).toBe("Sleeping · wakes on request");
+    expect(getChatGptWebProfileNotice(profile())).toBe("Connected and ready.");
+    expect(getChatGptWebProfileNotice(profile({ state: "login_required", browser_state: "sleeping" }))).not.toContain("wakes on request");
+  });
+  it.each([{ browser_state: "invented" }, { browser_state: null }, { catalog_verified: "true" }, { catalog_verified: null }])("rejects malformed optional lifecycle evidence %j", async fields => {
+    mocks.admin.mockResolvedValue(Response.json({ protocolVersion: 1, profiles: [profile(fields)] }));
+    await expect(getChatGptWebProfileStates()).rejects.toMatchObject({ code: "runtime_unavailable" });
+  });
   it.each([
     { profiles: [profile()] },
     { protocolVersion: 2, profiles: [profile()] },
@@ -67,6 +82,7 @@ describe("connection readiness mapping", () => {
     ["waiting_for_chatgpt_tool_approval", "active", "waiting_for_chatgpt_tool_approval"],
     ["login_required", "login_required", "login_required"],
     ["unconfigured", "login_required", "profile_not_found"],
+    ["session_unverified", "session_unverified", null],
     ["probing", "probing", null],
     ["draining", "draining", "runtime_draining"],
     ["error", "error", "runtime_error"],

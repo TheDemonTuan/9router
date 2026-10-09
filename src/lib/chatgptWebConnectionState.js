@@ -18,6 +18,8 @@ export const CHATGPT_WEB_RUNTIME_ERROR_MESSAGES = {
   harness_config_revision_conflict: "Tunnel configuration changed elsewhere. Refresh before trying again.",
   harness_tunnel_id_unsupported: "This pinned runtime tunnel client does not support namespaced Tunnel IDs; an operator-reviewed targeted runtime upgrade is required.",
   harness_unavailable: "Coding tools require a ready tunnel and verified Codex Native2 connector.",
+  profile_not_prepared: "Session not checked since restart. Verify the saved session or send a request to prepare it.",
+  runtime_capacity_exceeded: "Runtime capacity is full. Wait for active work to settle before submitting again.",
   login_required: "Sign in using the private browser, then choose Finish Sign In to verify your account.",
   profile_probe_failed: "ChatGPT verification could not inspect the chat interface. Open Browser, wait for the page to finish loading, then choose Finish Sign In again.",
   model_version_unavailable: "ChatGPT sign-in was detected, but no supported model could be verified. Open Browser, check the model picker, then choose Finish Sign In again.",
@@ -37,11 +39,25 @@ export const CHATGPT_WEB_RUNTIME_ERROR_MESSAGES = {
   runtime_upgrade_required: "This action requires an updated ChatGPT Web runtime. Contact the operator.",
   runtime_unavailable: "Runtime unavailable. Refresh connections after the runtime recovers.",
 };
-const STATES = new Set(["unconfigured", "login_required", "probing", "ready", "draining", "waiting_for_chatgpt_tool_approval", "error"]);
+const STATES = new Set(["unconfigured", "session_unverified", "login_required", "probing", "ready", "draining", "waiting_for_chatgpt_tool_approval", "error"]);
 const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max", "ultra"]);
 const PROFILE_ID = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 const MODEL_ID = /^chatgpt-web\/[a-z0-9]+(?:[.-][a-z0-9]+)*$/;
 const record = value => value && typeof value === "object" && !Array.isArray(value);
+
+// Older runtimes omit these fields. Absence is not evidence of sleep or failed login.
+export function parseChatGptWebLifecycleState(value) {
+  const result = {};
+  if (Object.hasOwn(value, "browser_state")) {
+    if (!["sleeping", "waking", "awake", "error"].includes(value.browser_state)) throw new Error("Invalid runtime browser state");
+    result.browser_state = value.browser_state;
+  }
+  if (Object.hasOwn(value, "catalog_verified")) {
+    if (typeof value.catalog_verified !== "boolean") throw new Error("Invalid runtime catalog evidence");
+    result.catalog_verified = value.catalog_verified;
+  }
+  return result;
+}
 
 export function chatGptWebDiagnostic(value) {
   const code = typeof value === "string" ? value : value?.code;
@@ -93,7 +109,8 @@ export async function getChatGptWebProfileStates({ signal } = {}) {
         for (const key of ["generic_tools", "generic_responses"]) if (typeof model.capabilities?.[key] === "boolean") capabilities[key] = model.capabilities[key];
         return { id: model.id, supported_reasoning_levels: [...model.supported_reasoning_levels], default_reasoning_level: model.default_reasoning_level, ...(Object.keys(capabilities).length ? { capabilities } : {}) };
       });
-      states.set(item.profileId, { profileId: item.profileId, state: item.state, mode: item.settings.mode, models, lastError: chatGptWebDiagnostic(item.lastError) });
+      states.set(item.profileId, { profileId: item.profileId, state: item.state, mode: item.settings.mode, models,
+        ...parseChatGptWebLifecycleState(item), lastError: chatGptWebDiagnostic(item.lastError) });
     }
     return states;
   } catch {
@@ -118,6 +135,8 @@ export function applyChatGptWebProfileState(connection, profile) {
       state = "error"; testStatus = "error";
       lastError = chatGptWebDiagnostic("model_version_unavailable");
     }
+  } else if (state === "session_unverified") {
+    lastError = null;
   } else if (state === "login_required") {
     lastError = chatGptWebDiagnostic("login_required");
   } else if (state === "draining") {
@@ -133,7 +152,8 @@ export function applyChatGptWebProfileState(connection, profile) {
     testStatus,
     lastError: message,
     lastErrorAt: !lastError ? null : unchangedError ? (connection.lastErrorAt || null) : (connection.updatedAt || connection.createdAt || null),
-    chatGptWebRuntime: { state, mode: profile?.mode || profile?.settings?.mode || null, lastError },
+    chatGptWebRuntime: { state, mode: profile?.mode || profile?.settings?.mode || null,
+      ...(profile ? parseChatGptWebLifecycleState(profile) : {}), lastError },
   };
 }
 

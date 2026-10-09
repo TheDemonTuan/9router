@@ -5,6 +5,8 @@ import { skillFileTokens, validateSkillFiles } from "./skill-attachments";
 import type { Locator, Page, Request, Response } from "playwright-core";
 import { BrowserManager } from "../../browser/manager";
 import type { BrowserTurnLease } from "../../browser/manager";
+import { runtimeExecutionScope } from "../../runtime-scope";
+import type { ResourceLease, RuntimeResourceBudget } from "../../resource-budget";
 import {
   atomicWriteFile,
   CHATGPT_CONNECTOR_NAME,
@@ -64,7 +66,7 @@ import {
 } from "../../chatgpt-session";
 import { assertBrowserLoginSession } from "../../browser-login";
 import {
-  CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER,
+  type ChatGptWebModelFamily,
   resolveChatGptWebContextLimits,
   resolveChatGptWebMessageTokenBudget,
   resolveChatGptWebTransportLimits,
@@ -85,6 +87,8 @@ import {
   chatGptExternalProgressIsLive,
   chatGptExternalToolCallsAreInFlight,
   ChatGptBrowserProgress,
+  DomPollCadence,
+  waitForDomPoll,
 } from "./turn-progress";
 import type {
   ChatGptExternalTurnProgressSnapshot,
@@ -94,11 +98,11 @@ import type {
 
 export { MAX_CHATGPT_BROWSER_TABS } from "./concurrency";
 
-const workers = new Map<string, ChatGptBrowserWorker>();
+const workersByBudget = new Map<RuntimeResourceBudget | undefined, Map<string, ChatGptBrowserWorker>>();
 
 export async function closeChatGptBrowserWorkers(): Promise<void> {
-  const active = [...workers.values()];
-  workers.clear();
+  const active = [...workersByBudget.values()].flatMap(workers => [...workers.values()]);
+  workersByBudget.clear();
   const results = await Promise.allSettled(active.map(worker => worker.close()));
   const failures = results
     .filter((result): result is PromiseRejectedResult => result.status === "rejected")
@@ -940,6 +944,7 @@ export function assertChatGptWebInputWithinLimits(
   modelId: string,
   effort: ChatGptWebModelMode["effort"],
   capabilities: ChatGptWebCapabilities,
+  modelFamily: ChatGptWebModelFamily | undefined,
   promptChars?: number,
 ): void {
   if (modelId !== CHATGPT_WEB_MODEL_ID && modelId !== CHATGPT_WEB_LUNA_MODEL_ID) {
@@ -954,11 +959,12 @@ export function assertChatGptWebInputWithinLimits(
       { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
     );
   }
-  const { contextWindow } = resolveChatGptWebContextLimits(modelId, effort, capabilities);
+  const { contextWindow } = resolveChatGptWebContextLimits(modelId, effort, capabilities, modelFamily);
   const { browserMessageTokenLimit, browserComposerCharLimit } = resolveChatGptWebTransportLimits(
     modelId,
     effort,
     capabilities,
+    modelFamily,
   );
   if (
     browserComposerCharLimit !== undefined
@@ -989,6 +995,7 @@ export function assertChatGptWebMultipartInputWithinLimits(
   modelId: string,
   effort: ChatGptWebModelMode["effort"],
   capabilities: ChatGptWebCapabilities,
+  modelFamily: ChatGptWebModelFamily | undefined,
   maxMessageChars: number,
   partCount: number,
   transport?: {
@@ -1012,10 +1019,11 @@ export function assertChatGptWebMultipartInputWithinLimits(
   if (modelId !== CHATGPT_WEB_MODEL_ID) {
     throw new Error(`ChatGPT Bigger Context limit is not defined for model: ${modelId}`);
   }
-  const { contextWindow: baseContextWindow } = resolveChatGptWebContextLimits(
+  const { contextWindow: experimentalContextWindow } = resolveChatGptWebContextLimits(
     modelId,
     effort,
-    { ...capabilities, experimentalBiggerContext: false },
+    { ...capabilities, experimentalBiggerContext: true },
+    modelFamily,
   );
   const assertMessageBoundary = (
     label: "stage" | "final part",
@@ -1028,6 +1036,7 @@ export function assertChatGptWebMultipartInputWithinLimits(
       modelId,
       messageEffort,
       capabilities,
+      modelFamily,
     );
     if (browserComposerCharLimit !== undefined && messageChars > browserComposerCharLimit) {
       throw new ChatGptWebAdapterError(
@@ -1041,7 +1050,7 @@ export function assertChatGptWebMultipartInputWithinLimits(
         { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
       );
     }
-    const messageBudget = resolveChatGptWebMessageTokenBudget(modelId, messageEffort, capabilities, imageTokens);
+    const messageBudget = resolveChatGptWebMessageTokenBudget(modelId, messageEffort, capabilities, modelFamily, imageTokens);
     if (messageTokens > messageBudget) {
       throw new ChatGptWebAdapterError(
         `A Bigger Context ${label} requires ${messageTokens.toLocaleString("en-US")} visible message tokens, which exceeds its ${messageBudget.toLocaleString("en-US")}-token input budget after reserving space for ChatGPT and attachments. The bridge will not split an individual Codex message or JSON record; compact the task before retrying.`,
@@ -1067,7 +1076,6 @@ export function assertChatGptWebMultipartInputWithinLimits(
     assertMessageBoundary("stage", estimatedMessageTokens, maxMessageChars, effort);
   }
   // More transport messages do not enlarge the model's advertised context window.
-  const experimentalContextWindow = baseContextWindow * Math.min(partCount, CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER);
   if (estimatedInputTokens < experimentalContextWindow) return;
   const partLabel = partCount === 2 ? "two-part" : "six-part";
   throw new ChatGptWebAdapterError(
@@ -1080,6 +1088,7 @@ export function assertChatGptWebMultipartInputWithinLimits(
 export function resolveChatGptWebMultipartStagingMode(
   modelId: string,
   capabilities: ChatGptWebCapabilities,
+  modelFamily: ChatGptWebModelFamily | undefined,
   maxStageMessageTokens: number,
   maxStageChars: number,
 ): ChatGptWebModelMode {
@@ -1097,8 +1106,8 @@ export function resolveChatGptWebMultipartStagingMode(
     : ["low", "medium"];
   for (const effort of efforts) {
     const mode = resolveChatGptWebModelMode(modelId, effort, capabilities);
-    const limits = resolveChatGptWebTransportLimits(modelId, effort, capabilities);
-    const messageTokenLimit = resolveChatGptWebMessageTokenBudget(modelId, effort, capabilities);
+    const limits = resolveChatGptWebTransportLimits(modelId, effort, capabilities, modelFamily);
+    const messageTokenLimit = resolveChatGptWebMessageTokenBudget(modelId, effort, capabilities, modelFamily);
     const tokenFits = maxStageMessageTokens <= messageTokenLimit;
     const charsFit = limits.browserComposerCharLimit === undefined
       || maxStageChars <= limits.browserComposerCharLimit;
@@ -1251,6 +1260,7 @@ export interface BrowserTurn {
   reasoning?: string;
   modelFamily?: "5.6" | "6";
   capabilities: ChatGptWebCapabilities;
+  resourceLease?: ResourceLease;
   prepare: () => Promise<CompiledChatGptWebPrompt & { release: () => void }>;
   prepareResume?: () => Promise<CompiledChatGptWebPrompt & { release: () => void }>;
   /** Select the Codex Native connector without advertising the ordinary turn tool environment. */
@@ -1342,6 +1352,7 @@ export interface ResolvedBrowserConfig {
   browserDiagnosticsPath?: string;
   chromeExecutablePath: string;
   turnTimeoutMs?: number;
+  resourceBudget?: RuntimeResourceBudget;
   headed: boolean;
   autoApproveToolCalls: boolean;
   useSavedChats: boolean;
@@ -2080,7 +2091,8 @@ export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBro
     browserDiagnosticsPath: join(resolve(browserProfilePath), "..", "diagnostics", "browser-turns"),
     chromeExecutablePath: configured.chromeExecutablePath || process.env.CGW_CHROMIUM_EXECUTABLE || defaultChromeExecutable(),
     ...(turnTimeoutMs !== undefined ? { turnTimeoutMs } : {}),
-    headed: configured.headed !== false,
+    resourceBudget: runtimeExecutionScope.getStore()?.resourceBudget,
+    headed: configured.headed !== false || runtimeExecutionScope.getStore()?.resourceBudget?.limits.browserMode === "headed",
     autoApproveToolCalls: configured.autoApproveToolCalls === true,
     useSavedChats: configured.useSavedChats === true,
   };
@@ -2176,10 +2188,27 @@ export function insertPlainTextIntoComposer(element: HTMLElement, value: string)
 }
 
 export class ChatGptBrowserWorker {
+  /** Cache-only eviction after the profile manager has physically closed. */
+  static forgetProfile(profileId: string, budget?: RuntimeResourceBudget): void {
+    const workers = workersByBudget.get(budget);
+    if (!workers) return;
+    for (const [key, worker] of workers) {
+      if (worker.config.profileId !== profileId || worker.activeRuns.size > 0) continue;
+      worker.closed = true;
+      workers.delete(key);
+    }
+    if (workers.size === 0) workersByBudget.delete(budget);
+  }
+
   static forProvider(provider: CodexProviderConfig): ChatGptBrowserWorker {
     const config = resolveBrowserConfig(provider);
     const key = JSON.stringify([config.profileId, config.profileEpoch, config.clientId]);
     const manager = BrowserManager.forProfile(config);
+    let workers = workersByBudget.get(config.resourceBudget);
+    if (!workers) {
+      workers = new Map();
+      workersByBudget.set(config.resourceBudget, workers);
+    }
     let worker = workers.get(key);
     if (!worker || worker.closed || worker.manager !== manager) {
       worker = new ChatGptBrowserWorker(config, manager);
@@ -2199,6 +2228,19 @@ export class ChatGptBrowserWorker {
   private readonly activeRuns = new Map<string, Promise<string>>();
 
   private constructor(private config: ResolvedBrowserConfig, private readonly manager: BrowserManager) {}
+  private async assertHeadlessInteractionFree(page: Page): Promise<void> {
+    if (this.config.headed) return;
+    const approval = page.locator('[data-testid="tool-approval-card"]')
+      .or(page.locator('[role="dialog"]').filter({ hasText: `Allow ChatGPT to use ${this.config.appName}?` }));
+    const challenge = page.locator('#challenge-running, #challenge-stage, [id^="cf-chl-"], iframe[src*="challenges.cloudflare.com"]');
+    if (await approval.filter({ visible: true }).count() > 0 || await challenge.filter({ visible: true }).count() > 0) {
+      throw new ChatGptWebAdapterError(
+        "Headless ChatGPT requires browser interaction. After this turn settles, explicitly verify the saved session in headed mode; the prompt will not be replayed.",
+        { status: 409, errorType: "runtime_error", code: "headless_interaction_required", retryable: false },
+      );
+    }
+  }
+
 
   /**
    * Lexical/contenteditable may preserve runs of ASCII spaces by exposing some of them as NBSP
@@ -2257,7 +2299,22 @@ export class ChatGptBrowserWorker {
       return Promise.reject(new Error(`Duplicate ChatGPT web browser turn: ${turn.traceId}`));
     }
     if (this.closed) return Promise.reject(new Error("ChatGPT browser worker is closed"));
-    const run = this.manager.run(JSON.stringify([this.config.clientId, turn.traceId]), () => this.runExclusive(turn));
+    if (!turn.resourceLease) {
+      const resourceLease = runtimeExecutionScope.getStore()?.resourceLease;
+      if (resourceLease) turn = { ...turn, resourceLease };
+    }
+    const run = this.manager.run(JSON.stringify([this.config.clientId, turn.traceId]), () => this.runExclusive(turn)).then(
+      async answer => {
+        await this.manager.waitForPhysicalSettlement(turn.traceId);
+        return answer;
+      },
+      async error => {
+        // A failed page.close is not physical settlement. Keep compute and
+        // runtime ownership until the manager observes an actual page/context close.
+        await this.manager.waitForPhysicalSettlement(turn.traceId);
+        throw error;
+      },
+    );
     this.activeRuns.set(turn.traceId, run);
     void run.finally(() => {
       if (this.activeRuns.get(turn.traceId) === run) this.activeRuns.delete(turn.traceId);
@@ -3513,7 +3570,7 @@ export class ChatGptBrowserWorker {
     captureDiagnostic?: (checkpoint: string) => Promise<void>,
     abortSignal?: AbortSignal,
     externalProgress?: ChatGptTurnProgressReader,
-    submissionLifecycle?: Pick<BrowserTurn, "onSendActivated" | "onSubmitted">,
+    submissionLifecycle?: Pick<BrowserTurn, "onSendActivated" | "onSubmitted" | "resourceLease">,
     completionTracker?: ChatGptCompletionTracker,
     recoverObservation?: ChatGptObservationRecovery,
   ): Promise<ChatGptSubmissionEvidence> {
@@ -3529,6 +3586,7 @@ export class ChatGptBrowserWorker {
       if (page.isClosed()) throw chatGptBrowserTabClosedError();
       await throwIfChatGptSessionFailureAlert(page);
       await throwIfChatGptRateLimitDialog(page);
+      await this.assertHeadlessInteractionFree(page);
       if (await sendButton.isEnabled()) break;
       if (Date.now() >= sendEnableDeadline) {
         await captureDiagnostic?.("send-disabled");
@@ -3541,6 +3599,7 @@ export class ChatGptBrowserWorker {
     if (abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
     const initialToolBatchRevision = externalProgress?.snapshot().lastToolBatchRevision ?? 0;
     await submissionLifecycle?.onSendActivated?.();
+    submissionLifecycle?.resourceLease?.markSubmitted();
     await sendButton.press("Enter", {
       noWaitAfter: true,
       signal: abortSignal,
@@ -4398,6 +4457,7 @@ export class ChatGptBrowserWorker {
       knownKey: cache?.key,
       attributeFilter: [...CHATGPT_DOM_REVISION_ATTRIBUTES],
     }, { timeout: 2_000 }).catch(() => undefined);
+    this.config.resourceBudget?.recordDomPoll({ cacheHit: Boolean(observed && !observed.snapshot && cache?.snapshot) });
     if (!observed) {
       if (responseTurn.page().isClosed()) {
         throw chatGptBrowserTabClosedError();
@@ -4474,6 +4534,7 @@ export class ChatGptBrowserWorker {
       ...((turn.nativeConnector || turn.capabilities.localToolsEnabled)
         ? { connectorIdentity: this.config.appName } : {}),
       requireRetainedConversation: turn.requireRetainedConversation,
+      retainConversation: turn.retainConversation,
     });
     let completed = false;
     try {
@@ -4564,6 +4625,7 @@ export class ChatGptBrowserWorker {
         ? resolveChatGptWebMultipartStagingMode(
           turn.modelId,
           browserCapabilities,
+          turn.modelFamily,
           maxStageMessageTokens!,
           maxStageChars!,
         )
@@ -4575,6 +4637,7 @@ export class ChatGptBrowserWorker {
           turn.modelId,
           requestedMode.effort,
           browserCapabilities,
+          turn.modelFamily,
           maxMessageChars,
           prepared.multipart.parts.length,
           multipartStages
@@ -4596,6 +4659,7 @@ export class ChatGptBrowserWorker {
           turn.modelId,
           requestedMode.effort,
           browserCapabilities,
+          turn.modelFamily,
           maxMessageChars,
         );
       }
@@ -4605,6 +4669,8 @@ export class ChatGptBrowserWorker {
       let page = await this.runStage(turn.traceId, "browser_page", browserStageTimeouts.browserPage, async (stageSignal) => {
         const owned = maintenancePage ?? lease?.page;
         if (!owned) throw new Error("ChatGPT turn requires an owned browser page lease");
+        diagnosticPage = owned;
+        await this.assertHeadlessInteractionFree(owned);
         const signal = turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal;
         await waitForOperationalChatGptViewport(owned, signal);
         return owned;
@@ -4742,9 +4808,10 @@ export class ChatGptBrowserWorker {
               checkpoint => diagnostics.capture(page, `multipart-${index + 1}-${checkpoint}`),
               turn.abortSignal ? AbortSignal.any([stageSignal, turn.abortSignal]) : stageSignal,
               undefined,
-              { onSendActivated: async () => {
+              { resourceLease: turn.resourceLease, onSendActivated: async () => {
                 await this.assertSelectedEffort(page, mode);
                 submissionRejection.begin(page);
+                await turn.onSendActivated?.();
               } },
               undefined,
               ownedObservationRecovery
@@ -4974,6 +5041,8 @@ export class ChatGptBrowserWorker {
       let internalObservationFaults = 0;
       let observedThisIteration = false;
       let completionFenceRevision: number | undefined;
+      const cadence = new DomPollCadence(this.config.resourceBudget?.limits.adaptiveDomPolling === true);
+      let previousExecutionProjection: string | undefined;
       for (;;) {
         // The heartbeat is a consumer callback, so it stays outside the observation-fault region:
         // a defect in the caller must not be retried as though the page could not be read.
@@ -4996,6 +5065,7 @@ export class ChatGptBrowserWorker {
         }
         await throwIfChatGptSessionFailureAlert(page);
         await throwIfChatGptTerminalErrorAlert(responseTurn.locator);
+        await this.assertHeadlessInteractionFree(page);
 
         if (mode.localTools && await resolveChatGptToolConfirmation(
           page,
@@ -5004,6 +5074,7 @@ export class ChatGptBrowserWorker {
           turn.abortSignal,
           CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS,
           async promptInstance => {
+            await turn.resourceLease?.resume(turn.abortSignal);
             if (!this.config.autoApproveToolCalls && !approvalInstances.has(promptInstance)) {
               approvalInstances.add(promptInstance);
               turn.onDiagnostic?.({ code: "waiting_for_chatgpt_tool_approval", promptInstance });
@@ -5012,7 +5083,8 @@ export class ChatGptBrowserWorker {
           },
         )) {
           internalObservationFaults = 0;
-          await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+          cadence.reset();
+          await waitForDomPoll(250, turn.externalProgress, undefined, turn.abortSignal);
           continue;
         }
 
@@ -5087,12 +5159,16 @@ export class ChatGptBrowserWorker {
           // temporarily cannot expose the response subtree. DOM remains authoritative for text and
           // completion; this only prevents a live turn from being misclassified as vanished.
           domHealthTracker.clearMissingResponse();
-          await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+          cadence.reset();
+          previousExecutionProjection = undefined;
+          await turn.resourceLease?.resume(turn.abortSignal);
+          await waitForDomPoll(250, turn.externalProgress, undefined, turn.abortSignal);
           continue;
         }
         const stop = page.locator(CHATGPT_STOP_BUTTON_SELECTOR).last();
         const running = await stop.isVisible().catch(() => false);
         if (running) sawRunning = true;
+        if (running) await turn.resourceLease?.resume(turn.abortSignal);
         if (snapshot.responsePresent) {
           if (!capturedResponse) {
             capturedResponse = true;
@@ -5134,7 +5210,8 @@ export class ChatGptBrowserWorker {
               if (completionFenceRevision === undefined) {
                 const revision = await turn.completionFence.begin();
                 if (revision === undefined) {
-                  await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+                  cadence.reset();
+                  await waitForDomPoll(250, turn.externalProgress, undefined, turn.abortSignal);
                   continue;
                 }
                 completionFenceRevision = revision;
@@ -5143,14 +5220,16 @@ export class ChatGptBrowserWorker {
                 // stale cached completion and the broker's terminal decision.
                 responseDomCache.key = undefined;
                 responseDomCache.snapshot = undefined;
-                await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+                cadence.reset();
+                await waitForDomPoll(250, turn.externalProgress, undefined, turn.abortSignal);
                 continue;
               }
               if (!await turn.completionFence.commit(completionFenceRevision)) {
                 completionFenceRevision = undefined;
                 responseDomCache.key = undefined;
                 responseDomCache.snapshot = undefined;
-                await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+                cadence.reset();
+                await waitForDomPoll(250, turn.externalProgress, undefined, turn.abortSignal);
                 continue;
               }
             }
@@ -5199,7 +5278,27 @@ export class ChatGptBrowserWorker {
           });
           if (domError) throw new Error(domError);
         }
-        await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+        const currentProgress = turn.externalProgress?.snapshot();
+        const acknowledgedToolBatch = Boolean(currentProgress && currentProgress.lastToolBatchRevision > 0
+          && !completionTracker.needsToolBatchObservation(currentProgress.lastToolBatchRevision));
+        const executionProjection = responseDomCache.key ?? snapshot.fullHtml;
+        const projectionStable = previousExecutionProjection === executionProjection;
+        previousExecutionProjection = executionProjection;
+        const toolWait = acknowledgedToolBatch && (currentProgress?.activeToolCalls ?? 0) > 0
+          && !currentProgress?.pendingResultPublications && !running && snapshot.responsePresent
+          && projectionStable && completionFenceRevision === undefined;
+        if (toolWait) turn.resourceLease?.suspendForExternalTools();
+        else await turn.resourceLease?.resume(turn.abortSignal);
+        const delayMs = cadence.observe({
+          signature: executionProjection,
+          externalRevision: currentProgress?.revision ?? 0,
+          activeToolCalls: currentProgress?.activeToolCalls ?? 0,
+          acknowledgedToolBatch,
+          generationActive: running || !snapshot.responsePresent,
+          pendingCompletionFence: completionFenceRevision !== undefined,
+          pendingResultPublication: (currentProgress?.pendingResultPublications ?? 0) > 0,
+        });
+        await waitForDomPoll(delayMs, turn.externalProgress, currentProgress?.revision, turn.abortSignal);
        } catch (error) {
         // Only a defect in this worker is retried here. Every deliberate signal — adapter errors,
         // aborts, closed tabs, DOM-health verdicts — still fails the turn immediately.
@@ -5221,7 +5320,8 @@ export class ChatGptBrowserWorker {
         await diagnostics.capture(page, "internal-observation-fault");
         responseDomCache.key = undefined;
         responseDomCache.snapshot = undefined;
-        await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+        cadence.reset();
+        await waitForDomPoll(250, turn.externalProgress, undefined, turn.abortSignal);
        }
       }
 
@@ -5234,6 +5334,9 @@ export class ChatGptBrowserWorker {
       );
       return finalText;
     } catch (error) {
+      if (diagnosticPage && !diagnosticPage.isClosed() && !turn.abortSignal?.aborted) {
+        await this.assertHeadlessInteractionFree(diagnosticPage);
+      }
       if (!(error instanceof DOMException && error.name === "AbortError")
         && !(error instanceof ChatGptWebAdapterError && error.code === "client_cancelled")) {
         error = await submissionRejection.failure() ?? error;

@@ -204,6 +204,11 @@ describe.skipIf(!executablePath)("Chromium login DOM", () => {
       }
       await selectChatGptModelFamily(surface, "6", async () => surface);
       await assertChatGptModelFamily(surface, "6", "max", 4);
+      for (let i = 0; i < 4; i++) await owner.press("ArrowLeft");
+      for (const [index, effort] of (["low", "medium", "high", "xhigh"] as const).entries()) {
+        await assertChatGptModelFamily(surface, "6", effort, index);
+        await owner.press("ArrowRight");
+      }
       await page.locator('[aria-hidden="true"] [data-model-picker-view-toggle]').evaluate(element => {
         element.parentElement!.setAttribute("aria-hidden", "false");
       });
@@ -232,6 +237,15 @@ describe.skipIf(!executablePath)("Chromium login DOM", () => {
         document.querySelector("[data-menu-row-content]")!.replaceChildren(document.createTextNode("6"), document.createTextNode(" Pro"));
       });
       await assertChatGptModelFamily(surface, "6", "max", 4);
+    });
+  }, 90_000);
+  test("old Latest lower effort cannot advertise GPT-6 Sol", async () => {
+    await fixture({ headerOnlyModel: true }, async page => {
+      const surface = await high(page);
+      await page.locator('[role="menuitemradio"]').first().evaluate(element => { element.textContent = "Latest"; });
+      await expect(assertChatGptModelFamily(surface, "6", "high", 2)).rejects.toMatchObject({ code: "model_version_unavailable" });
+      await page.locator('[role="menuitemradio"]').first().evaluate(element => { element.textContent = "GPT-5.6 Sol"; });
+      await assertChatGptModelFamily(surface, "5.6", "high", 2);
     });
   }, 90_000);
   for (const variant of ["future", "hidden", "inert", "duplicate", "conflict", "other-menu"]) {

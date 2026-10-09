@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({ authorize: vi.fn(), admin: vi.fn(), local: vi.fn(), connections: vi.fn(), update: vi.fn(), invalidate: vi.fn() }));
 vi.mock("@/dashboardGuard", () => ({ authorizeChatGptWebRuntimeAdmin: mocks.authorize, isLocalRequest: mocks.local }));
-vi.mock("open-sse/services/chatgptWebRuntimeClient.js", () => ({ requestChatGptWebRuntimeAdmin: mocks.admin, invalidateChatGptWebCatalog: mocks.invalidate }));
+vi.mock("open-sse/services/chatgptWebRuntimeClient.js", async importOriginal => ({ ...await importOriginal(), requestChatGptWebRuntimeAdmin: mocks.admin, invalidateChatGptWebCatalog: mocks.invalidate }));
 vi.mock("@/lib/db/index.js", () => ({ getProviderConnections: mocks.connections, updateProviderConnection: mocks.update }));
 vi.mock("next/server", () => ({ NextResponse: { json: (body, init) => Response.json(body, init) } }));
 const { GET, POST, PATCH } = await import("../../src/app/api/providers/chatgpt-web/runtime/[...action]/route.js");
@@ -94,6 +94,32 @@ describe("ChatGPT Web runtime admin boundaries", () => {
     expect(data.profiles[0].models[0].supported_reasoning_levels).toEqual(["medium", "high"]);
     expect(data.profiles[0].models[0].model_family).toBe("5.6");
     expect(JSON.stringify(data)).not.toMatch(/cookie-secret|bearer-secret|raw-private-diagnostic/);
+  });
+  it("preserves optional lifecycle evidence without inferring sleep for older runtimes", async () => {
+    mocks.admin.mockResolvedValueOnce(Response.json({ profiles: [{ ...fixture(), state: "session_unverified", models: [], browser_state: "sleeping", catalog_verified: false }] }));
+    expect((await (await GET(request("profiles"), context("profiles"))).json()).profiles[0]).toMatchObject({ state: "session_unverified", browser_state: "sleeping", catalog_verified: false });
+    for (const fields of [{ catalog_verified: "false" }, { browser_state: "unknown" }]) {
+      mocks.admin.mockResolvedValueOnce(Response.json({ profiles: [{ ...fixture(), ...fields }] }));
+      expect((await GET(request("profiles"), context("profiles"))).status).toBe(502);
+    }
+  });
+  it("exposes authenticated read-only scalar resource counts, never owner or request details", async () => {
+    const limits = { maxGlobalBrowsers: 2, maxGlobalTurns: 2, maxGlobalTabs: 10, maxRetainedTabsPerProfile: 5, maxQueueSize: 16, queueTimeoutMs: 30000, browserIdleTtlMs: 300000, browserMode: "headed", adaptiveDomPolling: false, secret: "fixture-secret" };
+    const counts = { browsers: 1, executingTurns: 0, waitingToolTurns: 1, queueDepth: 0 };
+    const tabs = { active: 1, retainedNative: 1, retainedGeneric: 0, inspection: 0, owner: "fixture-secret" };
+    const snapshot = { limits, ...counts, tabs, totals: { admitted: 2, rejected: 0, queueWaitMs: 10, polls: 2, domCacheHits: 1, domCacheMisses: 1 },
+      profiles: [{ profileId: "personal", browserState: "awake", ...counts, tabs, retainedSlots: 1, requestId: "fixture-secret", handle: "fixture-secret" }], token: "fixture-secret" };
+    mocks.admin.mockResolvedValueOnce(Response.json(snapshot));
+    const response = await GET(request("resources"), context("resources"));
+    expect(response.status).toBe(200); expect(response.headers.get("cache-control")).toBe("no-store");
+    const value = await response.json();
+    expect(value.profiles[0].tabs).toEqual({ active: 1, retainedNative: 1, retainedGeneric: 0, inspection: 0 });
+    expect(JSON.stringify(value)).not.toMatch(/fixture-secret|handle|owner|requestId|token/);
+    expect(mocks.admin).toHaveBeenCalledTimes(1); expect(mocks.admin.mock.calls[0][0]).toBe("/admin/resources");
+    expect(mocks.invalidate).not.toHaveBeenCalled(); expect(mocks.update).not.toHaveBeenCalled();
+    expect((await POST(request("resources", "POST", {}), context("resources"))).status).toBe(405);
+    mocks.authorize.mockResolvedValue(false);
+    expect((await GET(request("resources"), context("resources"))).status).toBe(401);
   });
   it("returns viewer identity/state without passwords, CDP endpoints, or arbitrary instructions", async () => {
     const value = lease();

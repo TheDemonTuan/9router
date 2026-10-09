@@ -18,6 +18,7 @@ import { buildResponseJSON } from "../src/bridge";
 import type { AdapterEvent } from "../src/types";
 import { randomUUID } from "node:crypto";
 import { requireChatGptWebModelRoute } from "../src/chatgpt-web-models";
+import { RuntimeStateError } from "../src/runtime-state";
 
 function parsedBrowserFixture(body: Record<string, unknown>) {
   const capabilities = { solAvailable: true, extraHighAvailable: false, proAvailable: false };
@@ -120,6 +121,8 @@ describe("Browser-only transport boundary", () => {
     const runtime = startRuntime({ dataDir: root, host: "127.0.0.1", port: 0, chromiumExecutable: join(root, "absent-chromium"),
       runtimeToken: Buffer.from("fixture-data-token-is-not-a-real-secret"), adminToken: Buffer.from("fixture-admin-token-is-not-a-real-secret") });
     const run = spyOn(ChatGptBrowserWorker.prototype, "run");
+    // Selected request preparation fails without launching Chromium in this boundary fixture.
+    const prepare = spyOn(runtime.profiles, "prepareForRequest").mockRejectedValue(new RuntimeStateError("login_required", "Fixture session is signed out", 409));
     try {
       await runtime.initialized;
       const profile = runtime.state.createProfile("fixture");
@@ -130,17 +133,22 @@ describe("Browser-only transport boundary", () => {
       });
       expect((await send(value, "fixture-admin-token-is-not-a-real-secret")).status).toBe(401);
       expect((await fetch(`${base}/admin/profiles`, { headers: { authorization: "Bearer fixture-data-token-is-not-a-real-secret" } })).status).toBe(401);
+      expect(prepare).not.toHaveBeenCalled();
       const unready = await send(value);
       expect(unready.status).toBeGreaterThanOrEqual(400);
       expect((await unready.json()).error.code).toBe("login_required");
+      expect(prepare).toHaveBeenCalledTimes(1);
+      expect(prepare.mock.calls[0]?.[0]).toBe("fixture");
+      expect(prepare.mock.calls[0]?.[1]).toBeInstanceOf(AbortSignal);
       const stale = await send({ ...value, profileEpoch: "stale" });
       expect(stale.status).toBe(409); expect((await stale.json()).error.code).toBe("profile_epoch_mismatch");
       runtime.state.drain("fixture-fence");
       const fenced = await send(value);
       expect(fenced.status).toBe(503); expect((await fenced.json()).error.code).toBe("runtime_draining");
+      expect(prepare).toHaveBeenCalledTimes(1);
       expect(runtime.state.acceptedRequestCount()).toBe(0);
       expect(run).not.toHaveBeenCalled();
-    } finally { run.mockRestore(); await runtime.close(); rmSync(root, { recursive: true, force: true }); }
+    } finally { prepare.mockRestore(); run.mockRestore(); await runtime.close(); rmSync(root, { recursive: true, force: true }); }
   });
 });
 

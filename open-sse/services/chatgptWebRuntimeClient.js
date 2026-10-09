@@ -5,12 +5,14 @@ import { MAX_BROWSER_TURNS, MODEL_SLUG_PATTERN, PROTOCOL_VERSION, REASONING_LEVE
 const CATALOG_TTL_MS = 30_000;
 const HEALTH_TIMEOUT_MS = 3000;
 const CATALOG_TIMEOUT_MS = 5000;
+// Admission may wait the configured maximum queue deadline before a full session probe.
+const PREPARE_TIMEOUT_MS = 120_000 + 120_000;
 const MAX_CACHE_ENTRIES = 64;
 const cache = new Map();
 const dispatcher = new Agent();
 const CAPABILITY_KEYS = ["text", "vision", "reasoning", "tools", "search", "compact", "native_responses", "generic_responses", "generic_tools", "mcp_tools", "exec", "subagents", "computer_use", "browser_tool", "streaming"];
-const DATA_PATHS = ["/healthz", "/readyz", "/v1/web-models", "/v1/thread-bindings/resolve", "/v1/responses", "/v1/browser/responses", RUNTIME_PATHS.agentResponses, "/v1/responses/compact", "/v1/interrupt-turn"];
-const ADMIN_PATHS = ["/admin/profiles", "/admin/session/verify", "/admin/session/import", "/admin/login/start", "/admin/login/complete", "/admin/login/status", "/admin/login/session", "/admin/login/close", "/admin/browser/view", "/admin/browser/restart", "/admin/smoke", "/admin/drain", "/admin/quiesce", "/admin/resume", "/admin/interrupt-turn"];
+const DATA_PATHS = ["/healthz", "/readyz", "/v1/web-models", RUNTIME_PATHS.prepare, "/v1/thread-bindings/resolve", "/v1/responses", "/v1/browser/responses", RUNTIME_PATHS.agentResponses, "/v1/responses/compact", "/v1/interrupt-turn"];
+const ADMIN_PATHS = ["/admin/profiles", "/admin/resources", "/admin/session/verify", "/admin/session/import", "/admin/login/start", "/admin/login/complete", "/admin/login/status", "/admin/login/session", "/admin/login/close", "/admin/browser/view", "/admin/browser/restart", "/admin/smoke", "/admin/drain", "/admin/quiesce", "/admin/resume", "/admin/interrupt-turn"];
 const HARNESS_ADMIN_METHODS = {
   [RUNTIME_PATHS.harnessStatus]: "GET", [RUNTIME_PATHS.harnessConfigure]: "POST",
   [RUNTIME_PATHS.harnessStart]: "POST", [RUNTIME_PATHS.harnessVerify]: "POST",
@@ -37,6 +39,8 @@ async function runtimeRequest(path, init, options, admin, profileId) {
   const url = new URL(path, "http://internal.invalid");
   const allowed = admin ? ADMIN_PATHS.includes(url.pathname) || Object.hasOwn(HARNESS_ADMIN_METHODS, url.pathname) || /^\/admin\/profiles\/[a-z0-9-]+$/.test(url.pathname) : DATA_PATHS.includes(url.pathname);
   if (!allowed || url.origin !== "http://internal.invalid" || url.hash || url.search && !(admin && ["/admin/login/status", "/admin/login/session", RUNTIME_PATHS.harnessStatus].includes(url.pathname))) throw new Error("Unsupported internal runtime endpoint");
+  if (url.pathname === RUNTIME_PATHS.prepare && (init.method || "GET").toUpperCase() !== "POST"
+    || url.pathname === "/admin/resources" && (init.method || "GET").toUpperCase() !== "GET") throw new Error("Unsupported internal runtime method");
   if (admin && Object.hasOwn(HARNESS_ADMIN_METHODS, url.pathname)) {
     if ((init.method || "GET").toUpperCase() !== HARNESS_ADMIN_METHODS[url.pathname]) throw new Error("Unsupported internal runtime method");
     if (url.pathname === RUNTIME_PATHS.harnessStatus) {
@@ -81,6 +85,18 @@ function parseRow(row) {
     ...(row.model_family ? { model_family: row.model_family } : {}), legacy: row.legacy, context_window: row.context_window,
     auto_compact_token_limit: row.auto_compact_token_limit, ...(row.max_output ? { max_output: row.max_output } : {}), capabilities };
 }
+export function parseChatGptWebResourceLimits(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid runtime resource limits");
+  const ranges = { maxGlobalBrowsers: [1, 32], maxGlobalTurns: [1, 64], maxGlobalTabs: [5, 160],
+    maxRetainedTabsPerProfile: [1, 5], maxQueueSize: [0, 128], queueTimeoutMs: [1000, 120000], browserIdleTtlMs: [1000, 3600000] };
+  const limits = {};
+  for (const [key, [min, max]] of Object.entries(ranges)) {
+    if (!Number.isSafeInteger(value[key]) || value[key] < min || value[key] > max) throw new Error("Invalid runtime resource limits");
+    limits[key] = value[key];
+  }
+  if (!["headed", "headless-text"].includes(value.browserMode) || typeof value.adaptiveDomPolling !== "boolean") throw new Error("Invalid runtime resource limits");
+  return { ...limits, browserMode: value.browserMode, adaptiveDomPolling: value.adaptiveDomPolling };
+}
 export function parseChatGptWebCatalog(value) {
   if (!value || typeof value !== "object" || Array.isArray(value) || value.protocolVersion !== PROTOCOL_VERSION
     || typeof value.profile_epoch !== "string" || !value.profile_epoch || typeof value.catalog_revision !== "string" || !value.catalog_revision
@@ -91,7 +107,8 @@ export function parseChatGptWebCatalog(value) {
     seen.add(model.id); models.push(model);
   }
   if (!models.length) throw new Error("Runtime catalog has no verified model rows");
-  return { models, profileId, profileEpoch: value.profile_epoch, revision: value.catalog_revision, checkedAt: value.checked_at, maxConcurrency: MAX_BROWSER_TURNS };
+  return { models, profileId, profileEpoch: value.profile_epoch, revision: value.catalog_revision, checkedAt: value.checked_at, maxConcurrency: MAX_BROWSER_TURNS,
+    ...(Object.hasOwn(value, "resource_limits") ? { resourceLimits: parseChatGptWebResourceLimits(value.resource_limits) } : {}) };
 }
 export function chatGptWebModelSupportsCapabilities(model, required) {
   return !required?.size || [...required].every(capability => model?.capabilities?.[capability] === true);
@@ -117,6 +134,33 @@ export async function getChatGptWebHealth(connection, { signal } = {}) {
   const value = await response.json();
   if (!response.ok || value.service !== SERVICE_NAME || value.protocolVersion !== PROTOCOL_VERSION) throw new Error("Runtime health protocol unavailable");
   return value;
+}
+// Only inference selection calls this mutating endpoint. Catalog/status GETs stay cold.
+export async function prepareChatGptWebProfile(connection, { signal } = {}) {
+  signal?.throwIfAborted();
+  const profileId = validateProfileId(connection?.providerSpecificData?.profileId);
+  let profileEpoch = connection?.chatGptWebProfileEpoch || connection?.providerSpecificData?.profileEpoch;
+  if (!profileEpoch) {
+    const snapshot = await requestChatGptWebRuntimeAdmin("/admin/profiles", { signal }, { timeoutMs: HEALTH_TIMEOUT_MS });
+    if (!snapshot.ok) { const error = new Error("Runtime profile snapshot unavailable"); error.response = snapshot; throw error; }
+    const value = await snapshot.json();
+    if (value?.protocolVersion !== PROTOCOL_VERSION || !Array.isArray(value.profiles)) throw new Error("Invalid runtime profile snapshot");
+    const matches = value.profiles.filter(profile => profile?.profileId === profileId);
+    if (matches.length !== 1) throw new Error("Runtime profile unavailable");
+    profileEpoch = matches[0].profileEpoch;
+  }
+  if (typeof profileEpoch !== "string" || !profileEpoch || profileEpoch.length > 128) throw new Error("Invalid runtime profile epoch");
+  const response = await requestChatGptWebRuntime(connection, RUNTIME_PATHS.prepare, {
+    method: "POST", signal, headers: { "content-type": "application/json" }, body: JSON.stringify({ profileId, profileEpoch }),
+  }, { timeoutMs: PREPARE_TIMEOUT_MS });
+  if (!response.ok) { const error = new Error("Runtime profile preparation unavailable"); error.response = response; throw error; }
+  const catalog = parseChatGptWebCatalog(await response.json());
+  if (catalog.profileId !== profileId || catalog.profileEpoch !== profileEpoch) throw new Error("Runtime prepared catalog identity mismatch");
+  // The prepared snapshot is authoritative for this request; don't race an older pending GET.
+  const key = cacheKey(profileId);
+  cache.set(key, { catalog: { ...catalog, stale: false }, checkedAt: Date.now(), pending: null });
+  while (cache.size > MAX_CACHE_ENTRIES) cache.delete(cache.keys().next().value);
+  return { ...catalog, stale: false };
 }
 export function getChatGptWebCatalog(connection, { signal, force = false } = {}) {
   const profileId = validateProfileId(connection?.providerSpecificData?.profileId), key = cacheKey(profileId);

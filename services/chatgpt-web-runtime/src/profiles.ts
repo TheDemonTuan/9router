@@ -11,8 +11,10 @@ import { activateChatGptEffortMenu, readChatGptEffortSnapshot, chatGptNewChatUrl
 import { assertChatGptModelFamily, selectChatGptModelFamily } from "./adapters/chatgpt-web/model-selection";
 import { availableChatGptWebModelRoutes, chatGptWebRouteEfforts, resolveChatGptWebContextLimits, CHATGPT_WEB_LUNA_BACKEND_MODEL } from "./chatgpt-web-models";
 import type { ChatGptWebAccountCapabilities, ChatGptWebAutomaticModelRoute } from "./chatgpt-web-models";
-import { profileSettingsSchema } from "./config";
+import { profileSettingsSchema, resolveProfileBrowserMode, DEFAULT_RUNTIME_RESOURCE_LIMITS, type BrowserPurpose } from "./config";
 import type { RuntimeConfig } from "./config";
+import type { RuntimeResourceBudget, PhysicalReservation } from "./resource-budget";
+import { ResourceCapacityError } from "./resource-budget";
 import { RuntimeState, RuntimeStateError } from "./runtime-state";
 import { ProfileTunnel } from "./tunnel";
 import type { ProfileTunnelConfig } from "./tunnel";
@@ -25,6 +27,7 @@ import { ChatGptWebAdapterError } from "./adapters/chatgpt-web/adapter-error";
 import { parseChatGptWebSessionTransfer, SessionTransferError } from "../session-transfer.js";
 import { HarnessConfigStore } from "./harness-config";
 import { AgentTurnBroker } from "./agent-turns";
+import { runtimeExecutionScope } from "./runtime-scope";
 
 const HARNESS_MESSAGES: Record<string, string> = {
   harness_compatibility_unverified: "This runtime build has not passed harness compatibility checks",
@@ -67,28 +70,139 @@ export class RuntimeProfiles {
   private readonly harnessEvidence = new Map<string, { epoch: string; configRevision: number; tunnelId: string; connector: boolean }>();
   private readonly harnessErrors = new Map<string, string>();
   private readonly harnessMutations = new Set<string>();
+  private readonly managers = new Map<string, { manager: BrowserManager; headed: boolean }>();
+  private readonly awakeProofs = new Map<string, BrowserManager>();
+  private readonly prepares = new Map<string, { promise: Promise<void>; abort: AbortController; waiters: number }>();
+  private readonly sleeps = new Map<string, Promise<void>>();
+  private readonly stoppingDisplays = new Set<ChildProcess>();
+  private sweeping = false;
   readonly harnessConfig: HarnessConfigStore;
-  constructor(readonly config: RuntimeConfig, readonly state: RuntimeState, readonly tunnelConfigs: Record<string, ProfileTunnelConfig> = {}) {
+  constructor(
+    readonly config: RuntimeConfig,
+    readonly state: RuntimeState,
+    readonly tunnelConfigs: Record<string, ProfileTunnelConfig> = {},
+    readonly resourceBudget?: RuntimeResourceBudget,
+  ) {
     this.harnessConfig = new HarnessConfigStore(config.dataDir, tunnelConfigs);
   }
-  async ensureProfileBrowser(profileId: string): Promise<BrowserManager> {
-    this.state.profile(profileId);
-    await this.ensureDisplay(profileId);
-    return this.manager(profileId);
+  async ensureProfileBrowser(profileId: string, purpose: BrowserPurpose = "inference"): Promise<BrowserManager> {
+    await this.sleeps.get(profileId);
+    const profile = this.state.profile(profileId);
+    const headed = resolveProfileBrowserMode(profile.settings, purpose,
+      this.resourceBudget?.limits.browserMode ?? this.config.resourceLimits?.browserMode ?? "headed") === "headed";
+    const cached = this.managers.get(profileId);
+    if (cached?.manager.isClosing) {
+      await cached.manager.close();
+      if (this.managers.get(profileId) === cached) this.managers.delete(profileId);
+    }
+    if (cached && !cached.manager.isClosed && (cached.headed !== headed || cached.manager.profileEpoch !== profile.epoch)) {
+      if (!cached.manager.canSleep) throw new RuntimeStateError("profile_active", "Browser mode changes require an idle unowned profile", 409);
+      await cached.manager.close();
+      this.managers.delete(profileId);
+      if (!headed) await this.stopDisplay(profileId);
+    }
+    let reservation: PhysicalReservation | undefined;
+    try {
+      if (headed) {
+        reservation = await this.resourceBudget?.reserveBrowser(profileId);
+        await this.ensureDisplay(profileId);
+      }
+      const manager = this.manager(profileId, headed);
+      if (reservation) manager.adoptBrowserReservation(reservation);
+      return manager;
+    } catch (error) {
+      const owner = this.managers.get(profileId)?.manager.resourceSnapshot().browserState;
+      if (!owner || owner === "sleeping") reservation?.release();
+      throw error;
+    }
   }
   async initialize(): Promise<void> {
-    for (const profile of this.state.listProfiles()) {
-      await this.ensureProfileBrowser(profile.profileId);
-      await this.manager(profile.profileId).ensureContext();
-      try {
-        if (profile.settings.mode === "full") await this.harnessSmoke(profile.profileId, true);
-        await this.probe(profile.profileId, true, true);
-      } catch (error) {
-        if (error instanceof ChatGptWebAdapterError && error.code === "connector_not_found") error = new RuntimeStateError("connector_unavailable", HARNESS_MESSAGES.connector_unavailable!, 503);
-        this.invalidate(profile.profileId, error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : "profile_probe_failed");
-        if (!(error instanceof RuntimeStateError || error instanceof ChatGptWebAdapterError) || !["login_required", "session_expired", "model_version_unavailable", "harness_compatibility_unverified", "harness_config_required", "harness_config_missing", "harness_storage_invalid", "connector_unavailable", "profile_probe_failed"].includes(error.code || "")) throw error;
-      }
+    // Config and persistent state are loaded by constructors; evidence is memory-only.
+    this.state.listProfiles();
+  }
+  async prepareForRequest(profileId: string, signal?: AbortSignal): Promise<void> {
+    const profile = this.state.profile(profileId);
+    if (this.state.fence()) throw new RuntimeStateError("runtime_draining", "Runtime is draining", 503);
+    if (this.errors.get(profileId) === "headless_interaction_required") throw new RuntimeStateError("headless_interaction_required", "Verify this profile explicitly in headed mode before sending more work", 503);
+    signal?.throwIfAborted();
+    const cached = this.managers.get(profileId);
+    const desiredHeaded = resolveProfileBrowserMode(profile.settings, "inference", this.resourceBudget?.limits.browserMode ?? "headed") === "headed";
+    if (cached && !this.prepares.has(profileId) && !cached.manager.isClosing && cached.headed === desiredHeaded
+      && cached.manager.resourceSnapshot().browserState === "awake" && this.awakeProofs.get(profileId) === cached.manager && this.ready(profileId)) return;
+    let entry = this.prepares.get(profileId);
+    if (!entry) {
+      const abort = new AbortController();
+      const assertPreparing = () => {
+        abort.signal.throwIfAborted();
+        if (this.state.fence()) throw new RuntimeStateError("runtime_draining", "Runtime is draining", 503);
+      };
+      const promise = Promise.resolve().then(async () => {
+        assertPreparing();
+        const cached = this.managers.get(profileId);
+        const desiredHeaded = resolveProfileBrowserMode(this.state.profile(profileId).settings, "inference", this.resourceBudget?.limits.browserMode ?? "headed") === "headed";
+        if (cached && !cached.manager.isClosing && cached.headed === desiredHeaded
+          && cached.manager.resourceSnapshot().browserState === "awake" && this.awakeProofs.get(profileId) === cached.manager && this.ready(profileId)) return;
+        await this.ensureProfileBrowser(profileId);
+        assertPreparing();
+        if (this.state.profile(profileId).settings.mode === "full") await this.harnessSmoke(profileId, true, abort.signal);
+        else await this.probe(profileId, true, false, undefined, assertPreparing);
+        assertPreparing();
+      });
+      entry = { promise, abort, waiters: 0 };
+      this.prepares.set(profileId, entry);
+      const owned = entry;
+      void promise.finally(() => { if (this.prepares.get(profileId) === owned) this.prepares.delete(profileId); }).catch(() => {});
     }
+    entry.waiters++;
+    const owned = entry;
+    let onAbort: (() => void) | undefined;
+    try {
+      if (!signal) await owned.promise;
+      else await Promise.race([owned.promise, new Promise<never>((_, reject) => {
+        onAbort = () => reject(signal.reason ?? new DOMException("Preparation cancelled", "AbortError"));
+        signal.addEventListener("abort", onAbort, { once: true });
+        if (signal.aborted) onAbort();
+      })]);
+      signal?.throwIfAborted();
+    } finally {
+      if (onAbort) signal?.removeEventListener("abort", onAbort);
+      if (--owned.waiters === 0) owned.abort.abort();
+    }
+  }
+  cancelPreparations(): void {
+    for (const entry of this.prepares.values()) entry.abort.abort(new RuntimeStateError("runtime_draining", "Runtime is draining", 503));
+  }
+  async sweepIdle(now = Date.now()): Promise<void> {
+    if (this.sweeping || this.state.fence()) return;
+    this.sweeping = true;
+    try {
+      for (const [profileId, cached] of this.managers) {
+        const count = this.resourceBudget?.snapshot().profiles.find(value => value.profileId === profileId);
+        if (this.prepares.has(profileId) || this.viewer?.profileId === profileId || this.viewerStarting || this.viewerClosing
+          || this.approvalWaits.has(profileId) || this.harnessMutations.has(profileId)
+          || count && (count.executingTurns || count.waitingToolTurns || count.queueDepth)
+          || !cached.manager.canSleep || now - cached.manager.resourceSnapshot().lastUsedAt < (this.resourceBudget?.limits.browserIdleTtlMs ?? DEFAULT_RUNTIME_RESOURCE_LIMITS.browserIdleTtlMs)) continue;
+        const sleeping = (async () => {
+          await cached.manager.close();
+          ChatGptBrowserWorker.forgetProfile(profileId, this.resourceBudget);
+          this.awakeProofs.delete(profileId);
+          if (this.managers.get(profileId) === cached) this.managers.delete(profileId);
+          await this.stopDisplay(profileId);
+        })();
+        this.sleeps.set(profileId, sleeping);
+        try { await sleeping; }
+        finally { if (this.sleeps.get(profileId) === sleeping) this.sleeps.delete(profileId); }
+      }
+    } finally { this.sweeping = false; }
+  }
+  resourceSnapshot() {
+    const snapshot = this.resourceBudget!.snapshot();
+    return { ...snapshot, profiles: this.state.listProfiles().map(profile => {
+      const counts = snapshot.profiles.find(value => value.profileId === profile.profileId);
+      return { profileId: profile.profileId, browsers: 0, executingTurns: 0, waitingToolTurns: 0,
+        tabs: { active: 0, retainedNative: 0, retainedGeneric: 0, inspection: 0 }, retainedSlots: 0, queueDepth: 0,
+        ...counts, browserState: this.prepares.has(profile.profileId) ? "waking" : this.managers.get(profile.profileId)?.manager.resourceSnapshot().browserState ?? "sleeping" };
+    }) };
   }
   private fullReady(profileId: string): boolean {
     const profile = this.state.profile(profileId);
@@ -107,31 +221,51 @@ export class RuntimeProfiles {
   }
   async refreshReadiness(profileId: string): Promise<void> {
     const full = this.state.profile(profileId).settings.mode === "full";
-    if ((full || this.tunnels.has(profileId)) && !await this.tunnels.get(profileId)?.ready()) {
+    if (this.tunnels.has(profileId) && !await this.tunnels.get(profileId)?.ready()) {
       this.harnessEvidence.delete(profileId); this.harnessErrors.set(profileId, "connector_unavailable");
       if (full) this.invalidate(profileId, "connector_unavailable");
       await AgentTurnBroker.forSocket(join(this.config.dataDir, "profiles", profileId, "run", "agent-turns.sock")).close();
     }
   }
   physicalIdle(): boolean {
-    return !this.viewerStarting && !this.viewerClosing && !this.viewer?.completing && this.displayStarts.size === 0 && this.state.listProfiles().every(profile => browserProfileWork(profile.profileId).idle);
+    return !this.sweeping && this.prepares.size === 0 && !this.viewerStarting && !this.viewerClosing && !this.viewer?.completing && this.displayStarts.size === 0 && this.state.listProfiles().every(profile => browserProfileWork(profile.profileId, this.resourceBudget).idle);
   }
   invalidate(profileId: string, code: string): void {
     this.probes.delete(profileId);
+    this.awakeProofs.delete(profileId);
     this.errors.set(profileId, /^[a-z][a-z0-9_]{0,79}$/.test(code) ? code : "profile_probe_failed");
   }
   noteApproval(profileId: string, traceId: string, promptInstance: string): void {
     this.approvalWaits.set(profileId, { traceId, promptInstance });
+    this.managers.get(profileId)?.manager.setApprovalOwned(true);
   }
   clearApproval(profileId: string): void {
     this.approvalWaits.delete(profileId);
+    this.managers.get(profileId)?.manager.setApprovalOwned(false);
   }
-  manager(profileId: string): BrowserManager {
+  manager(profileId: string, headed?: boolean): BrowserManager {
     const profile = this.state.profile(profileId);
-    return BrowserManager.forProfile({ profileId, profileEpoch: profile.epoch,
+    const cached = this.managers.get(profileId);
+    if (cached && !cached.manager.isClosed && cached.manager.profileEpoch === profile.epoch && headed === undefined) return cached.manager;
+    const effectiveHeaded = headed ?? resolveProfileBrowserMode(profile.settings, "inference", this.resourceBudget?.limits.browserMode ?? "headed") === "headed";
+    const manager = BrowserManager.forProfile({ profileId, profileEpoch: profile.epoch,
       browserProfilePath: join(this.config.dataDir, "profiles", profileId, "browser"),
-      chromeExecutablePath: this.config.chromiumExecutable, headed: true,
-      ...(this.displays.has(profileId) ? { display: `:${this.displays.get(profileId)!.number}` } : {}) });
+      chromeExecutablePath: this.config.chromiumExecutable, headed: effectiveHeaded,
+      resourceBudget: this.resourceBudget,
+      ...(effectiveHeaded && this.displays.has(profileId) ? { display: `:${this.displays.get(profileId)!.number}` } : {}) });
+    this.managers.set(profileId, { manager, headed: effectiveHeaded });
+    return manager;
+  }
+  private async stopDisplay(profileId: string): Promise<void> {
+    const display = this.displays.get(profileId);
+    if (!display) return;
+    for (const child of [display.wm, display.child]) {
+      if (child.exitCode === null && child.signalCode === null) this.stoppingDisplays.add(child);
+      if (child.exitCode === null && child.signalCode === null) {
+        const exited = once(child, "exit"); child.kill("SIGTERM"); await exited;
+      }
+    }
+    if (this.displays.get(profileId) === display) this.displays.delete(profileId);
   }
   private ensureDisplay(profileId: string): Promise<void> {
     if (process.platform !== "linux") return Promise.resolve();
@@ -141,10 +275,10 @@ export class RuntimeProfiles {
     if (existing) return existing;
     const operation = (async () => {
       if (display) {
-        if (!browserProfileWork(profileId).idle) throw new RuntimeStateError("profile_active", "Display restart requires physical settlement");
-        await this.manager(profileId).close();
-        for (const child of [display.wm, display.child]) if (child.exitCode === null && child.signalCode === null) { const exited = once(child, "exit"); child.kill("SIGTERM"); await exited; }
-        this.displays.delete(profileId);
+        if (!browserProfileWork(profileId, this.resourceBudget).idle) throw new RuntimeStateError("profile_active", "Display restart requires physical settlement");
+        await this.managers.get(profileId)?.manager.close();
+        this.managers.delete(profileId);
+        await this.stopDisplay(profileId);
       }
       await this.openDisplay(profileId);
     })().finally(() => this.displayStarts.delete(profileId));
@@ -165,7 +299,9 @@ export class RuntimeProfiles {
       const wm = spawn("openbox", [], { env: { ...process.env, DISPLAY: `:${number}` }, stdio: "ignore", shell: false });
       await new Promise<void>((resolve, reject) => { wm.once("error", reject); wm.once("spawn", resolve); });
       this.displays.set(profileId, { number, child, wm });
-      for (const owned of [child, wm]) owned.once("exit", () => this.invalidate(profileId, "private_display_unavailable"));
+      for (const owned of [child, wm]) owned.once("exit", () => {
+        if (!this.stoppingDisplays.delete(owned)) this.invalidate(profileId, "private_display_unavailable");
+      });
     } catch (error) {
       if (child.pid && child.exitCode === null && child.signalCode === null) { const exited = once(child, "exit"); child.kill("SIGTERM"); await exited; }
       throw error;
@@ -185,14 +321,18 @@ export class RuntimeProfiles {
     if (this.viewer?.profileId === profileId && this.viewer.manualLogin) throw new RuntimeStateError("login_required", "Finish human sign-in before model operations");
     const profile = this.state.profile(profileId);
     const probe = this.probes.get(profileId);
-    if (!probe || probe.epoch !== profile.epoch || probe.revision !== profile.revision || probe.models.length === 0) throw new RuntimeStateError("login_required", "Profile requires a live authenticated session and model probe");
+    if (!probe || probe.epoch !== profile.epoch || probe.revision !== profile.revision || probe.models.length === 0) {
+      const code = this.errors.get(profileId) ?? "profile_not_prepared";
+      throw new RuntimeStateError(code, code === "profile_not_prepared" ? "Prepare the selected profile before inference" : "Profile session verification failed", 503);
+    }
     if (profile.settings.mode === "full" && !this.fullReady(profileId)) throw new RuntimeStateError("connector_unavailable", "Full profile requires live owned tunnel and connector proof", 503);
     return probe;
   }
   catalog(profileId: string): unknown {
     const profile = this.state.profile(profileId), evidence = this.evidence(profileId);
     return { protocolVersion: PROTOCOL_VERSION, profile_id: profileId, profile_epoch: profile.epoch,
-      catalog_revision: evidence.catalogRevision, checked_at: evidence.checkedAt, max_concurrency: MAX_BROWSER_TURNS, models: evidence.models };
+      catalog_revision: evidence.catalogRevision, checked_at: evidence.checkedAt, max_concurrency: MAX_BROWSER_TURNS,
+      resource_limits: { ...(this.resourceBudget?.limits ?? this.config.resourceLimits ?? DEFAULT_RUNTIME_RESOURCE_LIMITS) }, models: evidence.models };
   }
   private probeDiagnostic(profileId: string, stage: "browser_open" | "navigation" | "session" | "composer" | "surface" | "capabilities" | "model_selection" | "account_commit" | "native_close" | "native_restore", error: unknown, startedAt: number, modelId?: string, effort?: string): void {
     const code = error instanceof RuntimeStateError || error instanceof ChatGptWebAdapterError ? error.code : undefined;
@@ -207,9 +347,8 @@ export class RuntimeProfiles {
     const startedAt = Date.now();
     let enteredMaintenance = false;
     try {
-      await this.ensureDisplay(profileId);
+      const manager = manualManager ?? await this.ensureProfileBrowser(profileId, "inspection");
       assertLease?.();
-      const manager = manualManager ?? this.manager(profileId);
       const result = await manager.maintenance("session probe", () => {
         enteredMaintenance = true;
         return this.probeInMaintenance(profileId, manager, navigate, initializing, manualManager !== undefined, assertLease);
@@ -217,6 +356,7 @@ export class RuntimeProfiles {
       if (result.epoch !== manager.profileEpoch && !manualManager) await manager.close();
       return result;
     } catch (error) {
+      if (error instanceof ResourceCapacityError) throw error;
       if (!enteredMaintenance) this.probeDiagnostic(profileId, "browser_open", error, startedAt);
       this.invalidate(profileId, error instanceof RuntimeStateError || error instanceof ChatGptWebAdapterError ? error.code || "profile_probe_failed" : "profile_probe_failed");
       throw error;
@@ -225,11 +365,12 @@ export class RuntimeProfiles {
   private async probeInMaintenance(profileId: string, manager: BrowserManager, navigate: boolean, initializing: boolean, manualLogin: boolean, assertLease?: () => void, expectedAccountFingerprint?: string | null): Promise<ProfileProbe> {
     const startedAt = Date.now();
     let stage: Parameters<RuntimeProfiles["probeDiagnostic"]>[1] = "browser_open";
-    this.probes.delete(profileId);
+    this.awakeProofs.delete(profileId);
     try {
       const profile = this.state.profile(profileId);
       if (!manualLogin && profile.epoch !== manager.profileEpoch) throw new RuntimeStateError("profile_revision_conflict", "Stale browser epoch probe discarded");
       const page = await manager.maintenancePage();
+      this.probes.delete(profileId);
       if (navigate) {
         stage = "navigation";
         try { await page.goto(chatGptNewChatUrl(profile.settings.useSavedChats), { waitUntil: "domcontentloaded", timeout: 60_000 }); }
@@ -244,6 +385,7 @@ export class RuntimeProfiles {
       stage = "model_selection";
       const models: WebModelRow[] = [];
       for (const candidate of availableChatGptWebModelRoutes(evidence.capabilities)) {
+        assertLease?.();
         if (candidate.interactionMode !== "automatic") continue;
         const route: ChatGptWebAutomaticModelRoute = candidate;
         if (route.modelFamily) {
@@ -284,7 +426,7 @@ export class RuntimeProfiles {
           }
           finally { await page.keyboard.press("Escape").catch(() => {}); }
         }
-        const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, { ...evidence.capabilities, experimentalBiggerContext: profile.settings.experimentalBiggerContext });
+        const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, { ...evidence.capabilities, experimentalBiggerContext: profile.settings.experimentalBiggerContext }, route.modelFamily);
         const full = profile.accountFingerprint === evidence.accountFingerprint && profile.settings.mode === "full" && this.fullReady(profileId);
         models.push({ id: route.slug, display_name: route.displayName,
           supported_reasoning_levels: [...chatGptWebRouteEfforts(route, evidence.capabilities)], default_reasoning_level: route.codexEffort,
@@ -315,8 +457,10 @@ export class RuntimeProfiles {
       const probe: ProfileProbe = { revision: current.revision, epoch: current.epoch, capabilities: evidence.capabilities,
         checkedAt: evidence.checkedAt, models, catalogRevision: randomUUID() };
       this.probes.set(profileId, probe); this.errors.delete(profileId);
+      this.awakeProofs.set(profileId, manager);
       return probe;
     } catch (error) {
+      if (error instanceof ResourceCapacityError) throw error;
       this.probeDiagnostic(profileId, stage, error, startedAt);
       this.invalidate(profileId, error instanceof RuntimeStateError || error instanceof ChatGptWebAdapterError ? error.code || "profile_probe_failed" : "profile_probe_failed");
       throw error;
@@ -335,8 +479,8 @@ export class RuntimeProfiles {
       return profile;
     };
     assertTarget();
-    if (!browserProfileWork(profileId).idle) throw new RuntimeStateError("profile_active", "Session import requires an idle profile", 409);
-    await this.ensureDisplay(profileId);
+    if (!browserProfileWork(profileId, this.resourceBudget).idle) throw new RuntimeStateError("profile_active", "Session import requires an idle profile", 409);
+    await this.ensureProfileBrowser(profileId, "inspection");
     assertTarget();
     const manager = this.manager(profileId);
     if (!manager.isIdle) throw new RuntimeStateError("profile_active", "Session import requires an idle profile", 409);
@@ -398,8 +542,8 @@ export class RuntimeProfiles {
       if (this.viewerStarting || this.viewerClosing || this.viewer?.profileId === profileId) throw new RuntimeStateError("profile_active", "Session verification requires an idle profile", 409);
     };
     assertTarget();
-    if (!browserProfileWork(profileId).idle) throw new RuntimeStateError("profile_active", "Session verification requires an idle profile", 409);
-    await this.ensureDisplay(profileId);
+    if (!browserProfileWork(profileId, this.resourceBudget).idle) throw new RuntimeStateError("profile_active", "Session verification requires an idle profile", 409);
+    await this.ensureProfileBrowser(profileId, "login");
     assertTarget();
     const manager = this.manager(profileId);
     if (!manager.isIdle) throw new RuntimeStateError("profile_active", "Session verification requires an idle profile", 409);
@@ -415,13 +559,16 @@ export class RuntimeProfiles {
       throw error;
     }
   }
-  status(profileId: string): unknown {
+  status(profileId: string) {
     const profile = this.state.profile(profileId);
     const probe = this.probes.get(profileId);
     return { profileId, profileEpoch: profile.epoch, revision: profile.revision, settings: profile.settings,
       state: this.state.fence() ? "draining" : this.approvalWaits.has(profileId) ? "waiting_for_chatgpt_tool_approval"
-        : this.ready(profileId) ? "ready" : this.errors.get(profileId) === "login_required" ? "login_required" : this.errors.has(profileId) ? "error" : "login_required",
-      models: probe?.models ?? [], activeTurns: browserProfileWork(profileId).activeTurns, maxConcurrency: MAX_BROWSER_TURNS,
+        : this.ready(profileId) ? "ready" : ["login_required", "session_expired"].includes(this.errors.get(profileId) ?? "") ? "login_required" : this.errors.has(profileId) ? "error" : "session_unverified",
+      browser_state: this.prepares.has(profileId) ? "waking" : this.managers.get(profileId)?.manager.resourceSnapshot().browserState ?? "sleeping",
+      catalog_verified: !!probe && probe.epoch === profile.epoch && probe.revision === profile.revision && probe.models.length > 0,
+      models: probe?.epoch === profile.epoch && probe.revision === profile.revision ? probe.models : [],
+      activeTurns: browserProfileWork(profileId, this.resourceBudget).activeTurns, maxConcurrency: MAX_BROWSER_TURNS,
       connectorReady: this.fullReady(profileId),
       lastError: this.errors.get(profileId) || null };
   }
@@ -500,12 +647,13 @@ export class RuntimeProfiles {
     const evidence = this.probes.get(profileId);
     if (!evidence || evidence.epoch !== profile.epoch || evidence.revision !== profile.revision) throw new RuntimeStateError("login_required", "Verify the saved session before configuring coding tools");
     try {
-    await ChatGptBrowserWorker.forProvider({ adapter: "chatgpt-web", baseUrl: "https://chatgpt.com", chatgptWeb: {
+    await this.ensureProfileBrowser(profileId, "connector");
+    await runtimeExecutionScope.run({ profileId, profileEpoch: profile.epoch, clientId: "operator-connector-smoke", resourceBudget: this.resourceBudget }, async () => ChatGptBrowserWorker.forProvider({ adapter: "chatgpt-web", baseUrl: "https://chatgpt.com", chatgptWeb: {
       profileId, profileEpoch: profile.epoch, clientId: "operator-connector-smoke", browserProfilePath: join(this.config.dataDir, "profiles", profileId, "browser"),
       chromeExecutablePath: this.config.chromiumExecutable, headed: true, appName: profile.settings.connectorName,
       brokerSocketPath: defaultBrokerEndpoint(join(this.config.dataDir, "profiles", profileId)), localToolsEnabled: true,
       solAvailable: evidence.capabilities.solAvailable, proAvailable: evidence.capabilities.proAvailable, extraHighAvailable: evidence.capabilities.extraHighAvailable,
-    } }).verifyConnector();
+    } }).verifyConnector());
     } catch (error) {
       if (error instanceof ChatGptWebAdapterError && error.code === "connector_not_found") throw new RuntimeStateError("connector_unavailable", HARNESS_MESSAGES.connector_unavailable!, 503);
       throw error;
@@ -539,10 +687,11 @@ export class RuntimeProfiles {
       } else {
         await this.verifyHarness(profileId);
         if (action === "activate") {
-          await manager.maintenance("coding tools activation", async () => {
+          const activationManager = this.manager(profileId);
+          await activationManager.maintenance("coding tools activation", async () => {
             const profile = this.state.profile(profileId);
             this.state.patchProfile(profileId, revision, { ...profile.settings, mode: "full" });
-            await manager.discardRetained();
+            await activationManager.discardRetained();
           });
           await this.probe(profileId);
         }
@@ -556,11 +705,20 @@ export class RuntimeProfiles {
     const status = this.harnessStatus(profileId);
     return action === "activate" || action === "disconnect" ? { profile: this.status(profileId), status } : status;
   }
-  async harnessSmoke(profileId: string, initializing = false): Promise<void> {
-    await this.probe(profileId, true, initializing);
+  async harnessSmoke(profileId: string, initializing = false, signal?: AbortSignal): Promise<void> {
+    const assertActive = () => {
+      signal?.throwIfAborted();
+      if (this.state.fence()) throw new RuntimeStateError("runtime_draining", "Runtime is draining", 503);
+    };
+    assertActive();
+    await this.probe(profileId, true, initializing, undefined, assertActive);
+    assertActive();
     if (initializing) {
       await this.startHarness(profileId);
+      assertActive();
       await this.verifyHarness(profileId);
+      assertActive();
+      await this.probe(profileId, false, initializing, undefined, assertActive);
     } else {
       const revision = this.state.profile(profileId).revision, configRevision = this.harnessConfig.describe(profileId).configRevision;
       await this.harnessAction("start", profileId, revision, configRevision);
@@ -583,8 +741,8 @@ export class RuntimeProfiles {
   }
   private async openViewer(profileId: string, login: boolean, traceId: string | undefined, generation: number): Promise<unknown> {
     if (this.state.fence()) throw new RuntimeStateError("runtime_draining", "Viewer maintenance denied while drained", 503);
-    await this.ensureDisplay(profileId);
-    const manager = this.manager(profileId);
+    const manager = await this.ensureProfileBrowser(profileId, login ? "login" : "viewer");
+    if (!login && manager.isIdle) await manager.maintenance("viewer inspection", () => manager.maintenancePage());
     if (login && !manager.isIdle) throw new RuntimeStateError("profile_active", "Login cannot interrupt active browser turns");
     const assertStarting = () => {
       if (this.state.fence() || generation !== this.viewerGeneration) throw new RuntimeStateError("runtime_draining", "Viewer startup was revoked", 503);
@@ -597,6 +755,7 @@ export class RuntimeProfiles {
     const loginId = randomUUID(), password = randomBytes(18).toString("base64url");
     let child: ChildProcess | undefined;
     let passwordFile: string | undefined;
+    manager.setViewerOwned(true);
     try {
       if (login) await manager.startManualLogin(chatGptNewChatUrl(this.state.profile(profileId).settings.useSavedChats), () => {
         if (this.viewer?.loginId === loginId) void this.closeViewer("error").catch(() => {});
@@ -627,6 +786,7 @@ export class RuntimeProfiles {
       if (passwordFile && existsSync(passwordFile)) unlinkSync(passwordFile);
       const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
       if (failed) throw failed.reason;
+      manager.setViewerOwned(false);
       throw error;
     }
     const expiresAt = Date.now() + 15 * 60_000;
@@ -750,6 +910,7 @@ export class RuntimeProfiles {
       const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected").map(result => result.reason);
       if (failures.length) throw new AggregateError(failures, "Viewer physical processes failed to settle");
       if (existsSync(viewer.passwordFile)) unlinkSync(viewer.passwordFile);
+      this.managers.get(viewer.profileId)?.manager.setViewerOwned(false);
       if (this.viewer === viewer) this.viewer = undefined;
     })().finally(() => { this.viewerClosing = undefined; });
     return this.viewerClosing;
@@ -757,12 +918,13 @@ export class RuntimeProfiles {
   async close(): Promise<void> {
     await this.closeViewer();
     await Promise.all(this.displayStarts.values());
-    await closeBrowserManagers();
+    await closeBrowserManagers(this.resourceBudget);
+    this.managers.clear();
+    this.awakeProofs.clear();
+    for (const profile of this.state.listProfiles()) ChatGptBrowserWorker.forgetProfile(profile.profileId, this.resourceBudget);
     await Promise.all([...this.tunnels.values()].map(tunnel => tunnel.stop())); this.tunnels.clear();
     await Promise.all(this.state.listProfiles().map(profile => this.harnessConfig.cleanup(profile.profileId)));
-    for (const display of this.displays.values()) {
-      for (const child of [display.wm, display.child]) if (child.exitCode === null && child.signalCode === null) { const exited = once(child, "exit"); child.kill("SIGTERM"); await exited; }
-    }
+    for (const profileId of this.displays.keys()) await this.stopDisplay(profileId);
     this.displays.clear(); this.probes.clear(); this.harnessEvidence.clear(); this.approvalWaits.clear();
   }
 }

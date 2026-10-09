@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { defaultBrokerEndpoint, expandUserPath, resolveBrokerEndpoint } from "../../config";
+import { runtimeExecutionScope } from "../../runtime-scope";
+import { ResourceCapacityError } from "../../resource-budget";
+import type { ResourceLease } from "../../resource-budget";
 import { releaseRetainedConversation as releaseBrowserRetainedConversation } from "../../browser/manager";
 import { namespacedToolName } from "../../types";
 import type { AdapterEvent, CodexContentPart, CodexParsedRequest, CodexProviderConfig, CodexToolResultMessage, CodexUsage } from "../../types";
@@ -9,6 +12,7 @@ import { parseDataUrl } from "../image";
 import { ChatGptWebAdapterError } from "./adapter-error";
 import { ChatGptBrowserWorker } from "./browser-worker";
 import type { ChatGptApprovalDiagnostic } from "./browser-worker";
+import type { BrowserTurn } from "./browser-worker";
 import { extractChatGptTurnIdentity } from "./environment";
 import type { ChatGptTurnEnvironment } from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode } from "./model";
@@ -212,6 +216,7 @@ function replayEvents(events: AdapterEvent[], emit: (event: AdapterEvent) => voi
 function submittedTurnFailure(session: ChatGptTurnSession, error: unknown): Error {
   const normalized = error instanceof Error ? error : new Error(String(error));
   if (normalized instanceof ChatGptWebAdapterError) return normalized;
+  if (normalized instanceof ResourceCapacityError) return normalized;
   const phase = session.runtime.submission?.phase;
   if (!phase || phase === "prepared") return normalized;
   const ambiguous = phase === "send_activated";
@@ -256,9 +261,18 @@ export function createChatGptWebAdapter(
   dependencies: {
     broker?: TurnBrokerOwner;
     onDiagnostic?: (traceId: string, state: ChatGptApprovalDiagnostic) => void;
+    onResourceAdmitted?: () => void;
+    onResourceAdmissionFailed?: (error: unknown) => void;
+    onResourcePreflight?: () => void;
     browserRequestId?: string;
   } = {},
 ): ProviderAdapter {
+  let resourceAdmitted = false;
+  const admitResource = () => {
+    if (resourceAdmitted) return;
+    dependencies.onResourceAdmitted?.();
+    resourceAdmitted = true;
+  };
   const executionNamespace = chatGptWebExecutionNamespace(provider);
   const browserRequestId = dependencies.browserRequestId;
   const browserRequest = browserRequestId !== undefined;
@@ -309,7 +323,7 @@ export function createChatGptWebAdapter(
     environment: ChatGptTurnEnvironment | undefined,
     traceId: string,
     turnCapabilities: ChatGptWebCapabilities,
-    hooks: { onCompactionProgress?: ChatGptProgressListener } = {},
+    hooks: { onCompactionProgress?: ChatGptProgressListener; admissionSignal?: AbortSignal } = {},
   ): ChatGptTurnRuntime => {
     const externalProgress = new ChatGptExternalTurnProgress();
     const mode = resolveChatGptWebModelMode(parsed.modelId, parsed.options.reasoning, turnCapabilities);
@@ -368,6 +382,53 @@ export function createChatGptWebAdapter(
       return answer;
     });
     const browserAbort = new AbortController();
+    const scope = runtimeExecutionScope.getStore();
+    const resourceBudget = scope?.resourceBudget;
+    if (scope && (scope.profileId !== provider.chatgptWeb?.profileId
+      || scope.profileEpoch !== provider.chatgptWeb?.profileEpoch
+      || scope.clientId !== provider.chatgptWeb?.clientId)) {
+      throw new Error("Native resource scope does not match the authenticated runtime owner");
+    }
+    let resourceLease: ResourceLease | undefined = scope?.resourceLease;
+    const resourceAdmission = deferred<void>();
+    void resourceAdmission.promise.catch(() => {});
+    const runWithResourceLease = async (turn: BrowserTurn): Promise<string> => {
+      let ownedLease: ResourceLease | undefined;
+      try {
+        if (resourceBudget && !resourceLease) {
+          if (!scope || scope.profileId !== provider.chatgptWeb?.profileId
+            || scope.profileEpoch !== provider.chatgptWeb?.profileEpoch
+            || scope.clientId !== provider.chatgptWeb?.clientId) {
+            throw new Error("Native resource admission requires the authenticated runtime owner");
+          }
+          const nested = Boolean(identity.parentThreadId
+            && scope.verifiedParentThreadId === identity.parentThreadId
+            && chatGptTurnSessions.hasActiveScopedParent(executionNamespace, identity.parentThreadId, resourceBudget));
+          const admissionSignal = hooks.admissionSignal
+            ? AbortSignal.any([browserAbort.signal, hooks.admissionSignal]) : browserAbort.signal;
+          ownedLease = await resourceBudget.acquire({ profileId: scope.profileId,
+            kind: resumeInput ? "continuation" : "new", signal: admissionSignal,
+            ...(nested ? { priority: "nested" as const } : {}),
+          });
+          resourceLease = ownedLease;
+        }
+        if (browserAbort.signal.aborted) throw abortError(browserAbort.signal);
+        if (hooks.admissionSignal?.aborted) throw abortError(hooks.admissionSignal);
+        return await worker.run({ ...turn, resourceLease,
+          onPreparedSelected: async reused => {
+            admitResource();
+            resourceAdmission.resolve(undefined);
+            await turn.onPreparedSelected?.(reused);
+          },
+        });
+      } catch (error) {
+        resourceAdmission.reject(error instanceof Error ? error : new Error(String(error)));
+        throw error;
+      } finally {
+        // The worker settles its physical page lease before this promise settles.
+        ownedLease?.release();
+      }
+    };
     let browserOwnerSettled = false;
     const trackBrowserOwner = (browser: Promise<string>): Promise<string> => browser.finally(() => {
       for (const unsubscribe of progressSubscriptions) unsubscribe();
@@ -420,7 +481,7 @@ export function createChatGptWebAdapter(
       },
     };
     if (!mode.localTools) {
-      const browserTurn = cancellableBrowserTurn(finalizeCheckpoint(worker.run({
+      const browserTurn = cancellableBrowserTurn(finalizeCheckpoint(runWithResourceLease({
         traceId,
         modelId: parsed.modelId,
         reasoning: parsed.options.reasoning,
@@ -459,6 +520,9 @@ export function createChatGptWebAdapter(
         effectiveModelIdentity: chatGptEffectiveModelIdentity(parsed),
         browser: browserTurn.browser,
         physicalSettlement: browserTurn.physicalSettlement,
+        get resourceLease() { return resourceLease; },
+        resourceBudget,
+        resourceAdmission: resourceAdmission.promise,
         trace,
         text,
         usageInput: checkpointInput.parsed,
@@ -507,7 +571,7 @@ export function createChatGptWebAdapter(
         throw error;
       }
     };
-    const browserTurn = cancellableBrowserTurn(trackBrowserOwner(finalizeCheckpoint(worker.run({
+    const browserTurn = cancellableBrowserTurn(trackBrowserOwner(finalizeCheckpoint(runWithResourceLease({
       traceId,
       modelId: parsed.modelId,
       reasoning: parsed.options.reasoning,
@@ -548,6 +612,9 @@ export function createChatGptWebAdapter(
       effectiveModelIdentity: chatGptEffectiveModelIdentity(parsed),
       browser: browserTurn.browser,
       physicalSettlement: browserTurn.physicalSettlement,
+      get resourceLease() { return resourceLease; },
+      resourceBudget,
+      resourceAdmission: resourceAdmission.promise,
       trace,
       text,
       usageInput: checkpointInput.parsed,
@@ -599,6 +666,7 @@ export function createChatGptWebAdapter(
           throw new Error("ChatGPT web requires verified remote Codex authority");
         }
         const environment = browserRequest ? undefined : environmentStore!.resolveVerified(parsed, verifiedEnvironment!, pathFlavor!, executionNamespace);
+        dependencies.onResourcePreflight?.();
         if (!browserRequest) chatGptTurnSessions.assertOwnerModel(
           `${executionNamespace}:${chatGptThreadOwnershipKey(parsed)}`,
           chatGptEffectiveModelIdentity(parsed),
@@ -676,7 +744,7 @@ export function createChatGptWebAdapter(
                       undefined,
                       freshCompactionTraceId,
                       turnCapabilities,
-                      { onCompactionProgress: idle.reporter() },
+                      { onCompactionProgress: idle.reporter(), admissionSignal: operationSignal },
                     );
                     retainOwnershipUntil(fallbackRuntime.physicalSettlement);
                     try {
@@ -730,6 +798,7 @@ export function createChatGptWebAdapter(
                     }
                     let rawSummary: string;
                     if (source.isActive() && source.runtime.mode === "tools") {
+                      admitResource();
                       const settlement = await settleActiveCompactionSource(
                         parsed,
                         source,
@@ -748,6 +817,7 @@ export function createChatGptWebAdapter(
                         undefined,
                         idle,
                         state => dependencies.onDiagnostic?.(handoffTraceId, state),
+                        admitResource,
                       );
                     } else {
                       if (source.isActive()) {
@@ -767,6 +837,7 @@ export function createChatGptWebAdapter(
                         undefined,
                         idle,
                         state => dependencies.onDiagnostic?.(handoffTraceId, state),
+                        admitResource,
                       );
                     }
                     const summary = canonicalizeCompactionHandoff(parsed, rawSummary);
@@ -829,6 +900,7 @@ export function createChatGptWebAdapter(
                 throw error;
               }
               const handoffError = error instanceof Error ? error : new Error(String(error));
+              if (handoffError instanceof ResourceCapacityError) throw handoffError;
               console.error("[chatgpt-web] structured context handoff failed:", handoffError);
               const upstreamError = handoffError instanceof ChatGptWebAdapterError ? handoffError : undefined;
               emit({
@@ -862,10 +934,11 @@ export function createChatGptWebAdapter(
         if (!browserRequest && !nativeTurnId) throw new Error("ChatGPT web requires native Codex turn_id metadata for browser ownership");
         const traceId = browserRequest ? createHash("sha256").update(executionKey).digest("hex").slice(0, 12) : chatGptWebTraceId(provider, parsed);
         if (incoming.abortSignal?.aborted) throw abortError(incoming.abortSignal);
+        dependencies.onResourcePreflight?.();
         const session = browserRequest
-          ? chatGptTurnSessions.getOrCreate(executionKey, () => startRuntime(parsed, undefined, traceId, turnCapabilities), traceId, ownerKey)
+          ? chatGptTurnSessions.getOrCreate(executionKey, () => startRuntime(parsed, undefined, traceId, turnCapabilities, { admissionSignal: incoming.abortSignal }), traceId, ownerKey)
           : await chatGptTurnSessions.getOrCreateAfterOwnerRetirement(
-            executionKey, ownerKey, () => startRuntime(parsed, environment, traceId, turnCapabilities), traceId,
+            executionKey, ownerKey, () => startRuntime(parsed, environment, traceId, turnCapabilities, { admissionSignal: incoming.abortSignal }), traceId,
             incoming.abortSignal, nativeTurnId, nativeIdentity.threadId, chatGptInstructionLineage(parsed), chatGptEffectiveModelIdentity(parsed),
           );
         const cancelBrowserRequest = () => session.cancel();
@@ -898,6 +971,11 @@ export function createChatGptWebAdapter(
         };
         const emitRoundEvent = (event: AdapterEvent): void => emitRoundEvents([event]);
         try {
+          await withAbort(session.runtime.resourceAdmission ?? Promise.resolve(), incoming.abortSignal);
+          admitResource();
+          // Request authority/admission failures must never retire an existing
+          // physical owner or be relabelled as that owner's submitted failure.
+          try {
           await session.runExclusive(async () => {
             const replay = session.roundEvents(roundKey);
             replayEvents(replay, emit);
@@ -976,11 +1054,19 @@ export function createChatGptWebAdapter(
                 if (results.length !== outstanding.length) {
                   throw new Error(`Codex returned ${results.length} of ${outstanding.length} results for a parallel ChatGPT tool batch`);
                 }
-                for (const message of results) {
-                  await broker!.completeTool(turnToken, message.toolCallId, brokerResult(message));
-                  session.runtime.externalProgress.recordToolResult();
-                  session.markResultDelivered(message.toolCallId);
-                }
+                const finishPublication = session.runtime.externalProgress.beginResultPublication();
+                try {
+                  await session.runtime.resourceLease?.resume(incoming.abortSignal);
+                  for (const message of results) {
+                    await broker!.completeTool(turnToken, message.toolCallId, brokerResult(message));
+                    session.runtime.externalProgress.recordToolResult();
+                    session.markResultDelivered(message.toolCallId);
+                  }
+                } catch (error) {
+                  session.cancel(error instanceof Error ? error : new Error(String(error)));
+                  await session.physicalSettlement;
+                  throw error;
+                } finally { finishPublication(); }
               }
             } else if (session.outstanding().length > 0) {
               throw new Error("Read-only ChatGPT Web runtime cannot own local tool calls");
@@ -1144,6 +1230,7 @@ export function createChatGptWebAdapter(
           session.failRound(roundKey, turnError);
           chatGptWebTurnRetryPolicy.clear(retryKey);
           throw turnError;
+          }
         } finally {
           if (browserRequest) {
             incoming.abortSignal?.removeEventListener("abort", cancelBrowserRequest);
@@ -1165,6 +1252,10 @@ export function createChatGptWebAdapter(
       try {
         emit({ type: "heartbeat" });
         await runChatGptWebTurn();
+        admitResource();
+      } catch (error) {
+        dependencies.onResourceAdmissionFailed?.(error);
+        throw error;
       } finally {
         clearInterval(heartbeat);
       }

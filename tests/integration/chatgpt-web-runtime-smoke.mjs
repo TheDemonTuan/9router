@@ -4,6 +4,8 @@
  * Usage: bun tests/integration/chatgpt-web-runtime-smoke.mjs
  *   --runtime-url http://127.0.0.1:17841 --gateway-port 21127
  *   --runtime-bun /absolute/path/to/bun-1.4.0 --chromium /absolute/path/to/chromium
+ *   --omp /absolute/path/to/omp [--opencode /absolute/path/to/opencode] --proof-dir /absolute/proof/path
+ * omp is the primary coding client when supplied; OpenCode remains an optional additional check.
  * Or: --image cgw-runtime:check --browser-volume 9router-cgw-browser --gateway-port 21127 (native Linux Docker only).
  * Requires gateway Bun 1.4.2, runtime dependencies installed with its frozen lock,
  * and an existing gateway build. Missing BUILD_ID fails before launching processes;
@@ -22,7 +24,7 @@ import { createServer } from "node:net";
 const options = {};
 for (let index = 2; index < process.argv.length; index += 2) {
   const key = process.argv[index];
-  assert(["--runtime-url", "--gateway-port", "--image", "--browser-volume", "--runtime-bun", "--chromium", "--opencode", "--proof-dir"].includes(key), "Unknown smoke flag");
+  assert(["--runtime-url", "--gateway-port", "--image", "--browser-volume", "--runtime-bun", "--chromium", "--omp", "--opencode", "--proof-dir"].includes(key), "Unknown smoke flag");
   assert(process.argv[index + 1] && !process.argv[index + 1].startsWith("--"), "Smoke flag requires a value");
   assert(!Object.hasOwn(options, key), "Duplicate smoke flag"); options[key] = process.argv[index + 1];
 }
@@ -504,6 +506,20 @@ try {
   const capacityEnd = await control();
   assert(capacityEnd.physicalSends >= capacityStart.physicalSends + 1, "Mixed-client smoke did not physically submit the reclaimed slot");
   writeFileSync(clientKeysFile, JSON.stringify({ version: 1, clients: [] }), { mode: 0o600 });
+  let actualOmp;
+  if (options["--omp"]) {
+    stage = "omp executable version prerequisite";
+    assert(options["--omp"] === resolve(options["--omp"]) && existsSync(options["--omp"]), "BLOCKED: --omp requires an absolute installed executable path");
+    const version = command(options["--omp"], ["--version"]);
+    assert(/^(?:omp(?:\/| v?))?\d+\.\d+\.\d+(?:[-+][a-zA-Z0-9.-]+)?$/.test(version), "BLOCKED: omp returned an unsafe or unknown version");
+    const { runOmpSmoke } = await import("./cgw-omp-smoke.mjs");
+    const { buildChatGptWebClientConfig } = await import(join(repository, "src/shared/utils/chatgptWebClientConfig.js"));
+    const catalogRow = { ...sol, id: sol.id.replace(/^cgw\//, ""), context_window: sol.context_length,
+      ...(sol.max_completion_tokens !== undefined ? { max_output: sol.max_completion_tokens } : {}) };
+    stage = "actual omp CLI generated YAML read/write/read-back with scoped approval";
+    actualOmp = await runOmpSmoke({ binary: options["--omp"], version, root, project: join(workspace, "omp"), env: isolated, apiKey,
+      gatewayBase: gateways[0].base, control, catalogRow, buildConfig: buildChatGptWebClientConfig, children, logFiles, signal: runAbort.signal });
+  }
   let actualOpenCode = null;
   if (options["--opencode"]) {
     stage = "actual OpenCode CLI project-scoped read/write/read-back";
@@ -587,6 +603,7 @@ try {
     signedPendingToolInterruptSettled: true,
     genericPublicFourWires: true, emptyCompanionProvisioningGeneric: true, codexUserAgentDoesNotGrantAuthority: true,
     genericFunctionFourWires: true, genericFreshBrowserSends: 16, genericActualMcpCalls: 12, genericLocalReadWriteReadBack: true, actualOpenCode,
+    ...(actualOmp ? { actualOmp } : {}),
     nativeGenericSharedFivePhysicalSlots: true, sixthTurnTypedBusyNoSend: true, genericCancellationSettled: true, nativeCancellationSettled: true, cancelledSlotReclaimed: true,
     actualGatewayProcesses: 2, duplicateConnectionRowsOneProfile: true, durableBlueGreenBinding: true, parallelJtiReplayDenied: true,
     browserOnlyCandidateSkippedForTools: true, allRowsDisabledTypedNoFallbackNoSend: true,

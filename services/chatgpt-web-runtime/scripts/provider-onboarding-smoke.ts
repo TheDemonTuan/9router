@@ -361,6 +361,164 @@ try {
   const importedPage = await runtime.profiles.manager(importedId).maintenancePage();
   assert.equal(await importedPage.evaluate(() => Reflect.get(window, "fixture").sends), 0);
   page.off("request", observeActions);
+  // Use the imported account's real zero-Send catalog, not manufactured Full readiness.
+  const agentCatalogResponse = await page.request.get(`${gateway}/api/providers/chatgpt-web/runtime/profiles`);
+  assert.equal(agentCatalogResponse.status(), 200);
+  const agentProfile = (await agentCatalogResponse.json()).profiles.find((row: { profileId: string }) => row.profileId === importedId);
+  assert(agentProfile); assert.equal(agentProfile.state, "ready"); assert.equal(agentProfile.settings.mode, "browser-only");
+  type AgentCatalogRow = { id: string; display_name: string; context_window: number; max_output?: number; supported_reasoning_levels: string[]; default_reasoning_level: string; capabilities: { generic_tools?: boolean } };
+  const agentModels = agentProfile.models as AgentCatalogRow[];
+  const reasoningModel = agentModels.find(row => row.id === "chatgpt-web/gpt-5.6-sol");
+  const instantModel = agentModels.find(row => row.id === "chatgpt-web/gpt-5.6-sol-instant");
+  assert(reasoningModel && instantModel);
+  assert.notEqual(reasoningModel.capabilities.generic_tools, true);
+  const setupMutations: string[] = [];
+  const observeSetup = (request: { url(): string; method(): string }) => {
+    const url = new URL(request.url());
+    if (url.origin === new URL(gateway).origin && url.pathname.startsWith("/api/") && !["GET", "HEAD", "OPTIONS"].includes(request.method())) setupMutations.push(`${request.method()} ${url.pathname}`);
+  };
+  const setupProfileBefore = runtime.state.profile(importedId);
+  const setupSendsBefore = physicalSends;
+  const setupProviderSendsBefore = providerSends;
+  page.on("request", observeSetup);
+  await page.getByRole("tab", { name: "Coding agents", exact: true }).click();
+  const agents = page.getByRole("region", { name: "ChatGPT Web connection", exact: true });
+  const clientSetup = agents.locator("section").filter({ has: page.getByRole("heading", { name: "Client setup", exact: true }) });
+  const clientSelect = agents.getByRole("combobox", { name: "Select coding agent client", exact: true });
+  const modelSelect = agents.getByRole("combobox", { name: "Verified model", exact: true });
+  const effortSelect = agents.getByRole("combobox", { name: "Reasoning effort", exact: true });
+  await clientSelect.waitFor();
+  assert.equal(await clientSelect.inputValue(), "omp", "omp must be the default client");
+  assert.equal(await clientSelect.evaluate((element: HTMLSelectElement) => element.tagName), "SELECT");
+  const detail = (name: string) => clientSetup.locator("details").filter({ has: page.locator("summary").filter({ hasText: new RegExp(`^${name}$`) }) });
+  const configDetail = detail("View config");
+  const codexDetail = detail("Codex native setup");
+  const compatibilityDetail = detail("Compatibility details");
+  for (const folded of [configDetail, codexDetail, compatibilityDetail]) {
+    assert.equal(await folded.count(), 1);
+    assert.equal(await folded.evaluate(element => element.hasAttribute("open")), false);
+  }
+  await clientSetup.getByText("1. API key", { exact: true }).waitFor();
+  await clientSetup.getByText("2. Add provider to ~/.omp/agent/models.yml", { exact: true }).waitFor();
+  await clientSetup.getByText("3. Start omp", { exact: true }).waitFor();
+  await clientSetup.getByText("export NINE_ROUTER_API_KEY='<your-9router-api-key>'", { exact: true }).waitFor();
+  await clientSetup.getByText(/Preserve all other models\/providers; do not overwrite/).waitFor();
+  await clientSetup.getByText("Your client controls tool execution and approvals.", { exact: true }).waitFor();
+  await clientSetup.getByText("Text only · enable coding tools to use local tools", { exact: true }).waitFor();
+  assert.equal(await clientSetup.getByText("Coding tools ready · executed by omp", { exact: true }).count(), 0);
+  assert.equal(await detail("OpenCode setup snippets").count(), 0, "OpenCode snippets must not be mounted until selected");
+  assert.equal(await clientSetup.locator("pre:visible").count(), 2, "Only the API-key and start commands should be expanded by default");
+  const noOverflow = async () => {
+    const dimensions = await page.evaluate(() => ({ viewport: document.documentElement.clientWidth, width: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) }));
+    assert(dimensions.width <= dimensions.viewport + 1, `Coding agents page overflows horizontally: ${JSON.stringify(dimensions)}`);
+  };
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await noOverflow();
+  await page.screenshot({ path: join(proof, "provider-agents-omp-desktop.png"), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await noOverflow();
+  await page.screenshot({ path: join(proof, "provider-agents-omp-mobile.png"), fullPage: true });
+  const checkOmpSelection = async (row: AgentCatalogRow, effort: string, artifact: string) => {
+    assert.equal(await modelSelect.inputValue(), row.id);
+    assert.equal(await effortSelect.inputValue(), effort);
+    const command = `omp --model '9router-cgw/cgw/${row.id}' --thinking '${effort}'`;
+    await clientSetup.locator("pre:visible").getByText(command, { exact: true }).waitFor();
+    const downloading = page.waitForEvent("download");
+    await clientSetup.getByRole("button", { name: "Download models.yml", exact: true }).click();
+    const download = await downloading;
+    assert.equal(download.suggestedFilename(), "models.yml");
+    const destination = join(proof, artifact);
+    await download.saveAs(destination);
+    assert.equal(await download.failure(), null);
+    const bytes = readFileSync(destination, "utf8");
+    const yaml = Bun.YAML.parse(bytes) as { providers: Record<string, { baseUrl: string; api: string; apiKey: string; headers: Record<string, string>; models: Array<{ id: string; name: string; input: string[]; contextWindow: number; maxTokens?: number; omitMaxOutputTokens: boolean; reasoning: boolean; thinking: { mode: string; efforts: string[]; defaultLevel: string; requiresEffort: boolean }; compat: Record<string, unknown> }> }> };
+    assert.deepEqual(Object.keys(yaml.providers), ["9router-cgw"]);
+    const provider = yaml.providers["9router-cgw"];
+    assert.equal(provider.baseUrl, `${new URL(gateway).origin}/v1`);
+    assert.equal(provider.api, "openai-completions"); assert.equal(provider.apiKey, "NINE_ROUTER_API_KEY");
+    assert.deepEqual(provider.headers, { "x-9router-token-saver": "off" });
+    assert.equal(provider.models.length, 1);
+    const model = provider.models[0]!;
+    assert.equal(model.id, `cgw/${row.id}`); assert.equal(model.name, row.display_name || row.id);
+    assert.deepEqual(model.input, ["text"]); assert.equal(model.contextWindow, row.context_window);
+    if (row.max_output !== undefined) assert.equal(model.maxTokens, row.max_output);
+    else assert.equal(Object.hasOwn(model, "maxTokens"), false);
+    assert.equal(model.omitMaxOutputTokens, true); assert.equal(model.reasoning, true);
+    assert.deepEqual(model.thinking, { mode: "effort", efforts: row.supported_reasoning_levels, defaultLevel: effort, requiresEffort: true });
+    assert.deepEqual(model.compat, { supportsStore: true, supportsSamplingParams: false, supportsReasoningEffort: true, thinkingFormat: "openai" });
+    if (!await configDetail.evaluate(element => element.hasAttribute("open"))) await configDetail.locator("summary").click();
+    assert.equal(await configDetail.locator("code").textContent(), bytes, "Downloaded YAML must match the actual displayed configuration");
+    await noOverflow();
+    await configDetail.locator("summary").click();
+    return bytes;
+  };
+  await modelSelect.selectOption(reasoningModel.id);
+  const defaultYaml = await checkOmpSelection(reasoningModel, reasoningModel.default_reasoning_level, "provider-agents-default-models.yml");
+  const changedEffort = reasoningModel.supported_reasoning_levels.find(value => value !== reasoningModel.default_reasoning_level);
+  assert(changedEffort, "Reasoning fixture must expose a second verified effort");
+  await effortSelect.selectOption(changedEffort);
+  const changedYaml = await checkOmpSelection(reasoningModel, changedEffort, "provider-agents-effort-models.yml");
+  assert.notEqual(changedYaml, defaultYaml);
+  await modelSelect.selectOption(instantModel.id);
+  const instantYaml = await checkOmpSelection(instantModel, instantModel.default_reasoning_level, "provider-agents-instant-models.yml");
+  assert.notEqual(instantYaml, changedYaml);
+  await clientSelect.selectOption("opencode");
+  const openCodeDetail = detail("OpenCode setup snippets");
+  await openCodeDetail.waitFor();
+  assert.equal(await openCodeDetail.evaluate(element => element.hasAttribute("open")), false);
+  assert.equal(await clientSetup.getByRole("button", { name: "Download models.yml", exact: true }).count(), 0);
+  await openCodeDetail.locator("summary").click();
+  const openCode = JSON.parse((await openCodeDetail.locator("pre").first().textContent())!);
+  assert.equal(openCode.model, `9router-cgw/cgw/${instantModel.id}`);
+  assert.equal(openCode.provider["9router-cgw"].options.baseURL, `${new URL(gateway).origin}/v1`);
+  await clientSelect.selectOption("other");
+  assert.equal(await detail("OpenCode setup snippets").count(), 0);
+  await clientSetup.getByText(/Send full conversation history each round with function calling/).waitFor();
+  assert.match((await clientSetup.textContent())!, new RegExp(`cgw/${instantModel.id.replaceAll(".", "\\.")}`));
+  await clientSelect.selectOption("omp");
+  assert.equal(await modelSelect.inputValue(), instantModel.id, "Changing clients must preserve model selection");
+  assert.equal(await effortSelect.inputValue(), instantModel.default_reasoning_level);
+  const clipboardState = await page.evaluateHandle(() => ({ clipboard: navigator.clipboard, descriptor: Object.getOwnPropertyDescriptor(navigator.clipboard, "writeText") }));
+  try {
+    await clipboardState.evaluate(({ clipboard }) => Object.defineProperty(clipboard, "writeText", { configurable: true, value: async () => { throw new DOMException("Fixture clipboard permission denied", "NotAllowedError"); } }));
+    await clientSetup.getByRole("button", { name: "Copy config", exact: true }).click();
+    await agents.getByText("Clipboard access was blocked. Select the snippet or download it.", { exact: true }).waitFor();
+    assert.equal(await agents.getByText("Snippet copied. No credentials are included.", { exact: true }).count(), 0);
+    await configDetail.locator("summary").click();
+    assert.equal(await configDetail.locator("code").isVisible(), true, "Clipboard denial must leave selectable configuration available");
+    await configDetail.locator("summary").click();
+  } finally {
+    await clipboardState.evaluate(({ clipboard, descriptor }) => { if (descriptor) Object.defineProperty(clipboard, "writeText", descriptor); else Reflect.deleteProperty(clipboard, "writeText"); });
+    await clipboardState.dispose();
+  }
+  await clientSetup.getByRole("button", { name: "Set up coding tools", exact: true }).click();
+  await agents.getByRole("region", { name: "Harness setup", exact: true }).waitFor();
+  assert.equal(runtime.profiles.ready(importedId), true, "Text-only CTA must not change session or harness readiness");
+  assert.deepEqual(runtime.state.profile(importedId), setupProfileBefore);
+  // Remove genuine probe evidence to exercise the empty-catalog path, then explicitly reverify below.
+  runtime.profiles.invalidate(importedId, "profile_probe_failed");
+  const emptyRefresh = page.waitForResponse(r => r.url().endsWith("/runtime/profiles"));
+  await page.getByRole("tab", { name: "Diagnostics", exact: true }).click();
+  await page.getByRole("button", { name: "Refresh diagnostics", exact: true }).click();
+  await emptyRefresh;
+  await page.getByRole("tab", { name: "Coding agents", exact: true }).click();
+  await agents.getByText("Verify a model and its context limit before downloading client configuration.", { exact: true }).waitFor();
+  assert.equal(await modelSelect.count(), 0); assert.equal(await effortSelect.count(), 0);
+  assert.equal(await clientSelect.inputValue(), "omp");
+  assert.equal(await clientSetup.getByRole("button", { name: /^Download / }).count(), 0);
+  assert.equal(await clientSetup.getByRole("button", { name: /^Copy/ }).count(), 0);
+  assert.equal(await clientSetup.locator("pre").count(), 0, "Empty catalog must not retain a stale snippet");
+  await noOverflow();
+  assert.deepEqual(setupMutations, [], "Setup, selectors, copy/download and CTA must not mutate gateway/runtime state");
+  page.off("request", observeSetup);
+  assert.equal(physicalSends, setupSendsBefore); assert.equal(providerSends, setupProviderSendsBefore);
+  assert.equal(await importedPage.evaluate(() => Reflect.get(window, "fixture").sends), 0);
+  await page.getByRole("tab", { name: "Connection", exact: true }).click();
+  const restoreAgentCatalog = page.waitForResponse(r => r.url().endsWith("/runtime/session/verify") && r.request().method() === "POST");
+  await page.getByRole("button", { name: "Verify saved session", exact: true }).click();
+  assert.equal((await restoreAgentCatalog).status(), 200);
+  assert.equal(runtime.profiles.ready(importedId), true); assert.equal(physicalSends, setupSendsBefore);
+  const codingAgentsProof = { defaultClient: "omp", threeStepSetup: true, foldedConfigAndCodex: true, actualYamlDownloadsParsed: 3, modelAndEffortUpdates: true, openCodeOnlyOnSelection: true, emptyCatalogUnavailable: true, clipboardDeniedGuidance: true, textOnlySetupCta: true, desktopViewport: { width: 1440, height: 900 }, mobileViewport: { width: 390, height: 844 }, horizontalOverflow: false, setupMutations: setupMutations.length, setupPhysicalSends: physicalSends - setupSendsBefore };
   const verificationSends = physicalSends;
   const importedConnections = await page.request.get(`${gateway}/api/providers`);
   assert.equal((await importedConnections.json()).connections.find((row: { id: string }) => row.id === secondConnection.id).testStatus, "active");
@@ -388,7 +546,7 @@ try {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: join(proof, "provider-model-test-mobile.png"), fullPage: true });
   const inferenceSends = physicalSends - verificationSends;
-  writeFileSync(join(proof, "result.json"), JSON.stringify({ gate: "provider-onboarding-ui", automaticProfile: true, providerConnectionPersisted: true, actualEmbeddedRfb: true, keyboardAndPointerForwarded: true, fullWindowWorkspace: true, actualSizeInput: true, sameLeaseResume: true, humanOnlyLogin: true, explicitLoginVerification: true, prematureVerificationRestored: true, persistedNativeCookie: true, readyAfterBrowserSignIn: true, liveCatalog: true, closedViewerRejected: true, distinctProfiles: true, loopbackOnlyVnc: true, savedSessionReused: true, actualExporterImport: true, accountMismatchPreserved: true, startupProfileIsolated: true, importedContextReopened: true, importWithoutNativeLogin: true, connectionReadinessReconciled: true, staleCatalogWarningCleared: true, dashboardModelInference: true, probeSends: verificationSends, inferenceSends, liveChatGpt: false }));
+  writeFileSync(join(proof, "result.json"), JSON.stringify({ gate: "provider-onboarding-ui", automaticProfile: true, providerConnectionPersisted: true, actualEmbeddedRfb: true, keyboardAndPointerForwarded: true, fullWindowWorkspace: true, actualSizeInput: true, sameLeaseResume: true, humanOnlyLogin: true, explicitLoginVerification: true, prematureVerificationRestored: true, persistedNativeCookie: true, readyAfterBrowserSignIn: true, liveCatalog: true, closedViewerRejected: true, distinctProfiles: true, loopbackOnlyVnc: true, savedSessionReused: true, actualExporterImport: true, accountMismatchPreserved: true, startupProfileIsolated: true, importedContextReopened: true, importWithoutNativeLogin: true, connectionReadinessReconciled: true, staleCatalogWarningCleared: true, codingAgents: codingAgentsProof, dashboardModelInference: true, probeSends: verificationSends, inferenceSends, liveChatGpt: false }));
   console.log("CGW_PROVIDER_ONBOARDING_SMOKE_OK");
 } catch (error) {
   console.error("CGW_PROVIDER_ONBOARDING_SMOKE_FAILED", error);
@@ -396,7 +554,7 @@ try {
   throw error;
 } finally {
   // These are synthetic offline fixtures, not real-account screenshots or credentials.
-  for (const name of ["result.json", "provider-failed.png", "provider-embedded-login.png", "provider-connected-ready.png", "provider-import-ready.png", "provider-import-mobile.png", "provider-model-test.png", "provider-model-test-mobile.png"]) {
+  for (const name of ["result.json", "provider-failed.png", "provider-embedded-login.png", "provider-connected-ready.png", "provider-import-ready.png", "provider-import-mobile.png", "provider-agents-omp-desktop.png", "provider-agents-omp-mobile.png", "provider-agents-default-models.yml", "provider-agents-effort-models.yml", "provider-agents-instant-models.yml", "provider-model-test.png", "provider-model-test-mobile.png"]) {
     const path = join(proof, name);
     if (existsSync(path)) chmodSync(path, 0o644);
   }

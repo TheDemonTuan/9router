@@ -7,14 +7,15 @@ import { RuntimeState, RuntimeStateError } from "./runtime-state";
 import { RuntimeProfiles } from "./profiles";
 import { browserProfileWork } from "./browser/manager";
 import { ViewerTransport, LOGIN_ID_PATTERN, VIEWER_MAX_MESSAGE, VIEWER_MAX_BUFFER } from "./viewer-transport";
-import { browserProviderConfig, loadRuntimeConfig, providerConfig, tokenMatches } from "./config";
+import { browserProviderConfig, loadRuntimeConfig, providerConfig, tokenMatches, DEFAULT_RUNTIME_RESOURCE_LIMITS } from "./config";
+import { RuntimeResourceBudget, ResourceCapacityError } from "./resource-budget";
 import type { RuntimeConfig } from "./config";
 import { loadProfileTunnelConfigs } from "./tunnel";
 import { AuthorityError, sha256, validateAuthorityClaims } from "./authority";
 import type { AuthorityClaims } from "./authority";
 import { createChatGptWebAdapter, chatGptWebExecutionNamespace } from "./adapters/chatgpt-web";
 import { chatGptTurnSessions } from "./adapters/chatgpt-web/turn-execution";
-import { cancelStructuredCompactionNativeTurn } from "./adapters/chatgpt-web/compaction-handoff";
+import { cancelStructuredCompactionNativeTurn, hasActiveStructuredCompactionNativeTurn } from "./adapters/chatgpt-web/compaction-handoff";
 import { brokerWorkSnapshot, closeTurnBrokers } from "./adapters/chatgpt-web/turn-broker";
 import { extractChatGptCompactionSourceRevision, extractChatGptTurnIdentity } from "./adapters/chatgpt-web/environment";
 import { rememberCompactionContinuation } from "./adapters/chatgpt-web/compaction-continuation";
@@ -35,6 +36,7 @@ import { BrowserRequestError, validateBrowserResponsesRequest } from "../browser
 import { AgentRequestError, validateAgentResponsesRequest } from "../agent-request.js";
 import { AgentTurnError, closeAgentTurnBrokers } from "./agent-turns";
 import { createChatGptWebAgentAdapter } from "./agent-adapter";
+import { ChatGptWebAdapterError } from "./adapters/chatgpt-web/adapter-error";
 
 export interface BrowserRuntimeEnvelope {
   protocolVersion: 1; profileId: string; profileEpoch: string; request: Record<string, unknown>;
@@ -100,14 +102,16 @@ export function validateRuntimeEnvelope(value: unknown, headerProfile: string | 
     effectiveReasoning: envelope.effectiveReasoning, transformedRequestSha256 };
 }
 interface ViewerData { loginId: string; transport?: ViewerTransport; }
-export interface RuntimeService { server: Server<ViewerData>; state: RuntimeState; profiles: RuntimeProfiles; initialized: Promise<void>; close(): Promise<void>; }
+export interface RuntimeService { server: Server<ViewerData>; state: RuntimeState; profiles: RuntimeProfiles; resourceBudget: RuntimeResourceBudget; initialized: Promise<void>; close(): Promise<void>; }
 export function startRuntime(config: RuntimeConfig): RuntimeService {
   const singleton = new RuntimeSingletonLock(config.dataDir);
   let state: RuntimeState;
   try { state = new RuntimeState(config.dataDir); } catch (error) { singleton.close(); throw error; }
   const tunnelFile = process.env.CGW_TUNNEL_PROFILES_FILE;
   let profiles: RuntimeProfiles;
-  try { profiles = new RuntimeProfiles(config, state, loadProfileTunnelConfigs(tunnelFile, config.dataDir)); }
+  const resourceBudget = new RuntimeResourceBudget(config.resourceLimits ?? DEFAULT_RUNTIME_RESOURCE_LIMITS);
+  if (state.fence()) resourceBudget.drain();
+  try { profiles = new RuntimeProfiles(config, state, loadProfileTunnelConfigs(tunnelFile, config.dataDir), resourceBudget); }
   catch (error) { state.close(); singleton.close(); throw error; }
   let activeHttpRequests = 0;
   const agentAborts = new Set<AbortController>();
@@ -122,24 +126,36 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
     lifecycleTail = operation.catch(() => {});
     return operation;
   };
-  const activity = () => ({ activeHttpRequests, activeBrowserTurns: state.listProfiles().reduce((count, profile) => count + browserProfileWork(profile.profileId).activeTurns, 0), pendingToolCalls: brokerWorkSnapshot().pendingToolCalls });
+  const activity = () => ({ activeHttpRequests, activeBrowserTurns: state.listProfiles().reduce((count, profile) => count + browserProfileWork(profile.profileId, resourceBudget).activeTurns, 0), pendingToolCalls: brokerWorkSnapshot().pendingToolCalls });
   const hasPhysicalWork = () => {
     const broker = brokerWorkSnapshot();
     return activeHttpRequests > 0 || agentAborts.size > 0 || chatGptTurnSessions.physicalWorkCount() > 0 || broker.owners > 0
       || broker.pendingToolCalls > 0 || broker.activeMcpRequests > 0 || broker.openSockets > 0 || !profiles.physicalIdle();
   };
   const errorResponse = (error: unknown) => {
-    const typed = error instanceof RuntimeStateError || error instanceof AuthorityError || error instanceof SessionTransferError || error instanceof BrowserRequestError || error instanceof AgentRequestError || error instanceof AgentTurnError;
+    if (error instanceof ResourceCapacityError) return Response.json({ error: { type: error.errorType,
+      code: error.code, message: error.message, retryable: false, submission_state: error.submission_state } },
+      { status: error.status, headers: { ...error.headers, "Cache-Control": "no-store" } });
+    const typed = error instanceof RuntimeStateError || error instanceof AuthorityError || error instanceof SessionTransferError || error instanceof BrowserRequestError || error instanceof AgentRequestError || error instanceof AgentTurnError || error instanceof ChatGptWebAdapterError;
     const code = typed ? error.code : "runtime_request_failed";
     const status = typed ? error.status : 500;
     return Response.json({ error: { type: "runtime_error", code, message: typed ? error.message : "Runtime request failed",
-      retryable: false, submission_state: typed ? "not_sent" : "unknown" } }, { status, headers: { "x-9router-no-fallback": "true", "Cache-Control": "no-store" } });
+      retryable: false, submission_state: typed ? "not_sent" : "unknown" } }, { status, headers: { "x-9router-no-fallback": "true", "x-should-retry": "false", "Cache-Control": "no-store" } });
   };
   const handleResponse = async (request: Request, compact: boolean): Promise<Response> => {
     const envelope = validateRuntimeEnvelope(await readJsonRequestBody(request), request.headers.get("x-cgw-profile-id"), compact);
+    if (state.profile(envelope.profileId).epoch !== envelope.profileEpoch) throw new RuntimeStateError("profile_epoch_mismatch", "Account epoch changed", 409);
+    const ownerNamespace = createHash("sha256").update(JSON.stringify([envelope.profileId, envelope.profileEpoch, envelope.authority.clientId])).digest("hex");
+    const activeSession = chatGptTurnSessions.scopedSession(ownerNamespace, envelope.authority.threadId, envelope.authority.turnId);
+    const binding = state.binding(envelope.authority.clientId, envelope.authority.threadId);
+    if (!binding || binding.status !== "active" || binding.profileId !== envelope.profileId || binding.profileEpoch !== envelope.profileEpoch)
+      throw new RuntimeStateError("profile_mismatch", "Request does not match durable profile binding", 409);
+    const activeCompaction = hasActiveStructuredCompactionNativeTurn(ownerNamespace, envelope.authority.threadId, envelope.authority.turnId);
     await profiles.refreshReadiness(envelope.profileId);
+    if (!activeSession?.isActive() && !activeCompaction) await profiles.prepareForRequest(envelope.profileId, request.signal);
     return runtimeExecutionScope.run({ profileId: envelope.profileId, profileEpoch: envelope.profileEpoch, clientId: envelope.authority.clientId,
-      pathFlavor: envelope.authority.pathFlavor, verifiedEnvironment: envelope.authority.environment }, async () => {
+      pathFlavor: envelope.authority.pathFlavor, verifiedEnvironment: envelope.authority.environment,
+      resourceBudget, verifiedParentThreadId: envelope.authority.parentThreadId }, async () => {
     const profile = state.profile(envelope.profileId), evidence = profiles.evidence(profile.profileId);
     if (profile.epoch !== envelope.profileEpoch) throw new RuntimeStateError("profile_epoch_mismatch", "Account epoch changed");
     const row = evidence.models.find(row => row.id === envelope.effectiveModel);
@@ -164,11 +180,31 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
     parsed.modelId = route.backendModel; parsed.options.reasoning = route.adapterEffort;
     const provider = providerConfig({ profileId: profile.profileId, profileEpoch: profile.epoch, clientId: authority.clientId,
       pathFlavor: authority.pathFlavor!, verifiedEnvironment: { ...authority.environment!, tools: parsed.context.tools ?? [] },
-      settings: profile.settings, capabilities: evidence.capabilities, dataDir: config.dataDir, contextWindow: row.context_window });
+      settings: profile.settings, capabilities: evidence.capabilities, dataDir: config.dataDir, contextWindow: row.context_window,
+      browserMode: resourceBudget.limits.browserMode, chromiumExecutable: config.chromiumExecutable });
     const namespace = chatGptWebExecutionNamespace(provider);
     const existing = chatGptTurnSessions.scopedSession(namespace, authority.threadId, authority.turnId);
-    validateAuthorityClaims(authority);
-    state.admit(authority, profile.profileId, profile.epoch, JSON.stringify(modelIdentity), existing?.isActive() === true);
+    const onResourcePreflight = () => {
+      request.signal.throwIfAborted();
+      validateAuthorityClaims(authority);
+      state.assertCanAdmit(authority, profile.profileId, profile.epoch, JSON.stringify(modelIdentity),
+        existing?.isActive() === true || hasActiveStructuredCompactionNativeTurn(namespace, authority.threadId, authority.turnId));
+    };
+    onResourcePreflight();
+    const admission = Promise.withResolvers<void>();
+    let admitted = false;
+    const onResourceAdmitted = () => {
+      if (admitted) return;
+      request.signal.throwIfAborted();
+      validateAuthorityClaims(authority);
+      const currentProfile = state.profile(profile.profileId);
+      if (currentProfile.epoch !== profile.epoch || currentProfile.revision !== profile.revision
+        || profiles.evidence(profile.profileId).catalogRevision !== evidence.catalogRevision)
+        throw new RuntimeStateError("profile_revision_conflict", "Profile changed while waiting for capacity", 409);
+      state.admit(authority, profile.profileId, profile.epoch, JSON.stringify(modelIdentity), existing?.isActive() === true || activeCompaction);
+      admitted = true;
+      admission.resolve();
+    };
     const compaction = parsed._compactionRequest === true;
     const compactionItem = compaction && parsed._compactionResponseFormat !== "message";
     if (compaction) {
@@ -176,11 +212,15 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
       delete parsed.context.tools; delete parsed.options.toolChoice; delete parsed.options.parallelToolCalls;
       parsed.context.messages.push({ role: "user", content: COMPACT_PROMPT, timestamp: Date.now() });
     }
-    const adapter = createChatGptWebAdapter(provider, { onDiagnostic: (traceId, diagnostic) => profiles.noteApproval(profile.profileId, traceId, diagnostic.promptInstance) });
+    const adapter = createChatGptWebAdapter(provider, {
+      onDiagnostic: (traceId, diagnostic) => profiles.noteApproval(profile.profileId, traceId, diagnostic.promptInstance),
+      onResourcePreflight, onResourceAdmitted, onResourceAdmissionFailed: admission.reject,
+    });
     const queue = new AsyncEventQueue<AdapterEvent>();
     const abort = new AbortController();
     const onDisconnect = () => abort.abort();
     request.signal.addEventListener("abort", onDisconnect, { once: true });
+    if (request.signal.aborted) onDisconnect();
     const completed = (response: Record<string, unknown>) => {
       if (!compaction) { rememberResponseState(parsed._rawBody, response, { force: true }); return; }
       if (response.status !== "completed" || !Array.isArray(response.output)) return;
@@ -196,20 +236,23 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
     };
     const run = async () => {
       try { await adapter.runTurn!(parsed, { headers: new Headers(), abortSignal: abort.signal }, event => {
-        if (event.type === "error" && ["login_required", "session_expired", "model_version_unavailable"].includes(event.code || "")) profiles.invalidate(profile.profileId, event.code!);
+        if (event.type === "error" && ["login_required", "session_expired", "model_version_unavailable", "headless_interaction_required"].includes(event.code || "")) profiles.invalidate(profile.profileId, event.code!);
         queue.push(event);
       }); }
       catch (error) {
+        admission.reject(error);
         const code = error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : "runtime_error";
-        if (["login_required", "session_expired", "model_version_unavailable"].includes(code)) profiles.invalidate(profile.profileId, code);
-        queue.push({ type: "error", message: "ChatGPT Web turn failed", code, retryable: false });
+        if (["login_required", "session_expired", "model_version_unavailable", "headless_interaction_required"].includes(code)) profiles.invalidate(profile.profileId, code);
+        queue.push({ type: "error", message: "ChatGPT Web turn failed", code, retryable: false,
+          ...(error instanceof ResourceCapacityError ? { status: error.status, errorType: error.errorType, submission_state: error.submission_state } : {}) });
       }
       finally {
-        state.settleClaim(authority.clientId, authority.jti);
+        if (!admitted) admission.reject(new RuntimeStateError("runtime_request_failed", "Native admission did not complete", 503));
+        if (admitted) state.settleClaim(authority.clientId, authority.jti);
         profiles.clearApproval(profile.profileId);
-        if (compaction) state.settleTurn(profile.profileId, profile.epoch, authority.clientId, authority.threadId, authority.turnId);
+        if (admitted && compaction) state.settleTurn(profile.profileId, profile.epoch, authority.clientId, authority.threadId, authority.turnId);
         const session = chatGptTurnSessions.scopedSession(namespace, authority.threadId, authority.turnId);
-        if (session) void session.physicalSettlement.then(() => state.settleTurn(profile.profileId, profile.epoch, authority.clientId, authority.threadId, authority.turnId));
+        if (admitted && session) void session.physicalSettlement.then(() => state.settleTurn(profile.profileId, profile.epoch, authority.clientId, authority.threadId, authority.turnId));
         request.signal.removeEventListener("abort", onDisconnect); queue.close();
       }
     };
@@ -218,13 +261,14 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
       if (tool.namespace) toolNsMap.set(namespacedToolName(tool.namespace, tool.name), { namespace: tool.namespace, name: tool.name });
       if (tool.freeform) freeformToolNames.add(tool.name); if (tool.toolSearch) toolSearchToolNames.add(tool.name);
     }
+    const running = run();
+    await admission.promise;
     if (parsed.stream && !compact) {
-      void run();
       return new Response(bridgeToResponsesSSE(queue, route.slug, toolNsMap, freeformToolNames, toolSearchToolNames,
         () => abort.abort(), 2000, { hideThinkingSummary: parsed.options.hideThinkingSummary, ...(compactionItem ? { compaction: true } : {}), onCompletedResponse: completed }),
-      { headers: { "content-type": "text/event-stream", "cache-control": "no-cache", "x-accel-buffering": "no", "x-9router-no-fallback": "true" } });
+      { headers: { "content-type": "text/event-stream", "cache-control": "no-cache", "x-accel-buffering": "no", "x-9router-no-fallback": "true", "x-should-retry": "false" } });
     }
-    await run();
+    await running;
     const response = buildResponseJSON(await queue.collect(), route.slug, { toolNsMap, freeformToolNames, toolSearchToolNames,
       hideThinkingSummary: parsed.options.hideThinkingSummary, ...(compactionItem ? { compaction: true } : {}) });
     completed(response);
@@ -239,7 +283,9 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
   const handleUnsignedResponse = async (request: Request, mode: "browser" | "agent"): Promise<Response> => {
     if (state.fence() || shuttingDown) throw new RuntimeStateError("runtime_draining", "Runtime is draining", 503);
     const envelope = validateBrowserRuntimeEnvelope(await readJsonRequestBody(request), request.headers.get("x-cgw-profile-id"), mode);
+    if (state.profile(envelope.profileId).epoch !== envelope.profileEpoch) throw new RuntimeStateError("profile_epoch_mismatch", "Account epoch changed", 409);
     await profiles.refreshReadiness(envelope.profileId);
+    await profiles.prepareForRequest(envelope.profileId, request.signal);
     if (state.fence() || shuttingDown) throw new RuntimeStateError("runtime_draining", "Runtime is draining", 503);
     const profile = state.profile(envelope.profileId);
     if (mode === "agent" && profile.settings.mode !== "full") throw new RuntimeStateError("agent_tools_unavailable", "Coding tools require a verified Full profile", 503);
@@ -253,19 +299,37 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
     if (mode === "agent" && row.capabilities.generic_tools !== true) throw new RuntimeStateError("agent_tools_unavailable", "Generic tool handoff has not passed runtime compatibility checks", 503);
     const route = requireChatGptWebModelRoute(envelope.effectiveModel, evidence.capabilities, envelope.effectiveReasoning);
     if (route.interactionMode !== "automatic") throw new RuntimeStateError("model_version_unavailable", "Manual routes are not supported", 400);
-    if (browserProfileWork(profile.profileId).activeTurns >= MAX_BROWSER_TURNS) throw new RuntimeStateError("provider_busy", "ChatGPT profile has five physical browser turns", 503);
     const requestId = randomUUID();
-    return runtimeExecutionScope.run({ profileId: profile.profileId, profileEpoch: profile.epoch, clientId: `${mode}:${requestId}` }, async () => {
+    const resourceLease = await resourceBudget.acquire({ profileId: profile.profileId, kind: "new", signal: request.signal });
+    let physicalRunStarted = false;
+    try {
+    request.signal.throwIfAborted();
+    if (state.fence()) throw new ResourceCapacityError("Runtime admission is drained");
+    const currentProfile = state.profile(profile.profileId);
+    if (currentProfile.epoch !== profile.epoch || currentProfile.revision !== profile.revision
+      || profiles.evidence(profile.profileId).catalogRevision !== evidence.catalogRevision)
+      throw new RuntimeStateError("profile_revision_conflict", "Profile changed while waiting for capacity", 409);
+    return await runtimeExecutionScope.run({ profileId: profile.profileId, profileEpoch: profile.epoch, clientId: `browser:${requestId}`, resourceBudget, resourceLease }, async () => {
       const parsed = parseRequest(envelope.request, { preserveInstructionOrder: mode === "agent" });
       parsed._chatgptEffectiveModelIdentity = { routeId: route.slug, browserFamily: route.modelFamily || route.backendModel, reasoning: envelope.effectiveReasoning };
       parsed._chatgptModelFamily = route.modelFamily;
       parsed.modelId = route.backendModel; parsed.options.reasoning = route.adapterEffort;
       const provider = browserProviderConfig({ profileId: profile.profileId, profileEpoch: profile.epoch, requestId,
-        settings: profile.settings, capabilities: evidence.capabilities, dataDir: config.dataDir, contextWindow: row.context_window });
+        settings: profile.settings, capabilities: evidence.capabilities, dataDir: config.dataDir, contextWindow: row.context_window,
+        browserMode: resourceBudget.limits.browserMode, chromiumExecutable: config.chromiumExecutable });
+      const admission = Promise.withResolvers<void>();
+      let admitted = false;
+      const onResourceAdmitted = () => {
+        if (admitted) return;
+        request.signal.throwIfAborted();
+        if (state.fence()) throw new ResourceCapacityError("Runtime admission is drained");
+        admitted = true; admission.resolve();
+      };
       const adapter = mode === "agent" ? createChatGptWebAgentAdapter(provider, { requestId, profileId: profile.profileId,
         profileEpoch: profile.epoch, model: envelope.effectiveModel, effort: envelope.effectiveReasoning,
-        socketPath: join(config.dataDir, "profiles", profile.profileId, "run", "agent-turns.sock") })
-        : createChatGptWebAdapter(provider, { browserRequestId: requestId });
+        socketPath: join(config.dataDir, "profiles", profile.profileId, "run", "agent-turns.sock"),
+        onResourceAdmitted, onResourceAdmissionFailed: admission.reject })
+        : createChatGptWebAdapter(provider, { browserRequestId: requestId, onResourceAdmitted, onResourceAdmissionFailed: admission.reject });
       const queue = new AsyncEventQueue<AdapterEvent>();
       const abort = new AbortController();
       if (mode === "agent") agentAborts.add(abort);
@@ -275,29 +339,36 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
       const run = async () => {
         try {
           await adapter.runTurn!(parsed, { headers: new Headers(), abortSignal: abort.signal }, event => {
-            if (event.type === "error" && ["login_required", "session_expired", "model_version_unavailable"].includes(event.code || "")) profiles.invalidate(profile.profileId, event.code!);
+            if (event.type === "error" && ["login_required", "session_expired", "model_version_unavailable", "headless_interaction_required"].includes(event.code || "")) profiles.invalidate(profile.profileId, event.code!);
             queue.push(event);
           });
         } catch (error) {
+          admission.reject(error);
           const code = error && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : "runtime_error";
-          if (["login_required", "session_expired", "model_version_unavailable"].includes(code)) profiles.invalidate(profile.profileId, code);
-          queue.push({ type: "error", message: "ChatGPT Web browser turn failed", code, retryable: false });
+          if (["login_required", "session_expired", "model_version_unavailable", "headless_interaction_required"].includes(code)) profiles.invalidate(profile.profileId, code);
+          queue.push({ type: "error", message: "ChatGPT Web browser turn failed", code, retryable: false,
+            ...(error instanceof ResourceCapacityError ? { status: error.status, errorType: error.errorType, submission_state: error.submission_state } : {}) });
         } finally {
+          if (!admitted) admission.reject(new RuntimeStateError("runtime_request_failed", "Browser admission did not complete", 503));
           agentAborts.delete(abort);
+          resourceLease.release();
           request.signal.removeEventListener("abort", onDisconnect);
           queue.close();
         }
       };
-      const headers = { "cache-control": "no-store", "x-9router-no-fallback": "true" };
+      const headers = { "cache-control": "no-store", "x-9router-no-fallback": "true", "x-should-retry": "false" };
+      physicalRunStarted = true;
+      const running = run();
+      await admission.promise;
       if (parsed.stream) {
-        void run();
         return new Response(bridgeToResponsesSSE(queue, route.slug, undefined, undefined, undefined, () => abort.abort(), 2000,
           { hideThinkingSummary: parsed.options.hideThinkingSummary }),
           { headers: { ...headers, "content-type": "text/event-stream", "x-accel-buffering": "no" } });
       }
-      await run();
+      await running;
       return Response.json(buildResponseJSON(await queue.collect(), route.slug, { hideThinkingSummary: parsed.options.hideThinkingSummary }), { headers });
     });
+    } catch (error) { if (!physicalRunStarted) resourceLease.release(); throw error; }
   };
   const server = Bun.serve<ViewerData>({ hostname: config.host, port: config.port, idleTimeout: 0, maxRequestBodySize: 128 * 1024 * 1024 + 16_384,
     async fetch(request, server) {
@@ -323,11 +394,27 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
         }
         if (request.method === "GET" && path === "/healthz") return Response.json({ service: SERVICE_NAME, protocolVersion: PROTOCOL_VERSION,
           version: VERSION, upstreamRevision: UPSTREAM_REVISION, draining: !!state.fence(), ...activity() });
+        if (request.method === "GET" && path === "/admin/resources") return Response.json(profiles.resourceSnapshot(), { headers: { "Cache-Control": "no-store" } });
+        if (request.method === "POST" && path === "/v1/profiles/prepare") {
+          if (url.search) throw new RuntimeStateError("invalid_request", "Prepare does not accept query parameters", 400);
+          const body = record(await readJsonRequestBody(request));
+          if (Object.keys(body).length !== 2 || !Object.hasOwn(body, "profileId") || !Object.hasOwn(body, "profileEpoch")
+            || typeof body.profileId !== "string" || typeof body.profileEpoch !== "string" || !body.profileEpoch)
+            throw new RuntimeStateError("invalid_request", "Exact profile identity and epoch required", 400);
+          const profileId = validateProfileId(body.profileId);
+          const header = request.headers.get("x-cgw-profile-id");
+          if (header !== profileId) throw new RuntimeStateError("profile_mismatch", "Profile header/body mismatch", 400);
+          if (state.profile(profileId).epoch !== body.profileEpoch) throw new RuntimeStateError("profile_epoch_mismatch", "Account epoch changed", 409);
+          await profiles.prepareForRequest(profileId, request.signal);
+          request.signal.throwIfAborted();
+          if (state.profile(profileId).epoch !== body.profileEpoch) throw new RuntimeStateError("profile_epoch_mismatch", "Account epoch changed", 409);
+          return Response.json(profiles.catalog(profileId), { headers: { "Cache-Control": "no-store" } });
+        }
         if (request.method === "GET" && path === "/readyz") {
           const profileId = request.headers.get("x-cgw-profile-id");
           if (!initializing && !state.fence()) await Promise.all(state.listProfiles().map(profile => profiles.refreshReadiness(profile.profileId)));
           const ready = !initializing && !shuttingDown && (profileId ? profiles.ready(profileId) : state.listProfiles().some(profile => profiles.ready(profile.profileId)));
-          return Response.json({ ready, state: state.fence() ? "draining" : ready ? "ready" : "login_required" }, { status: ready ? 200 : 503 });
+          return Response.json({ ready, state: state.fence() ? "draining" : ready ? "ready" : profileId ? profiles.status(profileId).state : "session_unverified" }, { status: ready ? 200 : 503 });
         }
         if (request.method === "GET" && path === "/v1/web-models") {
           const profileId = request.headers.get("x-cgw-profile-id"); if (!profileId) throw new RuntimeStateError("profile_required", "Profile header required", 400);
@@ -339,9 +426,26 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
           const body = record(await readJsonRequestBody(request));
           if (typeof body.clientId !== "string" || !body.clientId || typeof body.threadId !== "string" || !body.threadId || !Array.isArray(body.candidateProfileIds)
             || body.candidateProfileIds.some(value => typeof value !== "string")) throw new RuntimeStateError("invalid_binding", "Invalid thread binding candidates", 400);
-          await Promise.all((body.candidateProfileIds as string[]).map(id => profiles.refreshReadiness(id)));
-          return Response.json(state.resolveBinding({ clientId: body.clientId, threadId: body.threadId, candidateProfileIds: body.candidateProfileIds,
-            ...(typeof body.requestedProfileId === "string" ? { requestedProfileId: body.requestedProfileId } : {}), ready: id => profiles.ready(id) }));
+          let candidateProfileIds: string[];
+          let requestedProfileId: string | undefined;
+          try {
+            candidateProfileIds = body.candidateProfileIds.map(id => validateProfileId(id));
+            if (body.requestedProfileId !== undefined) requestedProfileId = validateProfileId(body.requestedProfileId);
+          } catch { throw new RuntimeStateError("invalid_binding", "Invalid thread binding profile identity", 400); }
+          const options = { clientId: body.clientId, threadId: body.threadId, candidateProfileIds,
+            ...(requestedProfileId ? { requestedProfileId } : {}) };
+          if (state.binding(options.clientId, options.threadId)) {
+            // Exact retained ownership resolves without waking or probing any account.
+            return Response.json(state.resolveBinding({ ...options, ready: id => profiles.ready(id) }));
+          }
+          if (state.fence() || shuttingDown) throw new RuntimeStateError("runtime_draining", "New thread binding denied while drained", 503);
+          const configured = state.listProfiles();
+          const selected = candidateProfileIds.find(id => (!requestedProfileId || id === requestedProfileId)
+            && configured.some(profile => profile.profileId === id));
+          if (!selected) throw new RuntimeStateError("profile_unavailable", "No configured candidate profile", 409);
+          await profiles.prepareForRequest(selected, request.signal);
+          request.signal.throwIfAborted();
+          return Response.json(state.resolveBinding({ ...options, ready: id => id === selected && profiles.ready(id) }));
         }
         if (request.method === "POST" && (path === "/v1/responses" || path === "/v1/responses/compact" || path === "/v1/browser/responses" || path === "/v1/agent/responses")) {
           activeHttpRequests++;
@@ -440,7 +544,8 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
           }
           if (request.method === "POST" && path === "/admin/browser/restart") {
             return await lifecycle(async () => {
-              const manager = profiles.manager(validateProfileId(body.profileId)); if (!manager.isIdle) throw new RuntimeStateError("profile_active", "Browser restart requires idle profile");
+              const manager = profiles.manager(validateProfileId(body.profileId));
+              if (!manager.isIdle && !manager.requiresPhysicalRecovery) throw new RuntimeStateError("profile_active", "Browser restart requires idle profile");
               await manager.close(); await profiles.probe(body.profileId as string); return Response.json(profiles.status(body.profileId as string));
             });
           }
@@ -454,6 +559,7 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
           }
           if (request.method === "POST" && path === "/admin/drain") return await lifecycle(async () => {
             const result = state.drain(String(body.operationId || ""));
+            resourceBudget.drain(); profiles.cancelPreparations();
             for (const abort of agentAborts) abort.abort(new RuntimeStateError("runtime_draining", "Runtime is draining", 503));
             await profiles.closeViewer();
             return Response.json(result);
@@ -475,6 +581,7 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
                 finally { initializing = false; }
               }
             });
+            resourceBudget.undrain();
             return Response.json({ resumed: true });
           });
         }
@@ -492,10 +599,15 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
       close(ws) { ws.data.transport?.close(); },
     },
   });
+  const sweepTimer = setInterval(() => {
+    if (!shuttingDown && !initializing) void profiles.sweepIdle().catch(() => {});
+  }, 30_000);
+  sweepTimer.unref();
   let closing: Promise<void> | undefined;
   const close = () => {
     if (closing) return closing;
     shuttingDown = true;
+    clearInterval(sweepTimer); resourceBudget.drain(); profiles.cancelPreparations();
     if (!state.fence()) state.drain(`shutdown-${randomUUIDForShutdown()}`);
     for (const abort of agentAborts) abort.abort(new RuntimeStateError("runtime_draining", "Runtime is draining", 503));
     closing = lifecycle(async () => {
@@ -506,7 +618,7 @@ export function startRuntime(config: RuntimeConfig): RuntimeService {
     });
     return closing;
   };
-  return { server, state, profiles, initialized, close };
+  return { server, state, profiles, resourceBudget, initialized, close };
 }
 function randomUUIDForShutdown(): string { return crypto.randomUUID(); }
 if (import.meta.main) {

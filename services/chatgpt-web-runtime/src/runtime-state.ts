@@ -166,18 +166,24 @@ export class RuntimeState {
       return { profileId: candidate, profileEpoch: profile.epoch, status: "active" } as ThreadBinding;
     })();
   }
+  assertCanAdmit(claims: AuthorityClaims, profileId: string, profileEpoch: string, modelIdentity: string, continuation: boolean): void {
+    const binding = this.binding(claims.clientId, claims.threadId);
+    if (!binding || binding.status !== "active" || binding.profileId !== profileId || binding.profileEpoch !== profileEpoch || this.profile(profileId).epoch !== profileEpoch) throw new RuntimeStateError("profile_mismatch", "Request does not match durable profile binding");
+    const turn = this.store.query("SELECT status,model_identity FROM turn_ledger WHERE profile_id=? AND profile_epoch=? AND client_id=? AND thread_id=? AND turn_id=?").get(profileId, profileEpoch, claims.clientId, claims.threadId, claims.turnId) as { status: string; model_identity: string } | null;
+    if (turn?.status === "interrupted") throw new RuntimeStateError("turn_interrupted", "Turn state was interrupted; ambiguous effects are not replayed");
+    if (turn && turn.model_identity !== modelIdentity) throw new RuntimeStateError("model_scope_mismatch", "Turn model identity changed");
+    if (this.fence() && (!continuation || turn?.status !== "accepted")) throw new RuntimeStateError("runtime_draining", "New browser turn denied while drained", 503);
+    if (this.store.query("SELECT 1 FROM request_claims WHERE client_id=? AND jti=?").get(claims.clientId, claims.jti))
+      throw new RuntimeStateError("authority_replayed", "Authority has already been consumed");
+  }
   admit(claims: AuthorityClaims, profileId: string, profileEpoch: string, modelIdentity: string, continuation: boolean): void {
     this.store.transaction(() => {
-      const binding = this.binding(claims.clientId, claims.threadId);
-      if (!binding || binding.status !== "active" || binding.profileId !== profileId || binding.profileEpoch !== profileEpoch || this.profile(profileId).epoch !== profileEpoch) throw new RuntimeStateError("profile_mismatch", "Request does not match durable profile binding");
-      const turn = this.store.query("SELECT status,model_identity FROM turn_ledger WHERE profile_id=? AND profile_epoch=? AND client_id=? AND thread_id=? AND turn_id=?").get(profileId, profileEpoch, claims.clientId, claims.threadId, claims.turnId) as { status: string; model_identity: string } | null;
-      if (turn?.status === "interrupted") throw new RuntimeStateError("turn_interrupted", "Turn state was interrupted; ambiguous effects are not replayed");
-      if (turn && turn.model_identity !== modelIdentity) throw new RuntimeStateError("model_scope_mismatch", "Turn model identity changed");
-      if (this.fence() && (!continuation || turn?.status !== "accepted")) throw new RuntimeStateError("runtime_draining", "New browser turn denied while drained", 503);
+      // Recheck inside the mutation transaction; a preflight never consumes authority.
+      this.assertCanAdmit(claims, profileId, profileEpoch, modelIdentity, continuation);
       const claim = this.store.query("INSERT OR IGNORE INTO request_claims VALUES(?,?,?,?, 'accepted')").run(claims.clientId, claims.jti, claims.bodySha256, claims.exp);
       if (!claim.changes) throw new RuntimeStateError("authority_replayed", "Authority has already been consumed");
       this.store.query("INSERT INTO runtime_meta(key,value) VALUES('accepted_request_count','1') ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT)").run();
-      if (!turn) this.store.query("INSERT INTO turn_ledger VALUES(?,?,?,?,?,?, 'accepted')").run(profileId, profileEpoch, claims.clientId, claims.threadId, claims.turnId, modelIdentity);
+      this.store.query("INSERT OR IGNORE INTO turn_ledger VALUES(?,?,?,?,?,?, 'accepted')").run(profileId, profileEpoch, claims.clientId, claims.threadId, claims.turnId, modelIdentity);
     })();
   }
   consumeInterrupt(claims: AuthorityClaims): void {

@@ -1,4 +1,6 @@
 import { parseDataUrl } from "../image";
+import { runtimeExecutionScope } from "../../runtime-scope";
+import type { ResourceLease } from "../../resource-budget";
 import type {
   CodexContentPart,
   CodexParsedRequest,
@@ -161,9 +163,11 @@ export async function settleActiveCompactionSource(
       );
     }
     let token: string | undefined;
+    const finishPublication = source.runtime.externalProgress.beginResultPublication();
     try {
       token = await source.runtime.token;
       broker.requestCompaction(token, interruptedByActiveCompaction());
+      await source.runtime.resourceLease?.resume(signal);
       for (const request of outstanding) {
         const result = results.get(request.callId)!;
         await broker.completeTool(
@@ -187,10 +191,12 @@ export async function settleActiveCompactionSource(
         compactionInstructionDelivered,
       };
     } catch (error) {
-      if (signal?.aborted) source.cancel(abortReason(signal));
+      source.cancel(error instanceof Error ? error : new Error(String(error)));
+      await source.physicalSettlement;
       throw error;
     } finally {
       if (token) await broker.revoke(token);
+      finishPublication();
     }
   });
 }
@@ -207,6 +213,7 @@ export async function requestRetainedCompactionHandoff(
   timeoutMs?: number,
   sharedIdle?: ChatGptCompactionIdleDeadline,
   onDiagnostic?: ChatGptApprovalDiagnosticListener,
+  onResourceAdmitted?: () => void,
 ): Promise<string> {
   if (source.runtime.effectiveModelIdentity !== chatGptEffectiveModelIdentity(parsed)) {
     throw new ChatGptWebAdapterError("Compaction cannot change the source model family or reasoning", {
@@ -232,6 +239,7 @@ export async function requestRetainedCompactionHandoff(
   };
   let transaction: CompactionTransactionHandle | undefined;
   let browser: Promise<string> | undefined;
+  let resourceLease: ResourceLease | undefined;
   let unbindTransaction: (() => void) | undefined;
   let unsubscribeProgress: (() => void) | undefined;
   if (operationSignal.aborted) abortBrowser();
@@ -250,8 +258,13 @@ export async function requestRetainedCompactionHandoff(
     unsubscribeProgress = broker.subscribeProgress(token, noteProgress);
     const instruction = structuredCompactionHandoffInstruction(transaction);
     const prepare = async () => ({ text: instruction, images: [], release: () => {} });
+    const scope = runtimeExecutionScope.getStore();
+    resourceLease = await scope?.resourceBudget?.acquire({
+      profileId: scope.profileId, kind: "continuation", signal: operationSignal,
+    });
     browser = worker.run({
       traceId,
+      resourceLease,
       modelId: parsed.modelId,
       reasoning: parsed.options.reasoning,
       ...(parsed._chatgptModelFamily ? { modelFamily: parsed._chatgptModelFamily } : {}),
@@ -261,6 +274,7 @@ export async function requestRetainedCompactionHandoff(
       nativeConnector: true,
       prepare,
       prepareResume: prepare,
+      onPreparedSelected: () => onResourceAdmitted?.(),
       conversationKey,
       requireRetainedConversation: true,
       abortSignal: browserAbort.signal,
@@ -302,6 +316,7 @@ export async function requestRetainedCompactionHandoff(
       // Do not release retained ownership until Playwright has physically settled, even on idle abort.
       await browser.then(() => undefined, () => undefined);
     }
+    resourceLease?.release();
     operationSignal.removeEventListener("abort", abortBrowser);
     clearTimeout(deadlineTimer);
     if (!sharedIdle) idle.close();
@@ -389,6 +404,17 @@ export function existingStructuredCompactionRun(key: string): Promise<string> | 
   pruneStructuredCompactionRuns();
   return structuredCompactionRuns.get(key)?.promise;
 }
+/** Exact authenticated owner lookup; never treats a cached completed run as active work. */
+export function hasActiveStructuredCompactionNativeTurn(
+  executionNamespace: string, threadId: string, turnId: string,
+): boolean {
+  for (const run of structuredCompactionRuns.values()) {
+    if (run.active && run.executionNamespace === executionNamespace
+      && run.nativeThreadId === threadId && run.nativeTurnId === turnId) return true;
+  }
+  return false;
+}
+
 
 export function runStructuredCompactionOnce(
   key: string,

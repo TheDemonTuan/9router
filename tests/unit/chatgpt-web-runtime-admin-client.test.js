@@ -3,11 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ readFile: vi.fn(), fetch: vi.fn() }));
 vi.mock("node:fs/promises", () => ({ readFile: mocks.readFile }));
 vi.mock("undici", () => ({ Agent: class {}, fetch: mocks.fetch }));
-const { requestChatGptWebRuntimeAdmin, requestChatGptWebRuntime, parseChatGptWebCatalog } = await import("../../open-sse/services/chatgptWebRuntimeClient.js");
+const { requestChatGptWebRuntimeAdmin, requestChatGptWebRuntime, parseChatGptWebCatalog, prepareChatGptWebProfile, getChatGptWebCatalog, invalidateChatGptWebCatalog } = await import("../../open-sse/services/chatgptWebRuntimeClient.js");
 const original = Object.fromEntries(["CHATGPT_WEB_RUNTIME_URL", "CHATGPT_WEB_RUNTIME_ADMIN_TOKEN_FILE", "CHATGPT_WEB_RUNTIME_TOKEN_FILE"].map(name => [name, process.env[name]]));
 const adminToken = "fixture-admin-bearer-not-a-real-token";
 beforeEach(() => {
   vi.clearAllMocks();
+  invalidateChatGptWebCatalog();
   process.env.CHATGPT_WEB_RUNTIME_URL = "http://runtime.example.test/";
   process.env.CHATGPT_WEB_RUNTIME_ADMIN_TOKEN_FILE = "/fixture/admin-token";
   process.env.CHATGPT_WEB_RUNTIME_TOKEN_FILE = "/fixture/data-token";
@@ -67,5 +68,48 @@ describe("managed harness internal transport", () => {
     expect(parseChatGptWebCatalog(catalog).models[0].capabilities).toEqual({ text: true, generic_responses: true, generic_tools: false });
     catalog.models[0].capabilities.generic_tools = "true";
     expect(parseChatGptWebCatalog(catalog).models[0].capabilities).toEqual({ text: true, generic_responses: true });
+  });
+});
+
+describe("lazy profile preparation", () => {
+  const connection = { providerSpecificData: { profileId: "personal" } };
+  const catalog = () => ({ protocolVersion: 1, profile_id: "personal", profile_epoch: "epoch-one", catalog_revision: "revision-one", checked_at: "2026-10-09T00:00:00Z", max_concurrency: 5,
+    models: [{ id: "chatgpt-web/gpt-6-sol", legacy: false, supported_reasoning_levels: ["high"], default_reasoning_level: "high", context_window: 90000, auto_compact_token_limit: 80000, capabilities: { text: true, generic_responses: true } }] });
+  it("uses a cold epoch snapshot then an exact authenticated DATA preparation", async () => {
+    const controller = new AbortController();
+    mocks.fetch.mockImplementation(async url => Response.json(url.endsWith("/admin/profiles")
+      ? { protocolVersion: 1, profiles: [{ profileId: "personal", profileEpoch: "epoch-one" }, { profileId: "other", profileEpoch: "epoch-two" }] } : catalog()));
+    mocks.readFile.mockImplementation(async path => path === "/fixture/data-token" ? "fixture-data-bearer-not-a-real-token" : adminToken);
+    expect(await prepareChatGptWebProfile(connection, { signal: controller.signal })).toMatchObject({ profileId: "personal", profileEpoch: "epoch-one" });
+    expect(mocks.fetch.mock.calls.map(([url]) => url)).toEqual(["http://runtime.example.test/admin/profiles", "http://runtime.example.test/v1/profiles/prepare"]);
+    const init = mocks.fetch.mock.calls[1][1];
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body)).toEqual({ profileId: "personal", profileEpoch: "epoch-one" });
+    expect(init.headers.get("x-cgw-profile-id")).toBe("personal");
+    expect(init.headers.get("authorization")).toBe("Bearer fixture-data-bearer-not-a-real-token");
+    controller.abort(); expect(init.signal.aborted).toBe(true);
+  });
+  it("never prepares from a catalog GET and uses a supplied trusted epoch without admin discovery", async () => {
+    mocks.fetch.mockResolvedValue(Response.json(catalog()));
+    await getChatGptWebCatalog(connection, { force: true });
+    expect(mocks.fetch.mock.calls.map(([url]) => url)).toEqual(["http://runtime.example.test/v1/web-models"]);
+    mocks.fetch.mockClear(); mocks.fetch.mockResolvedValue(Response.json(catalog()));
+    await prepareChatGptWebProfile({ ...connection, chatGptWebProfileEpoch: "epoch-one" });
+    expect(mocks.fetch.mock.calls.map(([url]) => url)).toEqual(["http://runtime.example.test/v1/profiles/prepare"]);
+  });
+  it("fails closed on epoch drift and does no work for an aborted caller", async () => {
+    mocks.fetch.mockResolvedValue(Response.json({ ...catalog(), profile_epoch: "epoch-two" }));
+    await expect(prepareChatGptWebProfile({ ...connection, chatGptWebProfileEpoch: "epoch-one" })).rejects.toThrow("identity mismatch");
+    mocks.fetch.mockClear();
+    const controller = new AbortController(); controller.abort();
+    await expect(prepareChatGptWebProfile(connection, { signal: controller.signal })).rejects.toThrow();
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+  it("keeps resources GET admin-only and prepare POST data-only", async () => {
+    await requestChatGptWebRuntimeAdmin("/admin/resources");
+    await expect(requestChatGptWebRuntimeAdmin("/admin/resources", { method: "POST" })).rejects.toThrow();
+    await expect(requestChatGptWebRuntime(connection, "/admin/resources")).rejects.toThrow();
+    await expect(requestChatGptWebRuntime(connection, "/v1/profiles/prepare")).rejects.toThrow();
+    await expect(requestChatGptWebRuntimeAdmin("/v1/profiles/prepare", { method: "POST" })).rejects.toThrow();
   });
 });

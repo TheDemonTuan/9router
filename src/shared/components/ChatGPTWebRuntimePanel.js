@@ -14,7 +14,7 @@ import { getChatGptWebProfileNotice } from "@/shared/utils/connectionStatus";
 
 const BASE = "/api/providers/chatgpt-web/runtime";
 const DEFAULT_SETTINGS = { mode: "browser-only", experimentalBiggerContext: false, experimentalFreshConversationPerTurn: false, useSavedChats: false, autoApproveToolCalls: false, connectorName: "Codex Native2" };
-const BIGGER_CONTEXT_ROUTES = new Set(["chatgpt-web/gpt-5.6-sol-instant", "chatgpt-web/gpt-5.6-sol", "chatgpt-web/gpt-5.6-pro", "chatgpt-web/gpt-6-pro"]);
+const BIGGER_CONTEXT_ROUTES = new Set(["chatgpt-web/gpt-5.6-sol-instant", "chatgpt-web/gpt-5.6-sol", "chatgpt-web/gpt-5.6-pro", "chatgpt-web/gpt-6-sol", "chatgpt-web/gpt-6-pro"]);
 const IMPORT_ERRORS = {
   invalid_session_transfer: "Invalid ChatGPT session JSON. Use the Chrome helper to export cookies; access tokens and /api/auth/session JSON cannot be imported.",
   session_transfer_expired: "The exported cookies have expired. Sign in in Chrome and export again.",
@@ -88,6 +88,8 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
   const [signInMethod, setSignInMethod] = useState(initialSignInMethod);
   const [harness, setHarness] = useState(null);
   const [harnessReadError, setHarnessReadError] = useState("");
+  const [resources, setResources] = useState(null);
+  const [resourceReadError, setResourceReadError] = useState("");
   const [tunnelIdInput, setTunnelId] = useState(null);
   const [runtimeApiKey, setRuntimeApiKey] = useState("");
   const [setupOpen, setSetupOpen] = useState(false);
@@ -176,7 +178,7 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
             setBaseRevision(current.revision);
             setDraft(current.settings);
           }
-          const evidence = JSON.stringify([current?.state, current?.settings?.mode, current?.lastError?.code, current?.models.map(model => model.id)]);
+          const evidence = JSON.stringify([current?.state, current?.browser_state, current?.catalog_verified, current?.settings?.mode, current?.lastError?.code, current?.models.map(model => model.id)]);
           const changed = lastProfileEvidence.current !== null && lastProfileEvidence.current !== evidence;
           lastProfileEvidence.current = evidence;
           if (changed) onChanged();
@@ -232,6 +234,24 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
     void poll();
     return () => { controller.abort(); clearTimeout(timer); };
   }, [profileId, refresh, endViewer, onChanged]);
+  useEffect(() => {
+    if (tab !== "diagnostics") return;
+    const controller = new AbortController();
+    let timer;
+    setResources(null); setResourceReadError("");
+    async function pollResources() {
+      try {
+        const snapshot = await request("resources", {}, controller.signal);
+        if (!controller.signal.aborted) { setResources(snapshot); setResourceReadError(""); }
+      } catch (cause) {
+        if (!controller.signal.aborted) { setResources(null); setResourceReadError(cause.message); }
+      } finally {
+        if (!controller.signal.aborted) timer = setTimeout(pollResources, 5000);
+      }
+    }
+    void pollResources();
+    return () => { controller.abort(); clearTimeout(timer); };
+  }, [tab, profileId, refresh]);
   const act = useCallback(async (action, body, label, method = "POST") => {
     const controller = lifetime.current;
     if (!controller || controller.signal.aborted) return unknownImport();
@@ -488,7 +508,10 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
   const assistantReason = !secureImportOrigin ? "insecure_origin" : !loaded || !profile ? "loading" : selectedProfileId !== profileId ? "profile_mismatch" : dirty || connectionDirty || harnessDraftDirty ? "unsaved_changes" : active ? "active_turns" : viewerOpen ? "viewer_open" : waiting ? "viewer_waiting" : fenced ? "draining" : profile.state === "probing" || busy ? "probing" : hasConsumedAttempt ? "consumed" : targetExpired ? "expired" : null;
   const preferencesConflict = dirty && profile?.revision !== baseRevision;
   useLayoutEffect(() => {
-    onStateChange?.({ dirty: dirty || harnessDraftDirty, busy: !!busy, status: !loaded ? "Loading" : profile?.state === "ready" && profile.models.length ? "Session ready" : "Sign-in needed" });
+    onStateChange?.({ dirty: dirty || harnessDraftDirty, busy: !!busy, status: !loaded ? "Loading"
+      : profile?.state === "session_unverified" ? "Session not checked since restart"
+      : profile?.state === "ready" && profile.models.length ? profile.browser_state === "sleeping" ? "Sleeping · wakes on request" : "Session ready"
+      : profile?.state === "login_required" ? "Sign-in needed" : profile?.state === "probing" || profile?.browser_state === "waking" ? "Checking saved session" : "Session unavailable" });
   }, [dirty, harnessDraftDirty, busy, loaded, profile, onStateChange]);
   const generated = useMemo(() => {
     const model = profile?.models.find(item => item.id === modelId);
@@ -533,6 +556,7 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
         controls[next].focus(); controls[next].click();
       }}>{tabs.map(([value, label]) => <Button key={value} id={`chatgpt-web-tab-${value}`} role="tab" tabIndex={tab === value ? 0 : -1} aria-selected={tab === value} aria-controls={`chatgpt-web-panel-${value}`} className={`shrink-0 focus-visible:ring-2 focus-visible:ring-brand-500 ${tab === value ? "border-brand-500 text-brand-500" : ""}`} variant="secondary" disabled={!!busy} onClick={() => changeTab(value)}>{label}</Button>)}</div>
       <p role={error ? "alert" : "status"} className={`text-sm ${error ? "text-red-400" : "text-text-muted"}`}>{humanStatus.replace("Check Advanced for diagnostics.", "Check Diagnostics for details.")}</p>
+      {profile?.state === "session_unverified" && tab !== "connection" && <Button variant="secondary" disabled={sessionDisabled || dirty || connectionDirty || harnessDraftDirty || selectedProfileId !== profileId} onClick={verifySession}>Verify saved session</Button>}
       {connectionStatusWarning && <p role="status" className="text-sm text-amber-500">{connectionStatusWarning}</p>}
       {(tab === "agents" || tab === "diagnostics") && harnessReadError && <p role="alert" className="text-sm text-amber-500">Harness status unavailable: {harnessReadError}. Refresh diagnostics or contact the operator.</p>}
       <div id={`chatgpt-web-panel-${tab}`} role="tabpanel" aria-labelledby={`chatgpt-web-tab-${tab}`} tabIndex={0} className="min-w-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500">
@@ -570,6 +594,19 @@ export default function ChatGPTWebRuntimePanel({ connectionName, profileId, sele
         />}
         {tab === "preferences" && <ChatGPTWebPreferencesTab draft={draft} change={change} disabled={disabled || active || waiting || !profile} biggerSupported={biggerSupported} dirty={dirty} conflict={preferencesConflict} saving={busy === "Save preferences"} save={() => void act(`profiles/${profileId}`, { revision: baseRevision, settings: draft }, "Save preferences", "PATCH")} reload={() => { if (profile && !busyRef.current) { setDraft(profile.settings); setBaseRevision(profile.revision); dirtyRef.current = false; setDirty(false); setError(""); setNotice(""); } }} />}
         {tab === "diagnostics" && <ChatGPTWebDiagnosticsTab profile={profile} harness={harness} lease={lease} disabled={disabled || active || waiting || dirty || connectionDirty} sessionDisabled={harnessDisabled} busy={busy} refresh={() => setRefresh(value => value + 1)} restart={() => void act("browser/restart", { profileId }, "Restart browser")} verifyConnector={verifyConnector} modelTest={() => void act("smoke", { profileId, kind: "browser" }, "Browser smoke")} endLogin={() => void act("login/close", { loginId: lease.loginId }, "End login")} />}
+        {tab === "diagnostics" && <div className="min-w-0 space-y-2 text-sm" aria-label="Runtime resource usage">
+          <h3 className="font-medium">Runtime resource usage</h3>
+          <p className="text-text-muted">Read-only snapshot. Refreshing these counts does not wake a browser.</p>
+          {profile?.browser_state && <p>Selected browser: {profile.browser_state}{profile.catalog_verified !== undefined ? ` · Catalog verified: ${profile.catalog_verified ? "yes" : "no"}` : ""}</p>}
+          {resourceReadError && <p role="status" className="text-amber-500">Resource counts unavailable: {resourceReadError}</p>}
+          {resources && <>
+            <p>Browsers {resources.browsers}/{resources.limits.maxGlobalBrowsers} · Conversation tabs {resources.tabs.active + resources.tabs.retainedNative + resources.tabs.retainedGeneric}/{resources.limits.maxGlobalTabs} · Inspection {resources.tabs.inspection} · Executing turns {resources.executingTurns}/{resources.limits.maxGlobalTurns} · Waiting on tools {resources.waitingToolTurns} · Queued {resources.queueDepth}/{resources.limits.maxQueueSize}</p>
+            <div className="overflow-x-auto"><table className="w-full text-left"><caption className="sr-only">Physical browser and tab ownership by profile</caption><thead><tr>{["Profile", "Browser", "Executing", "Tool wait", "Active tabs", "Native retained", "Inspection", "Queue"].map(label => <th key={label} className="p-2">{label}</th>)}</tr></thead>
+              <tbody>{resources.profiles.map(item => <tr key={item.profileId}><th scope="row" className="p-2 break-all">{item.profileId}</th><td className="p-2">{item.browserState}</td><td className="p-2">{item.executingTurns}</td><td className="p-2">{item.waitingToolTurns}</td><td className="p-2">{item.tabs.active}</td><td className="p-2">{item.tabs.retainedNative}</td><td className="p-2">{item.tabs.inspection}</td><td className="p-2">{item.queueDepth}</td></tr>)}</tbody>
+            </table></div>
+            <p className="text-text-muted">Totals: admitted {resources.totals.admitted} · rejected {resources.totals.rejected} · queue wait {resources.totals.queueWaitMs} ms · polls {resources.totals.polls} · DOM cache hits {resources.totals.domCacheHits} / misses {resources.totals.domCacheMisses}</p>
+          </>}
+        </div>}
       </div>
       {viewerOpen && waiting && <ChatGPTWebViewer key={lease.loginId} connectionName={connectionName} loginId={lease.loginId} profileId={profileId} expiresAt={lease.expiresAt} manualLogin={lease.manualLogin} verifying={busy === "Finish Sign In"} error={error} onFinish={finishLogin} onClose={() => setViewerOpen(false)} onEnded={endViewer} />}
     </section>

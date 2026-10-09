@@ -239,6 +239,7 @@ export type AdapterEvent =
       errorType?: string;
       code?: string;
       retryable?: boolean;
+      submission_state?: "not_sent" | "unknown";
     };
 
 /**

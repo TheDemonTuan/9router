@@ -52,6 +52,21 @@ export const CHATGPT_WEB_PRO_MODEL_COMPOSER_CHAR_LIMIT = 1_635_000;
  */
 export const CHATGPT_WEB_LUNA_CONTEXT_WINDOW = 1_050_000;
 export const CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER = 3;
+export const CHATGPT_WEB_GPT6_SOL_BIGGER_CONTEXT_WINDOW = 240_000;
+export const CHATGPT_WEB_GPT6_SOL_BIGGER_AUTO_COMPACT_TOKEN_LIMIT = 220_000;
+export const CHATGPT_WEB_GPT6_SOL_COMPOSER_CHAR_LIMIT = 500_000;
+
+/** GPT-6 staged context is limited to the account and efforts verified upstream. */
+export function supportsChatGptWebBiggerContext(
+  backendModel: string,
+  effort: ChatGptWebAdapterEffort,
+  capabilities: Pick<ChatGptWebAccountCapabilities, "proAvailable">,
+  modelFamily: ChatGptWebModelFamily | undefined,
+): boolean {
+  return backendModel === CHATGPT_WEB_BACKEND_MODEL && (
+    modelFamily !== "6" || effort === "max" || (capabilities.proAvailable && effort !== "low")
+  );
+}
 
 export interface ChatGptWebContextLimits {
   contextWindow: number;
@@ -83,6 +98,7 @@ export function resolveChatGptWebContextLimits(
   backendModel: ChatGptWebBackendModel,
   effort: ChatGptWebAdapterEffort,
   capabilities: ChatGptWebAccountCapabilities,
+  modelFamily: ChatGptWebModelFamily | undefined,
 ): ChatGptWebContextLimits {
   if (backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) {
     // Luna carries continuity through a private checkpoint on every completed browser turn. Codex
@@ -112,7 +128,14 @@ export function resolveChatGptWebContextLimits(
   } else {
     throw new Error(`ChatGPT Plus context limit is not defined for unavailable effort: ${effort}`);
   }
-  if (!capabilities.experimentalBiggerContext) return limits;
+  if (!capabilities.experimentalBiggerContext
+    || !supportsChatGptWebBiggerContext(backendModel, effort, capabilities, modelFamily)) return limits;
+  if (modelFamily === "6" && effort !== "max") {
+    return contextLimits(
+      CHATGPT_WEB_GPT6_SOL_BIGGER_CONTEXT_WINDOW,
+      CHATGPT_WEB_GPT6_SOL_BIGGER_AUTO_COMPACT_TOKEN_LIMIT,
+    );
+  }
   return contextLimits(
     limits.contextWindow * CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER,
     limits.autoCompactTokenLimit * CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER,
@@ -124,6 +147,7 @@ export function resolveChatGptWebTransportLimits(
   backendModel: ChatGptWebBackendModel,
   effort: ChatGptWebAdapterEffort,
   capabilities: ChatGptWebAccountCapabilities,
+  modelFamily: ChatGptWebModelFamily | undefined,
 ): ChatGptWebTransportLimits {
   if (backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) return {};
   if (!capabilities.proAvailable) {
@@ -131,7 +155,8 @@ export function resolveChatGptWebTransportLimits(
       return { browserComposerCharLimit: CHATGPT_WEB_INSTANT_COMPOSER_CHAR_LIMIT };
     }
     if (effort === "medium" || effort === "high" || (effort === "xhigh" && capabilities.extraHighAvailable)) {
-      return { browserComposerCharLimit: CHATGPT_WEB_MEDIUM_HIGH_COMPOSER_CHAR_LIMIT };
+      return { browserComposerCharLimit: modelFamily === "6"
+        ? CHATGPT_WEB_GPT6_SOL_COMPOSER_CHAR_LIMIT : CHATGPT_WEB_MEDIUM_HIGH_COMPOSER_CHAR_LIMIT };
     }
     throw new Error(`ChatGPT Plus transport limit is not defined for unavailable effort: ${effort}`);
   }
@@ -162,12 +187,13 @@ export function resolveChatGptWebMessageTokenBudget(
   backendModel: typeof CHATGPT_WEB_BACKEND_MODEL,
   effort: ChatGptWebAdapterEffort,
   capabilities: ChatGptWebAccountCapabilities,
+  modelFamily: ChatGptWebModelFamily | undefined,
   imageTokens = 0,
 ): number {
   const { contextWindow } = resolveChatGptWebContextLimits(
-    backendModel, effort, { ...capabilities, experimentalBiggerContext: false },
+    backendModel, effort, { ...capabilities, experimentalBiggerContext: false }, modelFamily,
   );
-  const { browserMessageTokenLimit } = resolveChatGptWebTransportLimits(backendModel, effort, capabilities);
+  const { browserMessageTokenLimit } = resolveChatGptWebTransportLimits(backendModel, effort, capabilities, modelFamily);
   return Math.max(0, Math.min(
     contextWindow - CHATGPT_WEB_PLATFORM_RESERVE_TOKENS - imageTokens - 1,
     browserMessageTokenLimit ?? Infinity,
@@ -349,6 +375,30 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] 
     adapterEffort: "max",
     supportedCodexEfforts: ["max"],
     requiresPro: true,
+  },
+  {
+    slug: "chatgpt-web/gpt-6-sol-instant",
+    displayName: "GPT-6 Sol Instant (Web)",
+    description: "GPT-6 Sol Instant through ChatGPT, with its own context and compaction budget.",
+    interactionMode: "automatic",
+    backendModel: CHATGPT_WEB_BACKEND_MODEL,
+    modelFamily: "6",
+    codexEffort: "low",
+    adapterEffort: "low",
+    supportedCodexEfforts: ["low"],
+    requiresPro: false,
+  },
+  {
+    slug: "chatgpt-web/gpt-6-sol",
+    displayName: "GPT-6 Sol (Web)",
+    description: "GPT-6 Sol through ChatGPT with Medium, High, or account-supported Extra High reasoning.",
+    interactionMode: "automatic",
+    backendModel: CHATGPT_WEB_BACKEND_MODEL,
+    modelFamily: "6",
+    codexEffort: "high",
+    adapterEffort: "high",
+    supportedCodexEfforts: ["medium", "high", "xhigh"],
+    requiresPro: false,
   },
   {
     slug: "chatgpt-web/gpt-6-pro",

@@ -2,6 +2,7 @@ export interface CodexErrorPayload {
   message: string;
   type: string;
   code: string | null;
+  submission_state?: "not_sent" | "unknown";
 }
 
 function isSubscriptionGateMessage(text: string): boolean {

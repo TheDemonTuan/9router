@@ -6,10 +6,13 @@ export function getStatusVariant(isActive, effectiveStatus) {
 }
 
 export function isChatGptWebProfileReady(profile) {
-  return profile?.state === "ready" && Array.isArray(profile.models) && profile.models.length > 0;
+  return profile?.state === "ready" && profile.catalog_verified !== false && Array.isArray(profile.models) && profile.models.length > 0;
 }
 
 export function getChatGptWebProfileNotice(profile) {
+  if (profile?.state === "session_unverified") return "Session not checked since restart · Verify saved session";
+  if (profile?.browser_state === "waking" && !["error", "login_required", "draining"].includes(profile.state)) return "Waking browser · checking saved session";
+  if (isChatGptWebProfileReady(profile) && profile.browser_state === "sleeping") return "Sleeping · wakes on request";
   if (isChatGptWebProfileReady(profile)) return "Connected and ready.";
   if (profile?.lastError?.message) return profile.lastError.message;
   if (profile?.state === "ready") return "No verified models are available. Open Browser, check the model picker, then choose Finish Sign In again.";
