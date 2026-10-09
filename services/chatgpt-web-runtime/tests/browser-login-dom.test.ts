@@ -52,7 +52,7 @@ async function high(page: Page) {
 }
 
 describe.skipIf(!executablePath)("Chromium login DOM", () => {
-  test("startup isolates a real authenticated UI failure and keeps the other catalog ready", async () => {
+  test("explicit inspection isolates an authenticated UI failure without probing profiles at startup", async () => {
     await fixture({}, async page => {
       const root = mkdtempSync(join(tmpdir(), "cgw-startup-dom-"));
       const state = new RuntimeState(root);
@@ -79,6 +79,11 @@ describe.skipIf(!executablePath)("Chromium login DOM", () => {
           return originalProbe(id, false, initializing);
         }));
         await profiles.initialize();
+        expect(profiles.probe).not.toHaveBeenCalled();
+        expect(profiles.ready("broken")).toBe(false);
+        expect(profiles.ready("healthy")).toBe(false);
+        await expect(profiles.probe("broken")).rejects.toMatchObject({ code: "profile_probe_failed" });
+        await profiles.probe("healthy");
         expect(profiles.status("broken")).toMatchObject({ state: "error", lastError: "profile_probe_failed", models: [] });
         expect(profiles.ready("healthy")).toBe(true);
         expect(profiles.catalog("healthy")).toMatchObject({ profile_id: "healthy" });
