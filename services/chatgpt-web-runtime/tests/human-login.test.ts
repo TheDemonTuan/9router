@@ -83,7 +83,7 @@ describe.skipIf(process.platform !== "linux")("human-only sign-in physical owner
       await expect(f.manager.run("turn", async () => "must not run")).rejects.toThrow("maintenance");
       await expect(f.manager.ensureContext()).rejects.toThrow("Human sign-in");
       await expect(f.runtime.profiles.patch("personal", f.profile.revision, { useSavedChats: true })).rejects.toThrow("human sign-in");
-      expect(() => BrowserManager.forProfile({ profileId: "personal", profileEpoch: "replacement", browserProfilePath: join(f.root, "profiles/personal/browser"), chromeExecutablePath: f.executable, headed: true })).toThrow("epoch cannot change");
+      expect(() => BrowserManager.forProfile({ profileId: "personal", profileEpoch: "replacement", browserProfilePath: join(f.root, "profiles/personal/browser"), chromeExecutablePath: f.executable, headed: true, resourceBudget: f.runtime.profiles.resourceBudget })).toThrow("epoch cannot change");
       expect(f.runtime.state.profile("personal").epoch).toBe(f.profile.epoch);
       expect(await f.runtime.profiles.startViewer("personal", false)).toMatchObject({ loginId, manualLogin: true });
       expect(await f.runtime.profiles.startViewer("personal", true)).toMatchObject({ loginId, manualLogin: true });

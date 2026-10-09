@@ -160,6 +160,7 @@ describe("Request-local browser adapter lifecycle", () => {
     const before = brokerWorkSnapshot();
     try {
       spyOn(ChatGptBrowserWorker.prototype, "run").mockImplementation(async turn => {
+        await turn.onPreparedSelected?.(false);
         const prepared = await turn.prepare();
         prompts.push(prepared.text); traces.push(turn.traceId);
         expect(turn.conversationKey).toBeUndefined();
@@ -235,6 +236,7 @@ describe("Request-local browser adapter lifecycle", () => {
     try {
       spyOn(ChatGptBrowserWorker.prototype, "run").mockImplementation(async turn => {
         attempts++;
+        await turn.onPreparedSelected?.(false);
         await turn.prepare();
         turn.onSendActivated?.();
         turn.onTextDelta?.("Partial fixture text");
