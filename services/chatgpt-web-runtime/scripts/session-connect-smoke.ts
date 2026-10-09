@@ -589,8 +589,8 @@ let collectionCalls = 0, onCollected: (() => Promise<void>) | undefined;
       return;
     }
     if (!await action.evaluate<boolean>("document.querySelector('#connect').disabled")) {
-      await clickPopup(action, "connect"); await outcome(action, /./);
-      assert(await action.evaluate<boolean>("document.querySelector('#connect').disabled && document.querySelector('#status').textContent.trim() !== ''"), "Rejected precheck must revoke consent");
+      await clickPopup(action, "connect");
+      await until(async () => action.evaluate<boolean>("document.querySelector('#connect').disabled && [document.querySelector('#status'), document.querySelector('#target-help')].some(element => element.textContent.trim() !== '' && element.textContent.trim() !== 'Checking the active dashboard tab…')"), "Rejected precheck must revoke consent", 135000);
     }
     await noPost(before); assert.equal(collectionCalls, collects, "Failed precheck must not collect cookies"); await action.close();
   };
