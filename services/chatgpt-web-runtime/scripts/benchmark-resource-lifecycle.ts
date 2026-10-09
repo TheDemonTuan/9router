@@ -194,6 +194,8 @@ async function hostMain() {
   assert(browserIdentity.status === 0 && /^(?:Google Chrome(?: for Testing)?|Chromium)\s+\d+\.\d+\.\d+\.\d+\s*$/.test(browserIdentity.stdout.trim()),
     `exact_chromium_version_unavailable: status=${browserIdentity.status}; stdout=${browserIdentity.stdout.trim()}; stderr=${browserIdentity.stderr.trim()}`);
   const browserVersion = browserIdentity.stdout.trim();
+  const namespace = spawnSync("bwrap", ["--die-with-parent", "--unshare-net", "--unshare-pid", "--ro-bind", "/", "/", "--proc", "/proc", "--dev-bind", "/dev", "/dev", "/bin/true"], { stdio: "inherit" });
+  assert(namespace.status === 0, "isolated_namespace_prerequisite_failed");
   const browserSha256 = new Bun.CryptoHasher("sha256").update(await Bun.file(realpathSync(browser)).arrayBuffer()).digest("hex");
   const revision = spawnSync("git", ["-C", options.sourceRoot, "rev-parse", "HEAD"], { encoding: "utf8" });
   const status = spawnSync("git", ["-C", options.sourceRoot, "status", "--porcelain"], { encoding: "utf8" });
