@@ -4,7 +4,7 @@ FROM ubuntu:noble@sha256:a853f94d226358a79c740cfc7bce0c289748f3fe3488d921d038ccd
 ARG TARGETARCH
 COPY services/chatgpt-web-runtime/scripts/install-ubuntu-snapshot.sh /build/install-ubuntu-snapshot.sh
 ADD --checksum=sha256:6bac2a01979e210d9eac1d4d56747ec709ea60654744d66705dc3c36e7629e50 \
-    https://snapshot.ubuntu.com/ubuntu/20261003T000000Z/pool/main/c/ca-certificates/ca-certificates_20260601~24.04.1_all.deb \
+    https://archive.ubuntu.com/ubuntu/pool/main/c/ca-certificates/ca-certificates_20260601~24.04.1_all.deb \
     /build/ca-certificates.deb
 RUN sh /build/install-ubuntu-snapshot.sh --ca-bootstrap /build/ca-certificates.deb --arch "${TARGETARCH}" \
       python3 tini xvfb openbox x11vnc xauth fonts-liberation fonts-noto-core fonts-noto-color-emoji \
