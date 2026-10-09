@@ -35,7 +35,7 @@ describe("native request admission preserves the existing owner", () => {
     const resolve = spyOn(ChatGptThreadEnvironmentStore.prototype, "resolveVerified").mockReturnValue(environment);
     const owner = spyOn(chatGptTurnSessions, "assertOwnerModel").mockImplementation(() => {});
     const lookup = spyOn(chatGptTurnSessions, "getOrCreateAfterOwnerRetirement").mockResolvedValue(session);
-    const retire = spyOn(chatGptTurnSessions, "retire").mockImplementation(() => {});
+    const retire = spyOn(chatGptTurnSessions, "retire").mockReturnValue(false);
     const failure = new RuntimeStateError("authority_replayed", "Synthetic authority was already consumed", 409);
     let rejected: unknown;
     try {
