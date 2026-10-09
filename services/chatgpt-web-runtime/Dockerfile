@@ -2,11 +2,11 @@
 # Build from the app root with --build-arg APP_REVISION=<40-hex SHA>.
 FROM ubuntu:noble@sha256:a853f94d226358a79c740cfc7bce0c289748f3fe3488d921d038ccd752c61b60 AS ubuntu
 ARG TARGETARCH
-COPY services/chatgpt-web-runtime/scripts/install-ubuntu-snapshot.sh /build/install-ubuntu-snapshot.sh
+COPY services/chatgpt-web-runtime/scripts/install-ubuntu-packages.sh /build/install-ubuntu-packages.sh
 ADD --checksum=sha256:6bac2a01979e210d9eac1d4d56747ec709ea60654744d66705dc3c36e7629e50 \
     https://archive.ubuntu.com/ubuntu/pool/main/c/ca-certificates/ca-certificates_20260601~24.04.1_all.deb \
     /build/ca-certificates.deb
-RUN sh /build/install-ubuntu-snapshot.sh --ca-bootstrap /build/ca-certificates.deb --arch "${TARGETARCH}" \
+RUN sh /build/install-ubuntu-packages.sh --ca-bootstrap /build/ca-certificates.deb --arch "${TARGETARCH}" \
       python3 tini xvfb openbox x11vnc xauth fonts-liberation fonts-noto-core fonts-noto-color-emoji \
       libasound2t64 libatk1.0-0t64 libatk-bridge2.0-0t64 libatspi2.0-0t64 libcairo2 libcups2t64 \
       libdbus-1-3 libdrm2 libexpat1 libfontconfig1 libgbm1 libgcc-s1 libglib2.0-0t64 libgtk-3-0t64 \

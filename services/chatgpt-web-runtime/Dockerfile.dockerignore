@@ -22,7 +22,7 @@
 !services/chatgpt-web-runtime/scripts/build-tunnel-assets.py
 !services/chatgpt-web-runtime/scripts/tunnel-build-lock/
 !services/chatgpt-web-runtime/scripts/tunnel-build-lock/**
-!services/chatgpt-web-runtime/scripts/install-ubuntu-snapshot.sh
+!services/chatgpt-web-runtime/scripts/install-ubuntu-packages.sh
 !services/chatgpt-web-runtime/scripts/image-entrypoint.sh
 !services/chatgpt-web-runtime/tests/
 !services/chatgpt-web-runtime/tests/**

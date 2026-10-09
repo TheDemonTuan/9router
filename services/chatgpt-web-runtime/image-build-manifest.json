@@ -19,9 +19,12 @@
     "release": "Ubuntu 24.04 (noble), glibc"
   },
   "ubuntu": {
-    "snapshot": "20261003T000000Z",
-    "archive": "https://snapshot.ubuntu.com/ubuntu/20261003T000000Z/",
-    "packagePolicy": "Signed InRelease and pinned Packages hashes verified by scripts/install-ubuntu-snapshot.sh; all inherited packages upgraded from the same immutable snapshot."
+    "archives": {
+      "amd64": "https://archive.ubuntu.com/ubuntu/",
+      "amd64Security": "https://security.ubuntu.com/ubuntu/",
+      "arm64": "https://ports.ubuntu.com/ubuntu-ports/"
+    },
+    "packagePolicy": "Current signed InRelease and authenticated Packages hashes verified by APT over HTTPS through scripts/install-ubuntu-packages.sh; all inherited packages upgraded. Exact signed metadata, package-index SHA256 and installed versions retained in /usr/local/share/cgw-os-provenance. Release images require native gates and unsuppressed security scans, then deployment by OCI digest."
   },
   "browser": {
     "distribution": "google-chrome-for-testing",
