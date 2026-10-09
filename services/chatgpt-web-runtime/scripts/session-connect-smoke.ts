@@ -863,6 +863,7 @@ let collectionCalls = 0, onCollected: (() => Promise<void>) | undefined;
     assert.equal(imports.length, before + 1);
   });
   await record("lost result observer returns unknown without replay", async () => {
+    await clearDraft(); await openConnection();
     const target = await prepare(), action = await popup(), before = imports.length;
     await page.evaluate(({ event, attemptId }) => {
       document.addEventListener(event, message => {
