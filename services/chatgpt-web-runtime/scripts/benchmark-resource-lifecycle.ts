@@ -559,7 +559,7 @@ async function workerMain() {
     };
     const nativeSend = async (id: string, body: JsonObject, threadId: string, turnId: string, parentThreadId?: string, compact = false, signal?: AbortSignal) => {
       const start = performance.now(), now = Math.floor(Date.now() / 1000), agentName = parentThreadId ? "/root/child" : "/root";
-      const request = { ...body, client_metadata: { "x-codex-turn-metadata": { request_kind: compact ? "compaction" : "turn", thread_id: threadId,
+      const request = { ...body, client_metadata: { "x-codex-turn-metadata": { request_kind: "turn", thread_id: threadId,
         turn_id: turnId, agent_name: agentName, ...(parentThreadId ? { parent_thread_id: parentThreadId, subagent_kind: "thread_spawn" } : {}),
         sandbox_mode: "workspace-write", workspaces: { [workspace]: {} } } } };
       const authority = { v: 1, aud: "9router-cgw", purpose: compact ? "compact" : "responses", clientId: "offline-benchmark", jti: randomUUID(), iat: now, exp: now + 60,
