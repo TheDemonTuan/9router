@@ -58,7 +58,8 @@ export const dirExists = async (dir) => {
 export const isProfileHome = async (dir) => {
   for (const file of IDENTITY_FILES) {
     try {
-      await fs.stat(path.join(dir, file));
+      // Profiles live on the runtime host, not in the deployment source tree.
+      await fs.stat(/* turbopackIgnore: true */ path.join(/* turbopackIgnore: true */ dir, file));
       return true;
     } catch {
       // keep looking

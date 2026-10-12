@@ -1,6 +1,7 @@
 # Unreleased
 
 ## Changed
+- **Hermes deployment tracing**: mark runtime-host profile identity checks as external filesystem data so Turbopack does not include the entire build source tree in standalone images; retain profile discovery and unsuppressed image security checks.
 - **Tunnel standard-library security**: pin official checksum-verified Go 1.27.2 archives for native tunnel builds to fix CVE-2026-78667, CVE-2026-78669 and CVE-2026-97031 reported by the ARM64 image gate; preserve unsuppressed scanning and source provenance.
 - **Tunnel HTTP/2 security**: upgrade both source-built tunnel clients to `golang.org/x/net v0.60.0` for CVE-2026-78669; regenerate Go checksum graphs and synchronize build-lock/provenance digests without suppressing Trivy findings.
 - **Upstream deployment gates**: isolate Gemini native transport tests from Bun-only API-key storage while retaining real permission enforcement coverage. Verify MiniMax Coding aliases and preserve legacy provider/alias parity alongside dedicated Kimi Responses and MiniMax Coding regressions; leave historical baseline files unchanged.
