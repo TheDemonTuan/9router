@@ -24,6 +24,10 @@ vi.mock("@/lib/localDb", () => ({
   getSettings: mocks.getSettings,
 }));
 
+vi.mock("@/lib/db/repos/apiKeysRepo.js", () => ({
+  getApiKeyByKey: vi.fn().mockResolvedValue({ access: { mode: "unrestricted" } }),
+}));
+
 const { GET } = await import("../../src/app/api/v1beta/models/route.js");
 const { POST } = await import("../../src/app/api/v1beta/models/[...path]/route.js");
 

@@ -1,6 +1,7 @@
 # Unreleased
 
 ## Changed
+- **Upstream deployment gates**: isolate Gemini native transport tests from Bun-only API-key storage while retaining real permission enforcement coverage. Verify MiniMax Coding aliases and preserve legacy provider/alias parity alongside dedicated Kimi Responses and MiniMax Coding regressions; leave historical baseline files unchanged.
 - **Upstream v0.5.99 integration**: add Bedrock/AWS SSO, MiniMax Code, ElevenLabs Scribe, Netlify relay pools, Hermes profiles and CLI connection improvements without restoring retired Headroom or Node SQLite fallback paths. Preserve independent CLI release version and existing security dependency pins.
 - **Restricted API keys**: enforce resolved model/combo permissions across generation endpoints, native Gemini and model listings; preserve combo member grants while filtering gateway-injected adapters, including nested combos and ChatGPT Web targets. Back up existing schema-2 Bun databases before adding access columns under schema version 3; retain restrictions through export/import.
 - **Antigravity/Gemini merge safety**: retain dynamic account-scoped catalogs, durable exact-model quota locks, nonblocking quota refresh and precise error parsing; never treat missing remaining fractions as authoritative zero. Preserve canonical tool validation and response-schema cleaners while adding reserved tool-result key sanitization, occurrence-paired duplicate tool IDs and schema/property-map separation. Keep live model capabilities through combo dispatch.

@@ -31,6 +31,7 @@ mkdir -p "$HOME" "$DATA_DIR"
     unit/rtkKiro.test.js \
     unit/force-stream-config.test.js \
     unit/minimax-transport-target-format.test.js \
+    unit/minimax-code.test.js \
     unit/base-executor-timeout-classification.test.js \
     integration/zcode-concurrent-responses.test.js \
     unit/grok-build-config.test.js \
