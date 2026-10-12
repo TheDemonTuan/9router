@@ -1,6 +1,6 @@
 {
   "sourceRevision": "a390c168ff1b2d14e73a95991c186c6aba3ff5a0",
-  "inputLockSha256": "e99226a1ded7b26487ba63811b2f3cf2fd02d7b06673281f4b5788492f61ff98",
+  "inputLockSha256": "d2d2fea1f407fda814046faae0760282c2eeaf256d33ca0ed62741e206d9d935",
   "sources": {
     "tunnel-client": {
       "url": "https://codeload.github.com/openai/tunnel-client/zip/a390c168ff1b2d14e73a95991c186c6aba3ff5a0",
@@ -14,10 +14,11 @@
   "patchedDependencyMinimums": {
     "tunnel-client": {
       "go.opentelemetry.io/otel/sdk": "v1.43.0",
-      "golang.org/x/net": "v0.56.0"
+      "golang.org/x/net": "v0.60.0"
     },
     "cloudflared": {
-      "golang.org/x/crypto": "v0.55.0",
+      "golang.org/x/net": "v0.60.0",
+      "golang.org/x/crypto": "v0.57.0",
       "google.golang.org/grpc": "v1.83.2"
     }
   },

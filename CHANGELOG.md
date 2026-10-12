@@ -1,6 +1,7 @@
 # Unreleased
 
 ## Changed
+- **Tunnel HTTP/2 security**: upgrade both source-built tunnel clients to `golang.org/x/net v0.60.0` for CVE-2026-78669; regenerate Go checksum graphs and synchronize build-lock/provenance digests without suppressing Trivy findings.
 - **Upstream deployment gates**: isolate Gemini native transport tests from Bun-only API-key storage while retaining real permission enforcement coverage. Verify MiniMax Coding aliases and preserve legacy provider/alias parity alongside dedicated Kimi Responses and MiniMax Coding regressions; leave historical baseline files unchanged.
 - **Upstream v0.5.99 integration**: add Bedrock/AWS SSO, MiniMax Code, ElevenLabs Scribe, Netlify relay pools, Hermes profiles and CLI connection improvements without restoring retired Headroom or Node SQLite fallback paths. Preserve independent CLI release version and existing security dependency pins.
 - **Restricted API keys**: enforce resolved model/combo permissions across generation endpoints, native Gemini and model listings; preserve combo member grants while filtering gateway-injected adapters, including nested combos and ChatGPT Web targets. Back up existing schema-2 Bun databases before adding access columns under schema version 3; retain restrictions through export/import.

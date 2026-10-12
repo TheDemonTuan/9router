@@ -805,9 +805,9 @@
   },
   {
     "Path": "golang.org/x/crypto",
-    "Version": "v0.55.0",
-    "Sum": "h1:+KWHjbgOaAQ66dh/YlkZKHlz9ZUlq61AFirAR9ntP8M=",
-    "GoModSum": "h1:uq0V9dE/fzQuJtbnL+2EhWOE63vo164FY8xqEnV9xis="
+    "Version": "v0.57.0",
+    "Sum": "h1:3ZVCjf8Ggz7zneR/EHRVx68Ctf+2pmIMP2UFhh9cC6M=",
+    "GoModSum": "h1:Fdz0i5U6CoizGwLda9DttjSk6qlZo25zYNtR+ycvuZA="
   },
   {
     "Path": "golang.org/x/lint",
@@ -817,15 +817,15 @@
   },
   {
     "Path": "golang.org/x/mod",
-    "Version": "v0.38.0",
-    "Sum": "h1:MECBjubtXD7yj4HrhIUcywNaGeNVUdfVnxmPajOk4yk=",
-    "GoModSum": "h1:V6Xz0pq8TQ3dGqVQ1FVHuelZpAL0uNhSkk9ogYP3c40="
+    "Version": "v0.41.0",
+    "Sum": "h1:qJmnOUb4YB+FsEuM3HcWucdZASCPGhsX6uljO6pog0c=",
+    "GoModSum": "h1:Ek9pY8RKWXwsWvd3rQiHYtMqkjSUV+s1Rj7j4H5Ur6o="
   },
   {
     "Path": "golang.org/x/net",
-    "Version": "v0.58.0",
-    "Sum": "h1:ynWG7rqYi4ccpTEuPZ2QGWHktVEM9DMCj9yzDE0Q7To=",
-    "GoModSum": "h1:YwCddHnFlT7eLQqVprV19OnhLGtc5xOKgE0RyqgfWAU="
+    "Version": "v0.60.0",
+    "Sum": "h1:79p50tfZlm0J9YfoDsSi639qSXNGVwEzOPLCxM2FsYU=",
+    "GoModSum": "h1:2DA/G1UfVbCpQPeWTmMPGY7Cs2PkBkwu743bVX5PIVg="
   },
   {
     "Path": "golang.org/x/oauth2",
@@ -835,27 +835,27 @@
   },
   {
     "Path": "golang.org/x/sync",
-    "Version": "v0.22.0",
-    "Sum": "h1:SZjpbeLmrCk4xhRSZFNZW5gFUeCeFgjekvI/+gfScek=",
-    "GoModSum": "h1:9xrNwdLfx4jkKbNva9FpL6vEN7evnE43NNNJQ2LF3+0="
+    "Version": "v0.23.0",
+    "Sum": "h1:KameEIfc1IkluZyXWLn39Wd4tURc6GbCiISGiZm2bQk=",
+    "GoModSum": "h1:sUUOizhqBxiL6pEWpqNLUiaJn1ShEbZ6BBqskPbjZm0="
   },
   {
     "Path": "golang.org/x/sys",
-    "Version": "v0.47.0",
-    "Sum": "h1:o7XGOvZQCADBQQ4Y7VNq2dRWQR7JmOUW8Kxx4ZsNgWs=",
-    "GoModSum": "h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw="
+    "Version": "v0.48.0",
+    "Sum": "h1:bbX/i/6MgT9BVLM9RT1thmxL04yeTAhbEz4SyadbXoo=",
+    "GoModSum": "h1:hNLxWAXmnKAxqDtdwIYC4bM9oQPEecfsnNMuSxOs3og="
   },
   {
     "Path": "golang.org/x/term",
-    "Version": "v0.45.0",
-    "Sum": "h1:NwWyBmoJCbfTHpxrWoZ9C6/VxOf7ic219I8xZZFdrf0=",
-    "GoModSum": "h1:9aqxs0blBcrm/n0L9QW0aRVD+ktan8ssZromtqJC43w="
+    "Version": "v0.46.0",
+    "Sum": "h1:3+OXuTbaKDgwk8jTi3aSLHRlmWqHEUDUtxnbFigO4YE=",
+    "GoModSum": "h1:+K02xbkittuwc0Am4abfA3Fc+XRGXkvBXNO88NCXPoc="
   },
   {
     "Path": "golang.org/x/text",
-    "Version": "v0.41.0",
-    "Sum": "h1:vz/seA0lnX87Othu2f/0L24RcgrXD9/YFTSuGjj3rH8=",
-    "GoModSum": "h1:jvf1O8ajNzZqhSrQBPbutR/EB83Cc0CFrezNQIwbb5M="
+    "Version": "v0.42.0",
+    "Sum": "h1:JbOZXgfeCPU9gacVtYliJqOhD+zhrEqK4LfdpmlUZqI=",
+    "GoModSum": "h1:ojzP1Z+2QtioaF8DTtO8K5q7JWVVYwZKenzujK0Zd0E="
   },
   {
     "Path": "golang.org/x/time",
@@ -865,9 +865,9 @@
   },
   {
     "Path": "golang.org/x/tools",
-    "Version": "v0.48.0",
-    "Sum": "h1:3+hClM1aLL5mjMKm5ovokw9epgRXPuu2tILgismM6RE=",
-    "GoModSum": "h1:08xX0orndb/F7jJxGDicx061tyd5pcMto75YMAXr6lk="
+    "Version": "v0.49.0",
+    "Sum": "h1:3NI7VXzL9+1WZD52Dx2ttoPwD5DWrFGpl9mFZDlmisI=",
+    "GoModSum": "h1:SJNXV9DBKT0UbdttsQjbfJlAE/q+y36++zo3uL3N0Oo="
   },
   {
     "Path": "golang.org/x/xerrors",
