@@ -11,7 +11,7 @@ vi.mock("open-sse/services/chatgptWebRuntimeClient.js", () => ({
   },
 }));
 const { POST, GET } = await import("../../src/app/api/providers/route.js");
-const { PUT } = await import("../../src/app/api/providers/[id]/route.js");
+const { GET: getConnection, PUT } = await import("../../src/app/api/providers/[id]/route.js");
 const request = (body, method = "POST") => new Request("http://localhost/api/providers", { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 beforeEach(() => {
   vi.resetAllMocks();
@@ -91,6 +91,28 @@ describe("profile CRUD", () => {
     const body = await (await GET()).json();
     expect(body.connections[0].accessToken).toBeUndefined();
     expect(body.connections[0].providerSpecificData).toEqual({ profileId: "personal" });
+  });
+  it.each(["openai", "bedrock", "chatgpt-web"])("redacts nested credentials from %s list and detail responses", async provider => {
+    const stored = {
+      id: "one", provider, apiKey: "fixture-private-key", accessToken: "fixture-private-access",
+      refreshToken: "fixture-private-refresh", idToken: "fixture-private-id",
+      providerSpecificData: {
+        profileId: "personal", region: "us-east-1", accessKeyId: "ASIAEXAMPLE",
+        sessionToken: "fixture-private-session", mode: "full",
+        nested: { label: "public", clientSecret: "fixture-private-client", entries: [{ authorization: "fixture-private-header", label: "public-entry" }] },
+      },
+    };
+    mocks.getProviderConnections.mockResolvedValue([stored]);
+    mocks.getProviderConnectionById.mockResolvedValue(stored);
+    const listed = (await (await GET()).json()).connections[0];
+    const detail = (await (await getConnection(new Request("http://localhost/api/providers/one"), { params: Promise.resolve({ id: "one" }) })).json()).connection;
+    for (const connection of [listed, detail]) {
+      expect(JSON.stringify(connection)).not.toContain("fixture-private-");
+      expect(connection.providerSpecificData).toEqual(provider === "chatgpt-web"
+        ? { profileId: "personal" }
+        : { profileId: "personal", region: "us-east-1", accessKeyId: "ASIAEXAMPLE", mode: "full", nested: { label: "public", entries: [{ label: "public-entry" }] } });
+    }
+    expect(stored.providerSpecificData.sessionToken).toBe("fixture-private-session");
   });
   it.each([{ profileId: 7 }, { profileId: "../escape" }, { profileId: "Upper" }])("rejects invalid selectors %j before persistence", async providerSpecificData => {
     expect((await POST(request({ provider: "chatgpt-web", name: "Invalid", providerSpecificData }))).status).toBe(400);

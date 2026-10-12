@@ -1,6 +1,6 @@
 {
   "name": "9router-app",
-  "version": "0.5.95",
+  "version": "0.5.99",
   "description": "9Router web dashboard",
   "private": true,
   "packageManager": "bun@1.4.2",
@@ -30,6 +30,7 @@
     "bcryptjs": "^3.0.3",
     "chalk": "^5.6.2",
     "confbox": "^0.3.1",
+    "enquirer": "^2.4.1",
     "express": "^5.2.1",
     "jose": "^6.2.12",
     "marked": "^18.0.14",
@@ -50,6 +51,10 @@
     "ws": "8.22.0",
     "zustand": "^5.0.15"
   },
+  "optionalDependencies": {
+    "@aws-sdk/credential-providers": "^3.1135.0"
+  },
+  "comment_aws_sdk_credential_providers": "Imported lazily for AWS Bedrock profile/SSO credentials; static access-key connections do not load it.",
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.3",
     "eslint": "^9",

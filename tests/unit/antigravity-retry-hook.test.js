@@ -4,6 +4,7 @@ const proxyAwareFetch = vi.fn();
 vi.mock("../../open-sse/utils/proxyFetch.js", () => ({ proxyAwareFetch }));
 
 const { AntigravityExecutor } = await import("../../open-sse/executors/antigravity.js");
+const { parseUpstreamError } = await import("../../open-sse/utils/error.js");
 
 const QUOTA_BODY = JSON.stringify({
   error: {
@@ -34,6 +35,12 @@ describe("Antigravity executor hard quota", () => {
       });
       expect(proxyAwareFetch).toHaveBeenCalledTimes(1);
       expect(result.response.status).toBe(429);
+      await expect(parseUpstreamError(result.response, executor)).resolves.toMatchObject({
+        statusCode: 429,
+        errorClass: "quota_exhausted",
+        retryable: false,
+        resetsAtMs: Date.parse("2026-09-24T02:26:46Z"),
+      });
       await expect(result.response.text()).resolves.toBe(QUOTA_BODY);
     } finally {
       vi.useRealTimers();

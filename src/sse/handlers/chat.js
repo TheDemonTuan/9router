@@ -41,6 +41,7 @@ import {
   getChatGptWebCatalog,
 } from "open-sse/services/chatgptWebRuntimeClient.js";
 import { getChatGptWebLegacyConversation } from "open-sse/utils/sessionManager.js";
+import { getKeyAccessContext, enforceKeyAccess, filterAdapterModels } from "../services/keyAccess.js";
 
 function readHeader(headers, name) {
   if (!headers || typeof headers !== "object") return null;
@@ -252,6 +253,13 @@ export async function handleChat(request, clientRawRequest = null, options = {})
     return errorResponse(HTTP_STATUS.BAD_REQUEST, "Missing model");
   }
 
+  // Per-key access control: a restricted key may call only its listed combos and
+  // models. Checked once on the requested target, before bypass, combo expansion
+  // and any credential lookup; an allowed combo grants the members it routes to.
+  const keyAccess = await getKeyAccessContext(request);
+  const keyAccessDenied = await enforceKeyAccess(keyAccess, modelStr);
+  if (keyAccessDenied) return keyAccessDenied;
+
   // Bypass naming/warmup requests before combo rotation to avoid wasting rotation slots
   const userAgent = request?.headers?.get("user-agent") || "";
   const bypassResponse = cgwRequest || chatGptWebAuthority ? null : handleBypassRequest(body, modelStr, userAgent, !!settings.ccFilterNaming);
@@ -274,7 +282,7 @@ export async function handleChat(request, clientRawRequest = null, options = {})
     const comboStrategies = settings.comboStrategies || {};
     const comboSpecificStrategy = comboStrategies[modelStr]?.fallbackStrategy;
     const comboStrategy = comboSpecificStrategy || settings.comboStrategy || "fallback";
-    const augmentedModels = augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, settings);
+    const augmentedModels = await filterAdapterModels(keyAccess, augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, settings), comboModels);
     const adapterAdded = augmentedModels.filter((m) => !comboModels.includes(m));
     const liveCapabilities = await loadChatGptWebComboCapabilities(augmentedModels, bridgeCapability);
 
@@ -334,7 +342,7 @@ export async function handleChat(request, clientRawRequest = null, options = {})
 
   // Single model request — may still switch to a capacity-adapter model if the
   // target lacks a capability the request needs (e.g. no vision, request has an image).
-  const soloAugmented = augmentModelsWithCapacityAdapter([modelStr], requiredCapabilities, settings);
+  const soloAugmented = await filterAdapterModels(keyAccess, augmentModelsWithCapacityAdapter([modelStr], requiredCapabilities, settings), [modelStr]);
   if (soloAugmented.length > 1) {
     const adapterAdded = soloAugmented.filter((m) => m !== modelStr);
     log.info("CHAT", `Capacity adapter for [${[...requiredCapabilities].join(",")}] on "${modelStr}" → trying ${soloAugmented.join(", ")}`);
@@ -386,7 +394,9 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       }
       const requiredCapabilities = detectRequiredCapabilities(body);
       const bridgeCapability = bridgeCapabilityForRequest(chatGptWebAuthority, body);
-      const augmentedModels = augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, chatSettings);
+      // The outer combo grants its members, not gateway-injected adapter targets.
+      const keyAccess = await getKeyAccessContext(request);
+      const augmentedModels = await filterAdapterModels(keyAccess, augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, chatSettings), comboModels);
       const adapterAdded = augmentedModels.filter((m) => !comboModels.includes(m));
       const liveCapabilities = await loadChatGptWebComboCapabilities(augmentedModels, bridgeCapability);
 

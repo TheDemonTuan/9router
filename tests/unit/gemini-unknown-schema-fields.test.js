@@ -14,25 +14,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { cleanJSONSchemaForAntigravity, UNSUPPORTED_SCHEMA_CONSTRAINTS } from "../../open-sse/translator/formats/gemini.js";
-
-describe("UNSUPPORTED_SCHEMA_CONSTRAINTS includes non-standard annotation keywords (#4283)", () => {
-  it("includes errorMessage", () => {
-    expect(UNSUPPORTED_SCHEMA_CONSTRAINTS).toContain("errorMessage");
-  });
-  it("includes errorMessages", () => {
-    expect(UNSUPPORTED_SCHEMA_CONSTRAINTS).toContain("errorMessages");
-  });
-  it("includes markdownDescription", () => {
-    expect(UNSUPPORTED_SCHEMA_CONSTRAINTS).toContain("markdownDescription");
-  });
-  it("includes minProperties", () => {
-    expect(UNSUPPORTED_SCHEMA_CONSTRAINTS).toContain("minProperties");
-  });
-  it("includes maxProperties", () => {
-    expect(UNSUPPORTED_SCHEMA_CONSTRAINTS).toContain("maxProperties");
-  });
-});
+import { cleanJSONSchemaForAntigravity } from "../../open-sse/translator/formats/gemini.js";
 
 describe("cleanJSONSchemaForAntigravity strips errorMessage recursively (#4283)", () => {
   it("strips top-level errorMessage", () => {
@@ -101,5 +83,17 @@ describe("cleanJSONSchemaForAntigravity strips errorMessage recursively (#4283)"
     const result = cleanJSONSchemaForAntigravity(structuredClone(schema));
     expect(result.description).toBe("A valid tool");
     expect(result.properties.n.description).toBe("A number");
+  });
+
+  it("retains keyword-shaped property names without treating their map as a schema", () => {
+    const names = ["properties", "type", "enum", "const", "allOf", "anyOf", "items", "default", "title", "x-client"];
+    const result = cleanJSONSchemaForAntigravity({
+      type: "object",
+      properties: Object.fromEntries(names.map(name => [name, { type: "string", default: "strip", errorMessage: "strip" }])),
+      required: names,
+    });
+    expect(Object.keys(result.properties)).toEqual(names);
+    expect(result.required).toEqual(names);
+    for (const schema of Object.values(result.properties)) expect(schema).toEqual({ type: "string" });
   });
 });

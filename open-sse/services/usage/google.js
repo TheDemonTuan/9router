@@ -222,6 +222,8 @@ export async function getAntigravityUsage(accessToken, providerSpecificData, pro
           total,
           resetAt,
           remainingPercentage,
+          // Missing fractions are a display-only exhausted estimate, not routing evidence.
+          ...(!hasRemainingFraction ? { remainingFractionKnown: false } : {}),
           unlimited: false,
           displayName: info.displayName || modelKey,
         };

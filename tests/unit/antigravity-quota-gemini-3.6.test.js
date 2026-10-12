@@ -37,12 +37,12 @@ vi.mock("../../open-sse/utils/proxyFetch.js", () => ({
   proxyAwareFetch,
 }));
 
+const { getAntigravityUsage } = await import("../../open-sse/services/usage/google.js");
+
 describe("Antigravity quota tracker: Gemini 3.6 Flash usage bars", () => {
   beforeEach(() => proxyAwareFetch.mockClear());
 
   it("returns Gemini 3.6 Flash tier quotas so the dashboard can render usage bars", async () => {
-    const { getAntigravityUsage } = await import("../../open-sse/services/usage/google.js");
-
     const usage = await getAntigravityUsage("access-token", {});
 
     expect(usage.quotas["gemini-3.6-flash-high"]).toMatchObject({
@@ -63,9 +63,7 @@ describe("Antigravity quota tracker: Gemini 3.6 Flash usage bars", () => {
     });
   });
 
-  it("still filters out internal and non-important models", async () => {
-    const { getAntigravityUsage } = await import("../../open-sse/services/usage/google.js");
-
+  it("filters internal models but preserves every discovered public model", async () => {
     const usage = await getAntigravityUsage("access-token", {});
 
     expect(usage.quotas).not.toHaveProperty("internal-model");

@@ -20,7 +20,8 @@ const nextConfig = {
   // letter). That throw happens at module scope, so every consumer of `open` dies on
   // import — including xAI/Grok token refresh, which loads the OAuth service that imports
   // it. Keeping it external preserves the real `import.meta.url` at runtime.
-  serverExternalPackages: ["open", "selfsigned", "ajv"],
+  // AWS profile/SSO credentials resolve plugins dynamically and read local credential caches.
+  serverExternalPackages: ["open", "selfsigned", "ajv", "@aws-sdk/credential-providers"],
   turbopack: {
     root: tracingRoot
   },

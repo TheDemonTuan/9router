@@ -36,6 +36,8 @@ function buildProviderEntry(r) {
     ...(r.authType ? { authType: r.authType } : {}),
     ...(r.authHint ? { authHint: r.authHint } : {}),
     ...(r.exposeThinkingVariants ? { exposeThinkingVariants: true } : {}),
+    ...(r.apiKeyOptionalWith ? { apiKeyOptionalWith: r.apiKeyOptionalWith } : {}),
+    ...(r.credentialForm ? { credentialForm: r.credentialForm } : {}),
   };
 }
 

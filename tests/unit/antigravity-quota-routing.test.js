@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   connections: [],
@@ -37,6 +37,7 @@ const {
   refreshAntigravityQuota,
   handleAntigravityQuotaError,
   clearAntigravityStrikes,
+  getAntigravityCachedQuotaEvidence,
 } = await import("@/sse/services/antigravityQuota.js");
 const { getProviderCredentials } = await import("@/sse/services/auth.js");
 
@@ -188,5 +189,48 @@ describe("Antigravity durable quota routing", () => {
     vi.setSystemTime(Date.parse(FUTURE_RESET));
     await expect(getProviderCredentials("antigravity", null, MODEL)).resolves.toMatchObject({ connectionId: "ag-expired" });
     expect(mocks.getAntigravityUsage).not.toHaveBeenCalled();
+  });
+});
+
+describe("Antigravity display summaries remain non-authoritative", () => {
+  it.each([
+    ["claude-sonnet-5-5", "claude_gpt_session"],
+    ["gemini-3.8-flash-high", "gemini_weekly"],
+  ])("does not synthesize a hard quota for %s from %s", async (model, bucket) => {
+    const id = `ag-summary-${model}`;
+    mocks.connections = [{ id, provider: "antigravity", isActive: true }];
+    mocks.getAntigravityUsage.mockResolvedValue({
+      quotas: { [bucket]: { remainingPercentage: 0, resetAt: FUTURE_RESET } },
+    });
+    await expect(handleAntigravityQuotaError(id, 429, model, "token", {})).resolves.toBeNull();
+    expect(mocks.connections[0][`modelLock_${model}`]).toBeUndefined();
+    await expect(getProviderCredentials("antigravity", null, model)).resolves.toMatchObject({ connectionId: id });
+    clearAntigravityStrikes(id, model);
+  });
+
+  it("persists a dynamically discovered exact model while ignoring invalid quota evidence", async () => {
+    const model = "future-discovered-model";
+    mocks.connections = [{ id: "ag-dynamic-quota", provider: "antigravity", isActive: true }];
+    await persistAntigravityQuota("ag-dynamic-quota", {
+      [model]: { remainingPercentage: 0, resetAt: FUTURE_RESET },
+      [MODEL]: { remainingPercentage: 0, resetAt: "invalid" },
+      [OTHER_MODEL]: { remainingPercentage: -1, resetAt: FUTURE_RESET },
+    }, [model]);
+    expect(mocks.connections[0][`modelLock_${model}`]).toBe(FUTURE_RESET);
+    expect(mocks.connections[0][`modelLock_${MODEL}`]).toBeUndefined();
+    expect(mocks.connections[0][`modelLock_${OTHER_MODEL}`]).toBeUndefined();
+  });
+
+  it("never promotes an unknown-fraction display zero into cached hard quota evidence", async () => {
+    const id = "ag-display-zero";
+    mocks.connections = [{ id, provider: "antigravity", isActive: true }];
+    mocks.getAntigravityUsage.mockResolvedValue({ quotas: {
+      [MODEL]: { remainingPercentage: 0, remainingFractionKnown: false, resetAt: FUTURE_RESET },
+    } });
+    await refreshAntigravityQuota(id, "token", {});
+    expect(mocks.connections[0][`modelLock_${MODEL}`]).toBeUndefined();
+    expect(getAntigravityCachedQuotaEvidence(id, MODEL)).toBeNull();
+    await expect(handleAntigravityQuotaError(id, 429, MODEL, "token", {})).resolves.toBeNull();
+    clearAntigravityStrikes(id, MODEL);
   });
 });

@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { detectRequiredCapabilities, reorderByCapabilities } from "../../open-sse/services/combo.js";
+import { describe, it, expect, vi } from "vitest";
+import { detectRequiredCapabilities, reorderByCapabilities, handleComboChat } from "../../open-sse/services/combo.js";
 
 describe("detectRequiredCapabilities", () => {
   it("text-only -> empty", () => {
@@ -89,5 +89,18 @@ describe("reorderByCapabilities", () => {
   it("single model -> unchanged", () => {
     const models = ["a/x"];
     expect(reorderByCapabilities(models, new Set(["vision"]))).toBe(models);
+  });
+});
+
+describe("combo live capability dispatch", () => {
+  it("dispatches to the live-eligible vision account before text-only fallback", async () => {
+    const handleSingleModel = vi.fn(async () => new Response("ok"));
+    await handleComboChat({
+      body: { messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "synthetic" } }] }] },
+      models: ["deepseek/deepseek-chat", "cgw/chatgpt-web/high"],
+      liveCapabilities: new Map([["cgw/chatgpt-web/high", { vision: true }]]),
+      handleSingleModel, log: { info: vi.fn(), warn: vi.fn() },
+    });
+    expect(handleSingleModel.mock.calls[0][1]).toBe("cgw/chatgpt-web/high");
   });
 });

@@ -142,6 +142,20 @@ export function generateProjectId() {
   return `${adj}-${noun}-${crypto.randomUUID().slice(0, 5)}`;
 }
 
+// Visit schema bodies, never property-name maps or literal enum/default values.
+function forEachSchemaChild(schema, visit) {
+  for (const [key, value] of Object.entries(schema)) {
+    if (!value || typeof value !== "object") continue;
+    if (["properties", "$defs", "definitions", "patternProperties", "dependentSchemas"].includes(key)) {
+      for (const child of Object.values(value)) visit(child);
+    } else if (["allOf", "anyOf", "oneOf", "prefixItems"].includes(key) || (key === "items" && Array.isArray(value))) {
+      for (const child of value) visit(child);
+    } else if (["items", "additionalProperties", "additionalItems", "propertyNames", "contains", "not", "if", "then", "else", "unevaluatedProperties", "unevaluatedItems", "contentSchema"].includes(key)) {
+      visit(value);
+    }
+  }
+}
+
 // Helper: Remove unsupported keywords recursively from object/array
 // Also strips all vendor extension fields (x- prefixed) not supported by Gemini
 function removeUnsupportedKeywords(obj, keywords) {
@@ -157,14 +171,9 @@ function removeUnsupportedKeywords(obj, keywords) {
   for (const key of Object.keys(obj)) {
     if (keywords.includes(key) || key.startsWith("x-")) {
       delete obj[key];
-      continue;
-    }
-
-    const value = obj[key];
-    if (value && typeof value === "object") {
-      removeUnsupportedKeywords(value, keywords);
     }
   }
+  forEachSchemaChild(obj, child => removeUnsupportedKeywords(child, keywords));
 }
 
 // Convert const to enum
@@ -176,11 +185,7 @@ function convertConstToEnum(obj) {
     delete obj.const;
   }
 
-  for (const value of Object.values(obj)) {
-    if (value && typeof value === "object") {
-      convertConstToEnum(value);
-    }
-  }
+  forEachSchemaChild(obj, convertConstToEnum);
 }
 
 // Convert enum values to strings (Gemini requires string enum values + explicit type:"string")
@@ -195,11 +200,7 @@ function convertEnumValuesToStrings(obj) {
     }
   }
 
-  for (const value of Object.values(obj)) {
-    if (value && typeof value === "object") {
-      convertEnumValuesToStrings(value);
-    }
-  }
+  forEachSchemaChild(obj, convertEnumValuesToStrings);
 }
 
 // Merge allOf schemas
@@ -229,11 +230,7 @@ function mergeAllOf(obj) {
     if (merged.required) obj.required = [...(obj.required || []), ...merged.required];
   }
 
-  for (const value of Object.values(obj)) {
-    if (value && typeof value === "object") {
-      mergeAllOf(value);
-    }
-  }
+  forEachSchemaChild(obj, mergeAllOf);
 }
 
 // Gemini has no multi-branch composition equivalent. Only null unions map to nullable.
@@ -253,9 +250,7 @@ function flattenAnyOfOneOf(obj, schemaKind = "tool") {
     obj.nullable = true;
   }
 
-  for (const value of Object.values(obj)) {
-    if (value && typeof value === "object") flattenAnyOfOneOf(value, schemaKind);
-  }
+  forEachSchemaChild(obj, child => flattenAnyOfOneOf(child, schemaKind));
 }
 
 // Flatten type arrays
@@ -267,18 +262,14 @@ function flattenTypeArrays(obj) {
     obj.type = nonNullTypes.length > 0 ? nonNullTypes[0] : "string";
   }
 
-  for (const value of Object.values(obj)) {
-    if (value && typeof value === "object") {
-      flattenTypeArrays(value);
-    }
-  }
+  forEachSchemaChild(obj, flattenTypeArrays);
 }
 
 // Infer missing type=object when properties exist (Gemini requires explicit type)
 function ensureObjectType(obj) {
   if (!obj || typeof obj !== "object") return;
   if (obj.properties && !obj.type) obj.type = "object";
-  for (const v of Object.values(obj)) if (v && typeof v === "object") ensureObjectType(v);
+  forEachSchemaChild(obj, ensureObjectType);
 }
 
 // Gemini cannot represent heterogeneous tuples.
@@ -296,9 +287,7 @@ function convertPrefixItems(obj) {
     delete obj.prefixItems;
   }
 
-  for (const value of Object.values(obj)) {
-    if (value && typeof value === "object") convertPrefixItems(value);
-  }
+  forEachSchemaChild(obj, convertPrefixItems);
 }
 
 // Gemini requires items on every type:"array" schema — fill a permissive placeholder
@@ -307,7 +296,7 @@ function ensureArrayItems(obj) {
   if (obj.type === "array" && !obj.items) {
     obj.items = { type: "string" };
   }
-  for (const v of Object.values(obj)) if (v && typeof v === "object") ensureArrayItems(v);
+  forEachSchemaChild(obj, ensureArrayItems);
 }
 
 // Clean JSON Schema for Antigravity API compatibility - removes unsupported keywords recursively
@@ -349,12 +338,7 @@ export function cleanJSONSchemaForAntigravity(schema) {
       }
     }
 
-    // Recurse into nested objects
-    for (const value of Object.values(obj)) {
-      if (value && typeof value === "object") {
-        cleanupRequired(value);
-      }
-    }
+    forEachSchemaChild(obj, cleanupRequired);
   }
 
   cleanupRequired(cleaned);
@@ -388,12 +372,7 @@ export function cleanJSONSchemaForAntigravity(schema) {
       }
     }
 
-    // Recurse into nested objects
-    for (const value of Object.values(obj)) {
-      if (value && typeof value === "object") {
-        addPlaceholders(value);
-      }
-    }
+    forEachSchemaChild(obj, addPlaceholders);
   }
 
   addPlaceholders(cleaned);
@@ -565,12 +544,36 @@ export function cleanLegacyResponseSchemaOrFallback(schema) {
   }
 }
 
+// Gemini / Cloud Code treat a `$ref` key inside functionResponse.response as a
+// pointer to functionResponse.parts and reject the request with
+// "The referenced name `#/$defs/...` in function_response.response does not match
+// to a display_name in the function_response.parts". Tool results that carry a
+// JSON Schema / OpenAPI document (webfetch, read, MCP) hit this, so rename the key.
+export const GEMINI_RESERVED_RESPONSE_KEYS = { "$ref": "_ref" };
+
+// Recursively rename reserved keys in a tool-result payload (arrays/objects only)
+export function sanitizeFunctionResponsePayload(value) {
+  if (Array.isArray(value)) return value.map(sanitizeFunctionResponsePayload);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, val]) => [
+    Object.hasOwn(GEMINI_RESERVED_RESPONSE_KEYS, key) ? GEMINI_RESERVED_RESPONSE_KEYS[key] : key,
+    sanitizeFunctionResponsePayload(val),
+  ]));
+}
+
+// Return the part with a sanitized functionResponse.response (same reference when untouched)
+function sanitizeFunctionResponsePart(part) {
+  const response = part?.functionResponse?.response;
+  if (!response || typeof response !== "object") return part;
+  return { ...part, functionResponse: { ...part.functionResponse, response: sanitizeFunctionResponsePayload(response) } };
+}
+
 // Merge adjacent same-role messages, strip empty parts, ensure initial and terminal user turns
 export function normalizeGeminiContents(contents, { requireTrailingUser = true } = {}) {
   const out = [];
   for (const c of contents || []) {
     if (!c?.role || !Array.isArray(c.parts)) continue;
-    const parts = c.parts.filter(p => p && Object.keys(p).length > 0);
+    const parts = c.parts.filter(p => p && Object.keys(p).length > 0).map(sanitizeFunctionResponsePart);
     if (parts.length === 0) continue;
     const last = out.at(-1);
     if (last?.role === c.role) last.parts.push(...parts);

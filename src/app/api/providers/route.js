@@ -9,11 +9,12 @@ import {
 } from "@/models";
 import { APIKEY_PROVIDERS } from "@/shared/constants/config";
 import { AI_PROVIDERS, FREE_TIER_PROVIDERS, LOCAL_BRIDGE_PROVIDERS, WEB_COOKIE_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isCustomEmbeddingProvider } from "@/shared/constants/providers";
-import { normalizeProviderId, normalizeProviderSpecificData, sanitizeProviderSpecificData, validateChatGptWebConnectionInput } from "@/lib/providerNormalization";
+import { normalizeProviderId, normalizeProviderSpecificData, validateChatGptWebConnectionInput } from "@/lib/providerNormalization";
 import { validateChatGptWebProfileId } from "open-sse/services/chatgptWebRuntimeClient.js";
 import { authorizeChatGptWebRuntimeAdmin } from "@/dashboardGuard";
 import { ensureChatGptWebRuntimeProfile } from "@/lib/chatgptWebProfileProvisioning";
 import { getChatGptWebProfileStates, applyChatGptWebProfileState, chatGptWebUnavailableProfileState } from "@/lib/chatgptWebConnectionState";
+import { toProviderConnectionResponse } from "@/lib/providerConnectionResponse";
 
 export const dynamic = "force-dynamic";
 
@@ -78,19 +79,14 @@ export async function GET(request) {
         ? (c.name || nodeNameMap[c.provider] || c.providerSpecificData?.nodeName || c.provider)
         : c.name;
       const safe = {
-        ...c,
+        ...toProviderConnectionResponse(c),
         name,
-        providerSpecificData: c.provider === "chatgpt-web" ? { profileId: c.providerSpecificData?.profileId } : sanitizeProviderSpecificData(c.providerSpecificData),
       };
       if (c.provider === "chatgpt-web") {
         Object.assign(safe, applyChatGptWebProfileState(safe, runtimeUnavailable
           ? chatGptWebUnavailableProfileState()
           : profileStates.get(c.providerSpecificData?.profileId)));
       }
-      delete safe.apiKey;
-      delete safe.accessToken;
-      delete safe.refreshToken;
-      delete safe.idToken;
       return safe;
     });
 
@@ -143,7 +139,10 @@ export async function POST(request) {
     if (!provider || !isValidProvider) {
       return NextResponse.json({ error: "Invalid provider" }, { status: 400 });
     }
-    if (!apiKey && provider !== "ollama-local" && !isLocalBridgeProvider) {
+    // Bedrock can use a local AWS profile instead of a pasted API key.
+    const apiKeySubstitute = AI_PROVIDERS[provider]?.apiKeyOptionalWith;
+    const hasApiKeySubstitute = !!(apiKeySubstitute && body.providerSpecificData?.[apiKeySubstitute]);
+    if (!apiKey && provider !== "ollama-local" && !isLocalBridgeProvider && !hasApiKeySubstitute) {
       return NextResponse.json({ error: `${isWebCookieProvider ? "Cookie value" : "API Key"} is required` }, { status: 400 });
     }
     const connectionName = name || displayName || AI_PROVIDERS[provider]?.name;
@@ -236,15 +235,10 @@ export async function POST(request) {
       allowOverwrite: body.id ? true : (body.allowOverwrite === true || body.overwrite === true),
     });
 
-    // Hide sensitive fields
-    const result = { ...newConnection };
-    delete result.apiKey;
-    delete result.accessToken;
-    delete result.refreshToken;
-    delete result.idToken;
-    result.providerSpecificData = provider === "chatgpt-web" ? { profileId: result.providerSpecificData?.profileId } : sanitizeProviderSpecificData(result.providerSpecificData);
-
-    return NextResponse.json({ connection: result }, { status: 201 });
+    return NextResponse.json(
+      { connection: toProviderConnectionResponse(newConnection) },
+      { status: 201 },
+    );
   } catch (error) {
     if (error?.code === "PROVIDER_NAME_CONFLICT") {
       return NextResponse.json(

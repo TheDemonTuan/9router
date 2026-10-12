@@ -1,7 +1,7 @@
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { getModelsByProviderId } from "open-sse/config/providerModels.js";
 import { getAntigravityUsage } from "open-sse/services/usage/google.js";
-import { markAccountUnavailable, persistModelLocksBatch } from "./auth.js";
+import { persistModelLocksBatch } from "./auth.js";
 import * as log from "../utils/logger.js";
 
 const quotaCache = new Map();
@@ -32,7 +32,7 @@ export async function persistAntigravityQuota(connectionId, quotas, modelIds = [
   const locks = [];
   for (const [model, quota] of Object.entries(quotas)) {
     if (DISPLAY_ONLY_KEYS.has(model) || !allowed.has(model)) continue;
-    if (quota?.unlimited === true || quota?.remainingPercentage !== 0) continue;
+    if (quota?.unlimited === true || quota?.remainingFractionKnown === false || quota?.remainingPercentage !== 0) continue;
     if (typeof quota?.remainingPercentage !== "number" || !Number.isFinite(quota.remainingPercentage)) continue;
     const resetMs = new Date(quota.resetAt).getTime();
     if (!Number.isFinite(resetMs) || resetMs <= Date.now()) continue;
@@ -98,10 +98,10 @@ async function _doRefresh(connectionId, accessToken, providerSpecificData, now) 
  */
 export function getAntigravityCachedQuotaEvidence(connectionId, model) {
   const cached = quotaCache.get(connectionId);
-  const quota = cached?.quotas ? cached.quotas[model] : cached?.[model];
+  const quota = cached?.quotas?.[model];
   const now = Date.now();
   const resetMs = new Date(quota?.resetAt).getTime();
-  if (quota?.remainingPercentage === 0 && Number.isFinite(resetMs) && resetMs > now) {
+  if (quota?.unlimited !== true && quota?.remainingFractionKnown !== false && quota?.remainingPercentage === 0 && Number.isFinite(resetMs) && resetMs > now) {
     strikeCounts.delete(`${connectionId}|${model}`);
     return { resetsAtMs: resetMs, errorClass: "quota_exhausted" };
   }
@@ -139,25 +139,9 @@ export async function handleAntigravityQuotaError(connectionId, status, model, a
     return recordAntigravityStrikeFast(connectionId, status, model);
   }
   log.info("AG_QUOTA", `${connectionId.slice(0, 8)} | ${status} on ${model} — refreshing quota`);
-  const quota = (await refreshAntigravityQuota(connectionId, accessToken, providerSpecificData))?.[model];
-  const now = Date.now();
-  const resetMs = new Date(quota?.resetAt).getTime();
-  if (quota?.remainingPercentage === 0 && Number.isFinite(resetMs) && resetMs > now) {
-    strikeCounts.delete(`${connectionId}|${model}`);
-    return { resetsAtMs: resetMs, errorClass: "quota_exhausted" };
-  }
+  await refreshAntigravityQuota(connectionId, accessToken, providerSpecificData);
+  const cached = getAntigravityCachedQuotaEvidence(connectionId, model);
+  if (cached) return cached;
 
-  const key = `${connectionId}|${model}`;
-  const strike = strikeCounts.get(key);
-  const windowStart = strike && now - strike.windowStart <= STRIKE_WINDOW_MS ? strike.windowStart : now;
-  const count = strike && windowStart === strike.windowStart ? strike.count + 1 : 1;
-  if (count < STRIKE_THRESHOLD) {
-    strikeCounts.set(key, { count, windowStart });
-    return null;
-  }
-
-  strikeCounts.delete(key);
-  const blockedUntil = now + STRIKE_BLOCK_MS;
-  log.warn("AG_QUOTA", `${connectionId.slice(0, 8)} | STRIKE_${status} ${model} — ${count}x within 60s; breaker 15m`);
-  return { resetsAtMs: blockedUntil, errorClass: "rate_limited" };
+  return recordAntigravityStrikeFast(connectionId, status, model);
 }
