@@ -2,7 +2,8 @@
 
 const fs = require("fs");
 const path = require("path");
-const { execSync } = require("child_process");
+const { execSync, execFileSync } = require("child_process");
+const { ensureBunRuntime } = require("../hooks/bunRuntime");
 
 const cliDir = path.resolve(__dirname, "..");
 const appDir = path.resolve(cliDir, "..");
@@ -155,23 +156,11 @@ function buildCliPackage() {
   fs.mkdirSync(path.join(buildHomeDir, "AppData", "Roaming"), { recursive: true });
   fs.mkdirSync(path.join(buildHomeDir, "AppData", "Local"), { recursive: true });
 
-  // Step 0: Sync version from app/cli/package.json to app/package.json
-  console.log("0️⃣  Syncing version to app/package.json...");
-  const cliPkg = JSON.parse(fs.readFileSync(path.join(cliDir, "package.json"), "utf8"));
-  const appPkgPath = path.join(appDir, "package.json");
-  const appPkg = JSON.parse(fs.readFileSync(appPkgPath, "utf8"));
-  if (appPkg.version !== cliPkg.version) {
-    appPkg.version = cliPkg.version;
-    fs.writeFileSync(appPkgPath, JSON.stringify(appPkg, null, 2) + "\n");
-    console.log(`✅ Version synced: ${cliPkg.version}\n`);
-  } else {
-    console.log(`✅ Version already synced: ${cliPkg.version}\n`);
-  }
-
   // Step 1: Build app with Next.js (workspace tracing root → traced node_modules in standalone).
   console.log("1️⃣  Building Next.js app...");
   try {
-    execSync("npm run build", {
+    const bunPath = ensureBunRuntime();
+    execFileSync(bunPath, ["run", "build"], {
       stdio: "inherit",
       cwd: appDir,
       env: {
@@ -180,6 +169,9 @@ function buildCliPackage() {
         USERPROFILE: buildHomeDir,
         APPDATA: path.join(buildHomeDir, "AppData", "Roaming"),
         LOCALAPPDATA: path.join(buildHomeDir, "AppData", "Local"),
+        DATA_DIR: path.join(buildHomeDir, "data"),
+        CGW_DATA_DIR: path.join(buildHomeDir, "cgw"),
+        PATH: [path.dirname(bunPath), process.env.PATH].filter(Boolean).join(path.delimiter),
         NEXT_DIST_DIR: buildDistDirName,
         NEXT_TRACING_ROOT_MODE: "workspace",
       }
@@ -221,11 +213,11 @@ function buildCliPackage() {
     process.exit(1);
   }
 
-  // Step 3b: Ensure sql.js (pure JS fallback) bundled in app/cli/app/node_modules.
-  // Strip better-sqlite3 (native) — it lives in ~/.9router/runtime to avoid
-  // Windows EBUSY during global CLI updates. node:sqlite (Node ≥22.5) is also
-  // available as a no-install middle tier.
-  console.log("3️⃣ b Configuring SQLite drivers...");
+  const viewerSource = path.join(appDir, "chatgpt-web-viewer-proxy.cjs");
+  if (!fs.statSync(viewerSource).isFile()) throw new Error("Missing viewer proxy module");
+  fs.copyFileSync(viewerSource, path.join(cliAppDir, "chatgpt-web-viewer-proxy.cjs"));
+
+  // Ensure external packages are available in the standalone bundle.
   function ensureModuleInBundle(pkg) {
     const dest = path.join(cliAppDir, "node_modules", pkg);
     if (fs.existsSync(dest)) {
@@ -238,23 +230,14 @@ function buildCliPackage() {
     ];
     const src = candidates.find((p) => fs.existsSync(p));
     if (!src) {
-      console.warn(`⚠️  ${pkg} not found locally — bundle will rely on node:sqlite or runtime install`);
-      return;
+      throw new Error(`External package ${pkg} not found locally`);
     }
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     copyRecursive(src, dest);
     console.log(`✅ Bundled ${pkg}`);
   }
-  ensureModuleInBundle("sql.js");
-  // `open` is external (see serverExternalPackages in next.config.mjs), so it must exist in
-  // the bundle's node_modules or every importer throws MODULE_NOT_FOUND at runtime. Output
-  // tracing normally copies it; this is the same belt-and-braces guard used for sql.js.
+  // `open` is external and must be present even if output tracing misses it.
   ensureModuleInBundle("open");
-  const betterDir = path.join(cliAppDir, "node_modules", "better-sqlite3");
-  if (fs.existsSync(betterDir)) {
-    fs.rmSync(betterDir, { recursive: true, force: true });
-    console.log("✅ Stripped better-sqlite3 (lives in ~/.9router/runtime)");
-  }
   console.log("");
 
   // Step 4: Copy static files

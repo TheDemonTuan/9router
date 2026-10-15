@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-test "$(bun --version)" = 1.4.0
+test "$(bun --version)" = 1.4.3
 
 # A sibling-free copy must resolve only runtime dependencies, even when the
 # caller has already installed fflate and other gateway packages at the root.

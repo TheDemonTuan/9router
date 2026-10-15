@@ -1,13 +1,13 @@
 import { Worker } from "node:worker_threads";
-import { createRequire } from "node:module";
+import * as nodeModule from "node:module";
 import { createHash } from "node:crypto";
 import { ANTIGRAVITY_SCHEMA_LIMITS as LIMITS } from "../../config/antigravitySchema.js";
 import { inspectAntigravitySchema, invalidAntigravitySchema, projectAntigravityClaudeToolSchema } from "./antigravityToolSchema.js";
 
-const require = createRequire(import.meta.url);
-// Keep resolution at runtime: Turbopack otherwise replaces require.resolve with
-// numeric bundle IDs, which are not paths a separate worker can require.
-const resolveModule = require.resolve.bind(require);
+// Worker entrypoints need filesystem paths, not bundler module IDs. Keep both
+// createRequire and its resolver opaque to webpack and Turbopack transforms.
+const require = Reflect.get(nodeModule, "createRequire")(import.meta.url);
+const resolveModule = Reflect.get(require, "resolve").bind(require);
 const paths = {
   "draft-07": resolveModule("ajv"),
   "2019-09": resolveModule("ajv/dist/2019.js"),

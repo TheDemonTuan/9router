@@ -1452,10 +1452,11 @@ Notes:
 
 ## 🛠️ Tech Stack
 
-- **Runtime**: Node.js 20+
-- **Framework**: Next.js 16
-- **UI**: React 19 + Tailwind CSS 4
-- **Database**: SQLite (better-sqlite3 / node:sqlite / sql.js fallback)
+- **Runtime**: Bun 1.4.3 for the app, ChatGPT Web runtime/companion, and RTK sidecar. The npm CLI entry remains compatible with Node.js 18+ and launches the app using its pinned Bun dependency, verified and cached under the data directory. Install with lifecycle scripts and optional dependencies enabled; runtime verification fails closed instead of falling back to Node.
+- **CLI update isolation**: standalone builds are copied into immutable `runtime/app/<identity>` snapshots under the data directory before launch. This keeps Windows npm updates outside the running app's working directory and preserves lazy-loaded chunks. Old snapshots are retained; remove them only after their app processes have stopped.
+- **Framework**: Next.js 16.4.1 (stable rendering/cache model; Turbopack default, explicit webpack compatibility scripts)
+- **UI**: React 19.3.0 + Tailwind CSS 4
+- **Database**: Bun native `bun:sqlite`
 - **Streaming**: Server-Sent Events (SSE)
 - **Auth**: OAuth 2.0 (PKCE) + JWT + API Keys
 

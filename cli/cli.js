@@ -26,7 +26,8 @@ function waitServerReady(port, { timeoutMs = 15000, intervalMs = 150 } = {}) {
 }
 
 const pkg = require("./package.json");
-const { ensureSqliteRuntime, buildEnvWithRuntime } = require("./hooks/sqliteRuntime");
+const { ensureBunRuntime } = require("./hooks/bunRuntime");
+const { ensureAppRuntime } = require("./hooks/appRuntime");
 const { ensureTrayRuntime } = require("./hooks/trayRuntime");
 const args = process.argv.slice(2);
 
@@ -56,11 +57,6 @@ if (args[0] === "connect" || args[0] === "show") {
     });
   return;
 }
-
-// Self-heal SQLite runtime deps (sql.js + better-sqlite3) into ~/.9router/runtime
-// so the server can resolve them via NODE_PATH. Best-effort — sql.js is required,
-// better-sqlite3 is optional. Logs to stderr only on failure.
-try { ensureSqliteRuntime({ silent: true }); } catch {}
 
 // Self-heal tray runtime (systray for macOS/Linux only). Windows skipped.
 try { ensureTrayRuntime({ silent: true }); } catch {}
@@ -140,9 +136,6 @@ Commands:
     process.exit(0);
   }
 }
-
-// Always use Node.js runtime with absolute path
-const RUNTIME = process.execPath;
 
 // Get app data dir (matches app/src/lib/dataDir.js convention)
 function getAppDataDir() {
@@ -434,13 +427,9 @@ function openBrowser(url) {
   });
 }
 
-// Find standalone server (bundled in bin/app for published package).
-// Prefer custom-server.js (injects real socket IP) when present.
+// The standalone app must enter through the socket-IP/viewer trust wrapper.
 const standaloneDir = path.join(__dirname, "app");
-const customServerPath = path.join(standaloneDir, "custom-server.js");
-const serverPath = fs.existsSync(customServerPath)
-  ? customServerPath
-  : path.join(standaloneDir, "server.js");
+const serverPath = path.join(standaloneDir, "custom-server.js");
 
 if (!fs.existsSync(serverPath)) {
   console.error("Error: Standalone build not found.");
@@ -509,13 +498,25 @@ function startServer() {
   function spawnServer() {
     serverStartTime = Date.now();
     crashLog = [];
-    const child = spawn(RUNTIME, ["--dns-result-order=ipv4first", "--max-old-space-size=6144", serverPath], {
-      cwd: standaloneDir,
+    const bunPath = ensureBunRuntime();
+    const appRuntimeDir = ensureAppRuntime();
+    const childEnv = { ...process.env };
+    const pathKey = process.platform === "win32"
+      ? Object.keys(childEnv).find((key) => key.toLowerCase() === "path") || "PATH"
+      : "PATH";
+    if (process.platform === "win32") {
+      for (const key of Object.keys(childEnv)) {
+        if (key !== pathKey && key.toLowerCase() === "path") delete childEnv[key];
+      }
+    }
+    childEnv[pathKey] = [path.dirname(bunPath), childEnv[pathKey]].filter(Boolean).join(path.delimiter);
+    const child = spawn(bunPath, ["--dns-result-order=ipv4first", path.join(appRuntimeDir, "custom-server.js")], {
+      cwd: appRuntimeDir,
       stdio: showLog ? "inherit" : ["ignore", "ignore", "pipe"],
       detached: true,
       windowsHide: true,
       env: {
-        ...buildEnvWithRuntime(process.env),
+        ...childEnv,
         PORT: port.toString(),
         HOSTNAME: host
       }

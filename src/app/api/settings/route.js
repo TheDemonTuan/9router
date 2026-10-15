@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { getSettings, updateSettings } from "@/lib/localDb";
 import { applyOutboundProxyEnv } from "@/lib/network/outboundProxy";
 import { resetComboRotation } from "open-sse/services/combo.js";
-import bcrypt from "bcryptjs";
+import { compareDashboardPassword, hashDashboardPassword } from "@/lib/auth/passwordHash.js";
 import { getInitialPassword, isUnsafeProductionInitialPassword } from "@/lib/auth/passwordPolicy.js";
 import { isValidCavemanLevel } from "open-sse/rtk/cavemanPrompts.js";
 import { isValidPonytailLevel } from "open-sse/rtk/ponytailPrompt.js";
@@ -55,7 +55,7 @@ export async function PATCH(request) {
         if (!body.currentPassword) {
           return NextResponse.json({ error: "Current password required" }, { status: 400 });
         }
-        const isValid = await bcrypt.compare(body.currentPassword, currentHash);
+        const isValid = await compareDashboardPassword(body.currentPassword, currentHash);
         if (!isValid) {
           return NextResponse.json({ error: "Invalid current password" }, { status: 401 });
         }
@@ -76,8 +76,7 @@ export async function PATCH(request) {
         }
       }
 
-      const salt = await bcrypt.genSalt(10);
-      body.password = await bcrypt.hash(body.newPassword, salt);
+      body.password = await hashDashboardPassword(body.newPassword);
       delete body.newPassword;
       delete body.currentPassword;
     }

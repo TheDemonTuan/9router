@@ -3,10 +3,11 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "packageManager": "bun@1.4.3",
   "description": "Unit tests for 9router embeddings endpoint",
   "scripts": {
-    "test": "vitest run --reporter=verbose",
-    "test:watch": "vitest --reporter=verbose"
+    "test": "bun --bun vitest run --reporter=verbose",
+    "test:watch": "bun --bun vitest --reporter=verbose"
   },
   "devDependencies": {
     "vitest": "^5.0.2"

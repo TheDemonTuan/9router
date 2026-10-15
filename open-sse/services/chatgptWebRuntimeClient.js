@@ -1,5 +1,3 @@
-import { readFile } from "node:fs/promises";
-import { Agent, fetch as undiciFetch } from "undici";
 import { MAX_BROWSER_TURNS, MODEL_SLUG_PATTERN, PROTOCOL_VERSION, REASONING_LEVELS, RUNTIME_PATHS, SERVICE_NAME, validateProfileId } from "../../services/chatgpt-web-runtime/protocol.js";
 
 const CATALOG_TTL_MS = 30_000;
@@ -7,7 +5,7 @@ const HEALTH_TIMEOUT_MS = 3000;
 const CATALOG_TIMEOUT_MS = 5000;
 const MAX_CACHE_ENTRIES = 64;
 const cache = new Map();
-const dispatcher = new Agent();
+const session = new Bun.FetchSession({ proxy: false });
 const CAPABILITY_KEYS = ["text", "vision", "reasoning", "tools", "search", "compact", "native_responses", "generic_responses", "generic_tools", "mcp_tools", "exec", "subagents", "computer_use", "browser_tool", "streaming"];
 const DATA_PATHS = ["/healthz", "/readyz", "/v1/web-models", "/v1/thread-bindings/resolve", "/v1/responses", "/v1/browser/responses", RUNTIME_PATHS.agentResponses, "/v1/responses/compact", "/v1/interrupt-turn"];
 const ADMIN_PATHS = ["/admin/profiles", "/admin/session/verify", "/admin/session/import", "/admin/login/start", "/admin/login/complete", "/admin/login/status", "/admin/login/session", "/admin/login/close", "/admin/browser/view", "/admin/browser/restart", "/admin/smoke", "/admin/drain", "/admin/quiesce", "/admin/resume", "/admin/interrupt-turn"];
@@ -29,7 +27,7 @@ function runtimeUrl() {
 async function token(admin) {
   const path = process.env[admin ? "CHATGPT_WEB_RUNTIME_ADMIN_TOKEN_FILE" : "CHATGPT_WEB_RUNTIME_TOKEN_FILE"]?.trim();
   if (!path) throw new Error("ChatGPT Web runtime secret file is required");
-  const secret = (await readFile(path, "utf8")).trim();
+  const secret = (await Bun.file(path).text()).trim();
   if (secret.length < 32 || secret.length > 4096 || /[\r\n\0]/.test(secret)) throw new Error("Invalid runtime bearer secret");
   return secret;
 }
@@ -51,8 +49,8 @@ async function runtimeRequest(path, init, options, admin, profileId) {
   if (profileId) headers.set("x-cgw-profile-id", validateProfileId(profileId));
   const timeout = options.timeoutMs ? AbortSignal.timeout(options.timeoutMs) : null;
   const signal = init.signal && timeout ? AbortSignal.any([init.signal, timeout]) : init.signal || timeout || undefined;
-  // An explicit direct dispatcher never consumes HTTP_PROXY/HTTPS_PROXY environment state.
-  return undiciFetch(`${runtimeUrl()}${url.pathname}${url.search}`, { ...init, headers, signal, redirect: "error", dispatcher });
+  // Internal credentials must never pass through an environment or caller proxy.
+  return session.fetch(`${runtimeUrl()}${url.pathname}${url.search}`, { ...init, headers, signal, redirect: "error", proxy: false });
 }
 export function requestChatGptWebRuntime(connection, path, init = {}, options = {}) {
   const profileId = connection?.providerSpecificData?.profileId;
