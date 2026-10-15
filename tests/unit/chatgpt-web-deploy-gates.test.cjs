@@ -8,7 +8,7 @@ const { spawnSync } = require("node:child_process");
 
 const root = resolve(__dirname, "../..");
 
-function closureFixture(failAt = "", version = "1.4.0") {
+function closureFixture(failAt = "", version = require("../../services/chatgpt-web-runtime/package.json").engines.bun) {
   const temp = mkdtempSync(join(tmpdir(), "cgw-closure-test-"));
   mkdirSync(join(temp, ".deploy"));
   copyFileSync(join(root, ".deploy/verify-cgw-runtime.sh"), join(temp, ".deploy/verify-cgw-runtime.sh"));
