@@ -9,9 +9,32 @@ const diff = "diff --git a/src/a.txt b/src/a.txt\nindex 1234567..89abcde 100644\
   + Array.from({ length: 39 }, (_, i) => ` context ${String(i + 1).padStart(3, "0")}\n`).join("")
   + "-OLD_VALUE\n+NEW_VALUE\n"
   + Array.from({ length: 40 }, (_, i) => ` context ${String(i + 41).padStart(3, "0")}\n`).join("");
+const fixtureSource = `#!/usr/bin/env bun
+if (process.argv.includes("--version")) { console.log("rtk 0.50.0"); process.exit(0); }
+const input = await Bun.stdin.text();
+if (input === "FAIL") process.exit(2);
+if (input.startsWith("ABORT:")) { await Bun.write(input.slice(6), String(process.pid)); await Bun.sleep(5000); }
+if (input === "HANG") await Bun.sleep(5000);
+if (input === "OVERFLOW") await new Promise((resolve, reject) => process.stdout.write("x".repeat(11_000_000), error => error ? reject(error) : resolve()));
+if (input === "STDERR_OVERFLOW") await new Promise((resolve, reject) => process.stderr.write("x".repeat(70_000), error => error ? reject(error) : resolve()));
+process.stdout.write(input);
+`;
 if (process.argv.includes("--wrapper-faults")) {
   const { startRtkServer } = await import("../../sidecars/rtk/server.mjs");
-  const server = await startRtkServer({ hostname: "127.0.0.1", port: 0, binaryPath: "/fixtures/rtk" });
+  const local = await mkdtemp(join(tmpdir(), "rtk-wrapper-"));
+  let binaryPath = "/fixtures/rtk";
+  if (process.platform === "win32") {
+    const source = join(local, "fixture.js");
+    await writeFile(source, fixtureSource);
+    binaryPath = join(local, "rtk.exe");
+    const result = spawnSync(process.execPath, ["build", source, "--compile", "--outfile", binaryPath], { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+  } else if (!(await Bun.file(binaryPath).exists())) {
+    binaryPath = join(local, "rtk");
+    await writeFile(binaryPath, fixtureSource);
+    await chmod(binaryPath, 0o755);
+  }
+  const server = await startRtkServer({ hostname: "127.0.0.1", port: 0, binaryPath });
   const url = `http://127.0.0.1:${server.port}/filter`;
   const post = async (filter, content, signal) => fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ filter, content }), signal });
   try {
@@ -19,15 +42,32 @@ if (process.argv.includes("--wrapper-faults")) {
     await assert.rejects(access("/tmp/pwned"));
     assert.equal((await post("grep", "FAIL" )).status, 502);
     assert.equal((await post("grep", "OVERFLOW" )).status, 502);
+    assert.equal((await post("grep", "STDERR_OVERFLOW")).status, 502);
+    const controller = new AbortController();
+    const pidFile = join(local, "abort-pid");
+    const aborted = post("grep", `ABORT:${pidFile}`, controller.signal).catch(error => error);
+    let pid;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      try { pid = Number(await Bun.file(pidFile).text()); break; } catch { await Bun.sleep(10); }
+    }
+    assert(pid, "abort fixture must start before cancellation");
+    controller.abort(); await aborted;
+    let alive = true;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      try { process.kill(pid, 0); } catch { alive = false; break; }
+      await Bun.sleep(10);
+    }
+    assert.equal(alive, false, "cancelled subprocess must be reaped");
+    assert.equal((await post("grep", "file:1:hello\n")).status, 200);
     const pending = Array.from({ length: 4 }, () => post("grep", "HANG"));
     await Bun.sleep(60);
     assert.equal((await post("grep", "HANG")).status, 503);
     const replies = await Promise.all(pending);
     assert(replies.every(r => r.status === 504));
     assert.equal((await post("grep", "file:1:hello\n")).status, 200);
-    assert(!(await readdir("/tmp")).some(file => /recall\.db|tee/.test(file)));
+    if (process.platform !== "win32") assert(!(await readdir("/tmp")).some(file => /recall\.db|tee/.test(file)));
     console.log("RTK wrapper resource smoke passed");
-  } finally { server.stop(true); }
+  } finally { server.stop(true); await rm(local, { recursive: true, force: true }); }
   process.exit(0);
 }
 
@@ -174,14 +214,7 @@ try {
   await chmod(fixtureHome, 0o755);
   try {
     const fixture = join(fixtureHome, "rtk");
-    await writeFile(fixture, `#!/usr/bin/env bun
-if (process.argv.includes("--version")) { console.log("rtk 0.50.0"); process.exit(0); }
-const input = await Bun.stdin.text();
-if (input === "FAIL") process.exit(2);
-if (input === "HANG") await Bun.sleep(5000);
-if (input === "OVERFLOW") await new Promise((resolve, reject) => process.stdout.write("x".repeat(11_000_000), error => error ? reject(error) : resolve()));
-process.stdout.write(input);
-`);
+    await writeFile(fixture, fixtureSource);
     await chmod(fixture, 0o755);
     docker("run", "--rm", "--network", "none", "--read-only", "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m", "-v", `${process.cwd()}:/work:ro`, "-v", `${fixtureHome}:/fixtures:ro`, "--entrypoint", "bun", image, "/work/tests/integration/rtk-sidecar-smoke.mjs", "--wrapper-faults");
   } finally { await rm(fixtureHome, { recursive: true, force: true }); }

@@ -279,6 +279,10 @@ export function createSSEStream(options = {}) {
           let output;
           let injectedUsage = false;
           let responsesTerminal = false;
+          if (trimmed.startsWith("data:") && trimmed.slice(5).trim() === "[DONE]") {
+            if (streamDoneSent) continue;
+            streamDoneSent = true;
+          }
 
           if (trimmed.startsWith("data:") && trimmed.slice(5).trim() !== "[DONE]") {
             try {
@@ -568,9 +572,11 @@ export function createSSEStream(options = {}) {
         }
 
         if (mode === STREAM_MODE.PASSTHROUGH) {
-          if (buffer) {
-            let output = buffer;
-            if (buffer.startsWith("data:") && !buffer.startsWith("data: ")) {
+          const bufferedDone = buffer.trim().startsWith("data:") && buffer.trim().slice(5).trim() === "[DONE]";
+          if (buffer && !(bufferedDone && streamDoneSent)) {
+            let output = bufferedDone ? SSE_DONE : buffer;
+            if (bufferedDone) streamDoneSent = true;
+            if (!bufferedDone && buffer.startsWith("data:") && !buffer.startsWith("data: ")) {
               output = "data: " + buffer.slice(5);
             }
             reqLogger?.appendConvertedChunk?.(output);

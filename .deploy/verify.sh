@@ -9,7 +9,7 @@ mkdir -p "$HOME" "$DATA_DIR"
   mapfile -t chatgpt_web_tests < <(find unit integration -type f -name '*chatgpt*.test.js' ! -path '*/real/*' | sort)
   printf 'Responses regression gate:\n'; printf '%s\n' "${response_tests[@]}"
   printf 'ChatGPT Web regression gate:\n'; printf '%s\n' "${chatgpt_web_tests[@]}"
-  bun x vitest run --config vitest.config.js \
+  bun x --no-install --bun vitest run --config vitest.config.js \
     "${response_tests[@]}" \
     "${chatgpt_web_tests[@]}" \
     unit/codex-tool-normalization.test.js \
@@ -82,7 +82,7 @@ bun tests/integration/token-saver-runtime-smoke.mjs
   node __baseline__/verify-alias.mjs
   node __baseline__/verify-oauth-urls.mjs
   set +e
-  bun x vitest run --config vitest.config.js translator/alibaba-token-plan-pipeline.test.js --reporter=json --outputFile=translator-results.json
+  bun x --no-install --bun vitest run --config vitest.config.js translator/alibaba-token-plan-pipeline.test.js --reporter=json --outputFile=translator-results.json
   vitest_status=$?
   set -e
   node __baseline__/verify-no-regression.mjs translator-results.json

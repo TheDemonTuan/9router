@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { RTK_CONFIG, RTK_FILTERS } from "../../open-sse/config/rtkConfig.js";
 import upstream from "./upstream.json";
 
@@ -12,38 +11,54 @@ const privacy = { ...process.env, RTK_TELEMETRY_DISABLED: "1", RTK_RECALL: "0", 
 
 async function run(binaryPath, args, content, signal, stdoutLimit = maxTextBytes) {
   if (signal?.aborted) throw signal.reason;
-  return new Promise((resolve, reject) => {
-    const child = spawn(binaryPath, args, { shell: false, env: privacy, stdio: ["pipe", "pipe", "pipe"] });
-    const stdout = [];
-    let size = 0;
-    let stderrSize = 0;
-    let settled = false;
-    let failure;
-    const abort = () => { failure = signal.reason ?? new Error("aborted"); child.kill("SIGKILL"); };
-    const timer = setTimeout(() => { failure = Object.assign(new Error("timeout"), { code: "RTK_TIMEOUT" }); child.kill("SIGKILL"); }, subprocessMs);
-    signal?.addEventListener("abort", abort, { once: true });
-    child.stdout.on("data", chunk => {
-      size += chunk.length;
-      if (size > stdoutLimit) { failure = new Error("stdout_overflow"); child.kill("SIGKILL"); }
-      else stdout.push(chunk);
-    });
-    child.stderr.on("data", chunk => {
-      stderrSize += chunk.length;
-      if (stderrSize > 65_536) { failure = new Error("stderr_overflow"); child.kill("SIGKILL"); }
-    });
-    child.on("error", err => { failure = err; });
-    child.stdin.on("error", err => { if (!failure) failure = err; });
-    child.on("close", code => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", abort);
-      if (failure || code !== 0) return reject(failure ?? new Error("filter_failed"));
-      try { resolve(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(stdout))); }
-      catch (err) { reject(err); }
-    });
-    child.stdin.end(content);
+  const child = Bun.spawn([binaryPath, ...args], {
+    env: privacy,
+    stdin: new TextEncoder().encode(content),
+    stdout: "pipe",
+    stderr: "pipe",
   });
+  let failure;
+  const fail = reason => {
+    if (failure === undefined) failure = reason;
+    if (child.exitCode === null) child.kill("SIGKILL");
+  };
+  const abort = () => fail(signal.reason ?? new Error("aborted"));
+  const timer = setTimeout(() => fail(Object.assign(new Error("timeout"), { code: "RTK_TIMEOUT" })), subprocessMs);
+  signal?.addEventListener("abort", abort, { once: true });
+  if (signal?.aborted) abort();
+  const stdout = [];
+  async function drain(stream, limit, name, chunks) {
+    const reader = stream.getReader();
+    let bytes = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        bytes += value.byteLength;
+        if (bytes > limit) fail(new Error(`${name}_overflow`));
+        else if (chunks && failure === undefined) chunks.push(value);
+      }
+    } catch (error) {
+      fail(error);
+    } finally {
+      reader.releaseLock();
+    }
+  }
+  try {
+    const [exit] = await Promise.all([
+      child.exited.catch(error => { fail(error); return -1; }),
+      drain(child.stdout, stdoutLimit, "stdout", stdout),
+      drain(child.stderr, 65_536, "stderr"),
+    ]);
+    if (failure !== undefined) throw failure;
+    if (exit !== 0) throw new Error("filter_failed");
+    return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(stdout));
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", abort);
+    if (child.exitCode === null) child.kill("SIGKILL");
+    await child.exited;
+  }
 }
 
 export async function startRtkServer({ hostname = "0.0.0.0", port = 8080, binaryPath = "/usr/local/bin/rtk" } = {}) {

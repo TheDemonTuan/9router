@@ -1,4 +1,4 @@
-FROM oven/bun:1.4.2-debian@sha256:4f6e31d1a54d6a3dd312daef655fc998101b5043d52e12592ac293ef04b9bc73 AS download
+FROM oven/bun:1.4.3-debian@sha256:923bedb355f7746666659f71e724998159a5c8c54bd1cb1030e1975a0698415b AS download
 ARG TARGETARCH
 COPY sidecars/rtk/upstream.json /tmp/upstream.json
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && rm -rf /var/lib/apt/lists/*
@@ -18,7 +18,7 @@ RUN set -eu; \
     RTK_TELEMETRY_DISABLED=1 RTK_RECALL=0 RTK_TEE=0 /usr/local/bin/rtk --version; \
     printf 'file:1:hello\n' | RTK_TELEMETRY_DISABLED=1 RTK_RECALL=0 RTK_TEE=0 /usr/local/bin/rtk pipe --filter grep
 
-FROM oven/bun:1.4.2-debian@sha256:4f6e31d1a54d6a3dd312daef655fc998101b5043d52e12592ac293ef04b9bc73
+FROM oven/bun:1.4.3-debian@sha256:923bedb355f7746666659f71e724998159a5c8c54bd1cb1030e1975a0698415b
 COPY --from=download /usr/local/bin/rtk /usr/local/bin/rtk
 COPY --from=download /usr/share/licenses/rtk/LICENSE /usr/share/licenses/rtk/LICENSE
 COPY sidecars/rtk/server.mjs sidecars/rtk/upstream.json /app/sidecars/rtk/

@@ -49,23 +49,23 @@
     }
   },
   "bun": {
-    "version": "1.4.0",
-    "releaseApi": "https://api.github.com/repos/oven-sh/bun/releases/tags/bun-v1.4.0",
-    "revision": "34cbb9a40b4bd1bd767d134a7065e66c2432a676",
-    "licenseSource": "https://github.com/oven-sh/bun/blob/34cbb9a40b4bd1bd767d134a7065e66c2432a676/LICENSE.md",
-    "licenseSha256": "b9caf52728691b4057e371232c221a132883198be2f3d2ddf92c90404c984b1a",
+    "version": "1.4.3",
+    "releaseApi": "https://api.github.com/repos/oven-sh/bun/releases/tags/bun-v1.4.3",
+    "revision": "c6da4a4d3010e5553438c60f6bd76d981976867c",
+    "licenseSource": "https://github.com/oven-sh/bun/blob/c6da4a4d3010e5553438c60f6bd76d981976867c/LICENSE.md",
+    "licenseSha256": "056696884250b0d682365260cf1487a6501b1665a343ec60e23a1e647043c572",
     "platforms": {
       "amd64": {
-        "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-x64-baseline.zip",
-        "sha256": "184fb4595f0d401a217cf7c78c1bc430ba83314dab7a8b94805babbf7fa7097f",
+        "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.3/bun-linux-x64-baseline.zip",
+        "sha256": "1fc2edac843102909e3a1be1d8d9802cc6071cf074e67e88231f4ffe0f8b397b",
         "member": "bun-linux-x64-baseline/bun",
-        "binarySha256": "33d56b070be6a9e3da0ab013038b43d1645d0534ca811ecdba4472599117eb4b"
+        "binarySha256": "7ce7d6b654eddeec20afddf2396317fba6dc19ab52788a27e894e1806bf8f24b"
       },
       "arm64": {
-        "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.0/bun-linux-aarch64.zip",
-        "sha256": "4b1a332ee861983eb93bcfe6f770fff94e3e31b2c388bdaea3c8ed35e58eed0e",
+        "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.3/bun-linux-aarch64.zip",
+        "sha256": "efa9813da5ed72423bf847f916e8d2c47c0d776add972354026a75e10da9aa21",
         "member": "bun-linux-aarch64/bun",
-        "binarySha256": "086c4121c8738a8e0f5ed730e8a461bc3973b4444e372ddb77aef9a747fa2ae9"
+        "binarySha256": "029ece746ac9f970c76d8f48bdd1b1d0c52f3636b74d19f546f5e7c1165c0abe"
       }
     }
   },

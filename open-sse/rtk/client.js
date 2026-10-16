@@ -1,4 +1,5 @@
-import { Agent, request } from "undici";
+// Bun's bare undici shim omits Agent lifecycle and separate transport deadlines.
+import { Agent, request } from "undici/index.js";
 import { RTK_CONFIG } from "../config/rtkConfig.js";
 import { getRtkState } from "./state.js";
 

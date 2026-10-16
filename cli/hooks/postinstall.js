@@ -7,12 +7,12 @@
 // the runtime warm-up; cli.js self-heals it if the server is started later.
 if (process.env.npm_command === "exec") process.exit(0);
 
-const { ensureSqliteRuntime } = require("./sqliteRuntime");
+const { ensureBunRuntime } = require("./bunRuntime");
 const { ensureTrayRuntime } = require("./trayRuntime");
 
 try {
-  ensureSqliteRuntime({ silent: false });
-  console.log("[9router] runtime SQLite deps ready");
+  ensureBunRuntime();
+  console.log("[9router] Bun runtime ready");
 } catch (e) {
   console.warn(`[9router] runtime warm-up skipped: ${e.message}`);
 }

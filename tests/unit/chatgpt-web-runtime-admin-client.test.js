@@ -1,42 +1,53 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { requestChatGptWebRuntimeAdmin, requestChatGptWebRuntime, parseChatGptWebCatalog } from "../../open-sse/services/chatgptWebRuntimeClient.js";
 
-const mocks = vi.hoisted(() => ({ readFile: vi.fn(), fetch: vi.fn() }));
-vi.mock("node:fs/promises", () => ({ readFile: mocks.readFile }));
-vi.mock("undici", () => ({ Agent: class {}, fetch: mocks.fetch }));
-const { requestChatGptWebRuntimeAdmin, requestChatGptWebRuntime, parseChatGptWebCatalog } = await import("../../open-sse/services/chatgptWebRuntimeClient.js");
-const original = Object.fromEntries(["CHATGPT_WEB_RUNTIME_URL", "CHATGPT_WEB_RUNTIME_ADMIN_TOKEN_FILE", "CHATGPT_WEB_RUNTIME_TOKEN_FILE"].map(name => [name, process.env[name]]));
+const names = ["CHATGPT_WEB_RUNTIME_URL", "CHATGPT_WEB_RUNTIME_ADMIN_TOKEN_FILE", "CHATGPT_WEB_RUNTIME_TOKEN_FILE", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy"];
+let original, directory, server, trap, seen, trapped, handler;
 const adminToken = "fixture-admin-bearer-not-a-real-token";
-beforeEach(() => {
-  vi.clearAllMocks();
-  process.env.CHATGPT_WEB_RUNTIME_URL = "http://runtime.example.test/";
-  process.env.CHATGPT_WEB_RUNTIME_ADMIN_TOKEN_FILE = "/fixture/admin-token";
-  process.env.CHATGPT_WEB_RUNTIME_TOKEN_FILE = "/fixture/data-token";
-  mocks.readFile.mockResolvedValue(adminToken);
-  mocks.fetch.mockImplementation(async () => Response.json({ ok: true }));
+const dataToken = "fixture-data-bearer-not-a-real-token";
+const connection = { providerSpecificData: { profileId: "personal" } };
+beforeEach(async () => {
+  original = Object.fromEntries(names.map(name => [name, process.env[name]]));
+  directory = await mkdtemp(join(tmpdir(), "cgw-direct-"));
+  seen = []; trapped = 0;
+  handler = () => Response.json({ ok: true });
+  trap = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch() { trapped++; return new Response("proxy trap", { status: 502 }); } });
+  server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+    seen.push({ url: new URL(request.url), headers: request.headers, body: await request.text() });
+    return handler(request);
+  } });
+  process.env.CHATGPT_WEB_RUNTIME_URL = server.url.href;
+  process.env.CHATGPT_WEB_RUNTIME_ADMIN_TOKEN_FILE = join(directory, "admin");
+  process.env.CHATGPT_WEB_RUNTIME_TOKEN_FILE = join(directory, "data");
+  await Bun.write(join(directory, "admin"), adminToken);
+  await Bun.write(join(directory, "data"), dataToken);
+  for (const name of names.filter(name => /proxy/i.test(name))) process.env[name] = /no_proxy/i.test(name) ? "" : trap.url.href;
 });
-afterEach(() => {
+afterEach(async () => {
+  server?.stop(true); trap?.stop(true);
+  await rm(directory, { recursive: true, force: true });
   for (const [name, value] of Object.entries(original)) {
     if (value === undefined) delete process.env[name]; else process.env[name] = value;
   }
 });
 
 describe("managed harness internal transport", () => {
-  it.each(["configure", "start", "verify", "activate", "disconnect"])("permits only admin POST /admin/harness/%s with runtime-owned authentication", async name => {
-    const path = `/admin/harness/${name}`;
-    const body = JSON.stringify({ profileId: "personal", revision: 3, configRevision: 1 });
-    await requestChatGptWebRuntimeAdmin(path, { method: "POST", body, headers: { authorization: "Bearer client-secret", "x-cgw-profile-id": "other", "x-9router-cgw-attestation": "fake-native-authority", "x-codex-turn-metadata": "fake-native-metadata", "content-type": "application/json" } });
-    expect(mocks.readFile).toHaveBeenCalledExactlyOnceWith("/fixture/admin-token", "utf8");
-    expect(mocks.fetch).toHaveBeenCalledExactlyOnceWith(`http://runtime.example.test${path}`, expect.objectContaining({ method: "POST", body, redirect: "error" }));
-    const forwarded = mocks.fetch.mock.calls[0][1].headers;
-    expect(forwarded.get("authorization")).toBe(`Bearer ${adminToken}`);
-    for (const name of ["x-cgw-profile-id", "x-9router-cgw-attestation", "x-codex-turn-metadata"]) expect(forwarded.has(name)).toBe(false);
-    expect(forwarded.get("content-type")).toBe("application/json");
+  it.each(["configure", "start", "verify", "activate", "disconnect"])("authenticates admin %s directly and strips caller authority", async name => {
+    const body = JSON.stringify({ profileId: "personal", revision: 3 });
+    await requestChatGptWebRuntimeAdmin(`/admin/harness/${name}`, { method: "POST", body, proxy: trap.url.href, headers: { authorization: "Bearer spoofed", "x-cgw-profile-id": "other", "x-9router-cgw-attestation": "fake", "x-codex-turn-metadata": "fake", "content-type": "application/json" } });
+    expect(seen[0].body).toBe(body);
+    expect(seen[0].headers.get("authorization")).toBe(`Bearer ${adminToken}`);
+    for (const key of ["x-cgw-profile-id", "x-9router-cgw-attestation", "x-codex-turn-metadata"]) expect(seen[0].headers.has(key)).toBe(false);
+    expect(trapped).toBe(0);
   });
-  it("permits exact read-only status query and does not add client authority", async () => {
-    await requestChatGptWebRuntimeAdmin("/admin/harness/status?profileId=personal");
-    expect(mocks.fetch.mock.calls[0][0]).toBe("http://runtime.example.test/admin/harness/status?profileId=personal");
-    expect(mocks.fetch.mock.calls[0][1].headers.has("x-cgw-profile-id")).toBe(false);
-    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+  it("separates data-plane credentials and retains validated profile", async () => {
+    await requestChatGptWebRuntime(connection, "/v1/responses", { method: "POST", headers: { "x-cgw-profile-id": "other" } });
+    expect(seen[0].headers.get("authorization")).toBe(`Bearer ${dataToken}`);
+    expect(seen[0].headers.get("x-cgw-profile-id")).toBe("personal");
+    expect(trapped).toBe(0);
   });
   it.each([
     ["/admin/harness/status?profileId=personal", "POST"],
@@ -51,16 +62,36 @@ describe("managed harness internal transport", () => {
     ["/admin/harness/disconnect?key=secret", "POST"],
     ["/admin/harness/delete", "POST"],
     ["https://foreign.example.test/admin/harness/start", "POST"],
-  ])("rejects unsupported internal endpoint %s %s before reading credentials", async (path, method) => {
+  ])("rejects unsupported %s %s without network access", async (path, method) => {
     await expect(requestChatGptWebRuntimeAdmin(path, { method })).rejects.toThrow();
-    expect(mocks.readFile).not.toHaveBeenCalled();
-    expect(mocks.fetch).not.toHaveBeenCalled();
+    expect(seen).toEqual([]);
   });
-  it.each(["status", "configure", "start", "verify", "activate", "disconnect"])("never permits harness/%s using data-plane credentials", async name => {
-    const path = `/admin/harness/${name}${name === "status" ? "?profileId=personal" : ""}`;
-    await expect(requestChatGptWebRuntime({ providerSpecificData: { profileId: "personal" } }, path, { method: name === "status" ? "GET" : "POST" })).rejects.toThrow("Unsupported internal runtime endpoint");
-    expect(mocks.readFile).not.toHaveBeenCalled();
-    expect(mocks.fetch).not.toHaveBeenCalled();
+  it.each(["status", "configure", "start", "verify", "activate", "disconnect"])("denies data-plane harness/%s", async name => {
+    await expect(requestChatGptWebRuntime(connection, `/admin/harness/${name}`, { method: "POST" })).rejects.toThrow();
+    expect(seen).toEqual([]);
+  });
+  it("rejects redirects before leaking credentials", async () => {
+    handler = () => Response.redirect(trap.url.href, 302);
+    await expect(requestChatGptWebRuntimeAdmin("/admin/profiles")).rejects.toThrow();
+    expect(trapped).toBe(0);
+  });
+  it("delivers SSE before completion", async () => {
+    let finish;
+    handler = () => new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode("data: first\n\n")); finish = () => controller.close(); } }), { headers: { "content-type": "text/event-stream" } });
+    const response = await requestChatGptWebRuntime(connection, "/v1/responses");
+    const reader = response.body.getReader();
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe("data: first\n\n");
+    finish();
+    expect((await reader.read()).done).toBe(true);
+  });
+  it.each(["caller", "timeout"])("cancels an unfinished stream by %s", async mode => {
+    handler = () => new Response(new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array([65])); } }));
+    const controller = new AbortController();
+    const response = await requestChatGptWebRuntime(connection, "/v1/responses", { signal: controller.signal }, mode === "timeout" ? { timeoutMs: 100 } : {});
+    const reader = response.body.getReader(); await reader.read();
+    const pending = reader.read();
+    if (mode === "caller") controller.abort();
+    await expect(pending).rejects.toThrow();
   });
   it("retains generic capability booleans from the verified catalog without unknown capabilities", () => {
     const catalog = { protocolVersion: 1, profile_id: "personal", profile_epoch: "fixture-epoch", catalog_revision: "fixture-revision", checked_at: "2026-10-08T00:00:00.000Z", max_concurrency: 5, models: [{ id: "chatgpt-web/gpt-5.6-sol", supported_reasoning_levels: ["medium", "high"], default_reasoning_level: "high", model_family: "5.6", legacy: false, context_window: 100000, auto_compact_token_limit: 80000, capabilities: { text: true, generic_responses: true, generic_tools: false, unknownAuthority: true, toolToken: "fixture-secret" } }] };

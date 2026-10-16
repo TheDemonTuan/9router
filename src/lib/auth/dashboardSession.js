@@ -1,5 +1,5 @@
 import { SignJWT, jwtVerify } from "jose";
-import bcrypt from "bcryptjs";
+import { compareDashboardPassword } from "@/lib/auth/passwordHash.js";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -79,7 +79,7 @@ export async function verifyDashboardPassword(password) {
   if (typeof password !== "string" || !password) return false;
   const settings = await getSettings();
   const storedHash = settings?.password;
-  if (storedHash) return bcrypt.compare(password, storedHash);
+  if (storedHash) return compareDashboardPassword(password, storedHash);
   const initialPassword = getInitialPassword() || DEFAULT_PASSWORD;
   return !isUnsafeProductionInitialPassword(initialPassword)
     && password === initialPassword;

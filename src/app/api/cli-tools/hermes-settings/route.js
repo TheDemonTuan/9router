@@ -1,10 +1,7 @@
 "use server";
 
 import { NextResponse } from "next/server";
-import { exec } from "child_process";
-import { promisify } from "util";
 import fs from "fs/promises";
-import os from "os";
 
 import {
   buildModelBlock,
@@ -28,8 +25,6 @@ import {
   removeStt9Router,
 } from "./hermesYaml.js";
 import { resolveHermesHome, listProfiles, dirExists } from "./hermesProfiles.js";
-
-const execAsync = promisify(exec);
 
 const PROVIDER_NAME = "9router";
 const API_KEY_ENV = "OPENAI_API_KEY";
@@ -61,7 +56,7 @@ const resolveHome = (profile) => {
 
 const readTextFile = async (file) => {
   try {
-    return await fs.readFile(file, "utf-8");
+    return await Bun.file(file).text();
   } catch (error) {
     if (error.code === "ENOENT") return "";
     throw error;
@@ -75,7 +70,7 @@ const readEnvFile = (home) => readTextFile(home.envPath);
 // without identity files is not a profile, and we must not fabricate one.
 const writeHomeConfig = async (home, yaml) => {
   if (home.isDefault) await fs.mkdir(home.dir, { recursive: true });
-  await fs.writeFile(home.configPath, yaml);
+  await Bun.write(home.configPath, yaml, { createPath: false });
 };
 
 // Only ever upserts the OPENAI_API_KEY line — per-profile .env files also carry bot tokens
@@ -84,22 +79,16 @@ const writeHomeEnv = async (home, apiKey) => {
   if (!apiKey) return;
   if (home.isDefault) await fs.mkdir(home.dir, { recursive: true });
   const env = upsertEnvVar(await readEnvFile(home), API_KEY_ENV, apiKey);
-  await fs.writeFile(home.envPath, env);
+  await Bun.write(home.envPath, env, { createPath: false });
 };
 
 const checkHermesInstalled = async () => {
+  if (Bun.which("hermes", { PATH: process.env.PATH })) return true;
   try {
-    const isWindows = os.platform() === "win32";
-    const command = isWindows ? "where hermes" : "which hermes";
-    await execAsync(command, { windowsHide: true });
+    await fs.access(resolveHermesHome(null).configPath);
     return true;
   } catch {
-    try {
-      await fs.access(resolveHermesHome(null).configPath);
-      return true;
-    } catch {
-      return false;
-    }
+    return false;
   }
 };
 
@@ -286,7 +275,7 @@ export async function DELETE(request) {
 
     let yaml = "";
     try {
-      yaml = await fs.readFile(home.configPath, "utf-8");
+      yaml = await Bun.file(home.configPath).text();
     } catch (readError) {
       if (readError.code === "ENOENT") {
         return NextResponse.json({ success: true, profile: home.name, message: "No config file to reset" });

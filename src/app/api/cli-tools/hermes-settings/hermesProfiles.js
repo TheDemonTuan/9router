@@ -70,7 +70,7 @@ export const isProfileHome = async (dir) => {
 
 const readText = async (file) => {
   try {
-    return await fs.readFile(file, "utf-8");
+    return await Bun.file(file).text();
   } catch (error) {
     if (error.code === "ENOENT") return "";
     throw error;

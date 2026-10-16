@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSettings } from "@/lib/localDb";
-import bcrypt from "bcryptjs";
+import { compareDashboardPassword } from "@/lib/auth/passwordHash.js";
 import { cookies } from "next/headers";
 import { setDashboardAuthCookie } from "@/lib/auth/dashboardSession";
 import { isOidcConfigured } from "@/lib/auth/oidc";
@@ -66,7 +66,7 @@ export async function POST(request) {
 
     let isValid = false;
     if (storedHash) {
-      isValid = await bcrypt.compare(password, storedHash);
+      isValid = await compareDashboardPassword(password, storedHash);
     } else {
       isValid = Boolean(initialPassword) && password === initialPassword;
     }

@@ -7,7 +7,6 @@ const mocks = vi.hoisted(() => ({
     headers: init?.headers || {},
   })),
   getSettings: vi.fn(),
-  compare: vi.fn(),
   cookies: vi.fn(),
   setDashboardAuthCookie: vi.fn(),
   isOidcConfigured: vi.fn(() => false),
@@ -22,7 +21,6 @@ const mocks = vi.hoisted(() => ({
 vi.mock("next/server", () => ({ NextResponse: { json: mocks.json } }));
 vi.mock("next/headers", () => ({ cookies: mocks.cookies }));
 vi.mock("@/lib/localDb", () => ({ getSettings: mocks.getSettings }));
-vi.mock("bcryptjs", () => ({ default: { compare: mocks.compare } }));
 vi.mock("@/lib/auth/dashboardSession", () => ({
   setDashboardAuthCookie: mocks.setDashboardAuthCookie,
 }));
@@ -96,14 +94,12 @@ describe("production initial password policy", () => {
   });
 
   it("keeps stored-hash login working without INITIAL_PASSWORD", async () => {
-    mocks.getSettings.mockResolvedValue(settings("$2b$10$stored-hash-fixture"));
-    mocks.compare.mockResolvedValue(true);
+    mocks.getSettings.mockResolvedValue(settings("$2b$10$Rfs939ZJ53Qv747q6ioaIu9kY7/mP/NQCEhz9TN9QS.bxaGbD/43S"));
 
     const response = await POST(request("stored-password"));
 
     expect(response.status).toBe(200);
     expect(response.body.success).toBe(true);
-    expect(mocks.compare).toHaveBeenCalledWith("stored-password", "$2b$10$stored-hash-fixture");
     expect(mocks.setDashboardAuthCookie).toHaveBeenCalledOnce();
   });
 });
