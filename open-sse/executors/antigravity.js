@@ -9,7 +9,7 @@ import { cleanJSONSchemaForAntigravity, cleanToolJsonSchemaForGemini, normalizeG
 import { DEFAULT_THINKING_AG_SIGNATURE } from "../config/defaultThinkingSignature.js";
 import { getGeminiThoughtSignatureSync } from "../services/thoughtSignatureStore.js";
 import { parseUpstreamError } from "../utils/error.js";
-import { MAX_ANTIGRAVITY_OUTPUT_TOKENS } from "../config/antigravityModels.js";
+import { ANTIGRAVITY_ARGON_MODEL_RE, MAX_ANTIGRAVITY_OUTPUT_TOKENS } from "../config/antigravityModels.js";
 import { isAntigravityClaudeModel, projectAntigravityClaudeToolSchema, invalidAntigravitySchema } from "../translator/concerns/antigravityToolSchema.js";
 import { takePreparedAntigravityProjection } from "../translator/concerns/antigravityToolValidation.js";
 import { isGemini4Model } from "../providers/capabilities.js";
@@ -355,6 +355,29 @@ export class AntigravityExecutor extends BaseExecutor {
       requestId: buildIdeRequestId({ body, request: transformedRequest, credentials, model, requestType: "agent" }),
       request: transformedRequest
     };
+  }
+
+  // Argon generation is accepted for the hub client version used by model
+  // discovery and rejected (404 NOT_FOUND) for the static IDE profile. Send the
+  // live-verified `antigravity/hub/<version> darwin/arm64` shape, request-local;
+  // explicit provider header overrides still win.
+  async execute(args) {
+    if (!ANTIGRAVITY_ARGON_MODEL_RE.test(String(args?.body?.model || args?.model || ""))) {
+      return super.execute(args);
+    }
+    const signal = args.preResponse?.signal && args.signal
+      ? AbortSignal.any([args.preResponse.signal, args.signal])
+      : args.preResponse?.signal || args.signal;
+    // Dynamic import avoids the antigravityModels -> executors static cycle.
+    const { resolveAntigravityDiscoveryProfile } = await import("../services/antigravityModels.js");
+    const profile = await resolveAntigravityDiscoveryProfile({ proxyOptions: args.proxyOptions, signal });
+    return super.execute({
+      ...args,
+      providerOverrides: {
+        ...args.providerOverrides,
+        headers: { "User-Agent": `antigravity/hub/${profile.version} darwin/arm64`, ...args.providerOverrides?.headers },
+      },
+    });
   }
 
   async refreshCredentials(credentials, log, proxyOptions = null) {
