@@ -92,6 +92,20 @@ test("viewer rejects wrong/expired/terminal sessions before opening a runtime we
   } finally { await f.close(); }
 });
 
+test("suspended CGW rejects authenticated viewer upgrades without opening a runtime websocket", async () => {
+  const saved = process.env.NEXT_PUBLIC_CHATGPT_WEB_ENABLED;
+  const f = await fixture();
+  try {
+    process.env.NEXT_PUBLIC_CHATGPT_WEB_ENABLED = "false";
+    assert.equal(await denied(f.connect()), 502);
+    assert.equal(f.runtimeHeaders, undefined);
+  } finally {
+    if (saved === undefined) delete process.env.NEXT_PUBLIC_CHATGPT_WEB_ENABLED;
+    else process.env.NEXT_PUBLIC_CHATGPT_WEB_ENABLED = saved;
+    await f.close();
+  }
+});
+
 test("binary RFB handshake forwards through the owned runtime with no client headers or admin-token disclosure", async () => {
   const f = await fixture();
   try {

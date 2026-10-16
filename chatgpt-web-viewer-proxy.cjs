@@ -58,6 +58,7 @@ function authorize(req, loginId, socket) {
   });
 }
 async function runtimeTarget(loginId) {
+  if (process.env.NEXT_PUBLIC_CHATGPT_WEB_ENABLED === "false") throw new Error("ChatGPT Web is suspended on this deployment");
   const url = new URL(process.env.CHATGPT_WEB_RUNTIME_URL?.trim());
   if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash || url.pathname !== "/") throw new Error("Invalid runtime target");
   const file = process.env.CHATGPT_WEB_RUNTIME_ADMIN_TOKEN_FILE?.trim();

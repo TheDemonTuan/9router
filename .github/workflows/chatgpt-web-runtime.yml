@@ -1,37 +1,11 @@
 name: ChatGPT Web runtime gates
 on:
-  push:
-    branches: [feat/chatgpt-web-experience]
-  # Master pushes run these gates through Build and Deploy, once per source SHA.
   workflow_call:
     inputs:
       verification_only:
         type: boolean
         default: true
         description: Run offline gates only; never activate live accounts, publication or deployment
-  pull_request:
-    paths:
-      - services/chatgpt-web-runtime/**
-      - tools/chatgpt-web-session-export/**
-      - src/**
-      - open-sse/**
-      - public/**
-      - tests/**
-      - .deploy/**
-      - package.json
-      - bun.lock
-      - Dockerfile
-      - .dockerignore
-      - custom-server.js
-      - chatgpt-web-viewer-proxy.cjs
-      - next.config.mjs
-      - jsconfig.json
-      - postcss.config.mjs
-      - scripts/copy-standalone-assets.mjs
-      - scripts/build-chatgpt-session-export.mjs
-      - scripts/docker-entrypoint.sh
-      - .github/workflows/chatgpt-web-runtime.yml
-      - .github/workflows/deploy.yml
   workflow_dispatch:
     inputs:
       live_account:
@@ -332,7 +306,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: TheDemonTuan/vps-deploy
-          ref: 3a31f12ce0c9e2aec4590f5c397692e60b595491
+          ref: 04e99424be880398513300e23162ff840d757dd9
           path: platform
           persist-credentials: false
       - name: Scan browserless runtime and Docker browser metadata without suppression
@@ -411,11 +385,11 @@ jobs:
     permissions:
       contents: read
       packages: read
-    uses: TheDemonTuan/vps-deploy/.github/workflows/security-trivy.yml@3a31f12ce0c9e2aec4590f5c397692e60b595491
+    uses: TheDemonTuan/vps-deploy/.github/workflows/security-trivy.yml@04e99424be880398513300e23162ff840d757dd9
     with:
       app: 9router
       source-sha: ${{ github.sha }}
-      platform-ref: 3a31f12ce0c9e2aec4590f5c397692e60b595491
+      platform-ref: 04e99424be880398513300e23162ff840d757dd9
       config: .deploy/app.yml
       scan-mode: source
 
@@ -426,12 +400,12 @@ jobs:
     permissions:
       contents: read
       packages: write
-    uses: TheDemonTuan/vps-deploy/.github/workflows/build-docker.yml@f9ba4e8f3235190cee08a3f0cff3ca59fa46bdd2
+    uses: TheDemonTuan/vps-deploy/.github/workflows/build-docker.yml@04e99424be880398513300e23162ff840d757dd9
     with:
       app: 9router
       component: cgw
       source-sha: ${{ github.sha }}
-      platform-ref: f9ba4e8f3235190cee08a3f0cff3ca59fa46bdd2
+      platform-ref: 04e99424be880398513300e23162ff840d757dd9
       config: .deploy/app.yml
 
   security-image:
@@ -441,11 +415,11 @@ jobs:
     permissions:
       contents: read
       packages: read
-    uses: TheDemonTuan/vps-deploy/.github/workflows/security-trivy.yml@3a31f12ce0c9e2aec4590f5c397692e60b595491
+    uses: TheDemonTuan/vps-deploy/.github/workflows/security-trivy.yml@04e99424be880398513300e23162ff840d757dd9
     with:
       app: 9router
       source-sha: ${{ github.sha }}
-      platform-ref: 3a31f12ce0c9e2aec4590f5c397692e60b595491
+      platform-ref: 04e99424be880398513300e23162ff840d757dd9
       config: .deploy/app.yml
       scan-mode: image
       image-ref: ${{ needs.publish.outputs.image-ref }}
@@ -463,14 +437,14 @@ jobs:
     environment: production
     timeout-minutes: 34
     steps:
-      - uses: TheDemonTuan/vps-deploy/.github/actions/deploy@3a31f12ce0c9e2aec4590f5c397692e60b595491
+      - uses: TheDemonTuan/vps-deploy/.github/actions/deploy@04e99424be880398513300e23162ff840d757dd9
         with:
           app: 9router
           host: oracle-main
           operation: deploy
           component: cgw
           source-sha: ${{ github.sha }}
-          platform-ref: 3a31f12ce0c9e2aec4590f5c397692e60b595491
+          platform-ref: 04e99424be880398513300e23162ff840d757dd9
           config: .deploy/app.yml
           image-ref: ${{ needs.publish.outputs.image-ref }}
         env:

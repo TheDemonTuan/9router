@@ -2,15 +2,16 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { requestChatGptWebRuntimeAdmin, requestChatGptWebRuntime, parseChatGptWebCatalog } from "../../open-sse/services/chatgptWebRuntimeClient.js";
+import { requestChatGptWebRuntimeAdmin, requestChatGptWebRuntime, parseChatGptWebCatalog, getChatGptWebCatalog } from "../../open-sse/services/chatgptWebRuntimeClient.js";
 
-const names = ["CHATGPT_WEB_RUNTIME_URL", "CHATGPT_WEB_RUNTIME_ADMIN_TOKEN_FILE", "CHATGPT_WEB_RUNTIME_TOKEN_FILE", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy"];
+const names = ["NEXT_PUBLIC_CHATGPT_WEB_ENABLED", "CHATGPT_WEB_RUNTIME_URL", "CHATGPT_WEB_RUNTIME_ADMIN_TOKEN_FILE", "CHATGPT_WEB_RUNTIME_TOKEN_FILE", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy"];
 let original, directory, server, trap, seen, trapped, handler;
 const adminToken = "fixture-admin-bearer-not-a-real-token";
 const dataToken = "fixture-data-bearer-not-a-real-token";
 const connection = { providerSpecificData: { profileId: "personal" } };
 beforeEach(async () => {
   original = Object.fromEntries(names.map(name => [name, process.env[name]]));
+  delete process.env.NEXT_PUBLIC_CHATGPT_WEB_ENABLED;
   directory = await mkdtemp(join(tmpdir(), "cgw-direct-"));
   seen = []; trapped = 0;
   handler = () => Response.json({ ok: true });
@@ -35,6 +36,16 @@ afterEach(async () => {
 });
 
 describe("managed harness internal transport", () => {
+  it("denies runtime, admin and catalog access while suspended without reading credentials or using the network", async () => {
+    process.env.NEXT_PUBLIC_CHATGPT_WEB_ENABLED = "false";
+    await rm(join(directory, "admin"));
+    await rm(join(directory, "data"));
+    await expect(requestChatGptWebRuntimeAdmin("/admin/login/start", { method: "POST" })).rejects.toMatchObject({ code: "chatgpt_web_disabled" });
+    await expect(requestChatGptWebRuntime(connection, "/v1/responses", { method: "POST" })).rejects.toMatchObject({ code: "chatgpt_web_disabled" });
+    expect(() => getChatGptWebCatalog(connection)).toThrow(expect.objectContaining({ code: "chatgpt_web_disabled" }));
+    expect(seen).toEqual([]);
+    expect(trapped).toBe(0);
+  });
   it.each(["configure", "start", "verify", "activate", "disconnect"])("authenticates admin %s directly and strips caller authority", async name => {
     const body = JSON.stringify({ profileId: "personal", revision: 3 });
     await requestChatGptWebRuntimeAdmin(`/admin/harness/${name}`, { method: "POST", body, proxy: trap.url.href, headers: { authorization: "Bearer spoofed", "x-cgw-profile-id": "other", "x-9router-cgw-attestation": "fake", "x-codex-turn-metadata": "fake", "content-type": "application/json" } });

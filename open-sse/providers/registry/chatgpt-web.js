@@ -1,5 +1,6 @@
 export default {
   id: "chatgpt-web",
+  hidden: process.env.NEXT_PUBLIC_CHATGPT_WEB_ENABLED === "false",
   priority: 31,
   alias: "cgw",
   uiAlias: "cgw",

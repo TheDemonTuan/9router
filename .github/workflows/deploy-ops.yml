@@ -12,7 +12,7 @@ on:
         description: Component (rollback supports app only)
         required: true
         type: choice
-        options: [app, rtk, cgw]
+        options: [app, rtk]
 
 permissions:
   contents: read
@@ -26,16 +26,16 @@ jobs:
     if: github.ref_type == 'branch' && github.ref_name == github.event.repository.default_branch && (inputs.operation != 'rollback' || inputs.component == 'app')
     runs-on: ubuntu-24.04
     environment: production
-    timeout-minutes: ${{ inputs.component == 'cgw' && 34 || 17 }}
+    timeout-minutes: 17
     steps:
-      - uses: TheDemonTuan/vps-deploy/.github/actions/deploy@3a31f12ce0c9e2aec4590f5c397692e60b595491
+      - uses: TheDemonTuan/vps-deploy/.github/actions/deploy@04e99424be880398513300e23162ff840d757dd9
         with:
           app: 9router
           host: oracle-main
           operation: ${{ inputs.operation }}
           component: ${{ inputs.component }}
           source-sha: ${{ github.sha }}
-          platform-ref: 3a31f12ce0c9e2aec4590f5c397692e60b595491
+          platform-ref: 04e99424be880398513300e23162ff840d757dd9
           config: .deploy/app.yml
         env:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
