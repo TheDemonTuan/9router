@@ -234,3 +234,45 @@ describe("Antigravity display summaries remain non-authoritative", () => {
     clearAntigravityStrikes(id, MODEL);
   });
 });
+
+describe("Argon exact-model quota independence", () => {
+  const argon = "gemini-4-argon-high";
+  it.each([true, false])("locks only the exhausted exact model (argon=%s)", async (argonExhausted) => {
+    const id = `ag-independent-${argonExhausted}`;
+    mocks.connections = [{ id, provider: "antigravity", isActive: true }];
+    await persistAntigravityQuota(id, {
+      [argon]: { remainingPercentage: argonExhausted ? 0 : 80, resetAt: FUTURE_RESET },
+      [MODEL]: { remainingPercentage: argonExhausted ? 80 : 0, resetAt: FUTURE_RESET },
+      gemini_argon_weekly: { remainingPercentage: 0, resetAt: FUTURE_RESET },
+    });
+    expect(mocks.connections[0][`modelLock_${argonExhausted ? argon : MODEL}`]).toBe(FUTURE_RESET);
+    expect(mocks.connections[0][`modelLock_${argonExhausted ? MODEL : argon}`]).toBeUndefined();
+    expect(mocks.connections[0].modelLock_gemini_argon_weekly).toBeUndefined();
+    expect(mocks.connections[0].modelLock___all).toBeUndefined();
+  });
+
+  it("never locks Argon from summary-only or unknown fraction evidence", async () => {
+    mocks.connections = [{ id: "ag-argon-unknown", provider: "antigravity", isActive: true }];
+    await persistAntigravityQuota("ag-argon-unknown", {
+      [argon]: { remainingPercentage: 0, remainingFractionKnown: false, resetAt: FUTURE_RESET },
+      gemini_argon_weekly: { remainingPercentage: 0, resetAt: FUTURE_RESET },
+    });
+    expect(mocks.connections[0][`modelLock_${argon}`]).toBeUndefined();
+    expect(mocks.connections[0].modelLock_gemini_argon_weekly).toBeUndefined();
+  });
+});
+
+describe("Argon 404 availability lock", () => {
+  it("persists a model-scoped two-minute lock without quota refresh", async () => {
+    const id = "ag-argon-not-found";
+    const model = "gemini-4-argon-high";
+    mocks.connections = [{ id, provider: "antigravity", isActive: true }];
+    const { markAccountUnavailable } = await import("@/sse/services/auth.js");
+    const result = await markAccountUnavailable(id, 404, "Requested entity was not found.", "antigravity", model, null, "request_error");
+    expect(result).toMatchObject({ shouldFallback: true, cooldownMs: 120000 });
+    expect(mocks.connections[0][`modelLock_${model}`]).toBe(new Date(NOW + 120000).toISOString());
+    expect(mocks.connections[0].modelLock___all).toBeUndefined();
+    expect(mocks.connections[0][`modelLock_${MODEL}`]).toBeUndefined();
+    expect(mocks.getAntigravityUsage).not.toHaveBeenCalled();
+  });
+});

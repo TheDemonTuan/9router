@@ -20,6 +20,25 @@ describe("Antigravity account selection eligibility", () => {
     mockConnections.length = 0;
   });
 
+  it("selects B with exact Argon even when Flash-only A has higher priority", async () => {
+    mockConnections.push(
+      { id: "conn-a", provider: "antigravity", priority: 1, isActive: true, accessToken: "token-a" },
+      { id: "conn-b", provider: "antigravity", priority: 2, isActive: true, accessToken: "token-b" },
+    );
+    mockResolveAntigravityModels.mockImplementation(async connection => ({ resolved: true, models: [
+      { id: "gemini-3.8-flash-high" }, ...(connection.id === "conn-b" ? [{ id: "gemini-4-argon-high" }] : []),
+    ] }));
+    const { getProviderCredentials } = await import("../../src/sse/services/auth.js");
+    expect((await getProviderCredentials("antigravity", null, "gemini-4-argon-high")).connectionId).toBe("conn-b");
+  });
+
+  it("does not revive static Argon when the resolved catalog is empty", async () => {
+    mockConnections.push({ id: "conn-empty", provider: "antigravity", isActive: true, accessToken: "token" });
+    mockResolveAntigravityModels.mockResolvedValue({ resolved: true, models: [] });
+    const { getProviderCredentials } = await import("../../src/sse/services/auth.js");
+    expect(await getProviderCredentials("antigravity", null, "gemini-4-argon-high")).toBeNull();
+  });
+
   it("selects only the account whose live catalog contains Claude 5.5", async () => {
     mockConnections.push(
       { id: "conn-a", provider: "antigravity", isActive: true, accessToken: "token-a" },

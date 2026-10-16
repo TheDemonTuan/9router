@@ -67,6 +67,30 @@ export function parseWeeklyQuotaSummary(data) {
     const buckets = Array.isArray(group.buckets) ? group.buckets : [];
     for (const bucket of buckets) {
       if (!bucket || typeof bucket !== "object") continue;
+      // Argon has an independent weekly allotment. These are internal display
+      // keys, not assumed Google wire bucket IDs; only explicit names qualify.
+      if (/\bargon\b/i.test(`${displayName} ${bucket.displayName || ""} ${bucket.bucketId || ""}`)) {
+        const window = String(bucket.window || "").toLowerCase();
+        const bucketText = `${bucket.bucketId || ""} ${bucket.displayName || ""}`.toLowerCase();
+        const rawFraction = bucket.remainingFraction;
+        const fraction = Number(rawFraction);
+        if ((window === "weekly" || bucketText.includes("weekly"))
+          && bucket.disabled !== true
+          && rawFraction !== null && rawFraction !== undefined && rawFraction !== ""
+          && Number.isFinite(fraction) && fraction >= 0 && fraction <= 1
+          && !result.gemini_argon_weekly) {
+          result.gemini_argon_weekly = {
+            used: 1000 - Math.round(1000 * fraction),
+            total: 1000,
+            resetAt: parseResetTime(bucket.resetTime),
+            remainingPercentage: fraction * 100,
+            unlimited: false,
+            displayName: "Gemini 4 Argon (Weekly)",
+          };
+        }
+        // Invalid or unsupported Argon buckets must never populate Flash rows.
+        continue;
+      }
 
       const windowType = String(bucket.window || "").toLowerCase();
       const bucketText = `${bucket.bucketId || ""} ${bucket.displayName || ""}`.toLowerCase();

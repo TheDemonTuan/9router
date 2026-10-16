@@ -346,3 +346,23 @@ describe("Responses <-> Gemini direct translators", () => {
       .toBe("upstream-signature");
   });
 });
+
+describe("Responses Gemini 4 payload guard", () => {
+  it.each([FORMATS.GEMINI, FORMATS.GEMINI_CLI, FORMATS.ANTIGRAVITY, FORMATS.VERTEX])("orders outputs after user text and strips sampling on %s", (target) => {
+    const request = { ...structuredClone(REQUEST), model: "gemini-4-argon-high", top_k: 8 };
+    const before = structuredClone(request);
+    const payload = payloadFor(target, request);
+    for (const key of ["temperature", "topP", "topK"]) expect(payload.generationConfig).not.toHaveProperty(key);
+    const turn = payload.contents.at(-1);
+    expect(turn.role).toBe("user");
+    expect(turn.parts[0].text).toBe("Compare both cities");
+    // Vertex explicitly rejects tool IDs; the other surfaces retain call linkage.
+    if (target === FORMATS.VERTEX) {
+      for (const part of turn.parts.slice(1)) expect(part.functionResponse).not.toHaveProperty("id");
+    } else {
+      expect(turn.parts.slice(1).map(part => part.functionResponse.id)).toEqual(["call_one", "call_two"]);
+    }
+    expect(turn.parts.slice(1).map(part => part.functionResponse.response.result)).toEqual([{ temp: 32 }, { temp: 28 }]);
+    expect(request).toEqual(before);
+  });
+});

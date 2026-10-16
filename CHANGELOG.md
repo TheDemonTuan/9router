@@ -1,6 +1,11 @@
 # Unreleased
 
 ## Changed
+- **Upstream v0.5.104 integration**: preserve fork catalogs, security pins and CLI 0.5.91 while integrating provider/protocol, picker, scheduler and storage fixes. Gemini 4 Argon sampling/tool ordering covers Chat, Responses and native Antigravity; keep the Antigravity 64,000-output cap and account-scoped discovery. Explicitly named Argon weekly quota is display-only and independent from Flash; synthetic quota fixtures do not establish Google's live schema. No speculative identity change or claim that the reported 404 is fixed.
+- **Live model picker**: keep refresh ownership local to the active effect so account refreshes and StrictMode cancellation cannot strand Antigravity loading; retain account-keyed TTL and focus/visibility refresh.
+- **Argon thinking intent**: honor explicit client effort or budget ahead of the registry's default high-tier suffix; clamp disabled/small-budget requests to low without changing Gemini 3 or Claude suffix precedence.
+- **Argon live verification**: no eligible unexpired stored token was available, so no live catalog/quota calls or generation probes were sent. The reported transport 404 remains unverified and unresolved; no speculative User-Agent change was retained.
+- **Proxy dropdown portals**: clamp measured menu bounds inside desktop/mobile viewports while retaining intrinsic width limits and vertical flip behavior.
 - **Hermes deployment tracing**: mark runtime-host profile identity checks as external filesystem data so Turbopack does not include the entire build source tree in standalone images; retain profile discovery and unsuppressed image security checks.
 - **Tunnel standard-library security**: pin official checksum-verified Go 1.27.2 archives for native tunnel builds to fix CVE-2026-78667, CVE-2026-78669 and CVE-2026-97031 reported by the ARM64 image gate; preserve unsuppressed scanning and source provenance.
 - **Tunnel HTTP/2 security**: upgrade both source-built tunnel clients to `golang.org/x/net v0.60.0` for CVE-2026-78669; regenerate Go checksum graphs and synchronize build-lock/provenance digests without suppressing Trivy findings.
@@ -73,6 +78,34 @@
 - **Account selection / Codex catalog**: serialize rotation per provider, fetch independent model catalogs concurrently, and bound response-body parsing by the existing request deadline.
 - **Antigravity transport**: retain DNS bypass and certificate validation with a reusable TLS agent; propagate aborts, use Bun's native proxy option, and avoid duplicate JSON Schema clones.
 
+# v0.5.104 (2026-10-15)
+
+## Features
+- **Gemini**: add Gemini 4 Argon (`gemini`/`vertex`, plus a `high` tier on Antigravity) — non-dismissible gemini-level thinking, 1M context, Vertex defaults to `global` location
+- **Usage**: Cursor IDE quota via DashboardService (spend + request buckets) (#4689)
+- **Cursor**: resolve Auto (Server Picks) to the account's default agent model (#4692)
+- **Quota**: anchored auto-ping schedule at fixed local times with timezone/DST support and schedule modal (#4848); unify mode selection into a 3-way toggle, default timezone to local, bring schedule config to the quota page
+- **Providers**: add Nous Research OAuth + free-tier provider
+- **UI**: model picker regex/negation search, Select/Deselect All, provider filtering, and per-provider wildcards
+
+## Fixes
+- **Nous**: add missing attribution tags to API-key requests through compatible Chat Completions connections, preserving caller tags and identities (#4745)
+- **Cursor**: recover long sessions from empty AgentService turns (#4690); hold strictProxy on the AgentService h2 path (#4696)
+- **OpenCode**: encode inverted timestamp in translated session IDs so non-OpenCode clients pass Zen free-tier checks (#4780); inject `reasoning_content` placeholder for Zen multi-turn chats (#4805); move free tier to `/inference/v1` with the v2 client fingerprint (#4842)
+- **OpenCode Zen**: use attested free-tier identity for `-free` models on keyed lane (#4784)
+- **OpenCode Go**: route `claude-haiku-5-5` to `/messages` with adaptive thinking (#4727); drop `response_format` for the deepseek family (relay rejects with a bare 400)
+- **Capabilities**: add missing OpenCode Free reasoning entries (space-bunny & co) so `reasoning_effort` stops being silently stripped; advertise PDF input for current Claude models (#4761)
+- **Combos**: fallback when a model returns HTTP 200 with zero usable content (#4750)
+- **Qoder**: surface add-on (free-credit promo) quota in the quota tracker (#4758)
+- **Translator**: return Claude messages for forced SSE JSON responses (#4789)
+- **Vertex**: honor API-key project/location for Gemini 4 Argon (#4821)
+- **GitHub**: route Copilot embeddings to `api.githubcopilot.com` (#4793)
+- **Codex**: drop retired gpt-5.5 from registry, image, and auto-ping; CLI preset default to `gpt-6.1-sol`
+- **Gemini**: drop sampling params and order functionResponse-last for Gemini 4 (#4802)
+- **Models**: expose no-auth free providers in `/v1/models`; prune custom models on node deletion
+- **Usage**: token fallback for `input_tokens` rows in 24h/today stats; stable key masking
+- **Dashboard**: unclip proxy dropdown and tooltips via body portal
+
 # v0.5.99 (2026-10-08)
 
 ## Features
@@ -80,6 +113,7 @@
 - **Antigravity**: add Claude Sonnet 5.5 and Opus 5.5 support with reasoning effort variants, pricing, and family quota routing
 - **Bedrock**: add Amazon Bedrock (`bedrock` and `bedrock-xai`) provider with static keys, AWS SSO profiles, native SigV4 signer, and shared EventStream decoder (#4157)
 - **Hermes**: per-profile configuration across API, Dashboard card, and CLI menu with bulk apply, scoped reset, and auxiliary roles (#4660)
+- **Hermes**: audio transcription via 9router — an "Audio STT" toggle in the card points the profile's `stt.openai.base_url` at `/v1/audio/transcriptions` with an STT-kind model picker (#4763)
 - **API Keys**: per-API-key access control — restrict keys to allowed combos and models via interactive modal
 - **ElevenLabs**: add Scribe speech-to-text support (#4537)
 - **Proxy Pools**: add Netlify serverless relay proxy pool with digest-deploy API and dashboard management modal

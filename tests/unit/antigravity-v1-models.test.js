@@ -1,11 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const mockGetProviderConnections = vi.fn();
+const mockGetDisabledModels = vi.fn();
+const mockGetCustomModels = vi.fn();
 vi.mock("@/lib/localDb", () => ({
   getProviderConnections: (...args) => mockGetProviderConnections(...args),
   getCombos: vi.fn().mockResolvedValue([]),
-  getCustomModels: vi.fn().mockResolvedValue([]),
+  getCustomModels: (...args) => mockGetCustomModels(...args),
   getModelAliases: vi.fn().mockResolvedValue({}),
+}));
+vi.mock("@/lib/disabledModelsDb", () => ({
+  getDisabledModels: (...args) => mockGetDisabledModels(...args),
 }));
 
 const mockResolveAntigravityModels = vi.fn();
@@ -16,6 +21,18 @@ vi.mock("open-sse/services/antigravityModels.js", () => ({
 describe("GET /v1/models for Antigravity", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockGetDisabledModels.mockResolvedValue({});
+    mockGetCustomModels.mockResolvedValue([]);
+  });
+
+  it.each(["ag", "antigravity"])("hides static custom rows disabled under %s", async key => {
+    mockGetProviderConnections.mockResolvedValue([]);
+    mockGetCustomModels.mockResolvedValue([{ providerAlias: "ag", id: "synthetic-disabled", type: "llm" }]);
+    mockGetDisabledModels.mockResolvedValue({ [key]: ["synthetic-disabled"] });
+    const { GET } = await import("../../src/app/api/v1/models/route.js");
+    const response = await GET(new Request("http://localhost:20127/v1/models"));
+    const data = await response.json();
+    expect(data.data.some(model => model.id === "ag/synthetic-disabled")).toBe(false);
   });
 
   it("advertises live Claude 5.5 when account provides it", async () => {

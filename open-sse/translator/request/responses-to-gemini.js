@@ -12,6 +12,7 @@ import {
   tryParseJSON,
 } from "../formats/gemini.js";
 import { RESPONSES_ITEM, ROLE, GEMINI_ROLE } from "../schema/index.js";
+import { isGemini4Model } from "../../providers/capabilities.js";
 import {
   openaiToAntigravityRequest,
   sanitizeGeminiFunctionName,
@@ -141,9 +142,10 @@ export function responsesToGeminiBase(model, body, signature, sessionId = null, 
     const instructions = [responseSchemaFallbackInstruction, body.instructions].filter(Boolean).join("\n\n");
     result.systemInstruction = { role: GEMINI_ROLE.USER, parts: [{ text: instructions }] };
   }
-  if (body.temperature !== undefined) result.generationConfig.temperature = body.temperature;
-  if (body.top_p !== undefined) result.generationConfig.topP = body.top_p;
-  if (body.top_k !== undefined) result.generationConfig.topK = body.top_k;
+  const allowSampling = !isGemini4Model(model);
+  if (allowSampling && body.temperature !== undefined) result.generationConfig.temperature = body.temperature;
+  if (allowSampling && body.top_p !== undefined) result.generationConfig.topP = body.top_p;
+  if (allowSampling && body.top_k !== undefined) result.generationConfig.topK = body.top_k;
   if (body.max_output_tokens !== undefined) result.generationConfig.maxOutputTokens = body.max_output_tokens;
 
   const calls = new Map();
@@ -188,7 +190,7 @@ export function responsesToGeminiBase(model, body, signature, sessionId = null, 
       }
       unsupported(`Unsupported Responses input item '${type || "unknown"}'`);
     }
-    result.contents = normalizeGeminiContents(result.contents);
+    result.contents = normalizeGeminiContents(result.contents, { model });
   }
 
   const declarations = functionDeclarations(body.tools, toolSchemaMode);

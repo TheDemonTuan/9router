@@ -77,7 +77,7 @@ export default function ComboDetailPage() {
         const k = await keysRes.json();
         setApiKey((k.keys || []).find((x) => x.isActive !== false)?.key || "");
       }
-      if (connsRes.ok) setConnections((await connsRes.json()).connections || []);
+      if (connsRes.ok) setConnections(((await connsRes.json()).connections || []).filter((x) => x.isActive !== false));
       if (!comboRes.ok) { setCombo(null); setLoading(false); return; }
       const c = await comboRes.json();
       setCombo(c);
@@ -399,6 +399,17 @@ export default function ComboDetailPage() {
           onClose={() => setShowPicker(false)}
           onSelect={handleAddModel}
           onDeselect={handleDeselectModel}
+          onSelectBatch={async (items) => {
+            const next = [...new Set([...providers, ...items.map(item => item.value)])];
+            setProviders(next);
+            await saveCombo({ models: next });
+          }}
+          onDeselectBatch={async (items) => {
+            const values = new Set(items.map(item => item.value));
+            const next = providers.filter(model => !values.has(model));
+            setProviders(next);
+            await saveCombo({ models: next });
+          }}
           activeProviders={connections}
           modelAliases={modelAliases}
           title={`Add ${kindLabel} Model`}

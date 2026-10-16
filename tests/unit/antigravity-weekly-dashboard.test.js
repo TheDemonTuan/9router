@@ -191,3 +191,32 @@ describe("Antigravity dashboard normalization with weekly quotas", () => {
     expect(quotas[0].name).toBe("Gemini (Flash / Pro)");
   });
 });
+
+describe("Argon dashboard quota isolation (synthetic contract fixtures)", () => {
+  const row = (displayName, remainingPercentage) => ({ displayName, remainingPercentage, total: 1000, used: 1000 - remainingPercentage * 10, resetAt: "2026-10-23T00:00:00Z" });
+  it("shows Argon weekly once, independently from Flash and Claude", () => {
+    const rows = parseQuotaData("antigravity", { quotas: {
+      "gemini-3.8-flash-high": row("Flash", 80),
+      "gemini-4-argon-high": row("Gemini 4 Argon High", 0),
+      gemini_session: row("Gemini (5h)", 50), gemini_weekly: row("Gemini (Weekly)", 80),
+      gemini_argon_weekly: row("Gemini 4 Argon (Weekly)", 20),
+      claude_gpt_weekly: row("Claude & GPT (Weekly)", 60),
+    } });
+    expect(rows.filter(entry => /argon/i.test(entry.modelKey))).toEqual([
+      expect.objectContaining({ modelKey: "gemini_argon_weekly", remainingPercentage: 20 }),
+    ]);
+    expect(rows.find(entry => entry.modelKey === "gemini_session").remainingPercentage).toBe(50);
+  });
+
+  it("retains per-model Argon evidence when weekly is unknown despite Claude summaries", () => {
+    const rows = parseQuotaData("antigravity", { quotas: {
+      "gemini-3.8-flash-high": row("Flash", 80),
+      "ag/gemini-4-argon-high": row("Gemini 4 Argon High", 20),
+      claude_gpt_weekly: row("Claude & GPT (Weekly)", 60),
+    } });
+    expect(rows.find(entry => entry.modelKey === "gemini").remainingPercentage).toBe(80);
+    expect(rows.find(entry => entry.modelKey === "ag/gemini-4-argon-high")).toMatchObject({ name: "Gemini 4 Argon High", remainingPercentage: 20, resetAt: "2026-10-23T00:00:00Z" });
+    expect(rows.filter(entry => /argon/i.test(entry.name))).toHaveLength(1);
+    expect(rows.find(entry => /argon/i.test(entry.name)).name).not.toMatch(/5h|weekly/i);
+  });
+});

@@ -2,6 +2,7 @@
 
 import { safeParseJSON } from "../concerns/json.js";
 import { OPENAI_BLOCK } from "../schema/index.js";
+import { isGemini4Model } from "../../providers/capabilities.js";
 
 // Unsupported JSON Schema constraints that should be removed for Antigravity
 export const UNSUPPORTED_SCHEMA_CONSTRAINTS = [
@@ -568,16 +569,41 @@ function sanitizeFunctionResponsePart(part) {
   return { ...part, functionResponse: { ...part.functionResponse, response: sanitizeFunctionResponsePayload(response) } };
 }
 
+// Gemini 4 rejects a merged user turn whose last part is not a functionResponse (#4802)
+function moveFunctionResponsesLast(parts) {
+  let firstResponse = -1;
+  let needsReorder = false;
+  for (let i = 0; i < parts.length; i++) {
+    if (parts[i].functionResponse) {
+      if (firstResponse < 0) firstResponse = i;
+    } else if (firstResponse >= 0) {
+      needsReorder = true;
+      break;
+    }
+  }
+  if (!needsReorder) return parts;
+  const ordered = parts.filter(part => !part.functionResponse);
+  for (const part of parts) if (part.functionResponse) ordered.push(part);
+  return ordered;
+}
+
 // Merge adjacent same-role messages, strip empty parts, ensure initial and terminal user turns
-export function normalizeGeminiContents(contents, { requireTrailingUser = true } = {}) {
+export function normalizeGeminiContents(contents, { requireTrailingUser = true, model = null } = {}) {
+  const frLast = isGemini4Model(model);
   const out = [];
   for (const c of contents || []) {
     if (!c?.role || !Array.isArray(c.parts)) continue;
     const parts = c.parts.filter(p => p && Object.keys(p).length > 0).map(sanitizeFunctionResponsePart);
     if (parts.length === 0) continue;
     const last = out.at(-1);
-    if (last?.role === c.role) last.parts.push(...parts);
-    else out.push({ ...c, parts: [...parts] });
+    if (last?.role === c.role) {
+      last.parts.push(...parts);
+    } else out.push({ ...c, parts: [...parts] });
+  }
+  if (frLast) {
+    for (const turn of out) {
+      if (turn.role === "user") turn.parts = moveFunctionResponsesLast(turn.parts);
+    }
   }
   if (out.length > 0 && out[0].role !== "user") {
     out.unshift({ role: "user", parts: [{ text: "..." }] });

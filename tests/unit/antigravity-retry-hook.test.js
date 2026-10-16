@@ -74,6 +74,24 @@ describe("Antigravity executor hard quota", () => {
     }
   });
 
+  it("registry uses the daily IDE cloudcode host and user agent", async () => {
+    const { default: antigravity } = await import("../../open-sse/providers/registry/antigravity.js");
+    expect(antigravity.transport.baseUrls).toEqual(["https://daily-cloudcode-pa.googleapis.com"]);
+    expect(antigravity.transport.headers["User-Agent"]).toBe("antigravity/ide/2.22.0 darwin/arm64");
+  });
+
+  it("buildHeaders matches official IDE stream headers", () => {
+    const ag = new AntigravityExecutor();
+    ag._lastSessionId = "sess-123";
+    const h = ag.buildHeaders({ accessToken: "tok" }, true);
+    expect(h["User-Agent"]).toBe("antigravity/ide/2.22.0 darwin/arm64");
+    expect(h["Content-Type"]).toBe("application/json");
+    expect(h["Authorization"]).toBe("Bearer tok");
+    expect(h).not.toHaveProperty("X-Machine-Session-Id");
+    expect(h).not.toHaveProperty("x-request-source");
+    expect(h).not.toHaveProperty("Accept");
+  });
+
   it("does not classify RESOURCE_EXHAUSTED as hard quota without ErrorInfo", () => {
     const executor = new AntigravityExecutor();
     const body = JSON.stringify({ error: { code: 429, status: "RESOURCE_EXHAUSTED", message: "Request cannot be served" } });

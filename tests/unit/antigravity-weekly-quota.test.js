@@ -11,6 +11,7 @@ import {
   fetchAntigravityWeeklyQuota,
   _clearWeeklyCache,
 } from "../../open-sse/services/usage/antigravity-weekly.js";
+import { getAntigravityUsage } from "../../open-sse/services/usage/google.js";
 
 // — Fixtures ——————————————————————————————————————————————
 const GEMINI_GROUP = {
@@ -276,7 +277,7 @@ describe("fetchAntigravityWeeklyQuota", () => {
         method: "POST",
         headers: expect.objectContaining({
           "Authorization": "Bearer token",
-          "User-Agent": "antigravity/ide/2.11.0 darwin/arm64",
+          "User-Agent": "antigravity/ide/2.22.0 darwin/arm64",
           "Content-Type": "application/json",
           "X-Client-Name": "antigravity",
         }),
@@ -311,6 +312,26 @@ describe("weekly quota isolation from existing quota", () => {
     _clearWeeklyCache();
   });
 
+  it.each([true, false])("does not reconcile Argon exhaustion into Flash (argon exhausted=%s)", async argonExhausted => {
+    proxyAwareFetch.mockImplementation(async url => {
+      if (url.includes("manifest")) return { ok: true, text: async () => "version: 2.19.1\n" };
+      if (url.includes(":loadCodeAssist")) return { ok: true, json: async () => ({ cloudaicompanionProject: "synthetic", paidTier: { id: "synthetic-paid" } }) };
+      if (url.includes(":fetchAvailableModels")) return { ok: true, json: async () => ({ models: {
+        "gemini-3.8-flash-high": { displayName: "Flash", quotaInfo: { remainingFraction: argonExhausted ? 0.8 : 0, resetTime: "2099-10-23T00:00:00Z" } },
+        "gemini-4-argon-high": { displayName: "Argon", quotaInfo: { remainingFraction: argonExhausted ? 0 : 0.8, resetTime: "2099-10-23T00:00:00Z" } },
+      } }) };
+      if (url.includes(":retrieveUserQuotaSummary")) return { ok: true, json: async () => ({ groups: [
+        { displayName: "Gemini Flash", buckets: [{ window: "5h", remainingFraction: 0.5 }] },
+        { displayName: "Gemini 4 Argon", buckets: [{ window: "weekly", remainingFraction: 0.2 }] },
+      ] }) };
+      throw new Error(`Unexpected synthetic quota URL: ${url}`);
+    });
+    const result = await getAntigravityUsage(`synthetic-${argonExhausted}`, {});
+    expect(result.quotas.gemini_session.remainingPercentage).toBe(argonExhausted ? 50 : 0);
+    expect(result.quotas.gemini_argon_weekly.remainingPercentage).toBe(20);
+    expect(result.quotas.argon_session).toBeUndefined();
+  });
+
   it("existing getAntigravityUsage succeeds even when weekly RPC fails", async () => {
     proxyAwareFetch.mockImplementation(async (url) => {
       if (url.includes(":loadCodeAssist")) {
@@ -340,7 +361,6 @@ describe("weekly quota isolation from existing quota", () => {
       return { ok: false, status: 404 };
     });
 
-    const { getAntigravityUsage } = await import("../../open-sse/services/usage/google.js");
     const result = await getAntigravityUsage("token", {});
 
     expect(result.quotas["gemini-3.8-flash-high"]).toMatchObject({
@@ -409,7 +429,6 @@ describe("weekly quota isolation from existing quota", () => {
       return { ok: false, status: 404 };
     });
 
-    const { getAntigravityUsage } = await import("../../open-sse/services/usage/google.js");
     const result = await getAntigravityUsage("token", {});
 
     // Per-model quotas should be absent (free-tier accounts skip model parsing)
@@ -483,7 +502,6 @@ describe("weekly quota isolation from existing quota", () => {
       return { ok: true, status: 200, json: async () => ({}) };
     });
 
-    const { getAntigravityUsage } = await import("../../open-sse/services/usage/google.js");
     const result = await getAntigravityUsage("token-exhausted", null);
 
     // Per-model quota should show exhausted
@@ -504,5 +522,43 @@ describe("weekly quota isolation from existing quota", () => {
       remainingPercentage: 75,
       resetAt: "2026-09-15T00:00:00.000Z",
     });
+  });
+});
+
+// Synthetic contract fixtures — not captured Google quota payloads.
+describe("explicit Argon weekly summary isolation", () => {
+  const flash = { displayName: "Gemini 3.8 Flash", buckets: [
+    { window: "weekly", remainingFraction: 0.8 },
+    { window: "5h", remainingFraction: 0.5 },
+  ] };
+  const argon = { displayName: "Gemini 4 Argon", buckets: [
+    { window: "weekly", remainingFraction: 0.2, resetTime: "2026-10-23T00:00:00Z" },
+  ] };
+
+  it.each([false, true])("keeps three independent summaries regardless of group order (%s)", (reverse) => {
+    const result = parseWeeklyQuotaSummary({ groups: reverse ? [argon, flash] : [flash, argon] });
+    expect(Object.keys(result).sort()).toEqual(["gemini_argon_weekly", "gemini_session", "gemini_weekly"]);
+    expect(result.gemini_weekly.remainingPercentage).toBe(80);
+    expect(result.gemini_session.remainingPercentage).toBe(50);
+    expect(result.gemini_argon_weekly).toMatchObject({ remainingPercentage: 20, displayName: "Gemini 4 Argon (Weekly)" });
+  });
+
+  it.each([undefined, null, "", "invalid", Infinity, NaN, -0.1, 1.1])("never treats invalid Argon fraction %s as Flash or zero", (remainingFraction) => {
+    expect(parseWeeklyQuotaSummary({ groups: [{ ...argon, buckets: [{ window: "weekly", remainingFraction }] }] })).toEqual({});
+  });
+
+  it.each([
+    { window: "5h", remainingFraction: 0 },
+    { window: "weekly", remainingFraction: 0, disabled: true },
+    { window: "monthly", remainingFraction: 0 },
+  ])("does not infer an Argon session or disabled weekly bucket", (bucket) => {
+    expect(parseWeeklyQuotaSummary({ groups: [{ ...argon, buckets: [bucket] }] })).toEqual({});
+  });
+
+  it.each(["displayName", "bucketId"])("recognizes explicit bucket %s before generic Gemini", (field) => {
+    const result = parseWeeklyQuotaSummary({ quotaSummary: { groups: [{ displayName: "Gemini", buckets: [
+      { [field]: "ARGON-weekly", remainingFraction: 0.2 },
+    ] }] } });
+    expect(Object.keys(result)).toEqual(["gemini_argon_weekly"]);
   });
 });

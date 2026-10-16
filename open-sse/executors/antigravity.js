@@ -12,6 +12,7 @@ import { parseUpstreamError } from "../utils/error.js";
 import { MAX_ANTIGRAVITY_OUTPUT_TOKENS } from "../config/antigravityModels.js";
 import { isAntigravityClaudeModel, projectAntigravityClaudeToolSchema, invalidAntigravitySchema } from "../translator/concerns/antigravityToolSchema.js";
 import { takePreparedAntigravityProjection } from "../translator/concerns/antigravityToolValidation.js";
+import { isGemini4Model } from "../providers/capabilities.js";
 
 // Sanitize function name: Gemini requires [a-zA-Z_][a-zA-Z0-9_.:\-]{0,63}
 function sanitizeFunctionName(name) {
@@ -259,6 +260,7 @@ export class AntigravityExecutor extends BaseExecutor {
       };
     });
     const contents = normalizeGeminiContents(rawContents, {
+      model: body.model || model,
       requireTrailingUser: !isAntigravityClaudeModel(body.model || model)
     });
 
@@ -313,6 +315,11 @@ export class AntigravityExecutor extends BaseExecutor {
     }
 
     const generationConfig = { ...(requestWithoutTools.generationConfig || {}) };
+    if (isGemini4Model(body.model || model)) {
+      delete generationConfig.temperature;
+      delete generationConfig.topP;
+      delete generationConfig.topK;
+    }
     if (generationConfig.maxOutputTokens > MAX_ANTIGRAVITY_OUTPUT_TOKENS) {
       generationConfig.maxOutputTokens = MAX_ANTIGRAVITY_OUTPUT_TOKENS;
     }

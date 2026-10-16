@@ -1,4 +1,5 @@
 import { getModelsByProviderId } from "open-sse/config/providerModels.js";
+import { ANTIGRAVITY_ARGON_MODEL_RE } from "open-sse/config/antigravityModels.js";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 export const QUOTA_CACHE_KEY = "quotaCacheData";
@@ -393,14 +394,15 @@ export function parseQuotaData(provider, data) {
       case "antigravity":
         if (data.quotas) {
           const entries = Object.entries(data.quotas);
-          const weeklyKeys = new Set(["gemini_weekly", "claude_gpt_weekly"]);
+          const weeklyKeys = new Set(["gemini_weekly", "gemini_argon_weekly", "claude_gpt_weekly"]);
           const sessionKeys = new Set(["gemini_session", "claude_gpt_session"]);
           const summaryKeys = new Set([...weeklyKeys, ...sessionKeys]);
-          const geminiModels = entries.filter(([k]) => k.startsWith("gemini-") && !k.includes("image"));
+          const argonModels = entries.filter(([k]) => ANTIGRAVITY_ARGON_MODEL_RE.test(k));
+          const geminiModels = entries.filter(([k]) => k.startsWith("gemini-") && !k.includes("image") && !ANTIGRAVITY_ARGON_MODEL_RE.test(k));
           const claudeModels = entries.filter(([k]) => k.startsWith("claude-"));
           const imageModels = entries.filter(([k]) => k.includes("image"));
           const summaryModels = entries.filter(([k]) => summaryKeys.has(k));
-          const otherModels = entries.filter(([k]) => !k.startsWith("gemini-") && !k.startsWith("claude-") && !k.includes("image") && !summaryKeys.has(k));
+          const otherModels = entries.filter(([k]) => !k.startsWith("gemini-") && !ANTIGRAVITY_ARGON_MODEL_RE.test(k) && !k.startsWith("claude-") && !k.includes("image") && !summaryKeys.has(k));
 
           // Summary keys from retrieveUserQuotaSummary
           const hasGeminiWeekly = Boolean(data.quotas.gemini_weekly);
@@ -451,6 +453,23 @@ export function parseQuotaData(provider, data) {
                 resetAt: quota.resetAt || null,
                 remainingPercentage: quota.remainingPercentage,
               });
+            });
+          }
+
+          // Argon is never represented by Flash/Pro or Claude summary rows.
+          // Without an explicitly named weekly summary, retain exact-model
+          // evidence without inferring a window from its reset timestamp.
+          const argonRows = data.quotas.gemini_argon_weekly
+            ? [["gemini_argon_weekly", data.quotas.gemini_argon_weekly]]
+            : argonModels;
+          for (const [modelKey, quota] of argonRows) {
+            normalizedQuotas.push({
+              name: quota.displayName || modelKey,
+              modelKey,
+              used: quota.used || 0,
+              total: quota.total || 0,
+              resetAt: quota.resetAt || null,
+              remainingPercentage: quota.remainingPercentage,
             });
           }
 
@@ -569,25 +588,42 @@ export function parseQuotaData(provider, data) {
 
       case "qoder":
       case "qoder-cn":
-        // Qoder ships a `user` quota and (optionally) an `organization`
-        // quota, both with same shape: {total, used, remaining, unit, resetAt}.
-        // Skip an organization bucket when its total is 0 — most personal
-        // Qoder accounts won't have one and rendering "0/0" is misleading.
+        // Qoder ships a `user` quota, an optional `organization` quota and —
+        // when the account has redeemed a free-credit promo — an `addOn`
+        // bucket. All share the shape {total, used, remaining, unit, resetAt}.
+        // Skip any bucket whose total is 0: `personal_standard` accounts
+        // report `user` as 0/0 (their grant lives in `addOn`) and most
+        // accounts never have an organization bucket, so rendering "0/0"
+        // rows is noise. Buckets holding an actual grant always have
+        // total > 0 and are kept.
         // Don't forward Qoder's `remaining` field: it's an absolute credit
         // count, but getRemainingPercentage / QuotaTable interpret
         // `remaining` as a 0-100 percentage and would render 348 credits
         // as "348%". The percentage is computed from used/total instead.
         if (data.quotas) {
           Object.entries(data.quotas).forEach(([quotaType, quota]) => {
-            if (quotaType === "organization" && (!quota || (Number(quota.total) || 0) === 0)) {
+            if (!quota || (Number(quota.total) || 0) === 0) {
               return;
             }
             normalizedQuotas.push({
-              name: quotaType === "user" ? "Personal" : quotaType === "organization" ? "Organization" : quotaType,
+              name:
+                quotaType === "user"
+                  ? "Personal"
+                  : quotaType === "organization"
+                    ? "Organization"
+                    : quotaType === "addOn"
+                      ? "Add-on"
+                      : quotaType,
               used: quota.used || 0,
               total: quota.total || 0,
               unit: quota.unit,
               resetAt: quota.resetAt || null,
+              // Qoder reports open-ended plans as a 9999 sentinel; the service
+              // turns that into neverExpires so the row can read
+              // "Never expires" instead of "N/A" or a year-9999 date.
+              neverExpires: quota.neverExpires === true,
+              // Present on add-on credits: links to Qoder's own usage page.
+              detailUrl: quota.detailUrl || null,
             });
           });
         }
@@ -698,6 +734,22 @@ export function parseQuotaData(provider, data) {
               remainingPercentage: quota.remainingPercentage,
               isCreditBalance: quota.isCreditBalance ?? true,
               currency: quota.currency || (name.includes("(") ? name.slice(name.indexOf("(") + 1, name.indexOf(")")) : "USD"),
+            });
+          });
+        }
+        break;
+
+      case "cursor":
+        // Plan spend is USD (cents from GetCurrentPeriodUsage). Forward
+        // remainingPercentage only — do not pass absolute remaining (UI treats it as %).
+        if (data.quotas) {
+          Object.entries(data.quotas).forEach(([name, quota]) => {
+            normalizedQuotas.push({
+              name,
+              used: quota.used || 0,
+              total: quota.total || 0,
+              resetAt: quota.resetAt || null,
+              remainingPercentage: quota.remainingPercentage,
             });
           });
         }

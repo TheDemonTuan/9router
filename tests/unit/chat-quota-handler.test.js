@@ -211,3 +211,22 @@ describe("chat credential exhaustion", () => {
     expect(mocks.getProviderCredentials).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("Argon NOT_FOUND remains an availability error", () => {
+  it("returns outer 503 with the seeded 64-second lock remaining and skips quota refresh", async () => {
+    const now = Date.parse("2026-10-16T00:00:00Z");
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    try {
+      mocks.getModelInfo.mockResolvedValue({ provider: "antigravity", model: "gemini-4-argon-high" });
+      mocks.getProviderCredentials.mockResolvedValue({
+        allRateLimited: true, retryAfter: new Date(now + 64000).toISOString(),
+        retryAfterHuman: "1m 4s", lastStatus: 404, lastError: "Requested entity was not found.",
+      });
+      const response = await handleChat(request());
+      expect(response.status).toBe(503);
+      expect(response.headers.get("retry-after")).toBe("64");
+      expect(mocks.handleAntigravityQuotaError).not.toHaveBeenCalled();
+      expect(mocks.handleChatCore).not.toHaveBeenCalled();
+    } finally { vi.restoreAllMocks(); }
+  });
+});

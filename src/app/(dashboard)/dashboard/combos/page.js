@@ -167,7 +167,7 @@ export default function CombosPage() {
       // Only LLM combos here - webSearch/webFetch combos belong to media-providers/web
       if (combosRes.ok) setCombos((combosData.combos || []).filter(c => !c.kind || c.kind === "llm"));
       if (providersRes.ok) {
-        setActiveProviders(providersData.connections || []);
+        setActiveProviders((providersData.connections || []).filter((c) => c.isActive !== false));
       }
       setComboStrategies(settingsData.comboStrategies || {});
       const rawAdapter = settingsData.capacityAdapter || {};
@@ -897,6 +897,12 @@ function CapacityAdapterCap({ cap, entry, onChange, activeProviders, getCaps }) 
           onClose={() => setShowModelSelect(false)}
           onSelect={handleAdd}
           onDeselect={handleDeselect}
+          onSelectBatch={(items) => patch({ models: [...new Set([...models, ...items.map(item => item.value)])] })}
+          onDeselectBatch={(items) => {
+            const values = new Set(items.map(item => item.value));
+            const next = models.filter(model => !values.has(model));
+            patch({ models: next.length ? next : [DEFAULT_FALLBACK_MODEL] });
+          }}
           activeProviders={activeProviders}
           title={`Add ${cap.label} Model`}
           addedModelValues={models}
@@ -1198,6 +1204,11 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
           onClose={() => setShowModelSelect(false)}
           onSelect={handleAddModel}
           onDeselect={handleDeselectModel}
+          onSelectBatch={(items) => setModels(previous => [...new Set([...previous, ...items.map(item => item.value)])])}
+          onDeselectBatch={(items) => {
+            const values = new Set(items.map(item => item.value));
+            setModels(previous => previous.filter(model => !values.has(model)));
+          }}
           activeProviders={activeProviders}
           modelAliases={modelAliases}
           title="Add Model to Combo"
