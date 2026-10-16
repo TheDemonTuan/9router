@@ -17,8 +17,6 @@ const INTENTIONAL_PROVIDER_ADDITIONS = new Set(["chatgpt-web", "minimax-code", "
 // Normalize via JSON roundtrip so function/undefined are dropped identically; drop added/removed fields.
 // ADDED_FIELDS are verified by dedicated runtime tests, so drop them from BOTH sides (added or intentionally removed).
 const current = JSON.parse(JSON.stringify(PROVIDERS));
-// Kimi's new Responses transport has its own routing regression; retain parity for legacy transports.
-current.kimi.transports = current.kimi.transports.filter(t => t.format !== "openai-responses");
 for (const f of ADDED_FIELDS) {
   for (const id of Object.keys(current)) delete current[id][f];
   for (const id of Object.keys(baseline)) delete baseline[id][f];

@@ -7,6 +7,7 @@ import { ANTIGRAVITY_IDE_USER_AGENT, ANTIGRAVITY_IDE_VERSION, ANTIGRAVITY_OAUTH_
 import { U, parseResetTime, normalizeCloudCodeProjectId, fetchWithTimeout, cancelResponseBody } from "./shared.js";
 import { fetchAntigravityWeeklyQuota } from "./antigravity-weekly.js";
 import { normalizeAntigravityCatalog, resolveAntigravityDiscoveryProfile } from "../antigravityModels.js";
+import { ANTIGRAVITY_ARGON_MODEL_RE } from "../../config/antigravityModels.js";
 
 // Antigravity API config (from Quotio) — urls from registry, oauth client + dynamic UA kept here
 const ANTIGRAVITY_CONFIG = {
@@ -243,7 +244,7 @@ export async function getAntigravityUsage(accessToken, providerSpecificData, pro
       // If every model in a family is locked/exhausted (remainingPercentage === 0)
       // until a future reset time, update the 5h session row (not the weekly row).
       const entries = Object.entries(quotas);
-      const geminiModels = entries.filter(([k]) => k.startsWith("gemini-") && !k.includes("image"));
+      const geminiModels = entries.filter(([k]) => k.startsWith("gemini-") && !k.includes("image") && !ANTIGRAVITY_ARGON_MODEL_RE.test(k));
       const claudeModels = entries.filter(([k]) => k.startsWith("claude-"));
 
       if (weeklyQuotas.gemini_session && geminiModels.length > 0) {

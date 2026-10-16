@@ -72,7 +72,8 @@ vi.mock("../../open-sse/rtk/index.js", () => ({
 }));
 
 
-vi.mock("../../open-sse/providers/capabilities.js", () => ({
+vi.mock("../../open-sse/providers/capabilities.js", async (importOriginal) => ({
+  ...await importOriginal(),
   getCapabilitiesForModel: vi.fn(() => ({})),
 }));
 

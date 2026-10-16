@@ -36,3 +36,15 @@ describe("checkFallbackError — request-scoped vs account-scoped failures", () 
     expect(result.cooldownMs).toBeGreaterThan(0);
   });
 });
+
+describe("reported Argon NOT_FOUND classification", () => {
+  it("retains the intentional two-minute availability cooldown, not quota", async () => {
+    const { AntigravityExecutor } = await import("../../open-sse/executors/antigravity.js");
+    const { parseUpstreamError } = await import("../../open-sse/utils/error.js");
+    const body = JSON.stringify({ error: { code: 404, message: "Requested entity was not found.", status: "NOT_FOUND" } });
+    const parsed = await parseUpstreamError(new Response(body, { status: 404 }), new AntigravityExecutor());
+    expect(parsed.statusCode).toBe(404);
+    expect(parsed.errorClass).toBe("request_error");
+    expect(checkFallbackError(404, parsed.message)).toEqual({ shouldFallback: true, cooldownMs: 120000 });
+  });
+});

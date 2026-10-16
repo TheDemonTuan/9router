@@ -2,7 +2,7 @@
 // Config-driven: thinking format/limits come from capabilities.js + registry transport,
 // never hardcoded per-model here. See .docs/thinking/plan.md MATRIX VI-A.
 
-import { getCapabilitiesForModel } from "../../providers/capabilities.js";
+import { getCapabilitiesForModel, isGemini4Model } from "../../providers/capabilities.js";
 import { getThinkingLevels } from "../../providers/thinkingLevels.js";
 import { PROVIDERS } from "../../providers/index.js";
 import { LEVEL_TO_BUDGET, budgetToLevel, effortToBudget, effortToThinkingLevel } from "./thinking.js";
@@ -323,7 +323,10 @@ function applyFormat(fmt, body, cfg, caps, supportedLevels, display, strictCatal
       break;
     }
     case "gemini-level": {
-      const level = none ? "minimal" : toGeminiThinkingLevel(eff);
+      let level = none ? "minimal" : toGeminiThinkingLevel(eff);
+      // Models without a "minimal" tier (Gemini 4) reject it with 400 — clamp to the lowest supported level.
+      const lowest = supportedLevels?.find((l) => l !== "none");
+      if (supportedLevels?.length && lowest && !supportedLevels.includes(level)) level = lowest;
       setGeminiThinking(body, { thinkingLevel: level, includeThoughts: level !== "minimal" });
       ensureGeminiOutputFloor(body, geminiLevelOutputFloor(level), caps);
       break;
@@ -394,6 +397,18 @@ function applyFormat(fmt, body, cfg, caps, supportedLevels, display, strictCatal
       if (level) body.reasoning_effort = level === "xhigh" || level === "max" ? "high" : level;
       break;
     }
+    case "nous": {
+      // Nous's first-party client omits `reasoning` when disabled and sends a
+      // nested object when enabled. The API does not advertise top-level
+      // `reasoning_effort` for all models, so send nested `reasoning`.
+      if (none && canDisable) break;
+      const level = eff.mode === "auto" ? "medium" : toLevel(eff);
+      body.reasoning = {
+        enabled: true,
+        ...(level ? { effort: level } : {}),
+      };
+      break;
+    }
     case "tokenrouter": {
       // TokenRouter's reasoning_effort enum is low/medium/high/xhigh/max — it rejects
       // "none"/"auto" with a 400 and supports "max" natively (no clamp like openai).
@@ -432,7 +447,10 @@ export function applyThinking(targetFormat, model, body, provider = null, intent
   const { cleanModel, override, invalidSuffix } = parseSuffix(model);
   const effProvider = provider || (cleanModel.startsWith("alitp-intl/") ? "alitp-intl" : null);
   const actualModel = cleanModel.startsWith("alitp-intl/") ? cleanModel.slice("alitp-intl/".length) : cleanModel;
-  const cfg = override || intent || extractThinking(body);
+  const clientConfig = intent || extractThinking(body);
+  // Argon's registry tier suffix is a default, not an instruction to overwrite
+  // explicit client levels/budgets. Preserve suffix-first behavior for older models.
+  const cfg = isGemini4Model(actualModel) ? clientConfig || override : override || clientConfig;
   const caps = getCapabilitiesForModel(effProvider, actualModel);
   const catalogLevels = effProvider === "codex"
     ? getThinkingLevels(effProvider, actualModel, metadata)

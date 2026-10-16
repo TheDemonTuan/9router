@@ -13,6 +13,11 @@ import {
   requestChatGptWebRuntime,
 } from "open-sse/services/chatgptWebRuntimeClient.js";
 import { probeBedrockCredentials } from "open-sse/executors/bedrock.js";
+import {
+  createNousApiKeyProbe,
+  getNousApiKeyValidationError,
+  isNousApiKeyAccepted,
+} from "open-sse/services/nous.js";
 
 // Probe a webSearch/webFetch provider using its searchConfig/fetchConfig.
 // Returns true if API key is accepted (status !== 401 && !== 403).
@@ -342,6 +347,19 @@ export async function POST(request) {
           isValid = openrouterRes.ok;
           break;
 
+
+        case "nous": {
+          // Nous exposes /models publicly, so a models request cannot validate
+          // the Portal key. Use the smallest authenticated inference instead.
+          const probe = createNousApiKeyProbe(apiKey);
+          const res = await fetch(probe.url, {
+            ...probe.options,
+            signal: AbortSignal.timeout(8000),
+          });
+          isValid = isNousApiKeyAccepted(res.status);
+          if (!isValid) error = getNousApiKeyValidationError(res.status);
+          break;
+        }
         case "glm":
         case "glm-cn":
         case "kimi":

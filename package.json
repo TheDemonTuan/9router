@@ -1,6 +1,6 @@
 {
   "name": "9router-app",
-  "version": "0.5.99",
+  "version": "0.5.104",
   "description": "9Router web dashboard",
   "private": true,
   "packageManager": "bun@1.4.3",
@@ -8,8 +8,8 @@
     "prepare:chatgpt-session-export": "bun scripts/build-chatgpt-session-export.mjs",
     "dev": "bun run prepare:chatgpt-session-export && bun ./node_modules/next/dist/bin/next dev --port 20127",
     "dev:webpack": "bun run prepare:chatgpt-session-export && bun ./node_modules/next/dist/bin/next dev --webpack --port 20127",
-    "build": "bun run prepare:chatgpt-session-export && bun --bun next build",
-    "build:webpack": "bun run prepare:chatgpt-session-export && bun --bun next build --webpack",
+    "build": "bun --bun next build",
+    "build:webpack": "bun --bun next build --webpack",
     "postbuild": "bun scripts/copy-standalone-assets.mjs",
     "start": "bun custom-server.js --port 20127",
     "start:standalone": "bun ./.next/standalone/custom-server.js",

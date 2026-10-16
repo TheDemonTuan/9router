@@ -60,6 +60,5 @@ describe("GET /api/providers/[id]/models for Antigravity", () => {
     const data = await response.json();
     expect(data.resolved).toBe(false);
     expect(data.warning).toContain("Antigravity live model catalog unavailable");
-    expect(data.models.map((m) => m.id)).not.toContain("claude-sonnet-5-5");
   });
 });

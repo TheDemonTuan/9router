@@ -16,6 +16,7 @@ const STRIKE_BLOCK_MS = 15 * 60_000;
 const MODEL_IDS = new Set(getModelsByProviderId("antigravity").map(model => model.id));
 const DISPLAY_ONLY_KEYS = new Set([
   "gemini_weekly",
+  "gemini_argon_weekly",
   "gemini_session",
   "claude_gpt_weekly",
   "claude_gpt_session",

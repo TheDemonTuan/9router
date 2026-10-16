@@ -202,3 +202,29 @@ describe("functionResponse `$ref` sanitization", () => {
     expect(out.toString).toBe("literal");
   });
 });
+
+describe("Gemini 4 stable tool-result partition", () => {
+  const parts = [
+    { functionResponse: { id: "a", name: "first", response: { value: 1 } }, thoughtSignature: "sig-a" },
+    { text: "continue" },
+    { inlineData: { mimeType: "image/png", data: "aW1n" } },
+    { functionResponse: { id: "b", name: "second", response: { value: 2 } } },
+  ];
+
+  it.each([false, true])("partitions mixed or adjacent user turns (split=%s) without mutating input", (split) => {
+    const input = split
+      ? [{ role: "user", parts: parts.slice(0, 2) }, { role: "user", parts: parts.slice(2) }]
+      : [{ role: "user", parts }];
+    const before = structuredClone(input);
+    const out = normalizeGeminiContents(input, { model: "gemini-4-argon-high" });
+    expect(out).toHaveLength(1);
+    expect(out[0].parts).toEqual([parts[1], parts[2], parts[0], parts[3]]);
+    expect(input).toEqual(before);
+  });
+
+  it("leaves Gemini 3 ordering and the Claude trailing-turn exception intact", () => {
+    expect(normalizeGeminiContents([{ role: "user", parts }], { model: "gemini-3.8-flash" })[0].parts).toEqual(parts);
+    const input = [{ role: "user", parts: [{ text: "hi" }] }, { role: "model", parts: [{ text: "prefill" }] }];
+    expect(normalizeGeminiContents(input, { model: "claude-sonnet-5-5", requireTrailingUser: false })).toEqual(input);
+  });
+});

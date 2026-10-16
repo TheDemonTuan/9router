@@ -18,6 +18,7 @@ export const CHATGPT_WEB_MAX_CONCURRENCY = MAX_BROWSER_TURNS;
 export function validateChatGptWebProfileId(value) { return validateProfileId(value); }
 export function sanitizeChatGptWebMaxConcurrency(value) { return value === MAX_BROWSER_TURNS ? MAX_BROWSER_TURNS : null; }
 function runtimeUrl() {
+  if (process.env.NEXT_PUBLIC_CHATGPT_WEB_ENABLED === "false") throw Object.assign(new Error("ChatGPT Web is suspended on this deployment"), { code: "chatgpt_web_disabled" });
   const raw = process.env.CHATGPT_WEB_RUNTIME_URL?.trim();
   if (!raw) throw new Error("CHATGPT_WEB_RUNTIME_URL is required");
   const url = new URL(raw);
@@ -32,6 +33,7 @@ async function token(admin) {
   return secret;
 }
 async function runtimeRequest(path, init, options, admin, profileId) {
+  const baseUrl = runtimeUrl();
   const url = new URL(path, "http://internal.invalid");
   const allowed = admin ? ADMIN_PATHS.includes(url.pathname) || Object.hasOwn(HARNESS_ADMIN_METHODS, url.pathname) || /^\/admin\/profiles\/[a-z0-9-]+$/.test(url.pathname) : DATA_PATHS.includes(url.pathname);
   if (!allowed || url.origin !== "http://internal.invalid" || url.hash || url.search && !(admin && ["/admin/login/status", "/admin/login/session", RUNTIME_PATHS.harnessStatus].includes(url.pathname))) throw new Error("Unsupported internal runtime endpoint");
@@ -50,7 +52,7 @@ async function runtimeRequest(path, init, options, admin, profileId) {
   const timeout = options.timeoutMs ? AbortSignal.timeout(options.timeoutMs) : null;
   const signal = init.signal && timeout ? AbortSignal.any([init.signal, timeout]) : init.signal || timeout || undefined;
   // Internal credentials must never pass through an environment or caller proxy.
-  return session.fetch(`${runtimeUrl()}${url.pathname}${url.search}`, { ...init, headers, signal, redirect: "error", proxy: false });
+  return session.fetch(`${baseUrl}${url.pathname}${url.search}`, { ...init, headers, signal, redirect: "error", proxy: false });
 }
 export function requestChatGptWebRuntime(connection, path, init = {}, options = {}) {
   const profileId = connection?.providerSpecificData?.profileId;

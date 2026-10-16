@@ -13,6 +13,9 @@ process.env.DISABLE_MITM_DNS_BYPASS = "true";
 let smokeFuturePromoted = false;
 let recordedGenerationBodies = [];
 let recordedManifestHeaders = [];
+let smokeArgonRemaining = 0.2;
+let smokeFlashRemaining = 0.8;
+const smokeUsage = { promptTokenCount: 123, candidatesTokenCount: 17, totalTokenCount: 140 };
 
 installSmokeFetch();
 
@@ -49,7 +52,13 @@ function installSmokeFetch() {
     }
 
     if (url.includes(":retrieveUserQuotaSummary")) {
-      return new Response(JSON.stringify({ groups: [] }), { status: 200 });
+      // Synthetic contract fixture, not an observed Google quota capture.
+      return Response.json({ groups: [
+        { displayName: "Gemini 3.8 Flash", buckets: [
+          { window: "weekly", remainingFraction: 0.8 }, { window: "5h", remainingFraction: 0.5 },
+        ] },
+        { displayName: "Gemini 4 Argon", buckets: [{ window: "weekly", remainingFraction: 0.2 }] },
+      ] });
     }
 
     if (url.includes(":fetchAvailableModels")) {
@@ -59,6 +68,10 @@ function installSmokeFetch() {
       if (token === "token-a") {
         return new Response(JSON.stringify({
           models: {
+            "gemini-3.8-flash-high": {
+              displayName: "Gemini 3.8 Flash High", maxTokens: 1048576, maxOutputTokens: 64000,
+              quotaInfo: { remainingFraction: smokeFlashRemaining, resetTime: "2099-10-23T00:00:00Z" },
+            },
             "gemini-2.5-pro": {
               displayName: "Gemini 2.5 Pro",
               maxTokens: 1000000,
@@ -71,6 +84,15 @@ function installSmokeFetch() {
       if (token === "token-b") {
         return new Response(JSON.stringify({
           models: {
+            "gemini-3.8-flash-high": {
+              displayName: "Gemini 3.8 Flash High", maxTokens: 1048576, maxOutputTokens: 64000,
+              quotaInfo: { remainingFraction: smokeFlashRemaining, resetTime: "2099-10-23T00:00:00Z" },
+            },
+            "gemini-4-argon-high": {
+              displayName: "Gemini 4 Argon High", maxTokens: 1048576, maxOutputTokens: 100000,
+              supportsImages: true, supportsThinking: true,
+              quotaInfo: { remainingFraction: smokeArgonRemaining, resetTime: "2099-10-23T00:00:00Z" },
+            },
             "gemini-2.5-pro": {
               displayName: "Gemini 2.5 Pro",
               maxTokens: 1000000,
@@ -117,11 +139,7 @@ function installSmokeFetch() {
               finishReason: "STOP",
             },
           ],
-          usageMetadata: {
-            promptTokenCount: 1,
-            candidatesTokenCount: 1,
-            totalTokenCount: 2,
-          },
+          usageMetadata: smokeUsage,
         },
       };
 
@@ -171,7 +189,7 @@ async function runChildSmoke() {
     isActive: true,
     accessToken: "token-a",
     providerSpecificData: {
-      enabledModels: ["gemini-2.5-pro"],
+      enabledModels: ["gemini-2.5-pro", "gemini-3.8-flash-high"],
       cloudaicompanionProject: "smoke-project",
     },
     priority: 1,
@@ -184,7 +202,7 @@ async function runChildSmoke() {
     isActive: true,
     accessToken: "token-b",
     providerSpecificData: {
-      enabledModels: ["gemini-2.5-pro", "claude-sonnet-5-5"],
+      enabledModels: ["gemini-2.5-pro", "gemini-3.8-flash-high", "claude-sonnet-5-5", "gemini-4-argon-high"],
       cloudaicompanionProject: "smoke-project",
     },
     priority: 2,
@@ -217,7 +235,7 @@ async function runChildSmoke() {
   await updateProviderConnection(connB.id, {
     providerSpecificData: {
       ...connB.providerSpecificData,
-      enabledModels: ["gemini-2.5-pro", "claude-sonnet-5-5", "claude-sonnet-99-1"],
+      enabledModels: ["gemini-2.5-pro", "gemini-3.8-flash-high", "claude-sonnet-5-5", "claude-sonnet-99-1", "gemini-4-argon-high"],
     },
   });
 
@@ -327,6 +345,101 @@ async function runChildSmoke() {
   assert.equal(recordedGenerationBodies[0].body.model, "claude-sonnet-99-1", "Wire model must strip (high) suffix");
 
   console.log("PASS stream/non-stream wire ID");
+
+  // Argon traverses the real catalog, account selector, translators and executor.
+  const argonPublic = dataPublic.data.filter(model => model.id === "ag/gemini-4-argon-high");
+  assert.equal(argonPublic.length, 1, "Account catalogs must union Argon exactly once");
+  assert.equal(argonPublic[0].max_completion_tokens, 64000);
+  assert.equal(agApiModels.filter(model => model.model === "gemini-4-argon-high").length, 1);
+  assert.equal((await getProviderCredentials("antigravity", null, "gemini-4-argon-high")).connectionId, connB.id);
+  console.log("PASS Argon catalog union/account selection");
+
+  const argonRequest = async (endpoint, body) => {
+    recordedGenerationBodies = [];
+    const response = await handleChat(new Request(`http://localhost:20127${endpoint}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "ag/gemini-4-argon-high", ...body }),
+    }));
+    assert.equal(response.status, 200);
+    assert.equal(recordedGenerationBodies.length, 1);
+    const wire = recordedGenerationBodies[0];
+    assert.equal(wire.token, "token-b");
+    assert.equal(wire.body.model, "gemini-4-argon-high");
+    for (const key of ["temperature", "topP", "topK"]) assert.equal(wire.body.request.generationConfig[key], undefined);
+    assert.ok(wire.body.request.generationConfig.maxOutputTokens <= 64000);
+    assert.equal(wire.body.request.generationConfig.thinkingConfig.thinkingBudget, undefined);
+    return { response, wire: wire.body };
+  };
+  const chatBody = { messages: [{ role: "user", content: "Reply with OK." }], stream: false,
+    temperature: 0.2, top_p: 0.7, top_k: 4, max_tokens: 100000, reasoning_effort: "low" };
+  const argonJson = await argonRequest("/v1/chat/completions", chatBody);
+  const argonCompletion = await argonJson.response.json();
+  assert.equal(argonCompletion.choices[0].message.content, "ok");
+  // Gateway accounting may add its existing input safety buffer; provider output
+  // tokens and the input/output identity must survive the real handler path.
+  assert.ok(argonCompletion.usage.prompt_tokens >= smokeUsage.promptTokenCount);
+  assert.equal(argonCompletion.usage.completion_tokens, smokeUsage.candidatesTokenCount);
+  assert.equal(argonCompletion.usage.total_tokens, argonCompletion.usage.prompt_tokens + argonCompletion.usage.completion_tokens);
+  assert.equal(argonJson.wire.request.generationConfig.thinkingConfig.thinkingLevel, "low");
+  const argonStream = await argonRequest("/v1/chat/completions", { ...chatBody, stream: true });
+  const argonStreamText = await argonStream.response.text();
+  assert.equal((argonStreamText.match(/data: \[DONE\]/g) || []).length, 1);
+  assert.ok(argonStreamText.includes('"content":"ok"'));
+  console.log("PASS Argon Chat JSON usage/SSE terminal");
+
+  for (const [intent, expectedLevel] of [
+    [{ reasoning_effort: "none" }, "low"],
+    [{ thinking: { type: "enabled", budget_tokens: 512 } }, "low"],
+    [{ reasoning_effort: "high" }, "high"],
+  ]) {
+    const result = await argonRequest("/v1/chat/completions", {
+      messages: chatBody.messages, stream: false, max_tokens: 1024, ...intent,
+    });
+    await result.response.text();
+    assert.deepEqual(result.wire.request.generationConfig.thinkingConfig, { thinkingLevel: expectedLevel, includeThoughts: true });
+  }
+  console.log("PASS Argon explicit effort/budget overrides registry default through handleChat");
+
+  const argonResponses = await argonRequest("/v1/responses", { input: [
+    { type: "function_call", call_id: "call_argon", name: "lookup", arguments: "{}" },
+    { type: "function_call_output", call_id: "call_argon", output: '{"value":1}' },
+    { role: "user", content: "Continue" },
+  ], stream: false, max_output_tokens: 100000, temperature: 0.2, top_p: 0.7, top_k: 4, reasoning: { effort: "low" } });
+  const responsesJson = await argonResponses.response.json();
+  assert.equal(responsesJson.object, "response");
+  const responseTurn = argonResponses.wire.request.contents.at(-1);
+  assert.equal(responseTurn.parts[0].text, "Continue");
+  assert.equal(responseTurn.parts.at(-1).functionResponse.id, "call_argon");
+  assert.equal(argonResponses.wire.request.generationConfig.thinkingConfig.thinkingLevel, "low");
+  console.log("PASS Argon Responses sampling/tool ordering");
+
+  const native = await argonRequest("/v1/chat/completions", { userAgent: "antigravity", stream: false, request: {
+    contents: [{ role: "user", parts: [
+      { functionResponse: { id: "a", name: "lookup", response: { value: 1 } } },
+      { text: "Continue" },
+      { functionResponse: { id: "b", name: "lookup", response: { value: 2 } } },
+    ] }], generationConfig: { temperature: 0.2, topP: 0.7, topK: 4, maxOutputTokens: 100000,
+      thinkingConfig: { thinkingLevel: "low" } },
+  } });
+  await native.response.text();
+  assert.equal(native.wire.request.contents[0].parts[0].text, "Continue");
+  assert.deepEqual(native.wire.request.contents[0].parts.slice(1).map(part => part.functionResponse.id), ["a", "b"]);
+  assert.equal(native.wire.request.generationConfig.thinkingConfig.thinkingLevel, "low");
+  console.log("PASS Argon native sampling/stable tool ordering");
+
+  const { getAntigravityUsage } = await import("../../open-sse/services/usage/google.js");
+  smokeArgonRemaining = 0;
+  let quota = await getAntigravityUsage("token-b", { cloudaicompanionProject: "smoke-project" });
+  assert.equal(quota.quotas.gemini_argon_weekly.remainingPercentage, 20);
+  assert.equal(quota.quotas.gemini_session.remainingPercentage, 50, "Argon exhaustion must not alter Flash session");
+  smokeArgonRemaining = 0.8;
+  smokeFlashRemaining = 0;
+  quota = await getAntigravityUsage("token-b", { cloudaicompanionProject: "smoke-project" });
+  assert.equal(quota.quotas["gemini-4-argon-high"].remainingPercentage, 80);
+  assert.equal(quota.quotas.gemini_argon_weekly.remainingPercentage, 20);
+  assert.equal(quota.quotas.gemini_session.remainingPercentage, 0);
+  assert.equal(quota.quotas.argon_session, undefined);
+  console.log("PASS Argon/Flash independent quota (synthetic contract)");
 }
 
 if (process.argv[2] === "child") {

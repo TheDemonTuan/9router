@@ -27,6 +27,7 @@ const ALIAS_TOKENS = [
   "muse-code","muse-subscription",
   "br","bedrock","aws-bedrock",
   "brx","bedrock-xai","bedrock-grok",
+  "nous","nous-portal","nous-research","ns",
 ];
 
 // Sort idToAlias by key — runtime accesses by key, order is irrelevant (content-based)
@@ -47,14 +48,12 @@ if (process.argv[2] === "--snapshot") {
 }
 if (!existsSync(snapPath)) { console.error("No baseline. Run --snapshot first."); process.exit(1); }
 const baseline = JSON.parse(readFileSync(snapPath, "utf8"));
-// MiniMax Coding introduces two public aliases; verify resolution before comparing legacy mappings.
-for (const [id, alias] of [["minimax-code", "mm"], ["minimax-code-global", "mmg"]]) {
+// Check the approved public additions explicitly as well as preserving the full map.
+for (const [id, alias] of [["minimax-code", "mm"], ["minimax-code-global", "mmg"], ["nous", "nous"]]) {
   if (current.idToAlias[id] !== alias || resolveProviderAlias(alias) !== id || !current.modelKeys.includes(alias)) {
-    console.error(`Invalid MiniMax Coding alias: ${alias} -> ${id}`);
+    console.error(`Invalid provider alias: ${alias} -> ${id}`);
     process.exit(1);
   }
-  delete current.idToAlias[id];
-  current.modelKeys = current.modelKeys.filter(k => k !== alias);
 }
 if (JSON.stringify(baseline) === JSON.stringify(current)) {
   console.log(`✅ Alias resolution byte-for-byte equal (${ALIAS_TOKENS.length} tokens).`);
