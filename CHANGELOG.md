@@ -1,6 +1,7 @@
 # Unreleased
 
 ## Changed
+- **Non-root web image**: default to user `bun`, preserve the mounted `.9router` home and start without privileged ownership changes. Operators can explicitly select `--user root` to repair legacy volume permissions; strict image misconfiguration scanning remains enabled.
 - **Temporary CGW web suspension**: web images disable ChatGPT Web selection, runtime/admin/catalog access and authenticated viewer forwarding via `NEXT_PUBLIC_CHATGPT_WEB_ENABLED=false`. Keep CGW source, saved connections and account/browser volumes. Remove automatic CGW release gates and session-export packaging from the web build; preserve application regression, ARM64 image smoke and source/image security gates. CGW runtime operations require deliberate platform re-enrollment.
 - **Upstream v0.5.104 integration**: preserve fork catalogs, security pins and CLI 0.5.91 while integrating provider/protocol, picker, scheduler and storage fixes. Gemini 4 Argon sampling/tool ordering covers Chat, Responses and native Antigravity; keep the Antigravity 64,000-output cap and account-scoped discovery. Explicitly named Argon weekly quota is display-only and independent from Flash; synthetic quota fixtures do not establish Google's live schema. No speculative identity change or claim that the reported 404 is fixed.
 - **Live model picker**: keep refresh ownership local to the active effect so account refreshes and StrictMode cancellation cannot strand Antigravity loading; retain account-keyed TTL and focus/visibility refresh.
