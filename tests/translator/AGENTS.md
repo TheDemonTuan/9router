@@ -29,6 +29,8 @@ Components:
 | `coverage-all-models.test.js` | Tier 1: every model translates without throwing; strip applied correctly. |
 | `format-roundtrip.test.js` | Tier 2: tool id/system/parallel survive the bridge. |
 | `bugs-openai-bridge.test.js` | Exposes concrete bugs (with source file:line). |
+| `responses-claude-request.test.js` | Direct `openai-responses → claude` request contract, capability gating, and scoped reasoning continuity. |
+| `responses-claude-response.test.js` | Direct `claude → openai-responses` streaming state machine, custom/function tools, and terminal states. |
 
 ## 3. Running
 
@@ -85,9 +87,6 @@ Grouped per CLI/provider test file. Each row is an `it.fails` case.
 **OpenAI → Claude (`bugs-toClaude-context.test.js`)**
 | Bug | Source |
 |---|---|
-| Always injects "You are Claude Code" system prompt | `request/openai-to-claude.js:124-134` |
-| `reasoning_content` not mapped to a thinking block | `request/openai-to-claude.js:268-273` |
-| `tool_choice:"none"` → `auto` | `request/openai-to-claude.js:298` |
 | `input_audio` dropped | `request/openai-to-claude.js` (no audio branch) |
 
 **Codex Responses (`bugs-codexCli-responses.test.js`)**

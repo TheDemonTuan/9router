@@ -40,10 +40,10 @@ describe("upstream native thinking and conversation preservation", () => {
     },
   );
 
-  it("combines Sonnet off/forced-choice handling with a fourth tool-result cache breakpoint", () => {
+  it("combines Sonnet off/parallel-tool handling with a fourth tool-result cache breakpoint and rejects unsupported forced choice", () => {
     const out = translateRequest("openai", "claude", "claude-sonnet-5-5", {
       model: "claude-sonnet-5-5", reasoning_effort: "none",
-      tool_choice: { type: "function", function: { name: "lookup" } },
+      tool_choice: "auto", parallel_tool_calls: false,
       tools: [{ type: "function", function: { name: "lookup", parameters: { type: "object", properties: {} } } }],
       messages: [
         { role: "system", content: "Use lookup" },
@@ -53,13 +53,19 @@ describe("upstream native thinking and conversation preservation", () => {
       ],
     }, false, null, "claude");
     expect(out.thinking).toEqual({ type: "between_tools" });
-    expect(out.tool_choice.type).toBe("auto");
+    expect(out.tool_choice).toEqual({ type: "auto", disable_parallel_tool_use: true });
     const last = out.messages[out.messages.length - 1];
     expect(last.role).toBe("user");
     expect(last.content[0]).toMatchObject({ type: "tool_result", tool_use_id: "toolu_fixture" });
     expect(last.content[last.content.length - 1].cache_control?.type).toBe("ephemeral");
     const blocks = [...(out.system || []), ...(out.tools || []), ...out.messages.flatMap((message) => message.content)];
     expect(blocks.filter((block) => block?.cache_control)).toHaveLength(4);
+    expect(() => translateRequest("openai", "claude", "claude-sonnet-5-5", {
+      model: "claude-sonnet-5-5",
+      tool_choice: { type: "function", function: { name: "lookup" } },
+      tools: [{ type: "function", function: { name: "lookup", parameters: { type: "object", properties: {} } } }],
+      messages: [{ role: "user", content: "Read the result" }],
+    }, false, null, "claude")).toThrow("does not support required or named tool_choice");
   });
 
   it("keeps a file-only user turn instead of replacing it after an assistant", () => {

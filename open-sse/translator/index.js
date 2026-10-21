@@ -69,6 +69,8 @@ function detectClientLastRole(body) {
 export function translateRequest(sourceFormat, targetFormat, model, body, stream = true, credentials = null, provider = null, reqLogger = null, stripList = [], connectionId = null, clientTool = null, sessionSourceBody = null) {
   ensureInitialized();
   let result = body;
+  const directClaudeResponses = sourceFormat === FORMATS.OPENAI_RESPONSES && targetFormat === FORMATS.CLAUDE;
+  if (directClaudeResponses && credentials) credentials._responsesClaudeContext = { provider, model, connectionId, clientScope: credentials._responsesClaudeContext?.clientScope || null };
   // Role the client actually ended on, before any translator drops an emptied turn.
   const clientLastRole = detectClientLastRole(body);
 
@@ -100,7 +102,7 @@ export function translateRequest(sourceFormat, targetFormat, model, body, stream
   // The generic helper inserts OpenAI `role: tool` messages, which a direct
   // Claude→Kiro translator cannot consume and which cannot repair partial
   // parallel tool results.
-  if (targetFormat !== FORMATS.KIRO) {
+  if (targetFormat !== FORMATS.KIRO && !directClaudeResponses) {
     fixMissingToolResponses(result);
   }
 
@@ -184,7 +186,9 @@ export function translateRequest(sourceFormat, targetFormat, model, body, stream
   if (targetFormat === FORMATS.CLAUDE) {
     const apiKey = credentials?.accessToken || credentials?.apiKey || null;
     result = prepareClaudeRequest(result, provider, apiKey, connectionId, credentials?.rawHeaders, clientSessionId);
-    if (Array.isArray(result?.messages)) result.messages = ensureTrailingUserTurn(result.messages, clientLastRole);
+    if (!directClaudeResponses && Array.isArray(result?.messages)) result.messages = ensureTrailingUserTurn(result.messages, clientLastRole);
+    delete result._directResponsesToClaude;
+    delete result._explicitMaxOutputTokens;
   }
 
   // Claude cloaking: rename client tools with CLAUDE_TOOL_SUFFIX (anti-ban)
@@ -192,7 +196,7 @@ export function translateRequest(sourceFormat, targetFormat, model, body, stream
   if (PROVIDERS[provider]?.quirks?.cloakToolsOnOAuth) {
     const apiKey = credentials?.accessToken || credentials?.apiKey || null;
     if (apiKey?.includes("sk-ant-oat")) {
-      const { body: cloakedBody, toolNameMap } = cloakClaudeTools(result);
+      const { body: cloakedBody, toolNameMap } = cloakClaudeTools(result, { includeDecoys: !directClaudeResponses });
       result = cloakedBody;
       if (toolNameMap?.size > 0) {
         result._toolNameMap = toolNameMap;
@@ -348,12 +352,14 @@ import "./request/openai-to-vertex.js";
 import "./request/antigravity-to-openai.js";
 import "./request/openai-responses.js";
 import "./request/responses-to-gemini.js";
+import "./request/responses-to-claude.js";
 import "./request/openai-to-kiro.js";
 import "./request/openai-to-cursor.js";
 import "./request/openai-to-ollama.js";
 import "./request/openai-to-commandcode.js";
 import "./request/claude-to-kiro.js";
 import "./response/claude-to-openai.js";
+import "./response/claude-to-responses.js";
 import "./response/openai-to-claude.js";
 import "./response/gemini-to-openai.js";
 import "./response/gemini-to-responses.js";

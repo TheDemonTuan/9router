@@ -7,9 +7,13 @@ const CC_ENTRYPOINT = "sdk-cli";
 // Generate the billing header expected from current Claude Code clients.
 // x-anthropic-billing-header: cc_version=<ver>.<build>; cc_entrypoint=sdk-cli; cch=<hash>;
 function generateBillingHeader(payload) {
-  const content = JSON.stringify(payload);
-  const cch = createHash("sha256").update(content).digest("hex").slice(0, 5);
-  const buildHash = randomBytes(2).toString("hex").slice(0, 3);
+  const stablePrefix = {
+    model: payload?.model,
+    system: payload?.system,
+    tools: payload?.tools,
+  };
+  const cch = createHash("sha256").update(JSON.stringify(stablePrefix)).digest("hex").slice(0, 5);
+  const buildHash = createHash("sha256").update(`build:${CLAUDE_CLI_VERSION}`).digest("hex").slice(0, 3);
   return `x-anthropic-billing-header: cc_version=${CLAUDE_CLI_VERSION}.${buildHash}; cc_entrypoint=${CC_ENTRYPOINT}; cch=${cch};`;
 }
 
@@ -53,7 +57,7 @@ export function extractClaudeSessionIdFromUserId(userId) {
  * @param {object} body - Claude API request body
  * @returns {{ body: object, toolNameMap: Map|null }}
  */
-export function cloakClaudeTools(body) {
+export function cloakClaudeTools(body, { includeDecoys = true } = {}) {
   const tools = body.tools;
   if (!tools || tools.length === 0) return { body, toolNameMap: null };
 
@@ -74,7 +78,7 @@ export function cloakClaudeTools(body) {
   }
 
   // Client tools first, then CC decoy tools (no overlap: client tools all have _cc suffix)
-  const allTools = [...clientDeclarations, ...CC_DECOY_TOOLS];
+  const allTools = includeDecoys ? [...clientDeclarations, ...CC_DECOY_TOOLS] : clientDeclarations;
 
   // Rename tool_use in message history (all client tools get suffix)
   const renamedMessages = body.messages?.map(msg => {

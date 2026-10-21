@@ -1,6 +1,7 @@
 import { handleChat } from "@/sse/handlers/chat.js";
 import { initTranslators } from "open-sse/translator/index.js";
 import { withPreResponseBudget } from "open-sse/utils/preResponseBudget.js";
+import { createTimingContext } from "@/sse/utils/timingContext.js";
 let initialized = false;
 
 async function ensureInitialized() {
@@ -25,8 +26,10 @@ export async function OPTIONS() {
  * Now handled by translator pattern (openai-responses format auto-detected)
  */
 export async function POST(request) {
+  const timingContext = request?.timingContext || createTimingContext();
+  if (request && !request.timingContext) request.timingContext = timingContext;
   return withPreResponseBudget(request, async (preResponse) => {
     await ensureInitialized();
-    return handleChat(request, null, { preResponse });
+    return handleChat(request, null, { preResponse, timingContext });
   });
 }

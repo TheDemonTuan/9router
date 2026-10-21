@@ -175,6 +175,14 @@ describe("Responses <-> Gemini direct translators", () => {
     expect(result.request.contents.flatMap((content) => content.parts).some((part) => part.functionCall)).toBe(true);
   });
 
+  it("preserves tool_choice none and forced function toolConfig on Claude-compatible Antigravity path", () => {
+    const noneRes = directRequest(FORMATS.ANTIGRAVITY, { ...REQUEST, model: "claude-sonnet-4-6", tool_choice: "none" }, "claude-sonnet-4-6");
+    expect(noneRes.request.toolConfig).toEqual({ functionCallingConfig: { mode: "NONE" } });
+
+    const forcedRes = directRequest(FORMATS.ANTIGRAVITY, { ...REQUEST, model: "claude-sonnet-4-6", tool_choice: { type: "function", name: "get_weather" } }, "claude-sonnet-4-6");
+    expect(forcedRes.request.toolConfig).toEqual({ functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["get_weather"] } });
+  });
+
   it("replays the compatible stored Gemini thought signature", () => {
     storeGeminiThoughtSignature("call_signed", "real-signature", "session", "gemini-3.8-pro");
     const request = responsesToGeminiBase("gemini-3.8-pro", {

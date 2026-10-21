@@ -256,14 +256,17 @@ function ensureGeminiOutputFloor(body, floor, caps) {
 }
 
 // Strip every known thinking field from a body (used before re-applying / when unsupported).
-function stripAll(body) {
+function stripAll(body, targetFormat) {
   delete body.thinking;
   delete body.reasoning_effort;
   delete body.reasoning;
   delete body.thinkingConfig;
   delete body.enable_thinking;
   delete body.thinking_budget;
-  delete body.output_config;
+  if (targetFormat === "claude" && body.output_config && typeof body.output_config === "object") {
+    delete body.output_config.effort;
+    if (!Object.keys(body.output_config).length) delete body.output_config;
+  } else delete body.output_config;
   if (body.generationConfig) delete body.generationConfig.thinkingConfig;
   if (body.request?.generationConfig) delete body.request.generationConfig.thinkingConfig;
   if (body.params && typeof body.params === "object") {
@@ -311,7 +314,7 @@ function applyFormat(fmt, body, cfg, caps, supportedLevels, display, strictCatal
       const level = toLevel(eff);
       // xhigh is model-gated (Opus/Sonnet 4.6 reject it) — clamp when not advertised.
       // Claude effort has no "minimal" (always-on models clamp "none" to it).
-      body.output_config = { effort: level === "auto" ? "high"
+      body.output_config = { ...body.output_config, effort: level === "auto" ? "high"
         : level === "minimal" ? "low"
         : level === "xhigh" && !supportedLevels?.includes("xhigh") ? "high" : level };
       break;
@@ -484,7 +487,7 @@ export function applyThinking(targetFormat, model, body, provider = null, intent
 
   // Model cannot reason → strip any stray thinking fields.
   if (!caps.reasoning) {
-    stripAll(body);
+    stripAll(body, targetFormat);
     return body;
   }
 
@@ -496,7 +499,7 @@ export function applyThinking(targetFormat, model, body, provider = null, intent
   // comes back at all; keep what the client asked for instead of resetting it.
   // An OpenAI-shaped client's ask arrives via the captured intent instead.
   const display = typeof body.thinking?.display === "string" ? body.thinking.display : intent?.display;
-  stripAll(body);
+  stripAll(body, targetFormat);
   applyFormat(fmt, body, cfg, caps, supportedLevels, display, hasExplicitCatalogLevels);
   return body;
 }

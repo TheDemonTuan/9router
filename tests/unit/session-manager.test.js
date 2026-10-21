@@ -155,6 +155,29 @@ describe("resolveSessionId", () => {
     expect(got).toBe("req-1");
   });
 
+  it("prioritizes explicit body prompt_cache_key, conversation_id headers, and x-codex-turn-metadata over per-request x-client-request-id", () => {
+    expect(resolveSessionId({
+      headers: { "x-client-request-id": "per-request-uuid" },
+      body: { ...bodyWithAssistant, prompt_cache_key: "explicit-cache-key" },
+      connectionId: "conn1",
+      scope: "codex",
+    })).toBe("explicit-cache-key");
+
+    expect(resolveSessionId({
+      headers: { "conversation_id": "conv-header-123", "x-client-request-id": "per-request-uuid" },
+      body: bodyWithAssistant,
+      connectionId: "conn1",
+      scope: "codex",
+    })).toBe("conv-header-123");
+
+    expect(resolveSessionId({
+      headers: { "x-codex-turn-metadata": JSON.stringify({ thread_id: "thread-abc" }), "x-client-request-id": "per-request-uuid" },
+      body: bodyWithAssistant,
+      connectionId: "conn1",
+      scope: "codex",
+    })).toBe("thread-abc");
+  });
+
 
   it("workspaceId path: empty body + workspaceId set -> normalized workspaceId", () => {
     const got = resolveSessionId({ body: {}, connectionId: "conn1", workspaceId: "ws-abc" });

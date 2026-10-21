@@ -173,4 +173,35 @@ describe("non-native Codex Responses preparation", () => {
     expect(sent.prompt_cache_key).toBe("synthetic-explicit");
     expect(headers.session_id).toBe("synthetic-explicit");
   });
+
+  it("keeps prompt_cache_key and session_id aligned even when per-request x-client-request-id is present", async () => {
+    const body = fixture();
+    expect((await run(body, { clientRawRequest: { body, headers: { "user-agent": "opencode", "x-client-request-id": "per-request-trace-id" } } })).status).toBe(200);
+    expect(sent.prompt_cache_key).toBe("synthetic-explicit");
+    expect(headers.session_id).toBe("synthetic-explicit");
+  });
+
+  it("preserves multiple system/developer messages and forced function tool_choice when translating Chat Completions to Codex", async () => {
+    const chatBody = {
+      model: "gpt-5.5",
+      stream: false,
+      messages: [
+        { role: "system", content: "Primary instructions" },
+        { role: "developer", content: "Repository rules" },
+        { role: "user", content: "Run check" },
+        { role: "system", content: "Mid-turn reminder" },
+      ],
+      tools: [{ type: "function", function: { name: "run_check", parameters: { type: "object", properties: {} } } }],
+      tool_choice: { type: "function", function: { name: "run_check" } },
+    };
+    const result = await run(chatBody, { sourceFormatOverride: FORMATS.OPENAI });
+    expect(result.status).toBe(200);
+    expect(sent.instructions).toBe("Primary instructions");
+    expect(sent.input).toEqual([
+      { type: "message", role: "developer", content: [{ type: "input_text", text: "Repository rules" }] },
+      { type: "message", role: "user", content: [{ type: "input_text", text: "Run check" }] },
+      { type: "message", role: "developer", content: [{ type: "input_text", text: "Mid-turn reminder" }] },
+    ]);
+    expect(sent.tool_choice).toEqual({ type: "function", name: "run_check" });
+  });
 });

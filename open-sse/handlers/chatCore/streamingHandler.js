@@ -174,14 +174,16 @@ export function buildTransformStream({ provider, sourceFormat, targetFormat, res
 /**
  * Handle streaming response — pipe provider SSE through transform stream to client.
  */
-export async function handleStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, responsesClientDialect = "standard-openai", responsesProviderDialect = "standard-openai", userAgent, body, stream, translatedBody, finalBody, responseSchemaValidation, toolArgumentValidation = null, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, pxpipe, reqTag, log, credentials, releasePending, upstreamHeadersAt = null, preResponse = null, routeContext = null }) {
+export async function handleStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, responsesClientDialect = "standard-openai", responsesProviderDialect = "standard-openai", userAgent, body, stream, translatedBody, finalBody, responseSchemaValidation, toolArgumentValidation = null, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, pxpipe, reqTag, log, credentials, releasePending, upstreamHeadersAt = null, preResponse = null, routeContext = null, timingContext = null }) {
   const isResponsesPassthrough = sourceFormat === FORMATS.OPENAI_RESPONSES && targetFormat === FORMATS.OPENAI_RESPONSES && responsesClientDialect === responsesProviderDialect;
+  const directClaudeResponses = sourceFormat === FORMATS.OPENAI_RESPONSES && targetFormat === FORMATS.CLAUDE;
+  const terminalDriven = isResponsesPassthrough || directClaudeResponses;
   let lifecycleFinalized = false;
   const hdrAt = Number.isFinite(upstreamHeadersAt) ? upstreamHeadersAt : null;
   let ubyteAt = null;
   let dbyteAt = null;
-  const onUpstreamFirstByte = () => { if (!ubyteAt) ubyteAt = Date.now(); };
-  const onDownstreamFirstByte = () => { if (!dbyteAt) dbyteAt = Date.now(); };
+  const onUpstreamFirstByte = () => { if (!ubyteAt) { ubyteAt = Date.now(); timingContext?.mark("firstByte", ubyteAt); } };
+  const onDownstreamFirstByte = () => { if (!dbyteAt) { dbyteAt = Date.now(); timingContext?.mark("firstDownstreamByte", dbyteAt); } };
 
   const completeLifecycle = (content, usage, ttftAt, outcome) => {
     if (lifecycleFinalized) return;
@@ -223,7 +225,7 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
     };
   }
 
-  if (!isResponsesPassthrough && !toolArgumentValidation && onRequestSuccess) {
+  if (!terminalDriven && !toolArgumentValidation && onRequestSuccess) {
     Promise.resolve(onRequestSuccess()).catch(err => {
       console.error("[ChatCore] onRequestSuccess failed:", err?.message || err);
     });
@@ -235,20 +237,21 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
   const transformStream = buildTransformStream({
     provider, sourceFormat, targetFormat, responsesClientDialect, responsesProviderDialect, userAgent, reqLogger, toolNameMap, customToolNames,
     model, connectionId, body,
-    onStreamComplete: isResponsesPassthrough ? completeLifecycle : wrappedOnStreamComplete,
+    onStreamComplete: terminalDriven ? completeLifecycle : wrappedOnStreamComplete,
     apiKey, credentials, responseSchemaValidation, releasePending, toolArgumentValidation, signal: streamController?.signal,
   });
 
-  // Terminal bytes when the stream aborts after HTTP 200 was already sent, so the
-  // client sees a real error instead of a silently truncated stream.
-  // Responses passthrough keeps its own response.failed shape; every other client
-  // format gets the OpenAI error frame + [DONE], or `event: error` for Claude.
-  const onAbortTerminal = isResponsesPassthrough
-    ? (message) => {
-      completeLifecycle({ content: "", thinking: "" }, null, null, { status: "failed", successful: false });
-      return buildAbortedResponsesTerminalBytes({ model, message });
-    }
-    : (message) => buildStreamErrorBytes(HTTP_STATUS.GATEWAY_TIMEOUT, message, sourceFormat);
+  // A translated Responses client needs the same protocol terminal as native
+  // Responses, with the active response ID and no duplicate success/failure.
+  const onAbortTerminal = transformStream.abortTerminal
+    ? (message) => transformStream.abortTerminal(message)
+    : sourceFormat === FORMATS.OPENAI_RESPONSES
+      ? (message) => {
+        if (lifecycleFinalized) return new Uint8Array();
+        completeLifecycle({ content: "", thinking: "" }, null, null, { status: "failed", successful: false });
+        return buildAbortedResponsesTerminalBytes({ model, message });
+      }
+      : (message) => buildStreamErrorBytes(HTTP_STATUS.GATEWAY_TIMEOUT, message, sourceFormat);
   const stallTimeoutMs = PROVIDERS[provider]?.stallTimeoutMs || STREAM_STALL_TIMEOUT_MS;
   const transformedBody = pipeWithDisconnect(
     providerResponse,
@@ -286,17 +289,38 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
 /**
  * Build onStreamComplete callback for streaming usage tracking.
  */
-export function buildOnStreamComplete({ provider, model, connectionId, apiKey, requestStartTime, body, stream, finalBody, translatedBody, clientRawRequest, pxpipe, reqTag, log, releasePending, routeContext = null }) {
+export function buildOnStreamComplete({ provider, model, connectionId, apiKey, requestStartTime, body, stream, finalBody, translatedBody, clientRawRequest, pxpipe, reqTag, log, releasePending, routeContext = null, timingContext = null }) {
   const streamDetailId = `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
 
   const onStreamComplete = (contentObj, usage, ttftAt, outcome = { status: "completed", successful: true }, metrics = {}) => {
+    const now = Date.now();
+    if (timingContext) {
+      if (Number.isFinite(metrics?.hdrAt)) timingContext.mark("headers", metrics.hdrAt);
+      if (Number.isFinite(metrics?.ubyteAt)) timingContext.mark("firstByte", metrics.ubyteAt);
+      if (Number.isFinite(metrics?.dbyteAt)) timingContext.mark("firstDownstreamByte", metrics.dbyteAt);
+      if (Number.isFinite(outcome?.firstReasoningAt)) timingContext.mark("firstReasoning", outcome.firstReasoningAt);
+      if (Number.isFinite(ttftAt)) timingContext.mark("firstText", ttftAt);
+      if (Number.isFinite(outcome?.firstToolAt)) timingContext.mark("firstTool", outcome.firstToolAt);
+      timingContext.mark("terminal", Number.isFinite(outcome?.terminalAt) ? outcome.terminalAt : now);
+    }
     const latency = {
+      requestId: timingContext?.requestId ?? null,
       ttft: ttftAt ? ttftAt - requestStartTime : null,
       ftext: ttftAt ? ttftAt - requestStartTime : null,
+      firstReasoning: outcome?.firstReasoningAt ? outcome.firstReasoningAt - requestStartTime : null,
+      firstTool: outcome?.firstToolAt ? outcome.firstToolAt - requestStartTime : null,
       hdr: metrics?.hdrAt ? metrics.hdrAt - requestStartTime : null,
       ubyte: metrics?.ubyteAt ? metrics.ubyteAt - requestStartTime : null,
+      preCore: timingContext?.durations?.preCoreMs ?? null,
+      auth: timingContext?.durations?.authMs ?? null,
+      account: timingContext?.durations?.accountMs ?? null,
+      refresh: timingContext?.durations?.refreshMs ?? null,
+      bodyParse: timingContext?.durations?.bodyMs ?? null,
+      payloadPrep: timingContext?.durations?.payloadPrepMs ?? null,
+      dispatch: timingContext?.durations?.dispatchMs ?? null,
       dbyte: metrics?.dbyteAt ? metrics.dbyteAt - requestStartTime : null,
-      total: Date.now() - requestStartTime
+      cancelled: timingContext?.durations?.cancelledMs ?? null,
+      total: (Number.isFinite(outcome?.terminalAt) ? outcome.terminalAt : now) - requestStartTime
     };
     const safeContent = contentObj?.content || "[Empty streaming response]";
     const safeThinking = contentObj?.thinking || null;

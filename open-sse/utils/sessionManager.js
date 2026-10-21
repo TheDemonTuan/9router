@@ -94,7 +94,7 @@ const MAX_ASSISTANT_SESSIONS = 5000;
 const MAX_CONTINUATION_SESSIONS = 5000;
 
 // Client headers/body fields that carry an upstream session id (priority order)
-const SESSION_HEADER_KEYS = ["x-session-id", "session-id", "session_id", "x-amp-thread-id"];
+const SESSION_HEADER_KEYS = ["x-session-id", "session-id", "session_id", "conversation_id", "conversation-id", "x-amp-thread-id"];
 const CLAUDE_CODE_SESSION_RE = /_session_([a-f0-9-]+)$/;
 const CLAUDE_CODE_SESSION_HEADER = "x-claude-code-session-id";
 
@@ -169,14 +169,15 @@ function extractClientSessionId(headers, body, scope = "", { includeRequestId = 
         const v = headerValue(headers, key);
         if (v) return v;
     }
-    const requestId = includeRequestId && scope !== "kiro" ? headerValue(headers, "x-client-request-id") : null;
-    if (requestId) return requestId;
-    const fromBody =
+    const explicitBodySession =
         normalizeSessionId(body?.prompt_cache_key) ||
         normalizeSessionId(body?.session_id) ||
         normalizeSessionId(body?.conversation_id) ||
-        (includeMetadataUser && scope !== "kiro" ? normalizeSessionId(body?.metadata?.user_id) : null);
-    return fromBody || null;
+        normalizeSessionId(parseCodexTurnMetadata(headers, body)?.thread_id);
+    if (explicitBodySession) return explicitBodySession;
+    const requestId = includeRequestId && scope !== "kiro" ? headerValue(headers, "x-client-request-id") : null;
+    if (requestId) return requestId;
+    return includeMetadataUser && scope !== "kiro" ? normalizeSessionId(body?.metadata?.user_id) : null;
 }
 
 /** Computes only the historical migration tombstone key, never routing authority. */

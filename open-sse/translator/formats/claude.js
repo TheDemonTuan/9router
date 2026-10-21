@@ -489,6 +489,9 @@ export function hoistToolResultImages(body) {
 export function prepareClaudeRequest(body, provider = null, apiKey = null, connectionId = null, rawHeaders = null, sessionId = null) {
   // quirk: MiniMax's Claude-compatible endpoint rejects Anthropic's output_config (400 invalid params)
   if (PROVIDERS[provider]?.quirks?.dropOutputConfig) {
+    if (body._directResponsesToClaude && body.output_config?.format) {
+      throw Object.assign(new Error("This Claude-compatible provider does not support native structured outputs"), { status: 400, code: "unsupported_parameter", param: "text.format" });
+    }
     delete body.output_config;
   }
 
@@ -513,8 +516,66 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
     if (effort === "xhigh" || effort === "max") body.output_config.effort = "high";
   }
   if (modelCaps.forcedToolChoice === false && (body.tool_choice?.type === "any" || body.tool_choice?.type === "tool")) {
-    const { disable_parallel_tool_use } = body.tool_choice;
-    body.tool_choice = { type: "auto", ...(disable_parallel_tool_use !== undefined ? { disable_parallel_tool_use } : {}) };
+    throw Object.assign(new Error("This model does not support required or named tool_choice"), { status: 400, code: "unsupported_parameter", param: "tool_choice" });
+  }
+
+  // The direct Responses adapter has already validated complete history. Never
+  // repair it, drop text after tools, or invent/replace signed thinking blocks.
+  if (body._directResponsesToClaude) {
+    const ceiling = modelCaps.maxOutput || DEFAULT_MAX_TOKENS;
+    const explicitMaxOutputTokens = body._explicitMaxOutputTokens === true;
+    delete body._directResponsesToClaude;
+    delete body._explicitMaxOutputTokens;
+    if (body.max_tokens > ceiling) {
+      throw Object.assign(new Error("max_output_tokens exceeds the model output limit"), { status: 400, code: "invalid_request_error", param: "max_output_tokens" });
+    }
+    if (body.thinking?.type === "enabled" && body.thinking.budget_tokens >= body.max_tokens) {
+      if (explicitMaxOutputTokens) {
+        throw Object.assign(new Error("max_output_tokens must exceed the native thinking budget"), { status: 400, code: "invalid_request_error", param: "max_output_tokens" });
+      }
+      body.max_tokens = Math.min(body.thinking.budget_tokens + 1024, ceiling);
+      if (body.thinking.budget_tokens >= body.max_tokens) {
+        body.thinking.budget_tokens = Math.max(1024, body.max_tokens - 1024);
+      }
+    }
+    if (provider !== "claude" && !provider?.startsWith("anthropic-compatible") && body.messages?.some(message =>
+      Array.isArray(message.content) && message.content.some(block => block.type === CLAUDE_BLOCK.TOOL_RESULT && Array.isArray(block.content) && block.content.some(part => part.type === CLAUDE_BLOCK.IMAGE)))) {
+      throw Object.assign(new Error("This provider cannot preserve images inside tool results"), { status: 400, code: "unsupported_parameter", param: "input" });
+    }
+    if (Array.isArray(body.system) && body.system.length > 0) {
+      body.system = body.system.map((block, i) => {
+        const { cache_control, ...rest } = block;
+        return i === body.system.length - 1 ? { ...rest, cache_control: { type: "ephemeral", ttl: "1h" } } : rest;
+      });
+    }
+    if (Array.isArray(body.messages)) {
+      for (let i = body.messages.length - 1; i >= 0; i--) {
+        const msg = body.messages[i];
+        if (msg.role === "assistant" && Array.isArray(msg.content) && msg.content.length > 0) {
+          for (let j = msg.content.length - 1; j >= 0; j--) {
+            const block = msg.content[j];
+            if (block.type !== CLAUDE_BLOCK.THINKING && block.type !== CLAUDE_BLOCK.REDACTED_THINKING) {
+              block.cache_control = { type: "ephemeral" };
+              break;
+            }
+          }
+          break;
+        }
+      }
+      markFinalToolResults(body);
+    }
+    if (Array.isArray(body.tools) && body.tools.length > 0) {
+      const lastCacheable = lastCacheableToolIndex(body.tools);
+      body.tools = body.tools.map((tool, i) => {
+        const { cache_control, ...rest } = tool;
+        return i === lastCacheable ? { ...rest, cache_control: { type: "ephemeral", ttl: "1h" } } : rest;
+      });
+    }
+    if (isAnthropicServing && apiKey?.includes("sk-ant-oat")) {
+      const sid = sessionId || resolveSessionId({ headers: rawHeaders, body, connectionId, scope: "claude" });
+      return applyCloaking(body, apiKey, sid);
+    }
+    return body;
   }
 
   // Clamp max_tokens to the model's real output ceiling. Models whose caps

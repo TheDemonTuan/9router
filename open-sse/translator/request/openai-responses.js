@@ -447,15 +447,21 @@ export function openaiToOpenAIResponsesRequest(model, body, stream, credentials)
       continue;
     }
     if (msg.role === ROLE.SYSTEM || msg.role === ROLE.DEVELOPER) {
+      const instruction = extractInstructionsText(msg.content);
       if (credentials?.chatGptWebRequestMode === "browser") {
-        const instruction = extractInstructionsText(msg.content);
         result.instructions = hasSystemMessage ? `${result.instructions}\n\n${instruction}` : instruction;
         hasSystemMessage = true;
-      } else if (!hasSystemMessage) {
-        result.instructions = extractInstructionsText(msg.content);
+      } else if (!hasSystemMessage && result.input.length === 0) {
+        result.instructions = instruction;
         hasSystemMessage = true;
+      } else if (instruction) {
+        result.input.push({
+          type: RESPONSES_ITEM.MESSAGE,
+          role: ROLE.DEVELOPER,
+          content: [{ type: RESPONSES_ITEM.INPUT_TEXT, text: instruction }],
+        });
       }
-      continue; // Skip instruction messages in input
+      continue;
     }
 
     // Convert user/assistant messages to input items
@@ -564,8 +570,11 @@ export function openaiToOpenAIResponsesRequest(model, body, stream, credentials)
   if (body.service_tier !== undefined) result.service_tier = body.service_tier;
   if (body.prompt_cache_key !== undefined) result.prompt_cache_key = body.prompt_cache_key;
   if (Array.isArray(body.include)) result.include = [...body.include];
-  if (body.tool_choice !== undefined) result.tool_choice = credentials?.chatGptWebRequestMode === "agent" && body.tool_choice?.type === "function"
-    ? { type: "function", name: body.tool_choice.function.name } : body.tool_choice;
+  if (body.tool_choice !== undefined) {
+    result.tool_choice = body.tool_choice?.type === "function" && typeof body.tool_choice?.function?.name === "string"
+      ? { type: "function", name: body.tool_choice.function.name }
+      : body.tool_choice;
+  }
   if (body.parallel_tool_calls !== undefined) result.parallel_tool_calls = body.parallel_tool_calls;
   const text = chatResponseFormatToResponsesText(body.response_format);
   if (text) result.text = text;

@@ -24,6 +24,51 @@ import { NOUS_MODELS_URL, normalizeNousModels } from "open-sse/services/nous.js"
 
 const GEMINI_CLI_MODELS_URL = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
 
+function isAbortError(error) {
+  if (!error) return false;
+  return (
+    error.name === "AbortError" ||
+    error.code === "ABORT_ERR" ||
+    error.code === "CLIENT_ABORT" ||
+    error.code === 20 ||
+    error.type === "aborted" ||
+    /aborted|abort|cancel/i.test(error.message || "")
+  );
+}
+
+function sanitizeLogText(text) {
+  if (typeof text !== "string") {
+    if (text instanceof Error) text = text.message;
+    else text = String(text || "");
+  }
+  return text
+    .replace(/([?&](?:api[_-]?key|key|token|access[_-]?token|secret|password)=)([^&]+)/gi, "$1***")
+    .replace(/(Bearer\s+|Basic\s+)[A-Za-z0-9_\-\.\:\/+=]{8,}/gi, "$1***")
+    .replace(/sk-ant-[a-zA-Z0-9_\-]{8,}/g, "sk-ant-***")
+    .replace(/sk-[a-zA-Z0-9]{20,}/g, "sk-***")
+    .replace(/AIza[0-9A-Za-z-_]{30,}/g, "AIza***")
+    .replace(/(x-api-key["']?\s*[:=]\s*["']?)[^"'\s,]+/gi, "$1***");
+}
+
+function extractErrorMessage(errorText, status) {
+  let detail = null;
+  if (errorText) {
+    try {
+      const parsed = JSON.parse(errorText);
+      detail = parsed.error?.message || parsed.message || (typeof parsed.error === "string" ? parsed.error : null);
+    } catch {
+      if (typeof errorText === "string" && errorText.trim().length > 0 && errorText.length < 500) {
+        detail = errorText.trim();
+      }
+    }
+  }
+  const cleanDetail = detail ? sanitizeLogText(detail) : null;
+  if (cleanDetail) {
+    return `Failed to fetch models: ${status} - ${cleanDetail}`;
+  }
+  return `Failed to fetch models: ${status}`;
+}
+
 const parseOpenAIStyleModels = (data) => {
   if (Array.isArray(data)) return data;
   return data?.data || data?.models || data?.results || [];
@@ -79,16 +124,21 @@ const getStaticProviderModels = (providerId) =>
 
 // Generic custom resolver for OAuth providers that need refresh-on-401 + token persist.
 // Receives a `fetchFn(token)` and returns parsed models or throws.
-const buildOAuthResolver = ({ refreshFn, fetchFn, parseFn, errorLabel }) => async (connection) => {
+const buildOAuthResolver = ({ refreshFn, fetchFn, parseFn, errorLabel }) => async (connection, options = {}) => {
   const { accessToken, refreshToken } = connection;
   if (!accessToken) {
     return { error: "No valid token found", status: 401 };
   }
+  const signal = options?.signal;
+  if (signal?.aborted) {
+    return { error: "Request cancelled", status: 499 };
+  }
   let warning;
   try {
-    let response = await fetchFn(accessToken, connection);
+    let response = await fetchFn(accessToken, connection, options);
     if (!response.ok && (response.status === 401 || response.status === 403) && refreshToken) {
-      const refreshed = await refreshFn(connection);
+      if (signal?.aborted) return { error: "Request cancelled", status: 499 };
+      const refreshed = await refreshFn(connection, options);
       if (refreshed?.accessToken) {
         await updateProviderCredentials(connection.id, {
           accessToken: refreshed.accessToken,
@@ -97,7 +147,8 @@ const buildOAuthResolver = ({ refreshFn, fetchFn, parseFn, errorLabel }) => asyn
         });
         connection.accessToken = refreshed.accessToken;
         if (refreshed.refreshToken) connection.refreshToken = refreshed.refreshToken;
-        response = await fetchFn(refreshed.accessToken, connection);
+        if (signal?.aborted) return { error: "Request cancelled", status: 499 };
+        response = await fetchFn(refreshed.accessToken, connection, options);
       }
     }
     if (response.ok) {
@@ -106,12 +157,17 @@ const buildOAuthResolver = ({ refreshFn, fetchFn, parseFn, errorLabel }) => asyn
       if (models.length > 0) return { models };
     } else {
       const errorText = await response.text();
-      warning = `${errorLabel}: ${response.status} ${errorText}`;
-      console.log(`${errorLabel} (falling back to static):`, errorText);
+      const sanitizedError = sanitizeLogText(errorText);
+      warning = `${errorLabel}: ${response.status} ${sanitizedError}`;
+      console.warn(`${errorLabel} (falling back to static):`, sanitizedError);
     }
   } catch (error) {
-    warning = `${errorLabel}: ${error.message}`;
-    console.log(`${errorLabel} (falling back to static):`, error.message);
+    if (isAbortError(error) || signal?.aborted) {
+      return { error: "Request cancelled", status: 499 };
+    }
+    const sanitizedError = sanitizeLogText(error.message);
+    warning = `${errorLabel}: ${sanitizedError}`;
+    console.warn(`${errorLabel} (falling back to static):`, sanitizedError);
   }
   return { models: [], warning };
 };
@@ -500,8 +556,8 @@ const PROVIDER_MODELS_CONFIG = {
   "qoder-cn": buildQoderModelsResolver("qoder-cn"),
   "gemini-cli": {
     customResolver: buildOAuthResolver({
-      refreshFn: (conn) => refreshGoogleToken(conn.refreshToken, GEMINI_CONFIG.clientId, GEMINI_CONFIG.clientSecret),
-      fetchFn: (token, conn) => {
+      refreshFn: (conn, options) => refreshGoogleToken(conn.refreshToken, GEMINI_CONFIG.clientId, GEMINI_CONFIG.clientSecret),
+      fetchFn: (token, conn, options) => {
         const projectId = conn.projectId || conn.providerSpecificData?.projectId;
         const body = projectId ? { project: projectId } : {};
         return fetch(GEMINI_CLI_MODELS_URL, {
@@ -512,7 +568,8 @@ const PROVIDER_MODELS_CONFIG = {
             "User-Agent": "google-api-nodejs-client/9.15.1",
             "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1"
           },
-          body: JSON.stringify(body)
+          body: JSON.stringify(body),
+          signal: options?.signal,
         });
       },
       parseFn: parseGeminiCliModels,
@@ -549,19 +606,30 @@ const PROVIDER_MODELS_CONFIG = {
     },
   },
   "ollama-local": {
-    customResolver: async (connection) => {
-      const url = `${resolveOllamaLocalHost(connection)}/api/tags`;
-      const response = await fetch(url, {
-        method: "GET",
-        headers: { "Content-Type": "application/json" }
-      });
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.log("Error fetching models from ollama-local:", errorText);
-        return { error: `Failed to fetch models: ${response.status}`, status: response.status };
+    customResolver: async (connection, options = {}) => {
+      try {
+        const url = `${resolveOllamaLocalHost(connection)}/api/tags`;
+        const response = await fetch(url, {
+          method: "GET",
+          headers: { "Content-Type": "application/json" },
+          signal: options?.signal,
+        });
+        if (!response.ok) {
+          const errorText = await response.text();
+          const cleanErr = sanitizeLogText(errorText);
+          console.warn("Error fetching models from ollama-local:", cleanErr);
+          return { error: `Failed to fetch models: ${response.status}`, status: response.status };
+        }
+        const data = await response.json();
+        return { models: parseOpenAIStyleModels(data) };
+      } catch (error) {
+        if (isAbortError(error) || options?.signal?.aborted) {
+          return { error: "Request cancelled", status: 499 };
+        }
+        const cleanMsg = sanitizeLogText(error.message);
+        console.warn("Error fetching models from ollama-local:", cleanMsg);
+        return { error: `Failed to fetch models: ${cleanMsg}`, status: 500 };
       }
-      const data = await response.json();
-      return { models: parseOpenAIStyleModels(data) };
     }
   }
 };
@@ -570,9 +638,14 @@ const PROVIDER_MODELS_CONFIG = {
  * GET /api/providers/[id]/models - Get models list from provider
  */
 export async function GET(request, { params }) {
+  if (request?.signal?.aborted) {
+    return NextResponse.json({ error: "Request cancelled", code: "request_cancelled" }, { status: 499 });
+  }
+
+  let connection = null;
   try {
     const { id } = await params;
-    const connection = await getProviderConnectionById(id);
+    connection = await getProviderConnectionById(id);
 
     if (!connection) {
       return NextResponse.json({ error: "Connection not found" }, { status: 404 });
@@ -595,6 +668,9 @@ export async function GET(request, { params }) {
           checkedAt: catalog.checkedAt,
         });
       } catch (error) {
+        if (isAbortError(error) || request?.signal?.aborted) {
+          return NextResponse.json({ error: "Request cancelled", code: "request_cancelled" }, { status: 499 });
+        }
         return NextResponse.json({ error: error.message, models: [], stale: false }, { status: 503 });
       }
     }
@@ -611,13 +687,15 @@ export async function GET(request, { params }) {
           "Content-Type": "application/json",
           "Authorization": `Bearer ${connection.apiKey}`,
         },
+        signal: request.signal,
       });
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.log(`Error fetching models from ${connection.provider}:`, errorText);
+        const cleanErr = sanitizeLogText(errorText);
+        console.warn(`Error fetching models from ${connection.provider}:`, cleanErr);
         return NextResponse.json(
-          { error: `Failed to fetch models: ${response.status}` },
+          { error: extractErrorMessage(errorText, response.status) },
           { status: response.status }
         );
       }
@@ -652,13 +730,15 @@ export async function GET(request, { params }) {
           "anthropic-version": "2023-06-01",
           "Authorization": `Bearer ${connection.apiKey}`
         },
+        signal: request.signal,
       });
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.log(`Error fetching models from ${connection.provider}:`, errorText);
+        const cleanErr = sanitizeLogText(errorText);
+        console.warn(`Error fetching models from ${connection.provider}:`, cleanErr);
         return NextResponse.json(
-          { error: `Failed to fetch models: ${response.status}` },
+          { error: extractErrorMessage(errorText, response.status) },
           { status: response.status }
         );
       }
@@ -726,7 +806,8 @@ export async function GET(request, { params }) {
     // Make request
     const fetchOptions = {
       method: config.method,
-      headers
+      headers,
+      signal: request.signal,
     };
 
     if (config.body && config.method === "POST") {
@@ -737,9 +818,10 @@ export async function GET(request, { params }) {
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.log(`Error fetching models from ${connection.provider}:`, errorText);
+      const cleanErr = sanitizeLogText(errorText);
+      console.warn(`Error fetching models from ${connection.provider}:`, cleanErr);
       return NextResponse.json(
-        { error: `Failed to fetch models: ${response.status}` },
+        { error: extractErrorMessage(errorText, response.status) },
         { status: response.status }
       );
     }
@@ -753,7 +835,14 @@ export async function GET(request, { params }) {
       models
     });
   } catch (error) {
-    console.log("Error fetching provider models:", error);
-    return NextResponse.json({ error: "Failed to fetch models" }, { status: 500 });
+    if (isAbortError(error) || request?.signal?.aborted) {
+      return NextResponse.json({ error: "Request cancelled", code: "request_cancelled" }, { status: 499 });
+    }
+    const cleanMsg = sanitizeLogText(error?.message || "Failed to fetch models");
+    console.error(`Error fetching models for ${connection?.provider || "provider"}:`, cleanMsg);
+    return NextResponse.json(
+      { error: `Failed to fetch models: ${cleanMsg}` },
+      { status: error?.status || 500 }
+    );
   }
 }

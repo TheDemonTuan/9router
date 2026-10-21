@@ -72,9 +72,11 @@ export function stripContinuityFields(body) {
   return body;
 }
 
-export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, sessionDedupMode = "off", cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, providerOverrides = null, clientSignal, preResponse = null, routeContext: inputRouteContext = null, routeReason = "direct", effectiveModel = null }) {
+export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, sessionDedupMode = "off", cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, providerOverrides = null, clientSignal, preResponse = null, routeContext: inputRouteContext = null, routeReason = "direct", effectiveModel = null, timingContext = null }) {
   const { provider, model } = modelInfo;
-  const requestStartTime = Date.now();
+  const coreEnteredAt = Date.now();
+  if (timingContext) timingContext.mark("coreEntered", coreEnteredAt);
+  const requestStartTime = Number.isFinite(timingContext?.receivedAt) ? timingContext.receivedAt : coreEnteredAt;
   // Stable per-session color so all lines of one CLI conversation share a tag
   const sessionSeed = (() => {
     try {
@@ -120,6 +122,8 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // OpenAI clients should stay on /chat/completions; other clients can fall
   // back to its declared Claude target).
   const targetFormat = useTransport?.format || modelTargetFormat || getTargetFormat(provider, credentials);
+  const directClaudeResponses = sourceFormat === FORMATS.OPENAI_RESPONSES && targetFormat === FORMATS.CLAUDE;
+  if (directClaudeResponses && credentials) credentials._responsesClaudeContext = { provider, model, connectionId, clientScope: apiKey || null };
   if (useTransport && credentials) credentials.runtimeTransport = useTransport;
   // Alibaba Token Plan Team Edition: connections may carry a console Base URL
   // override. Swap the transport origin (all protocols) only for validated
@@ -320,7 +324,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   if (credentials) credentials.rawHeaders = clientRawRequest?.headers || {};
 
   // Auto-strip media blocks the model can't read (vision/audio/pdf) before translation.
-  if (!passthrough) {
+  if (!passthrough && !directClaudeResponses) {
     const baseCaps = getCapabilitiesForModel(provider, model);
     const caps = provider === "codex" && credentials?.codexModelMetadata?.capabilities
       ? { ...baseCaps, ...credentials.codexModelMetadata.capabilities }
@@ -617,6 +621,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   const streamController = createStreamController({
     onDisconnect: (reason) => {
+      if (timingContext) timingContext.mark("cancelled");
       releasePending();
       if (onDisconnect) onDisconnect(reason);
     },
@@ -668,6 +673,11 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // exception: it is decoded by the executor into OpenAI-compatible output.
   let providerResponseFormat = targetFormat;
   try {
+    if (timingContext) {
+      const now = Date.now();
+      timingContext.mark("payloadPrepared", now);
+      timingContext.mark("dispatched", now);
+    }
     const result = await (preResponse ? preResponse.run(() => executor.execute({
       model, body: translatedBody, stream, credentials, providerSessionId: sessionSeed,
       clientTool, signal: streamController.signal, log, proxyOptions, preResponse, providerOverrides,
@@ -681,6 +691,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     finalBody = result.transformedBody;
     providerResponseFormat = result.responseFormat || targetFormat;
     upstreamHeadersAt = result.upstreamHeadersAt ?? null;
+    if (timingContext && Number.isFinite(upstreamHeadersAt)) timingContext.mark("headers", upstreamHeadersAt);
     const renamedToolNames = takeRenamedToolNames(translatedBody);
     if (renamedToolNames?.size) {
       toolNameMap = new Map([...(toolNameMap || []), ...renamedToolNames]);
@@ -827,10 +838,10 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   const sharedCtx = {
     provider, model, body, stream, translatedBody, finalBody,
-    responseSchemaValidation, toolArgumentValidation, requestStartTime, connectionId, apiKey,
+    responseSchemaValidation, toolArgumentValidation, requestStartTime, connectionId, apiKey, timingContext,
     clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag,
     log, responsesClientDialect, responsesProviderDialect, releasePending,
-    preResponse, upstreamHeadersAt, routeContext,
+    preResponse, upstreamHeadersAt, routeContext, credentials,
   };
   const appendLog = (extra) => appendRequestLog({ model, provider, connectionId, ...extra }).catch(() => { });
   const trackDone = () => releasePending();
@@ -852,8 +863,8 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   }
 
   // Streaming response
-  const { onStreamComplete, streamDetailId } = buildOnStreamComplete({ ...sharedCtx });
-  return handleStreamingResponse({ ...sharedCtx, providerResponse, sourceFormat, targetFormat: providerResponseFormat, userAgent, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, credentials });
+  const { onStreamComplete, streamDetailId } = buildOnStreamComplete({ ...sharedCtx, timingContext });
+  return handleStreamingResponse({ ...sharedCtx, providerResponse, sourceFormat, targetFormat: providerResponseFormat, userAgent, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, credentials, timingContext });
   } catch (error) {
     if (preResponse?.signal.aborted || error?.code === "PRE_RESPONSE_DEADLINE_EXCEEDED" || error?.code === "CLIENT_ABORT") {
       streamController.abort(error);

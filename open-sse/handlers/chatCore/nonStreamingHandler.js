@@ -15,6 +15,8 @@ import { decloakToolNames } from "../../utils/claudeCloaking.js";
 import { restoreToolNames } from "../../utils/opencodeFingerprint.js";
 import { ROLE, RESPONSES_ITEM } from "../../translator/schema/index.js";
 import { validateAntigravityToolCalls } from "../../translator/concerns/antigravityToolValidation.js";
+import { convertClaudeResponseToResponses, failClaudeResponses } from "../../translator/response/claude-to-responses.js";
+import { createSSERecordParser } from "../../utils/sseRecordParser.js";
 
 import { buildResponseSnapshot, openAICompletionToResponses } from "../../transformer/responsesBuilder.js";
 
@@ -43,8 +45,12 @@ function geminiToResponsesSnapshot(responseBody, targetFormat) {
 /**
  * Translate non-streaming response body from provider format → OpenAI format.
  */
-export function translateNonStreamingResponse(responseBody, targetFormat, sourceFormat, customToolNames = null) {
+export function translateNonStreamingResponse(responseBody, targetFormat, sourceFormat, customToolNames = null, context = {}) {
   if (targetFormat === sourceFormat) return responseBody;
+  if (targetFormat === FORMATS.CLAUDE && sourceFormat === FORMATS.OPENAI_RESPONSES) {
+    if (responseBody?.choices) return openAICompletionToResponses(responseBody, customToolNames);
+    return convertClaudeResponseToResponses(responseBody, { ...context, customToolNames });
+  }
   if (sourceFormat === FORMATS.OPENAI_RESPONSES && GEMINI_RESPONSE_FORMATS.has(targetFormat)) {
     return geminiToResponsesSnapshot(responseBody, targetFormat);
   }
@@ -186,7 +192,7 @@ export function translateNonStreamingResponse(responseBody, targetFormat, source
 /**
  * Handle non-streaming response from provider.
  */
-export async function handleNonStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, body, stream, translatedBody, finalBody, responseSchemaValidation, toolArgumentValidation = null, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, trackDone, appendLog, pxpipe, reqTag, log, routeContext, preResponse = null }) {
+export async function handleNonStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, body, stream, translatedBody, finalBody, responseSchemaValidation, toolArgumentValidation = null, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, trackDone, appendLog, pxpipe, reqTag, log, routeContext, preResponse = null, credentials = null }) {
   const contentType = providerResponse.headers.get("content-type") || "";
   let responseBody;
   let validatedClientResponse = null;
@@ -201,7 +207,26 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
       throw error;
     }
     let parsed;
-    if (toolArgumentValidation) {
+    if (targetFormat === FORMATS.CLAUDE && sourceFormat === FORMATS.OPENAI_RESPONSES) {
+      const state = { ...initState(sourceFormat), provider, model, credentials, toolNameMap, customToolNames: new Set(customToolNames || []) };
+      const observe = events => {
+        for (const event of events || []) {
+          if (event.data?.response && ["response.completed", "response.failed", "response.incomplete"].includes(event.event)) validatedClientResponse = event.data.response;
+        }
+      };
+      const parser = createSSERecordParser(record => {
+        const data = record.split("\n").filter(line => line.startsWith("data:")).map(line => line.slice(5).replace(/^ /, "")).join("\n");
+        if (!data) return;
+        let event;
+        try { event = JSON.parse(data); }
+        catch { observe(failClaudeResponses(state, "Invalid Anthropic SSE event", "invalid_upstream_event")); return; }
+        observe(translateResponse(targetFormat, sourceFormat, event, state));
+      });
+      parser.write(sseText);
+      parser.end();
+      observe(translateResponse(targetFormat, sourceFormat, null, state));
+      parsed = validatedClientResponse;
+    } else if (toolArgumentValidation) {
       try {
         const aggregate = await parseValidatedAntigravitySSE(sseText, model, toolArgumentValidation, { signal: preResponse?.signal, sourceFormat, toolNameMap, customToolNames });
         parsed = aggregate.native;
@@ -256,25 +281,22 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
   }
 
   reqLogger?.logProviderResponse?.(providerResponse.status, providerResponse.statusText, providerResponse.headers, responseBody);
-  if (onRequestSuccess) {
-    Promise.resolve()
-      .then(onRequestSuccess)
-      .catch(err => {
-        console.error("[ChatCore] onRequestSuccess failed:", err?.message || err);
-      });
-  }
 
   // Decloak tool_use names once on raw Claude body, before any translation (INPUT side)
   responseBody = decloakToolNames(responseBody, toolNameMap);
+  const translatedResponse = validatedClientResponse || (needsTranslation(targetFormat, sourceFormat)
+    ? translateNonStreamingResponse(responseBody, targetFormat, sourceFormat, customToolNames, { provider, model, credentials })
+    : responseBody);
+  const failed = translatedResponse?.status === "failed";
+  if (!failed && onRequestSuccess) Promise.resolve().then(onRequestSuccess).catch(err => {
+    console.error("[ChatCore] onRequestSuccess failed:", err?.message || err);
+  });
 
   const usage = extractUsageFromResponse(responseBody);
-  appendLog({ tokens: usage, status: "200 OK" });
+  appendLog({ tokens: usage, status: failed ? "FAILED 502" : "200 OK" });
   saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, silent: true });
   if (log?.line) log.line(reqTag, "📊", formatDoneLine({ usage, latency: { total: Date.now() - requestStartTime } }));
 
-  const translatedResponse = validatedClientResponse || (needsTranslation(targetFormat, sourceFormat)
-    ? translateNonStreamingResponse(responseBody, targetFormat, sourceFormat, customToolNames)
-    : responseBody);
   if (responseSchemaValidation) {
     const validation = validateStructuredResponse(translatedResponse, responseSchemaValidation);
     if (!validation.valid) {
@@ -317,7 +339,7 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
     }
   }
 
-  if (translatedResponse?.usage) {
+  if (translatedResponse?.usage && !(targetFormat === FORMATS.CLAUDE && sourceFormat === FORMATS.OPENAI_RESPONSES)) {
     translatedResponse.usage = filterUsageForFormat(addBufferToUsage(translatedResponse.usage), sourceFormat);
   }
 
@@ -348,7 +370,7 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
       finish_reason: translatedResponse?.choices?.[0]?.finish_reason || "unknown"
     },
     pxpipe,
-    status: "success"
+    status: failed ? "error" : "success"
   }, { endpoint: clientRawRequest?.endpoint || null })).catch(err => {
     console.error("[RequestDetail] Failed to save:", err.message);
   });

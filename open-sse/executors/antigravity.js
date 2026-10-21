@@ -324,6 +324,22 @@ export class AntigravityExecutor extends BaseExecutor {
       generationConfig.maxOutputTokens = MAX_ANTIGRAVITY_OUTPUT_TOKENS;
     }
 
+    const originalFcConfig = _originalToolConfig?.functionCallingConfig;
+    const effectiveToolConfig = originalFcConfig?.mode === "NONE"
+      ? { functionCallingConfig: { mode: "NONE" } }
+      : tools?.length > 0
+        ? (originalFcConfig?.mode === "ANY"
+          ? {
+            functionCallingConfig: {
+              mode: "ANY",
+              ...(Array.isArray(originalFcConfig.allowedFunctionNames) && originalFcConfig.allowedFunctionNames.length > 0
+                ? { allowedFunctionNames: originalFcConfig.allowedFunctionNames.map(sanitizeFunctionName) }
+                : {}),
+            },
+          }
+          : { functionCallingConfig: { mode: "VALIDATED" } })
+        : undefined;
+
     const transformedRequest = {
       ...requestWithoutTools,
       generationConfig,
@@ -331,7 +347,7 @@ export class AntigravityExecutor extends BaseExecutor {
       ...(tools && { tools }),
       sessionId,
       safetySettings: undefined,
-      ...(tools?.length > 0 && { toolConfig: { functionCallingConfig: { mode: "VALIDATED" } } })
+      ...(effectiveToolConfig && { toolConfig: effectiveToolConfig })
     };
 
     // Strip blacklisted thinking fields from top-level body (set by thinkingUnified.js at root, not body.request)

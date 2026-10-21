@@ -24,6 +24,7 @@ import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import { detectFormatByEndpoint } from "open-sse/translator/formats.js";
 import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
+import { createTimingContext } from "../utils/timingContext.js";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy.js";
 import { assertChatGptWebAuthorityHeaderSize, chatGptWebAuthorityErrorResponse, chatGptWebAuthorityRequiredResponse, loadChatGptWebClientKeys, redactChatGptWebInternalHeaders, verifyChatGptWebAuthority } from "@/lib/chatgptWebAuthority.js";
 import { validateBrowserChatRequest, validateBrowserResponsesRequest } from "../../../services/chatgpt-web-runtime/browser-request.js";
@@ -176,12 +177,15 @@ async function loadChatGptWebComboCapabilities(models, bridgeCapability = "gener
  */
 export async function handleChat(request, clientRawRequest = null, options = {}) {
   const preResponse = options?.preResponse || clientRawRequest?.preResponse || request?.preResponse || null;
+  const timingContext = options?.timingContext || options?.timing || request?.timingContext || createTimingContext();
+  if (request && !request.timingContext) request.timingContext = timingContext;
   let body;
   let rawBody;
   let chatGptWebAuthority = null;
   try {
     rawBody = new Uint8Array(await request.arrayBuffer());
     body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(rawBody));
+    timingContext.mark("bodyParsed");
   } catch (error) {
     if (error?.status === 431) return chatGptWebAuthorityErrorResponse(error);
     log.warn("CHAT", "Invalid JSON body");
@@ -259,6 +263,7 @@ export async function handleChat(request, clientRawRequest = null, options = {})
   const keyAccess = await getKeyAccessContext(request);
   const keyAccessDenied = await enforceKeyAccess(keyAccess, modelStr);
   if (keyAccessDenied) return keyAccessDenied;
+  timingContext.mark("authChecked");
 
   // Bypass naming/warmup requests before combo rotation to avoid wasting rotation slots
   const userAgent = request?.headers?.get("user-agent") || "";
@@ -301,6 +306,7 @@ export async function handleChat(request, clientRawRequest = null, options = {})
           clientModel: modelStr,
           effectiveModel: m,
           routeReason: "combo",
+          timingContext,
           ...meta });
         },
         log,
@@ -321,6 +327,7 @@ export async function handleChat(request, clientRawRequest = null, options = {})
         clientModel: modelStr,
         effectiveModel: m,
         routeReason: "combo",
+        timingContext,
         ...meta }),
         adapterAdded
       ),
@@ -337,9 +344,9 @@ export async function handleChat(request, clientRawRequest = null, options = {})
     // Both Web lanes require the exact provider; capacity adapters must not substitute.
     return handleSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, {
       preResponse, chatGptWebAuthority, clientModel: modelStr, effectiveModel: modelStr, routeReason: "direct",
+      timingContext,
     });
   }
-
   // Single model request — may still switch to a capacity-adapter model if the
   // target lacks a capability the request needs (e.g. no vision, request has an image).
   const soloAugmented = await filterAdapterModels(keyAccess, augmentModelsWithCapacityAdapter([modelStr], requiredCapabilities, settings), [modelStr]);
@@ -354,8 +361,8 @@ export async function handleChat(request, clientRawRequest = null, options = {})
         clientModel: modelStr,
         effectiveModel: m,
         routeReason: m !== modelStr ? "capacity-adapter" : "direct",
+        timingContext,
         ...meta }),
-        adapterAdded
       ),
       log,
       comboName: modelStr,
@@ -366,13 +373,14 @@ export async function handleChat(request, clientRawRequest = null, options = {})
 
   return handleSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, { chatGptWebAuthority, preResponse,
     clientModel: modelStr, effectiveModel: modelStr, requestedModel: requestedModelStr,
-    routeReason: "direct" });
+    routeReason: "direct", timingContext });
 }
 
 /**
  * Handle single model chat request
  */
-async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, { preResponse = null, clientModel = null, effectiveModel = null, routeReason = "direct", routeContext = null, chatGptWebAuthority = null, requestedModel = null } = {}) {
+async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, { preResponse = null, clientModel = null, effectiveModel = null, routeReason = "direct", routeContext = null, chatGptWebAuthority = null, requestedModel = null, timingContext = null } = {}) {
+  timingContext = timingContext || request?.timingContext || createTimingContext();
   requestedModel = (requestedModel || modelStr).split("/").slice(-1)[0];
   const modelInfo = await getModelInfo(modelStr);
 
@@ -415,10 +423,10 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
             clientModel: modelStr,
             effectiveModel: m,
             routeReason: "combo",
+            timingContext,
             ...meta });
           },
           log,
-          comboName: modelStr,
           judgeModel: comboStrategies[modelStr]?.judgeModel,
           tuning: comboStrategies[modelStr]?.fusionTuning,
           preResponse,
@@ -431,12 +439,12 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         body,
         models: augmentedModels,
         handleSingleModel: withCapacityAdapterStripping(
-          (b, m, meta = {}) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, { chatGptWebAuthority, preResponse,
-          clientModel: modelStr,
-          effectiveModel: m,
-          routeReason: "combo",
-          ...meta }),
-          adapterAdded
+        (b, m, meta = {}) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, { chatGptWebAuthority, preResponse,
+        clientModel: modelStr,
+        effectiveModel: m,
+        routeReason: "combo",
+        timingContext,
+        ...meta }),
         ),
         log,
         comboName: modelStr,
@@ -502,6 +510,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
           chatGptWebRequestMode: bridgeCapability === "generic_tools" ? "agent" : "browser",
           signal: preResponse?.signal || request?.signal } : {}),
       });
+      timingContext.mark("accountSelected");
     } catch (error) {
       if (provider !== "chatgpt-web") throw error;
       return withChatGptWebNoFallback(Response.json({ error: { type: "runtime_error", code: "runtime_unavailable", message: "Durable ChatGPT Web profile binding is unavailable", retryable: false, submission_state: "not_sent" } }, { status: 503 }));
@@ -541,6 +550,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
 
     // Account selection shown in the unified "▶" line (acc:...)
     const refreshedCredentials = await checkAndRefreshToken(provider, credentials);
+    timingContext.mark("tokenRefreshed");
     if (provider === "chatgpt-web") refreshedCredentials.chatGptWebAuthority = chatGptWebAuthority;
     if (provider === "chatgpt-web") refreshedCredentials.chatGptWebOriginalModel = clientRawRequest?.body?.model;
 
@@ -621,6 +631,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       modelInfo: { provider, providerAlias: modelInfo.providerAlias, model },
       credentials: refreshedCredentials,
       preResponse,
+      timingContext,
       log,
       clientRawRequest,
       connectionId: credentials.connectionId,

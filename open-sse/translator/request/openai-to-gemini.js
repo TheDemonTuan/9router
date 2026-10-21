@@ -515,9 +515,14 @@ function wrapInCloudCodeEnvelopeForClaude(model, claudeRequest, credentials = nu
     }
     if (functionDeclarations.length > 0) {
       envelope.request.tools = [{ functionDeclarations }];
-      envelope.request.toolConfig = {
-        functionCallingConfig: { mode: "VALIDATED" }
-      };
+      const tcType = claudeRequest.tool_choice?.type;
+      envelope.request.toolConfig = tcType === "none"
+        ? { functionCallingConfig: { mode: "NONE" } }
+        : tcType === "any"
+          ? { functionCallingConfig: { mode: "ANY" } }
+          : tcType === "tool" && claudeRequest.tool_choice?.name
+            ? { functionCallingConfig: { mode: "ANY", allowedFunctionNames: [sanitizeGeminiFunctionName(claudeRequest.tool_choice.name)] } }
+            : { functionCallingConfig: { mode: "VALIDATED" } };
     }
   }
 

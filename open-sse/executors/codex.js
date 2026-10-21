@@ -141,8 +141,12 @@ function normalizeCodexTools(body) {
   // Drop tool_choice if it references an unknown function name
   if (body.tool_choice && typeof body.tool_choice === "object" && !Array.isArray(body.tool_choice)) {
     if (body.tool_choice.type === "function") {
-      const n = typeof body.tool_choice.name === "string" ? body.tool_choice.name.trim() : "";
+      const rawName = typeof body.tool_choice.name === "string"
+        ? body.tool_choice.name
+        : (typeof body.tool_choice.function?.name === "string" ? body.tool_choice.function.name : "");
+      const n = rawName.trim();
       if (!n || !validNames.has(n)) delete body.tool_choice;
+      else body.tool_choice = { type: "function", name: n };
     }
   }
 }
@@ -213,7 +217,7 @@ export class CodexExecutor extends BaseExecutor {
       && !transformedBody?.tools?.some?.(tool => tool?.type === "web_search")) {
       headers["x-openai-internal-codex-responses-lite"] = "true";
     }
-    const sessionId = resolveCacheSessionId(originalBody || transformedBody, credentials);
+    const sessionId = transformedBody?.prompt_cache_key || resolveCacheSessionId(originalBody || transformedBody, credentials);
     headers["session_id"] = sessionId || credentials?.connectionId || "default";
     // Identify client type to Codex backend (matches official codex CLI)
     if (!headers["originator"]) headers["originator"] = "codex_cli_rs";

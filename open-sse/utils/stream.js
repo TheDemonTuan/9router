@@ -9,6 +9,8 @@ import { validateJsonText } from "../translator/concerns/jsonSchemaValidation.js
 import { validateAntigravityToolCalls } from "../translator/concerns/antigravityToolValidation.js";
 import { buildResponseSnapshot, normalizeResponseId } from "../transformer/responsesBuilder.js";
 import { buildStreamErrorBytes } from "./streamHelpers.js";
+import { failClaudeResponses } from "../translator/response/claude-to-responses.js";
+import { createSSERecordParser } from "./sseRecordParser.js";
 
 import { SSE_DONE, SSE_HEADERS, SSE_HEADERS_NO_BUFFER } from "./sseConstants.js";
 
@@ -63,7 +65,8 @@ export function createSSEStream(options = {}) {
     responseSchemaValidation = null,
     releasePending = null,
     toolArgumentValidation = null,
-    signal = null
+    signal = null,
+    contentStallTimeoutMs = 0
   } = options;
 
   let buffer = "";
@@ -73,7 +76,7 @@ export function createSSEStream(options = {}) {
   const decoder = new TextDecoder("utf-8", { fatal: false });
 
   const state = mode === STREAM_MODE.TRANSLATE
-    ? { ...initState(sourceFormat), provider, toolNameMap, customToolNames: new Set(customToolNames || []), model, sessionId: credentials?._clientSessionId || null,
+    ? { ...initState(sourceFormat), provider, toolNameMap, customToolNames: new Set(customToolNames || []), model, credentials, sessionId: credentials?._clientSessionId || null,
         // Which upstream format this stream came from. A response translator can be
         // reached either directly (target === its registered source) or as the second
         // hop of a pivot, and on the terminal null chunk the pivot drops it — so a
@@ -88,6 +91,10 @@ export function createSSEStream(options = {}) {
   let accumulatedContent = "";
   let accumulatedThinking = "";
   let ttftAt = null;
+  let firstReasoningAt = null;
+  let firstToolAt = null;
+  let pingCount = 0;
+  let lastContentProgressAt = Date.now();
   let sseLineCount = 0;
   let sseEmittedCount = 0;
   const eventTypeCounts = {};
@@ -121,7 +128,7 @@ export function createSSEStream(options = {}) {
     clearCompletionTimer();
     if (finalized) return;
     finalized = true;
-    releaseStream(Boolean(toolValidationFailed || validationFailed));
+    releaseStream(Boolean(toolValidationFailed || validationFailed || state?.claudeResponsesTerminalStatus === "failed"));
 
     const isPassthrough = mode === STREAM_MODE.PASSTHROUGH;
     let finalUsage = isPassthrough ? usage : state?.usage;
@@ -142,10 +149,24 @@ export function createSSEStream(options = {}) {
       if (!validation.valid) validationFailed = validation.errors.join("; ");
     }
     if (onStreamComplete) {
+      const baseOutcome = toolValidationFailed
+        ? { status: "failed", successful: false, message: toolValidationFailed.message }
+        : validationFailed
+          ? { status: "failed", successful: false, message: `Structured output failed JSON Schema validation: ${validationFailed}` }
+          : state?.claudeResponsesTerminalStatus
+            ? { status: state.claudeResponsesTerminalStatus, successful: state.claudeResponsesTerminalStatus !== "failed" }
+            : { status: "completed", successful: true };
       onStreamComplete({
         content: accumulatedContent,
         thinking: accumulatedThinking
-      }, finalUsage, ttftAt, toolValidationFailed ? { status: "failed", successful: false, message: toolValidationFailed.message } : validationFailed ? { status: "failed", successful: false, message: `Structured output failed JSON Schema validation: ${validationFailed}` } : undefined);
+      }, finalUsage, ttftAt, {
+        ...baseOutcome,
+        firstReasoningAt,
+        firstToolAt,
+        terminalAt: Date.now(),
+        pingCount,
+        lastContentProgressAt,
+      });
     }
   };
 
@@ -242,9 +263,88 @@ export function createSSEStream(options = {}) {
     }
   };
 
+  // Decode complete SSE records separately from protocol state. Transport
+  // activity (including Anthropic pings) is never a first-text milestone.
+  if (mode === STREAM_MODE.TRANSLATE && targetFormat === FORMATS.CLAUDE && sourceFormat === FORMATS.OPENAI_RESPONSES) {
+    const emit = (events, controller) => {
+      for (const item of events || []) {
+        const event = item.data;
+        if (event?.type === "response.output_text.delta" && event.delta) {
+          ttftAt ??= Date.now();
+          accumulatedContent += event.delta;
+          totalContentLength += event.delta.length;
+        } else if ((event?.type === "response.reasoning_text.delta" || event?.type === "response.reasoning_summary_text.delta") && event.delta) {
+          firstReasoningAt ??= Date.now();
+          accumulatedThinking += event.delta;
+          totalContentLength += event.delta.length;
+        } else if ((event?.type === "response.function_call_arguments.delta" || event?.type === "response.custom_tool_call_input.delta") && event.delta) {
+          firstToolAt ??= Date.now();
+        }
+        const output = formatSSE(item, sourceFormat);
+        reqLogger?.appendConvertedChunk?.(output);
+        controller.enqueue(sharedEncoder.encode(output));
+        if (["response.completed", "response.incomplete", "response.failed"].includes(item.event)) state.claudeResponsesTerminalDelivered = true;
+      }
+      if (state.claudeResponsesTerminal) finalizeStream();
+    };
+    const record = (raw, controller) => {
+      if (state.claudeResponsesTerminal) return;
+      const data = [];
+      for (const line of raw.split(/\r\n|\r|\n/)) {
+        if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
+      }
+      if (!data.length) return;
+      let parsed;
+      try { parsed = JSON.parse(data.join("\n")); }
+      catch {
+        emit(failClaudeResponses(state, "Invalid Anthropic SSE event", "invalid_upstream_event"), controller);
+        return;
+      }
+      if (parsed?.type === "ping") {
+        pingCount++;
+        if (contentStallTimeoutMs > 0 && Date.now() - lastContentProgressAt >= contentStallTimeoutMs) {
+          emit(failClaudeResponses(state, "Stream content progress timeout", "stream_content_stall"), controller);
+          return;
+        }
+      } else {
+        lastContentProgressAt = Date.now();
+      }
+      const extracted = extractUsage(parsed);
+      if (extracted) state.usage = mergeUsage(state.usage, extracted);
+      emit(translateResponse(targetFormat, sourceFormat, parsed, state), controller);
+    };
+    let activeController;
+    const parser = createSSERecordParser(raw => record(raw, activeController));
+    const direct = new TransformStream({
+      transform(chunk, controller) {
+        if (state.claudeResponsesTerminal) return;
+        const text = decoder.decode(chunk, { stream: true });
+        reqLogger?.appendProviderChunk?.(text);
+        activeController = controller;
+        parser.write(text);
+      },
+      flush(controller) {
+        activeController = controller;
+        parser.write(decoder.decode());
+        parser.end();
+        emit(translateResponse(targetFormat, sourceFormat, null, state), controller);
+      },
+    });
+    direct.abortTerminal = (message) => {
+      if (state.claudeResponsesTerminalDelivered) return new Uint8Array();
+      const events = failClaudeResponses(state, message);
+      if (events.length) {
+        state.claudeResponsesTerminalDelivered = true;
+        finalizeStream();
+      }
+      return sharedEncoder.encode(events.map(item => formatSSE(item, sourceFormat)).join(""));
+    };
+    return direct;
+  }
+
   const transform = new TransformStream({
     async transform(chunk, controller) {
-      if (!ttftAt) ttftAt = Date.now();
+      // First text is observed only after parsing useful content.
       const text = decoder.decode(chunk, { stream: true });
       buffer += text;
       reqLogger?.appendProviderChunk?.(text);
@@ -438,23 +538,32 @@ export function createSSEStream(options = {}) {
         // Claude format - content
         if (parsed.delta?.text) {
           totalContentLength += parsed.delta.text.length;
+          ttftAt ??= Date.now();
           accumulatedContent += parsed.delta.text;
         }
         // Claude format - thinking
         if (parsed.delta?.thinking) {
           totalContentLength += parsed.delta.thinking.length;
+          firstReasoningAt ??= Date.now();
           accumulatedThinking += parsed.delta.thinking;
         }
-        
+        if (parsed.delta?.type === "input_json_delta" && parsed.delta.partial_json) {
+          firstToolAt ??= Date.now();
+        }
         // OpenAI format - content
         if (parsed.choices?.[0]?.delta?.content) {
           totalContentLength += parsed.choices[0].delta.content.length;
+          ttftAt ??= Date.now();
           accumulatedContent += parsed.choices[0].delta.content;
         }
         // OpenAI format - reasoning
         if (parsed.choices?.[0]?.delta?.reasoning_content) {
           totalContentLength += parsed.choices[0].delta.reasoning_content.length;
+          firstReasoningAt ??= Date.now();
           accumulatedThinking += parsed.choices[0].delta.reasoning_content;
+        }
+        if (parsed.choices?.[0]?.delta?.tool_calls?.length) {
+          firstToolAt ??= Date.now();
         }
         
         // Gemini format
