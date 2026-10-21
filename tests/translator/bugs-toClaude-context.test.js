@@ -15,14 +15,20 @@ describe("OpenAI → Claude context mapping", () => {
     expect(JSON.stringify(out.system || []), "Claude Code prompt injected").not.toContain("Claude Code");
   });
 
-  it("rejects unsigned reasoning_content instead of fabricating signed thinking", () => {
-    expect(() => T({
+  it("assistant reasoning_content becomes a thinking block", () => {
+    const out = T({
       messages: [
         { role: "user", content: "q" },
         { role: "assistant", content: "a", reasoning_content: "my hidden reasoning" },
         { role: "user", content: "next" },
       ],
-    })).toThrow("Unsigned reasoning_content");
+    });
+    expect(JSON.stringify(out), "reasoning_content lost").toContain("my hidden reasoning");
+    const assistant = out.messages.find((m) => m.role === "assistant");
+    expect(assistant.content[0]).toEqual(expect.objectContaining({
+      type: "thinking",
+      thinking: "my hidden reasoning",
+    }));
   });
 
   it("tool_choice=none is not turned into auto", () => {

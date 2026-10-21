@@ -91,7 +91,8 @@
       "security_patch_owner": "9router CGW runtime image maintainers",
       "security_update_policy": "Native rebuild from the pinned module source with committed patched go.mod/go.sum and checksum module graph; retain full binary Go metadata, generated SPDX and exact license texts; every architecture must pass the unsuppressed HIGH/CRITICAL image gate.",
       "security_dependency_overrides": {
-        "golang.org/x/crypto": "v0.55.0",
+        "github.com/klauspost/compress": "v1.18.7",
+        "golang.org/x/crypto": "v0.57.0",
         "google.golang.org/grpc": "v1.83.2"
       },
       "platforms": [
@@ -102,7 +103,7 @@
     "distribution": "native patched source build, not upstream release binaries",
     "sourceBuild": {
       "inputLockPath": "scripts/tunnel-build-lock",
-      "inputLockSha256": "d2d2fea1f407fda814046faae0760282c2eeaf256d33ca0ed62741e206d9d935",
+      "inputLockSha256": "4b7efb5972a842be9f3bf01c14bd0aa144cc3289fe2d7caadfda3b0bc97b4a1a",
       "buildHelper": "scripts/build-tunnel-assets.py",
       "buildHelperSha256": "d1885e5c0951bf30ac5ba79ac9a0d66aeca4c87fd54fb9111d2869ee509efaf7",
       "sourceArchives": {
@@ -128,6 +129,7 @@
           "golang.org/x/net": "v0.60.0"
         },
         "cloudflared": {
+          "github.com/klauspost/compress": "v1.18.7",
           "golang.org/x/net": "v0.60.0",
           "golang.org/x/crypto": "v0.57.0",
           "google.golang.org/grpc": "v1.83.2"

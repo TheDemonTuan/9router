@@ -3,7 +3,8 @@ import { FORMATS } from "../formats.js";
 import { CLAUDE_BLOCK, CLAUDE_STOP, RESPONSES_ITEM, ROLE } from "../schema/index.js";
 import { toOpenAIUsage } from "../concerns/usage.js";
 import { ClaudeCustomInputDecoder } from "../concerns/claudeCustomInput.js";
-import { sealClaudeReasoning } from "../concerns/claudeContinuation.js";
+import { hasClaudeContinuationScope, sealClaudeReasoning } from "../concerns/claudeContinuation.js";
+import { stripCloakSuffix } from "../../utils/claudeCloaking.js";
 import { buildResponseSnapshot, normalizeResponseId } from "../../transformer/responsesBuilder.js";
 
 function emitter(state, events) {
@@ -84,7 +85,7 @@ function beginBlock(state, emit, index, native) {
     }
     if (!native.input || typeof native.input !== "object" || Array.isArray(native.input)) throw new Error("Claude tool input must be a JSON object");
     stream.callIds.add(native.id);
-    block.name = state.toolNameMap?.get(native.name) || native.name;
+    block.name = state.toolNameMap?.get(native.name) || stripCloakSuffix(native.name) || native.name;
     block.callId = native.id;
     block.custom = state.customToolNames?.has(block.name) || false;
     block.id = `${block.custom ? "ctc" : "fc"}_${state.responseId}_${outputIndex}`;
@@ -127,7 +128,10 @@ function closeBlock(state, emit, block, status = "completed", preserveNative = t
     const native = block.kind === CLAUDE_BLOCK.THINKING
       ? { ...block.native, thinking: block.text.join(""), signature: block.native.signature || "" }
       : block.native;
-    if (block.kind === CLAUDE_BLOCK.REDACTED_THINKING || native.signature) block.encrypted = sealClaudeReasoning([native], context(state));
+    const ctx = context(state);
+    if ((block.kind === CLAUDE_BLOCK.REDACTED_THINKING || native.signature) && hasClaudeContinuationScope(ctx)) {
+      block.encrypted = sealClaudeReasoning([native], ctx);
+    }
   }
   block.done = true;
   const item = itemFor(block, status);
@@ -135,7 +139,9 @@ function closeBlock(state, emit, block, status = "completed", preserveNative = t
     emit("response.output_text.done", { item_id: block.id, output_index: block.index, content_index: 0, text: item.content[0].text, logprobs: [] });
     emit("response.content_part.done", { item_id: block.id, output_index: block.index, content_index: 0, part: item.content[0] });
   } else if (block.kind === CLAUDE_BLOCK.THINKING) {
-    emit("response.reasoning_text.done", { item_id: block.id, output_index: block.index, content_index: 0, text: block.text.join("") });
+    const reasoningText = block.text.join("");
+    emit("response.reasoning_text.done", { item_id: block.id, output_index: block.index, content_index: 0, text: reasoningText });
+    emit("response.reasoning_summary_text.done", { item_id: block.id, output_index: block.index, summary_index: 0, text: reasoningText });
     emit("response.content_part.done", { item_id: block.id, output_index: block.index, content_index: 0, part: item.content[0] });
   } else if (block.kind === CLAUDE_BLOCK.TOOL_USE && status === "completed") {
     emit(block.custom ? "response.custom_tool_call_input.done" : "response.function_call_arguments.done", {

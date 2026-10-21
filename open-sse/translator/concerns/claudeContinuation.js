@@ -31,6 +31,16 @@ function binding(context = {}) {
   return Buffer.from(JSON.stringify([provider, model, createHash("sha256").update(String(account)).digest("hex"), client]));
 }
 
+export function hasClaudeContinuationScope(context = {}) {
+  const credentials = context.credentials || {};
+  const scoped = credentials._responsesClaudeContext || {};
+  const account = scoped.connectionId || credentials.connectionId || credentials.accountId
+    || credentials.apiKey || credentials.accessToken || context.connectionId || context.apiKey;
+  const provider = context.provider || scoped.provider;
+  const model = scoped.model || context.model;
+  return Boolean(account && provider && model);
+}
+
 function validateBlocks(blocks) {
   if (!Array.isArray(blocks) || blocks.length === 0 || blocks.some(block => !block || (
     block.type === CLAUDE_BLOCK.THINKING

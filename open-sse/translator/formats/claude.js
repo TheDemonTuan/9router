@@ -9,6 +9,7 @@ import { PROVIDERS } from "../../providers/index.js";
 import { getCapabilitiesForModel } from "../../providers/capabilities.js";
 import { isDeepSeekModel } from "../../providers/models/helpers.js";
 import { DEFAULT_MAX_TOKENS } from "../../config/runtimeConfig.js";
+import { CLAUDE_SYSTEM_PROMPT } from "../../config/appConstants.js";
 
 const CACHE_CONTROL_5M = { type: "ephemeral" };
 const CACHE_CONTROL_1H = { type: "ephemeral", ttl: "1h" };
@@ -516,7 +517,11 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
     if (effort === "xhigh" || effort === "max") body.output_config.effort = "high";
   }
   if (modelCaps.forcedToolChoice === false && (body.tool_choice?.type === "any" || body.tool_choice?.type === "tool")) {
-    throw Object.assign(new Error("This model does not support required or named tool_choice"), { status: 400, code: "unsupported_parameter", param: "tool_choice" });
+    if (body._directResponsesToClaude) {
+      throw Object.assign(new Error("This model does not support required or named tool_choice"), { status: 400, code: "unsupported_parameter", param: "tool_choice" });
+    }
+    const { disable_parallel_tool_use } = body.tool_choice;
+    body.tool_choice = { type: "auto", ...(disable_parallel_tool_use !== undefined ? { disable_parallel_tool_use } : {}) };
   }
 
   // The direct Responses adapter has already validated complete history. Never
@@ -541,6 +546,13 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
     if (provider !== "claude" && !provider?.startsWith("anthropic-compatible") && body.messages?.some(message =>
       Array.isArray(message.content) && message.content.some(block => block.type === CLAUDE_BLOCK.TOOL_RESULT && Array.isArray(block.content) && block.content.some(part => part.type === CLAUDE_BLOCK.IMAGE)))) {
       throw Object.assign(new Error("This provider cannot preserve images inside tool results"), { status: 400, code: "unsupported_parameter", param: "input" });
+    }
+    if (isAnthropicServing && apiKey?.includes("sk-ant-oat")) {
+      const claudeCodeBlock = { type: CLAUDE_BLOCK.TEXT, text: CLAUDE_SYSTEM_PROMPT };
+      const existing = Array.isArray(body.system) ? body.system : [];
+      if (!existing.some(block => typeof block?.text === "string" && block.text.includes("You are Claude Code"))) {
+        body.system = [claudeCodeBlock, ...existing];
+      }
     }
     if (Array.isArray(body.system) && body.system.length > 0) {
       body.system = body.system.map((block, i) => {
@@ -601,15 +613,22 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
     }
   }
 
-  // 1. System: remove all cache_control, add only to last block with ttl 1h
+  // 1. System: remove Claude Code prompt for non-Claude compatible providers, then add 1h cache_control to last block
   if (body.system && Array.isArray(body.system)) {
-    body.system = body.system.map((block, i) => {
-      const { cache_control, ...rest } = block;
-      if (i === body.system.length - 1) {
-        return { ...rest, cache_control: { type: "ephemeral", ttl: "1h" } };
-      }
-      return rest;
-    });
+    if (provider && provider !== "claude" && provider !== "anthropic") {
+      body.system = body.system.filter(block => !block?.text || !block.text.includes("You are Claude Code"));
+    }
+    if (body.system.length === 0) {
+      delete body.system;
+    } else {
+      body.system = body.system.map((block, i) => {
+        const { cache_control, ...rest } = block;
+        if (i === body.system.length - 1) {
+          return { ...rest, cache_control: { type: "ephemeral", ttl: "1h" } };
+        }
+        return rest;
+      });
+    }
   }
 
   // 2. Messages: process in optimized passes

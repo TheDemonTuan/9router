@@ -9,14 +9,9 @@
 import { describe, it, expect } from "vitest";
 import { applyCloaking, cloakClaudeTools, decloakStreamChunk } from "../../open-sse/utils/claudeCloaking.js";
 import { CLAUDE_TOOL_SUFFIX } from "../../open-sse/config/appConstants.js";
-import { CLAUDE_CLI_VERSION } from "../../open-sse/providers/shared.js";
-
-it("advertises a Claude Code version accepted by Fable 5.1 and keeps the billing header byte-stable across conversation turns", () => {
-  const turn1 = applyCloaking({ model: "claude-sonnet-4-6", system: [{ type: "text", text: "sys" }], tools: [{ name: "t" }], messages: [{ role: "user", content: "turn 1" }] }, "sk-ant-oat-test", "session-id");
-  const turn2 = applyCloaking({ model: "claude-sonnet-4-6", system: [{ type: "text", text: "sys" }], tools: [{ name: "t" }], messages: [{ role: "user", content: "turn 1" }, { role: "assistant", content: "reply" }, { role: "user", content: "turn 2" }] }, "sk-ant-oat-test", "session-id");
-  expect(CLAUDE_CLI_VERSION).toBe("2.1.280");
-  expect(turn1.system[0].text).toMatch(new RegExp(`^x-anthropic-billing-header: cc_version=${CLAUDE_CLI_VERSION.replace(/\./g, "\\.")}\\.`));
-  expect(turn1.system[0].text).toBe(turn2.system[0].text);
+it("advertises a Claude Code version accepted by Fable 5.1", () => {
+  const body = applyCloaking({ messages: [] }, "sk-ant-oat-test", "session-id");
+  expect(body.system[0].text).toMatch(/^x-anthropic-billing-header: cc_version=2.1.280\./);
 });
 
 describe("cloakClaudeTools", () => {

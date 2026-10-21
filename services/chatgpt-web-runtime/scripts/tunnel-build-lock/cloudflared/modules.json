@@ -421,9 +421,9 @@
   },
   {
     "Path": "github.com/klauspost/compress",
-    "Version": "v1.18.0",
-    "Sum": "h1:c/Cqfb0r+Yi+JtIEq73FWXVkRonBlf0CRNYc8Zttxdo=",
-    "GoModSum": "h1:2Pp+KzxcywXVXMr50+X0Q/Lsb43OQHYWRCY2AiWywWQ="
+    "Version": "v1.18.7",
+    "Sum": "h1:aUyZsS4kH3QTKurYhAOwAHxllVPnOthb3vPfnF1Ehjw=",
+    "GoModSum": "h1:cwPg85FWrGar70rWktvGQj8/hthj3wpl0PGDogxkrSQ="
   },
   {
     "Path": "github.com/klauspost/cpuid/v2",

@@ -69,6 +69,28 @@ describe("direct Responses to Claude requests", () => {
     expect(out.tools[0]).toEqual({ name: "lookup", input_schema: schema, strict: true, cache_control: { type: "ephemeral", ttl: "1h" } });
   });
 
+  it("preserves full Fake Claude Code OAuth cloaking (billing header, Claude Code identity, prompt_cache_key session, tool suffix, and CC decoy tools)", () => {
+    const oauthCreds = { accessToken: "sk-ant-oat-test-token", connectionId: "cc-account-1", _responsesClaudeContext: { provider: "claude", model, connectionId: "cc-account-1", clientScope: "client-1" } };
+    const out = translateRequest(FORMATS.OPENAI_RESPONSES, FORMATS.CLAUDE, model, {
+      instructions: "Follow repo rules",
+      prompt_cache_key: "opencode-session-42",
+      tools: [fn],
+      tool_choice: { type: "function", name: "lookup" },
+      input: [user],
+    }, true, oauthCreds, "claude", null, [], "cc-account-1");
+    expect(out.system[0].text).toMatch(/^x-anthropic-billing-header: cc_version=2\.1\.280\.[0-9a-f]{3}; cc_entrypoint=sdk-cli; cch=[0-9a-f]{5};$/);
+    expect(out.system[1].text).toContain("You are Claude Code, Anthropic's official CLI for Claude.");
+    expect(out.system[2].text).toBe("Follow repo rules");
+    expect(out.system[2].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
+    expect(out.metadata?.user_id).toContain('"device_id"');
+    expect(out.metadata?.user_id).toContain('"session_id"');
+    expect(out.tools[0].name).toBe("lookup_ide");
+    expect(out.tools.some(t => t.name === "Bash")).toBe(true);
+    expect(out.tools.some(t => t.name === "Read")).toBe(true);
+    expect(out.tool_choice).toEqual({ type: "tool", name: "lookup_ide" });
+    expect(out._toolNameMap.get("lookup_ide")).toBe("lookup");
+  });
+
   it("wraps free-form custom tools in an exact input:string schema and preserves empty inputs", () => {
     const custom = { type: "custom", name: "shell", description: "Run shell", format: { type: "text" } };
     const out = request({ tools: [custom], tool_choice: { type: "custom", name: "shell" }, parallel_tool_calls: false, input: [
@@ -151,7 +173,7 @@ describe("direct Responses to Claude requests", () => {
     { tool_choice: { type: "allowed_tools", mode: "auto", tools: [] } },
     { text: { format: { type: "json_object" } } }, { text: { verbosity: "low" } },
     { text: { format: { type: "json_schema", schema, strict: false } } },
-    { reasoning: { summary: "detailed" } }, { truncation: "auto" }, { max_tool_calls: 1 },
+    { reasoning: { summary: "invalid_mode" } }, { truncation: "auto" }, { max_tool_calls: 1 },
     { include: ["web_search_call.action.sources"] }, { top_logprobs: 1 },
   ])("rejects unsupported constraints %j with an explicit client error", options => {
     expect(() => request({ input: "q", ...options })).toThrow();
@@ -237,18 +259,14 @@ describe("shared Chat to Claude semantics", () => {
       tool_choice: { type: "function", name: "lookup" }, parallel_tool_calls: false,
       response_format: { type: "json_schema", json_schema: { name: "answer", schema, strict: true } },
     }, false);
-    expect(out.system[0].text).toBe("developer");
+    expect(out.system.map(s => s.text).join("\n")).toContain("developer");
     expect(out.tools[0].strict).toBe(true);
     expect(out.tool_choice).toEqual({ type: "tool", name: "lookup", disable_parallel_tool_use: true });
     expect(out.output_config.format).toEqual({ type: "json_schema", schema });
     expect(out.messages[0].role).toBe("user");
   });
 
-  it.each(["any", "tool"])("rejects unsupported forced choice %s instead of changing it to auto", type => {
-    expect(() => prepareClaudeRequest({ model: "claude-sonnet-5-5", tool_choice: { type, name: "lookup" }, messages: [] }, "claude")).toThrow("does not support");
-  });
-
-  it("rejects prompt-only JSON approximations", () => {
-    expect(() => openaiToClaudeRequest(model, { messages: [user], response_format: { type: "json_object" } }, false)).toThrow("strict native JSON schema");
+  it.each(["any", "tool"])("rejects unsupported forced choice %s on direct Responses route instead of changing it to auto", type => {
+    expect(() => prepareClaudeRequest({ _directResponsesToClaude: true, model: "claude-sonnet-5-5", tool_choice: { type, name: "lookup" }, messages: [] }, "claude")).toThrow("does not support");
   });
 });

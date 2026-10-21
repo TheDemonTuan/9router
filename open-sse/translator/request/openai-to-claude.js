@@ -1,5 +1,6 @@
 import { register } from "../index.js";
 import { FORMATS } from "../formats.js";
+import { CLAUDE_SYSTEM_PROMPT } from "../../config/appConstants.js";
 import { adjustMaxTokens } from "../formats/maxTokens.js";
 import { safeParseJSON } from "../concerns/json.js";
 import { parseDataUri } from "../concerns/image.js";
@@ -37,9 +38,6 @@ export function openaiToClaudeRequest(model, body, stream) {
   if (body.messages && Array.isArray(body.messages)) {
     // Extract system messages
     for (const msg of body.messages) {
-      if (msg.role === ROLE.ASSISTANT && msg.reasoning_content) {
-        throw Object.assign(new Error("Unsigned reasoning_content cannot replace native signed Claude thinking history"), { status: 400, code: "unsupported_parameter", param: "messages.reasoning_content" });
-      }
       if (msg.role === ROLE.SYSTEM || msg.role === ROLE.DEVELOPER) {
         systemParts.push(typeof msg.content === "string" ? msg.content : extractTextContent(msg.content, "\n"));
       }
@@ -116,17 +114,31 @@ export function openaiToClaudeRequest(model, body, stream) {
     }
   }
 
-  // Native structured output, not a prompt approximation.
-  if (body.response_format && body.response_format.type !== "text") {
-    const format = body.response_format;
-    if (format.type !== "json_schema" || !format.json_schema?.schema || format.json_schema.strict === false) {
-      throw Object.assign(new Error("Claude requires a strict native JSON schema response_format"), { status: 400, code: "unsupported_parameter", param: "response_format" });
+  // Handle response_format for JSON mode
+  if (body.response_format) {
+    const responseFormat = body.response_format;
+    if (responseFormat.type === "json_schema" && responseFormat.json_schema?.schema) {
+      const schemaJson = JSON.stringify(responseFormat.json_schema.schema, null, 2);
+      systemParts.push(`You must respond with valid JSON that strictly follows this JSON schema:\n\`\`\`json\n${schemaJson}\n\`\`\`\nRespond ONLY with the JSON object, no other text.`);
+      if (responseFormat.json_schema.strict === true) {
+        result.output_config = { format: { type: "json_schema", schema: responseFormat.json_schema.schema } };
+      }
+    } else if (responseFormat.type === "json_object") {
+      systemParts.push("You must respond with valid JSON. Respond ONLY with a JSON object, no other text.");
     }
-    result.output_config = { format: { type: "json_schema", schema: format.json_schema.schema } };
   }
 
+  // System with Claude Code prompt and cache_control
+  const claudeCodePrompt = { type: CLAUDE_BLOCK.TEXT, text: CLAUDE_SYSTEM_PROMPT };
+
   if (systemParts.length > 0) {
-    result.system = [{ type: CLAUDE_BLOCK.TEXT, text: systemParts.join("\n"), cache_control: { type: "ephemeral", ttl: "1h" } }];
+    const systemText = systemParts.join("\n");
+    result.system = [
+      claudeCodePrompt,
+      { type: CLAUDE_BLOCK.TEXT, text: systemText, cache_control: { type: "ephemeral", ttl: "1h" } }
+    ];
+  } else {
+    result.system = [claudeCodePrompt];
   }
 
   // Tools - convert from OpenAI format to Claude format with prefix for OAuth
@@ -244,6 +256,9 @@ function getContentBlocksFromMessage(msg, toolNameMap = new Map()) {
       }
     }
   } else if (msg.role === ROLE.ASSISTANT) {
+    if (typeof msg.reasoning_content === "string" && msg.reasoning_content) {
+      blocks.push({ type: CLAUDE_BLOCK.THINKING, thinking: msg.reasoning_content });
+    }
     if (Array.isArray(msg.content)) {
       for (const part of msg.content) {
         if (part.type === OPENAI_BLOCK.TEXT && part.text) {
@@ -296,7 +311,7 @@ export function convertOpenAIToolChoice(choice) {
   if (typeof choice === "string") {
     if (choice === "required") return { type: "any" };
     if (choice === "none") return { type: "none" };
-    if (choice === "auto") return { type: "auto" };
+    return { type: "auto" };
   }
 
   if (typeof choice === "object") {
@@ -316,18 +331,24 @@ export function convertOpenAIToolChoice(choice) {
     }
   }
 
-  throw Object.assign(new Error("Unsupported tool_choice for Claude"), { status: 400, code: "unsupported_parameter", param: "tool_choice" });
+  return { type: "auto" };
 }
 
 // OpenAI -> Claude format for Antigravity (without system prompt modifications)
 function openaiToClaudeRequestForAntigravity(model, body, stream) {
-  // Antigravity's envelope maps response_format to native generationConfig and
-  // uses CloudCode thoughtSignature on functionCall parts, not Anthropic signed thinking.
   const messages = Array.isArray(body.messages)
     ? body.messages.map(msg => (msg?.role === ROLE.ASSISTANT && msg.reasoning_content !== undefined ? { ...msg, reasoning_content: undefined } : msg))
     : body.messages;
   const result = openaiToClaudeRequest(model, { ...body, response_format: undefined, messages }, stream);
-
+  // Remove Claude Code system prompt, keep only user's system messages
+  if (result.system && Array.isArray(result.system)) {
+    result.system = result.system.filter(block =>
+      !block.text || !block.text.includes("You are Claude Code")
+    );
+    if (result.system.length === 0) {
+      delete result.system;
+    }
+  }
   // Strip prefix from tool names for Antigravity (doesn't use Claude OAuth)
   if (result.tools && Array.isArray(result.tools)) {
     result.tools = result.tools.map((tool, index) => {

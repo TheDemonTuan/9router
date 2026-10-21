@@ -60,11 +60,11 @@ describe("upstream native thinking and conversation preservation", () => {
     expect(last.content[last.content.length - 1].cache_control?.type).toBe("ephemeral");
     const blocks = [...(out.system || []), ...(out.tools || []), ...out.messages.flatMap((message) => message.content)];
     expect(blocks.filter((block) => block?.cache_control)).toHaveLength(4);
-    expect(() => translateRequest("openai", "claude", "claude-sonnet-5-5", {
+    expect(() => translateRequest("openai-responses", "claude", "claude-sonnet-5-5", {
       model: "claude-sonnet-5-5",
-      tool_choice: { type: "function", function: { name: "lookup" } },
-      tools: [{ type: "function", function: { name: "lookup", parameters: { type: "object", properties: {} } } }],
-      messages: [{ role: "user", content: "Read the result" }],
+      tool_choice: { type: "function", name: "lookup" },
+      tools: [{ type: "function", name: "lookup", parameters: { type: "object", properties: {} } }],
+      input: [{ role: "user", content: "Read the result" }],
     }, false, null, "claude")).toThrow("does not support required or named tool_choice");
   });
 

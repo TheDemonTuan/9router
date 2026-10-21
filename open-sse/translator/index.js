@@ -196,7 +196,7 @@ export function translateRequest(sourceFormat, targetFormat, model, body, stream
   if (PROVIDERS[provider]?.quirks?.cloakToolsOnOAuth) {
     const apiKey = credentials?.accessToken || credentials?.apiKey || null;
     if (apiKey?.includes("sk-ant-oat")) {
-      const { body: cloakedBody, toolNameMap } = cloakClaudeTools(result, { includeDecoys: !directClaudeResponses });
+      const { body: cloakedBody, toolNameMap } = cloakClaudeTools(result);
       result = cloakedBody;
       if (toolNameMap?.size > 0) {
         result._toolNameMap = toolNameMap;

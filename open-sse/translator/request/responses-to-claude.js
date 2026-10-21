@@ -89,12 +89,12 @@ function content(value, role, capabilities) {
 }
 
 function validateOptions(body) {
-  for (const name of ["previous_response_id", "conversation", "background", "max_tool_calls", "prompt", "prompt_cache_key", "prompt_cache_retention", "context_management", "truncation", "top_logprobs", "logprobs", "frequency_penalty", "presence_penalty", "seed", "service_tier", "response_format"]) {
+  for (const name of ["previous_response_id", "conversation", "background", "max_tool_calls", "prompt", "context_management", "truncation", "top_logprobs", "logprobs", "frequency_penalty", "presence_penalty", "seed", "service_tier", "response_format"]) {
     if (body[name] != null && !(name === "background" && body[name] === false) && !(name === "truncation" && body[name] === "disabled")) unsupported(name);
   }
   if (body.store === true) unsupported("store");
   if (body.include != null && (!Array.isArray(body.include) || body.include.some(value => value !== "reasoning.encrypted_content"))) unsupported("include");
-  if (body.reasoning?.summary != null && body.reasoning.summary !== "none" && body.reasoning.summary !== "auto") unsupported("reasoning.summary");
+  if (body.reasoning?.summary != null && !["none", "auto", "concise", "detailed"].includes(body.reasoning.summary)) unsupported("reasoning.summary");
   if (body.text?.verbosity != null) unsupported("text.verbosity");
   if (body.parallel_tool_calls != null && typeof body.parallel_tool_calls !== "boolean") invalid("parallel_tool_calls must be a boolean", "parallel_tool_calls");
 }
@@ -202,7 +202,6 @@ export function responsesToClaudeRequest(model, body, stream, credentials = null
   requireResolved();
   if (!result.messages.length) invalid("input must contain a user conversation, not only system instructions");
   if (result.messages[0].role !== ROLE.USER) invalid("Conversation history must begin with a user message");
-  if (result.messages[result.messages.length - 1].role !== ROLE.USER) invalid("Claude Responses input must end with a user message or tool result; assistant prefilling is unsupported");
   if (system.length) result.system = system;
   if (customNames.size) result._customToolNames = [...customNames];
   return result;
