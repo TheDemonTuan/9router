@@ -3,8 +3,12 @@
   "version": "0.5.104",
   "description": "9Router web dashboard",
   "private": true,
-  "packageManager": "bun@1.4.3",
+  "packageManager": "bun@1.4.4",
   "scripts": {
+    "format": "bun fmt",
+    "format:check": "bun fmt --check",
+    "lint": "bun --bun eslint",
+    "typecheck:runtime": "bun run --cwd services/chatgpt-web-runtime typecheck",
     "prepare:chatgpt-session-export": "bun scripts/build-chatgpt-session-export.mjs",
     "dev": "bun run prepare:chatgpt-session-export && bun ./node_modules/next/dist/bin/next dev --port 20127",
     "dev:webpack": "bun run prepare:chatgpt-session-export && bun ./node_modules/next/dist/bin/next dev --webpack --port 20127",

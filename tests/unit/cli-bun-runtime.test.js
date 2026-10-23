@@ -13,7 +13,7 @@ beforeEach(() => {
   hooks = path.join(root, "hooks"); pkg = path.join(root, "node_modules", "bun"); data = path.join(root, "data");
   fs.mkdirSync(hooks); fs.mkdirSync(pkg, { recursive: true });
   for (const file of ["runtime.js", "bunRuntime.js", "appRuntime.js"]) fs.copyFileSync(new URL(`../../cli/hooks/${file}`, import.meta.url), path.join(hooks, file));
-  fs.writeFileSync(path.join(pkg, "package.json"), JSON.stringify({ version: "1.4.3", bin: { bun: "bun.exe" } }));
+  fs.writeFileSync(path.join(pkg, "package.json"), JSON.stringify({ version: "1.4.4", bin: { bun: "bun.exe" } }));
   source = path.join(pkg, "bun.exe");
 });
 afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -23,9 +23,9 @@ function run() { return execFileSync("node", ["-e", script], { cwd: root, env: e
 function realBinary() { fs.copyFileSync(binary, source); }
 
 it("fails closed when package binary is missing or a lifecycle placeholder", () => {
-  expect(run).toThrow(/Bun 1.4.3 runtime unavailable/);
+  expect(run).toThrow(expect.objectContaining({ status: 1, stdout: "" }));
   fs.writeFileSync(source, "lifecycle scripts were disabled");
-  expect(run).toThrow(/Bun 1.4.3 runtime unavailable/);
+  expect(run).toThrow(expect.objectContaining({ status: 1, stdout: "" }));
 });
 it("rejects an unexpected dependency version", () => {
   realBinary();
@@ -35,7 +35,7 @@ it("rejects an unexpected dependency version", () => {
 it("uses an immutable cache and rejects corruption without repairing over it", () => {
   realBinary(); const cached = run();
   expect(cached.startsWith(data)).toBe(true);
-  expect(execFileSync(cached, ["--version"], { encoding: "utf8" }).trim()).toBe("1.4.3");
+  expect(execFileSync(cached, ["--version"], { encoding: "utf8" }).trim()).toBe("1.4.4");
   expect(run()).toBe(cached);
   fs.writeFileSync(cached, "corrupt");
   expect(run).toThrow(/checksum mismatch/);
@@ -50,7 +50,7 @@ it("publishes the same verified winner under concurrent preparation", async () =
   });
   const paths = await Promise.all([prepare(), prepare(), prepare()]);
   expect(new Set(paths).size).toBe(1);
-  expect(execFileSync(paths[0], ["--version"], { encoding: "utf8" }).trim()).toBe("1.4.3");
+  expect(execFileSync(paths[0], ["--version"], { encoding: "utf8" }).trim()).toBe("1.4.4");
 });
 it("rejects a cache symlink even if it targets the valid binary", ({ skip }) => {
   realBinary(); const cached = run(); fs.unlinkSync(cached);

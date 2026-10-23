@@ -7,7 +7,7 @@ Unit tests for the `/v1/embeddings` endpoint implementation.
 Install test dependencies from the `tests/` directory:
 
 ```bash
-cd tests/ && npm install
+cd tests/ && bun install --frozen-lockfile
 ```
 
 ## Running Tests
@@ -15,14 +15,16 @@ cd tests/ && npm install
 From the `tests/` directory:
 
 ```bash
-npm test
+bun run test --config vitest.config.js unit/embeddingsCore.test.js
 ```
 
-Or run vitest directly with npx:
+Vitest runs on the pinned Bun 1.4.4 runtime. Keep the explicit config for app/engine aliases; use the focused suite needed for your change:
 
 ```bash
-npx vitest run --reporter=verbose --config ./vitest.config.js
+bun run test --config vitest.config.js unit/responses-native-forwarding.test.js
 ```
+
+`bun test` is reserved for suites already written for Bun or Node-compatible runners (for example the runtime service and selected `.cjs` regressions). It is not a drop-in runner for the Vitest tree: hoisted module mocks, module resets, and async fake-timer controls need deliberate migration. Do not enable `RUN_REAL=1` for an offline check; isolate `HOME` and `DATA_DIR` when exercising persistence.
 
 ## Test Files
 

@@ -3,9 +3,9 @@
  * Offline actual Next + companion + runtime + persistent Chromium + MCP stdio.
  * Usage: bun tests/integration/chatgpt-web-runtime-smoke.mjs
  *   --runtime-url http://127.0.0.1:17841 --gateway-port 21127
- *   --runtime-bun /absolute/path/to/bun-1.4.3 --chromium /absolute/path/to/chromium
+ *   --runtime-bun /absolute/path/to/bun-1.4.4 --chromium /absolute/path/to/chromium
  * Or: --image cgw-runtime:check --browser-volume 9router-cgw-browser --gateway-port 21127 (native Linux Docker only).
- * Requires gateway Bun 1.4.3, runtime dependencies installed with its frozen lock,
+ * Requires gateway Bun 1.4.4, runtime dependencies installed with its frozen lock,
  * and an existing gateway build. Missing BUILD_ID fails before launching processes;
  * this runner never compiles the gateway implicitly. No account, production DB, Codex auth or live
  * tunnel is used. Outer tools execute only inside the newly owned fixture workspace.
@@ -26,7 +26,7 @@ for (let index = 2; index < process.argv.length; index += 2) {
   assert(process.argv[index + 1] && !process.argv[index + 1].startsWith("--"), "Smoke flag requires a value");
   assert(!Object.hasOwn(options, key), "Duplicate smoke flag"); options[key] = process.argv[index + 1];
 }
-assert(globalThis.Bun?.version === "1.4.3", "BLOCKED: gateway smoke driver requires Bun 1.4.3");
+assert(globalThis.Bun?.version === "1.4.4", "BLOCKED: gateway smoke driver requires Bun 1.4.4");
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const runtimePackage = join(repository, "services/chatgpt-web-runtime");
 const gatewayPort = Number(options["--gateway-port"] || 21127);
@@ -144,7 +144,7 @@ try {
     resources.probe = null;
     resources.extraction = `cgw-extract-${suffix}`;
     command("docker", ["create", "--name", resources.extraction, options["--image"]]);
-    runtimeBun = join(root, "bun-1.4.3"); command("docker", ["cp", `${resources.extraction}:/usr/local/bin/bun`, runtimeBun]); chmodSync(runtimeBun, 0o700);
+    runtimeBun = join(root, "bun-1.4.4"); command("docker", ["cp", `${resources.extraction}:/usr/local/bin/bun`, runtimeBun]); chmodSync(runtimeBun, 0o700);
     command("docker", ["rm", resources.extraction]); resources.extraction = null;
     resources.network = `cgw-offline-${suffix}`; resources.volume = `cgw-state-${suffix}`; resources.container = `cgw-runtime-${suffix}`;
     command("docker", ["network", "create", resources.network]); command("docker", ["volume", "create", resources.volume]);
@@ -154,14 +154,14 @@ try {
       JSON.stringify({ CGW_RUNTIME_TOKEN_FILE: dataToken, CGW_ADMIN_TOKEN_FILE: adminToken, CGW_FIXTURE_CONTROL_PORT: "17843", ENABLE_REQUEST_LOGS: "false" }));
   } else {
     runtimeBun = options["--runtime-bun"] || process.env.CGW_RUNTIME_BUN;
-    assert(runtimeBun && existsSync(runtimeBun), "BLOCKED: set CGW_RUNTIME_BUN or --runtime-bun to an installed Bun 1.4.3 executable");
+    assert(runtimeBun && existsSync(runtimeBun), "BLOCKED: set CGW_RUNTIME_BUN or --runtime-bun to an installed Bun 1.4.4 executable");
     const chromium = options["--chromium"] || process.env.CGW_CHROMIUM_EXECUTABLE;
     assert(chromium && existsSync(chromium), "BLOCKED: set CGW_CHROMIUM_EXECUTABLE or --chromium to an installed sandbox-capable Chromium");
     await freePort(Number(runtimeUrl.port));
     runtimeOwner = start(runtimeBun, [join(runtimePackage, "scripts/gateway-smoke-fixture.ts")], { ...isolated,
       CGW_RUNTIME_TOKEN_FILE: dataFile, CGW_ADMIN_TOKEN_FILE: adminFile, CGW_PORT: runtimeUrl.port, CGW_FIXTURE_CONTROL_PORT: String(controlPort), CGW_CHROMIUM_EXECUTABLE: chromium, CGW_FIXTURE_HOST_DISPLAY: "1" }, "runtime");
   }
-  assert(command(runtimeBun, ["--version"]) === "1.4.3", "BLOCKED: runtime/companion require Bun 1.4.3");
+  assert(command(runtimeBun, ["--version"]) === "1.4.4", "BLOCKED: runtime/companion require Bun 1.4.4");
   stage = "companion keygen and provisioning";
   command(runtimeBun, [join(runtimePackage, "src/companion/keygen.ts"), privateFile, publicFile]);
   pair = { privateKey: readFileSync(privateFile, "utf8"), publicKey: readFileSync(publicFile, "utf8") };

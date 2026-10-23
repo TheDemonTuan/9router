@@ -9,7 +9,7 @@ import type { BrowserContext } from "playwright-core";
 // production configuration switch. All Responses, identity, broker and browser code
 // remains the real runtime implementation. Only ChatGPT's origin and outbound tunnel
 // are replaced by a DOM fixture and an actual private MCP stdio connection.
-if (Bun.version !== "1.4.3") throw new Error("Runtime fixture requires Bun 1.4.3");
+if (Bun.version !== "1.4.4") throw new Error("Runtime fixture requires Bun 1.4.4");
 if (process.argv.includes("--stdin-config")) {
   const config = JSON.parse(await Bun.stdin.text());
   const directory = "/run/cgw/fixture";

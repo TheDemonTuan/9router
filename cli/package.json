@@ -1,8 +1,10 @@
 {
   "name": "9router",
   "version": "0.5.91",
-  "packageManager": "bun@1.4.3",
-  "trustedDependencies": ["bun"],
+  "packageManager": "bun@1.4.4",
+  "trustedDependencies": [
+    "bun"
+  ],
   "description": "9Router CLI - Start and manage 9Router server",
   "bin": {
     "9router": "./cli.js"
@@ -25,7 +27,7 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "bun": "1.4.3",
+    "bun": "1.4.4",
     "enquirer": "^2.4.1",
     "node-machine-id": "^1.1.12",
     "react": "19.3.0",

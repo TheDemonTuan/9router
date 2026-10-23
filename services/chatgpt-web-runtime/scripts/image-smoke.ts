@@ -17,7 +17,7 @@ assert.equal(process.platform, "linux", "Native Linux required");
 assert.equal(process.arch, arch === "amd64" ? "x64" : "arm64", "Native process architecture mismatch");
 assert.equal(process.getuid?.(), 10001, "Runtime must not run as root");
 assert.equal(process.getgid?.(), 10001, "Runtime group mismatch");
-assert.equal(Bun.version, "1.4.3", "Bun baseline changed");
+assert.equal(Bun.version, "1.4.4", "Bun baseline changed");
 assert.equal(readFileSync("/proc/1/comm", "utf8").trim(), "tini", "Tini must own PID 1");
 assert.match(readFileSync("/etc/os-release", "utf8"), /VERSION_ID="24.04"/, "Ubuntu 24.04 required");
 const processStatus = readFileSync("/proc/self/status", "utf8");

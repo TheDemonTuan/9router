@@ -47,6 +47,8 @@ npm install -g 9router
 npx 9router
 ```
 
+The CLI launcher requires Node.js 18 or newer and keeps its own release version. The application server runs with the exact `bun@1.4.4` dependency, so a separate global Bun installation is not required. Keep lifecycle scripts and optional dependencies enabled when installing: the launcher checks the Bun package version, copies its executable into a content-addressed runtime cache, verifies the copied executable's SHA-256, and checks that it reports Bun `1.4.4` before starting the server.
+
 **Option 2 — Docker (server/VPS):**
 
 ```bash

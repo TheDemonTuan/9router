@@ -4,7 +4,7 @@ const { createHash, randomUUID } = require("node:crypto");
 const { spawnSync } = require("node:child_process");
 const { getRuntimeDir } = require("./runtime");
 
-const VERSION = "1.4.3";
+const VERSION = "1.4.4";
 
 function fileHash(file) {
   if (!fs.lstatSync(file).isFile()) throw new Error(`Not a regular file: ${file}`);

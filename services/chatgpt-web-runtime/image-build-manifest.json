@@ -49,23 +49,23 @@
     }
   },
   "bun": {
-    "version": "1.4.3",
-    "releaseApi": "https://api.github.com/repos/oven-sh/bun/releases/tags/bun-v1.4.3",
-    "revision": "c6da4a4d3010e5553438c60f6bd76d981976867c",
-    "licenseSource": "https://github.com/oven-sh/bun/blob/c6da4a4d3010e5553438c60f6bd76d981976867c/LICENSE.md",
-    "licenseSha256": "056696884250b0d682365260cf1487a6501b1665a343ec60e23a1e647043c572",
+    "version": "1.4.4",
+    "releaseApi": "https://api.github.com/repos/oven-sh/bun/releases/tags/bun-v1.4.4",
+    "revision": "38afee6c84fcf48c0edb2466aa4b27d287a59c30",
+    "licenseSource": "https://github.com/oven-sh/bun/blob/38afee6c84fcf48c0edb2466aa4b27d287a59c30/LICENSE.md",
+    "licenseSha256": "362fe32c954ec829240bd7429c53d705eef08c6bfa45ffc2d02005f857cba4dd",
     "platforms": {
       "amd64": {
-        "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.3/bun-linux-x64-baseline.zip",
-        "sha256": "1fc2edac843102909e3a1be1d8d9802cc6071cf074e67e88231f4ffe0f8b397b",
+        "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-x64-baseline.zip",
+        "sha256": "e0446eb55995772eb9894bebae9a6be368d985a8b9271ee124486f9946eedd76",
         "member": "bun-linux-x64-baseline/bun",
-        "binarySha256": "7ce7d6b654eddeec20afddf2396317fba6dc19ab52788a27e894e1806bf8f24b"
+        "binarySha256": "10702245766b225e70bbf6235fd6b47214fd94b4760d00ffaed8ab0df57ac235"
       },
       "arm64": {
-        "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.3/bun-linux-aarch64.zip",
-        "sha256": "efa9813da5ed72423bf847f916e8d2c47c0d776add972354026a75e10da9aa21",
+        "url": "https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-aarch64.zip",
+        "sha256": "baa6bb36f51d6e58561e02bbea825038a9df454f673d6d776e8bbf86f8c7850e",
         "member": "bun-linux-aarch64/bun",
-        "binarySha256": "029ece746ac9f970c76d8f48bdd1b1d0c52f3636b74d19f546f5e7c1165c0abe"
+        "binarySha256": "354c2b049c716aca07b2e5cddb887928ac58950675d1258bb6312083917793b6"
       }
     }
   },

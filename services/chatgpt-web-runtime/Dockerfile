@@ -23,7 +23,7 @@ COPY services/chatgpt-web-runtime/scripts/build-tunnel-assets.py /build/build-tu
 COPY services/chatgpt-web-runtime/scripts/tunnel-build-lock/ /build/tunnel-build-lock/
 RUN python3 /build/install-image-assets.py --manifest /build/image-build-manifest.json \
     --arch "${TARGETARCH}" --revision "${APP_REVISION}" --output /assets \
-    && test "$(/assets/bin/bun --version)" = '1.4.3'
+    && test "$(/assets/bin/bun --version)" = '1.4.4'
 
 FROM ubuntu AS dependencies
 COPY --from=assets /assets/bin/bun /usr/local/bin/bun

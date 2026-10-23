@@ -5,7 +5,7 @@ import { atomicWriteFile } from "../src/config";
 import { UPSTREAM_REVISION } from "../protocol.js";
 
 if (process.platform !== "linux" || !["x64", "arm64"].includes(process.arch)) throw new Error("Native Linux amd64/arm64 compatibility gate required; Windows/emulation is not a pass");
-if (Bun.version !== "1.4.3") throw new Error("Runtime compatibility gate requires Bun 1.4.3");
+if (Bun.version !== "1.4.4") throw new Error("Runtime compatibility gate requires Bun 1.4.4");
 if (!process.env.CGW_CHROMIUM_EXECUTABLE) throw new Error("Pinned native sandboxed Chromium executable required");
 const output = process.argv[2];
 if (!output || process.argv.length !== 3) throw new Error("Usage: bun scripts/verify-harness-compatibility.ts <private build-evidence-output-json>");
