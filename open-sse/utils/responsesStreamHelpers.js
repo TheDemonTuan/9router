@@ -24,6 +24,22 @@ export function isOpenAIResponsesTerminalEvent(eventName, chunk) {
   return status === "completed" || status === "failed" || status === "incomplete";
 }
 
+const OPENAI_RESPONSES_PROGRESS_EVENTS = new Set([
+  "response.created",
+  "response.output_item.added", "response.output_item.done",
+  "response.content_part.added", "response.content_part.done",
+  "response.reasoning_summary_part.added", "response.reasoning_summary_part.done",
+]);
+const OPENAI_RESPONSES_PROGRESS_DELTA = /^response\.(?:output_text|reasoning_text|reasoning_summary_text|refusal|function_call_arguments|custom_tool_call_input)\.(delta|done)$/;
+
+export function isOpenAIResponsesProgressEvent(eventName, chunk) {
+  if (isOpenAIResponsesTerminalEvent(eventName, chunk)) return true;
+  const type = getOpenAIResponsesEventName(eventName, chunk);
+  if (OPENAI_RESPONSES_PROGRESS_EVENTS.has(type)) return true;
+  const match = OPENAI_RESPONSES_PROGRESS_DELTA.exec(type || "");
+  return !!match && (match[1] === "done" || (typeof chunk?.delta === "string" && chunk.delta.length > 0));
+}
+
 // Parse one complete SSE record. The JSON type is authoritative because Codex
 // also emits data-only Responses frames.
 export function parseOpenAIResponsesSSERecord(record) {
@@ -52,14 +68,14 @@ export function parseOpenAIResponsesSSERecord(record) {
 const sharedEncoder = new TextEncoder();
 
 // Encoded response.failed + [DONE] payload for aborted/stalled Responses passthrough streams.
-export function buildAbortedResponsesTerminalBytes({ model = null, message = "stream closed before response.completed" } = {}) {
-  return sharedEncoder.encode(`${formatIncompleteOpenAIResponsesStreamFailure({ model, message })}data: [DONE]\n\n`);
+export function buildAbortedResponsesTerminalBytes({ model = null, message = "stream closed before response.completed", responseId = null } = {}) {
+  return sharedEncoder.encode(`${formatIncompleteOpenAIResponsesStreamFailure({ model, message, responseId })}data: [DONE]\n\n`);
 }
 
 // Synthesize a response.failed event for streams that close without a terminal event.
 // Accept the former model string signature for external callers.
 export function formatIncompleteOpenAIResponsesStreamFailure(options = {}) {
-  const { model = null, message = "stream closed before response.completed" } = typeof options === "string"
+  const { model = null, message = "stream closed before response.completed", responseId = null } = typeof options === "string"
     ? { model: options }
     : options;
   return formatSSE({
@@ -67,7 +83,7 @@ export function formatIncompleteOpenAIResponsesStreamFailure(options = {}) {
     data: {
       type: "response.failed",
       response: buildResponseSnapshot({
-        responseId: `resp_${Date.now()}`,
+        responseId: responseId || `resp_${Date.now()}`,
         status: "failed",
         model,
         error: {

@@ -172,13 +172,40 @@ describe("BaseExecutor — timeout and abort classification", () => {
       handleError() { errors++; },
       handleDisconnect() {},
       abort() { controller.abort(); },
-    }, null, 20, { heartbeatIntervalMs: 0 });
+    }, null, 20, { heartbeatIntervalMs: 0, progressState: { version: 0, terminal: false }, progressTimeoutMs: 20 });
     const reader = out.getReader();
     expect((await reader.read()).done).toBe(false);
     await new Promise(resolve => setTimeout(resolve, 60));
     expect(errors).toBe(0);
     expect(controller.signal.aborted).toBe(false);
     await reader.cancel();
+  });
+
+  it("cancels a fast source once after downstream backpressure without late errors", async () => {
+    const { pipeWithDisconnect } = await import("../../open-sse/utils/streamHandler.js");
+    const abort = new AbortController();
+    let pulls = 0;
+    let cancels = 0;
+    let errors = 0;
+    const source = new ReadableStream({
+      pull(controller) { pulls++; controller.enqueue(new Uint8Array([1])); },
+      cancel() { cancels++; return new Promise(() => {}); },
+    });
+    const output = pipeWithDisconnect({ body: source }, new TransformStream(), {
+      signal: abort.signal, isConnected: () => true,
+      handleComplete() {}, handleError() { errors++; }, handleDisconnect() {},
+      abort() { abort.abort(); },
+    }, null, 20, { heartbeatIntervalMs: 0, progressState: { version: 0, terminal: false }, progressTimeoutMs: 20 });
+    const reader = output.getReader();
+    await reader.read();
+    await new Promise(resolve => setTimeout(resolve, 40));
+    await reader.cancel();
+    const stoppedAt = pulls;
+    await new Promise(resolve => setTimeout(resolve, 60));
+    expect(cancels).toBe(1);
+    expect(pulls).toBe(stoppedAt);
+    expect(source.locked).toBe(false);
+    expect(errors).toBe(0);
   });
 
   it("Case D: stream stall watchdog after 200 SSE produces terminal failure, not 499", async () => {

@@ -62,9 +62,9 @@ describe("stream controller lifecycle cleanup", () => {
 
 describe("Responses abort terminal synthesis", () => {
   it("keeps model and abort message in the synthetic terminal", () => {
-    const text = new TextDecoder().decode(buildAbortedResponsesTerminalBytes({ model: "gpt-5.5", message: "stream stall timeout" }));
+    const text = new TextDecoder().decode(buildAbortedResponsesTerminalBytes({ model: "gpt-5.5", message: "stream stall timeout", responseId: "resp_smoke" }));
     const payload = JSON.parse(text.match(/data: (\{.+\})/)[1]);
-    expect(payload.response).toMatchObject({ model: "gpt-5.5", error: { message: "stream stall timeout" } });
+    expect(payload.response).toMatchObject({ id: "resp_smoke", model: "gpt-5.5", status: "failed", output: [], error: { type: "stream_error", code: "stream_disconnected", message: "stream stall timeout" } });
   });
 
   it("emits response.failed + [DONE] when upstream errors (abort/stall)", async () => {

@@ -110,8 +110,8 @@ export function createStreamController({ onDisconnect, onError, onComplete, log,
  * Create transform stream with disconnect detection
  * Wraps existing transform stream and adds abort capability.
  *
- * Stall detection lives in pipeWithDisconnect (tied to upstream byte
- * activity), not here — output of the transform stream may be silent
+ * Stall detection lives in pipeWithDisconnect (raw reads, with optional
+ * protocol progress), not here — output of the transform stream may be silent
  * for long periods while raw bytes still flow (e.g. Kiro EventStream
  * binary frames buffering, Claude reasoning streams).
  *
@@ -227,12 +227,14 @@ export function withWireHeartbeat(response, { clientSignal = null, format = "sse
  *
  * A pending raw upstream read is subject to STREAM_STALL_TIMEOUT_MS.
  * Downstream backpressure never starts a stall timer.
+ * Optional semantic progress shares that active-read clock across reads;
+ * byte-only keepalives do not reset it. Transform/backpressure time is excluded.
  *
  * @param {Response} providerResponse - Response from provider
  * @param {TransformStream} transformStream - Transform stream for SSE
  * @param {object} streamController - Stream controller from createStreamController
  */
-export function pipeWithDisconnect(providerResponse, transformStream, streamController, onAbortTerminal = null, stallTimeoutMs = STREAM_STALL_TIMEOUT_MS, { onUpstreamFirstByte = null, onDownstreamFirstByte = null, heartbeatIntervalMs = SSE_HEARTBEAT_INTERVAL_MS } = {}) {
+export function pipeWithDisconnect(providerResponse, transformStream, streamController, onAbortTerminal = null, stallTimeoutMs = STREAM_STALL_TIMEOUT_MS, { onUpstreamFirstByte = null, onDownstreamFirstByte = null, heartbeatIntervalMs = SSE_HEARTBEAT_INTERVAL_MS, progressState = null, progressTimeoutMs = 0 } = {}) {
   let stallTimer = null;
   let chunkCount = 0;
   let totalBytes = 0;
@@ -244,17 +246,48 @@ export function pipeWithDisconnect(providerResponse, transformStream, streamCont
   let reading = false;
   let finished = false;
   const clearStall = () => { clearTimeout(stallTimer); stallTimer = null; };
+  const tracksProgress = progressState !== null && progressTimeoutMs > 0;
+  let progressVersion = progressState?.version;
+  let progressWaitMs = 0;
+  let activeReadAt = 0;
+  let rawReadAt = 0;
+  const syncProgress = (now) => {
+    // Parsing may advance the version while a prefetched raw read is pending.
+    // Give that progress a fresh budget rather than firing a stale deadline.
+    if (tracksProgress && progressVersion !== progressState.version) {
+      progressVersion = progressState.version;
+      progressWaitMs = 0;
+      activeReadAt = now;
+    }
+  };
+  const armReadTimer = () => {
+    const now = performance.now();
+    syncProgress(now);
+    const rawRemaining = stallTimeoutMs - (now - rawReadAt);
+    const progressRemaining = tracksProgress && !progressState.terminal
+      ? progressTimeoutMs - progressWaitMs - (now - activeReadAt) : Infinity;
+    if (rawRemaining > 0 && progressRemaining > 0) {
+      stallTimer = setTimeout(armReadTimer, Math.min(rawRemaining, progressRemaining));
+      return;
+    }
+    stallTimer = null;
+    if (finished) return;
+    abortMessage = rawRemaining <= 0 ? "stream stall timeout" : "upstream Responses stream made no progress";
+    streamController.handleError?.(new Error(abortMessage));
+    cancelRaw(abortMessage);
+    streamController.abort?.();
+  };
   const release = () => { if (!reading) { try { rawReader.releaseLock(); } catch {} } };
   const cleanup = () => {
     if (finished) return;
     finished = true;
     clearStall();
     streamController.signal?.removeEventListener("abort", onAbort);
-    release();
   };
   const cancelRaw = (reason) => {
     if (finished) return;
     cleanup();
+    // Cancel while the reader still owns its lock; never await source cleanup.
     try { Promise.resolve(rawReader.cancel(reason)).catch(() => {}); } catch {}
     release();
   };
@@ -263,8 +296,8 @@ export function pipeWithDisconnect(providerResponse, transformStream, streamCont
     signal: streamController.signal,
     startTime: streamController.startTime,
     isConnected: () => streamController.isConnected(),
-    handleComplete: () => { dbg(tag, `complete | chunks=${chunkCount} | bytes=${totalBytes} | dur=${Date.now() - t0}ms`); cleanup(); streamController.handleComplete(); },
-    handleError: (e) => { dbg(tag, `error: ${e?.message} | chunks=${chunkCount} | bytes=${totalBytes} | dur=${Date.now() - t0}ms`); cleanup(); streamController.handleError(e); },
+    handleComplete: () => { dbg(tag, `complete | chunks=${chunkCount} | bytes=${totalBytes} | dur=${Date.now() - t0}ms`); cancelRaw(); streamController.handleComplete(); },
+    handleError: (e) => { dbg(tag, `error: ${e?.message} | chunks=${chunkCount} | bytes=${totalBytes} | dur=${Date.now() - t0}ms`); cancelRaw(e); streamController.handleError(e); },
     handleDisconnect: (r) => { dbg(tag, `disconnect: ${r} | chunks=${chunkCount} | bytes=${totalBytes} | dur=${Date.now() - t0}ms`); cancelRaw(r); streamController.handleDisconnect(r); },
     abort: () => { cancelRaw(); streamController.abort(); }
   };
@@ -278,22 +311,19 @@ export function pipeWithDisconnect(providerResponse, transformStream, streamCont
     async pull(controller) {
       if (finished) { controller.close(); return; }
       reading = true;
-      stallTimer = setTimeout(() => {
-        stallTimer = null;
-        if (finished) return;
-        abortMessage = "stream stall timeout";
-        dbg(tag, `STALL TIMEOUT ${stallTimeoutMs}ms | chunks=${chunkCount} | bytes=${totalBytes} | sinceLast=${Date.now() - lastChunkAt}ms`);
-        streamController.handleError?.(new Error(abortMessage));
-        streamController.abort?.();
-        cancelRaw(abortMessage);
-      }, stallTimeoutMs);
+      rawReadAt = activeReadAt = performance.now();
+      armReadTimer();
       try {
         const { done, value } = await rawReader.read();
         clearStall();
+        const readSettledAt = performance.now();
+        syncProgress(readSettledAt);
+        if (tracksProgress) progressWaitMs += readSettledAt - activeReadAt;
         if (finished) { controller.close(); return; }
         if (done) {
           dbg(tag, `upstream EOF | chunks=${chunkCount} | bytes=${totalBytes} | dur=${Date.now() - t0}ms`);
           cleanup();
+          release();
           controller.close();
           return;
         }
@@ -309,7 +339,7 @@ export function pipeWithDisconnect(providerResponse, transformStream, streamCont
         }
         controller.enqueue(value);
       } catch (error) {
-        if (!finished) { cleanup(); controller.error(error); }
+        if (!finished) { cancelRaw(error); controller.error(error); }
         else controller.close();
       } finally {
         reading = false;

@@ -3,8 +3,8 @@ import { needsTranslation } from "../../translator/index.js";
 import { createSSETransformStreamWithLogger, createPassthroughStreamWithLogger } from "../../utils/stream.js";
 import { pipeWithDisconnect } from "../../utils/streamHandler.js";
 import { PROVIDERS } from "../../config/providers.js";
-import { HTTP_STATUS, STREAM_STALL_TIMEOUT_MS } from "../../config/runtimeConfig.js";
-import { buildAbortedResponsesTerminalBytes, isOpenAIResponsesTerminalEvent, parseOpenAIResponsesSSERecord, formatIncompleteOpenAIResponsesStreamFailure } from "../../utils/responsesStreamHelpers.js";
+import { HTTP_STATUS, STREAM_STALL_TIMEOUT_MS, CODEX_STREAM_PROGRESS_TIMEOUT_MS } from "../../config/runtimeConfig.js";
+import { buildAbortedResponsesTerminalBytes, isOpenAIResponsesTerminalEvent, isOpenAIResponsesProgressEvent, parseOpenAIResponsesSSERecord } from "../../utils/responsesStreamHelpers.js";
 import { ResponsesAccumulator } from "../../transformer/responsesAccumulator.js";
 import { buildStreamErrorBytes } from "../../utils/streamHelpers.js";
 import { buildRequestDetail, extractRequestConfig, saveUsageStats, formatDoneLine } from "./requestDetail.js";
@@ -48,6 +48,16 @@ const CODEX_SOURCE_TO_TARGET = {
 export function buildTransformStream({ provider, sourceFormat, targetFormat, responsesClientDialect = "standard-openai", responsesProviderDialect = "standard-openai", userAgent, reqLogger, toolNameMap, customToolNames, model, connectionId, body, onStreamComplete, apiKey, credentials, responseSchemaValidation, releasePending, toolArgumentValidation = null, signal = null }) {
   const isResponsesStream = sourceFormat === FORMATS.OPENAI_RESPONSES && targetFormat === FORMATS.OPENAI_RESPONSES;
   const isNativeResponsesStream = isResponsesStream && responsesClientDialect === responsesProviderDialect;
+  const progressState = { version: 0, terminal: false };
+  let createdSeen = false;
+  const observeProgress = (parsed) => {
+    if (parsed.type === "response.created") {
+      if (createdSeen) return;
+      createdSeen = true;
+    }
+    if (isOpenAIResponsesProgressEvent(parsed.type, parsed.data)) progressState.version++;
+    if (isOpenAIResponsesTerminalEvent(parsed.type, parsed.data)) progressState.terminal = true;
+  };
 
   // Cross-dialect Responses streams retain all non-terminal records verbatim;
   // only an empty completed terminal is enriched from prior protocol events.
@@ -59,6 +69,14 @@ export function buildTransformStream({ provider, sourceFormat, targetFormat, res
     let finalized = false;
     let ttftAt = null;
     let content = "";
+    let responseId = null;
+    const abortTerminal = (message) => {
+      if (finalized) return new Uint8Array();
+      finalized = true;
+      progressState.terminal = true;
+      onStreamComplete?.({ content, thinking: "" }, accumulator.snapshot().usage, ttftAt, { status: "failed", successful: false });
+      return buildAbortedResponsesTerminalBytes({ model, message, responseId });
+    };
     const finish = () => {
       if (finalized) return;
       finalized = true;
@@ -73,6 +91,8 @@ export function buildTransformStream({ provider, sourceFormat, targetFormat, res
         controller.enqueue(encoder.encode(`${record}\n\n`));
         return;
       }
+      if (parsed.data.response?.id) responseId = parsed.data.response.id;
+      observeProgress(parsed);
       const isTextDelta = (parsed?.type === "response.output_text.delta" || parsed?.data?.type === "response.output_text.delta")
         && typeof parsed?.data?.delta === "string";
       if (isTextDelta) {
@@ -86,22 +106,30 @@ export function buildTransformStream({ provider, sourceFormat, targetFormat, res
         const eventPrefix = parsed.eventName ? `event: ${parsed.eventName}\n` : "";
         controller.enqueue(encoder.encode(`${eventPrefix}data: ${JSON.stringify(enriched)}\n\n`));
       }
-      if (isOpenAIResponsesTerminalEvent(parsed.type, enriched)) finish();
+      if (isOpenAIResponsesTerminalEvent(parsed.type, enriched)) {
+        finish();
+        controller.terminate();
+      }
     };
-    return new TransformStream({
+    const transform = new TransformStream({
       transform(chunk, controller) {
         buffer += decoder.decode(chunk, { stream: true });
         const records = buffer.split(/\r?\n\r?\n|\r\r/);
         buffer = records.pop() || "";
-        for (const record of records) writeRecord(record, controller);
+        for (const record of records) {
+          writeRecord(record, controller);
+          if (finalized) break;
+        }
       },
       flush(controller) {
         buffer += decoder.decode();
         if (buffer.trim()) writeRecord(buffer, controller);
-        if (!accumulator.state.terminal) controller.enqueue(encoder.encode(formatIncompleteOpenAIResponsesStreamFailure({ model })));
-        finish();
+        if (!finalized) controller.enqueue(abortTerminal());
       },
     });
+    transform.abortTerminal = abortTerminal;
+    transform.progressState = progressState;
+    return transform;
   }
 
   // Native Responses streams are protocol data, not Chat SSE. Preserve every
@@ -113,10 +141,20 @@ export function buildTransformStream({ provider, sourceFormat, targetFormat, res
     let usage = null;
     let content = "";
     let ttftAt = null;
+    let responseId = null;
+    const abortTerminal = (message) => {
+      if (finalized) return new Uint8Array();
+      terminal = true;
+      progressState.terminal = true;
+      finish("failed", false);
+      return buildAbortedResponsesTerminalBytes({ model, message, responseId });
+    };
     const decoder = new TextDecoder();
     const observe = (record) => {
       const parsed = parseOpenAIResponsesSSERecord(record);
       if (!parsed?.data) return;
+      if (parsed.data.response?.id) responseId = parsed.data.response.id;
+      observeProgress(parsed);
       const isTextDelta = (parsed.type === "response.output_text.delta" || parsed.data.type === "response.output_text.delta")
         && typeof parsed.data.delta === "string";
       if (isTextDelta) {
@@ -127,7 +165,7 @@ export function buildTransformStream({ provider, sourceFormat, targetFormat, res
       if (extracted) usage = mergeUsage(usage, extracted);
       if (isOpenAIResponsesTerminalEvent(parsed.type, parsed.data)) {
         terminal = true;
-        const status = parsed.data.response?.status || (parsed.type === "response.completed" ? "completed" : "failed");
+        const status = parsed.data.response?.status || (["response.completed", "response.done"].includes(parsed.type) ? "completed" : "failed");
         finish(status, status === "completed");
       }
     };
@@ -136,23 +174,26 @@ export function buildTransformStream({ provider, sourceFormat, targetFormat, res
       finalized = true;
       onStreamComplete?.({ content, thinking: "" }, usage, ttftAt, { status, successful });
     };
-    return new TransformStream({
+    const transform = new TransformStream({
       transform(chunk, controller) {
         controller.enqueue(chunk);
         buffer += decoder.decode(chunk, { stream: true });
         const records = buffer.split(/\r?\n\r?\n|\r\r/);
         buffer = records.pop() || "";
-        for (const record of records) observe(record);
+        for (const record of records) {
+          observe(record);
+          if (terminal) { controller.terminate(); break; }
+        }
       },
       flush(controller) {
         buffer += decoder.decode();
         if (buffer.trim()) observe(buffer);
-        if (!terminal) {
-          controller.enqueue(new TextEncoder().encode(formatIncompleteOpenAIResponsesStreamFailure({ model })));
-          finish("failed", false);
-        }
+        if (!terminal) controller.enqueue(abortTerminal());
       }
     });
+    transform.abortTerminal = abortTerminal;
+    transform.progressState = progressState;
+    return transform;
   }
 
   // Responses-API providers (e.g. codex) emit Responses SSE → translate into client format.
@@ -177,7 +218,7 @@ export function buildTransformStream({ provider, sourceFormat, targetFormat, res
 export async function handleStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, responsesClientDialect = "standard-openai", responsesProviderDialect = "standard-openai", userAgent, body, stream, translatedBody, finalBody, responseSchemaValidation, toolArgumentValidation = null, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, pxpipe, reqTag, log, credentials, releasePending, upstreamHeadersAt = null, preResponse = null, routeContext = null, timingContext = null }) {
   const isResponsesPassthrough = sourceFormat === FORMATS.OPENAI_RESPONSES && targetFormat === FORMATS.OPENAI_RESPONSES && responsesClientDialect === responsesProviderDialect;
   const directClaudeResponses = sourceFormat === FORMATS.OPENAI_RESPONSES && targetFormat === FORMATS.CLAUDE;
-  const terminalDriven = isResponsesPassthrough || directClaudeResponses;
+  const terminalDriven = (sourceFormat === FORMATS.OPENAI_RESPONSES && targetFormat === FORMATS.OPENAI_RESPONSES) || directClaudeResponses;
   let lifecycleFinalized = false;
   const hdrAt = Number.isFinite(upstreamHeadersAt) ? upstreamHeadersAt : null;
   let ubyteAt = null;
@@ -259,7 +300,9 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
     streamController,
     onAbortTerminal,
     stallTimeoutMs,
-    { onUpstreamFirstByte, onDownstreamFirstByte }
+    { onUpstreamFirstByte, onDownstreamFirstByte,
+      progressState: provider === "codex" ? transformStream.progressState : null,
+      progressTimeoutMs: provider === "codex" ? CODEX_STREAM_PROGRESS_TIMEOUT_MS : 0 },
   );
 
   saveRequestDetail(buildRequestDetail({
