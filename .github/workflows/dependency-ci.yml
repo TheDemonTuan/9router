@@ -1,0 +1,51 @@
+name: Dependency image verification
+
+on:
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-image-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    name: Dependency image smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build actual production image without publishing
+        run: docker build -t 9router:dependency-ci .
+      - name: Exercise health and API authentication in the built image
+        shell: bash
+        run: |
+          set -euo pipefail
+          cid="$(docker run -d -e DATA_DIR=/tmp/9router-dependency-ci -e DEPLOY_SLOT=blue 9router:dependency-ci)"
+          trap 'docker logs "$cid"; docker rm -f "$cid"' EXIT
+          ready=false
+          for attempt in {1..60}; do
+            if docker exec "$cid" bun -e 'const r = await fetch("http://127.0.0.1:20128/api/health"); if (r.status !== 200 || (await r.json()).ok !== true) process.exit(1);' 2>/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          [[ "$ready" == true ]]
+          docker exec "$cid" bun -e '
+            const assert = require("node:assert/strict");
+            const health = await fetch("http://127.0.0.1:20128/api/health");
+            assert.equal(health.headers.get("cache-control"), "no-store");
+            assert.equal((await health.json()).deployment_slot, "blue");
+            const response = await fetch("http://127.0.0.1:20128/v1/chat/completions", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ model: "synthetic/test", messages: [{ role: "user", content: "ci" }] })
+            });
+            assert.equal(response.status, 401);
+            assert.equal((await response.json()).error.message, "Missing API key");
+          '
