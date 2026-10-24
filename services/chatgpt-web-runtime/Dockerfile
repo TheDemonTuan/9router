@@ -1,6 +1,6 @@
 # Native-only Ubuntu 24.04/glibc runtime. Docker browser-init provisions Chrome into a volume, never this image.
 # Build from the app root with --build-arg APP_REVISION=<40-hex SHA>.
-FROM ubuntu:noble@sha256:a853f94d226358a79c740cfc7bce0c289748f3fe3488d921d038ccd752c61b60 AS ubuntu
+FROM ubuntu:noble@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac AS ubuntu
 ARG TARGETARCH
 COPY services/chatgpt-web-runtime/scripts/install-ubuntu-packages.sh /build/install-ubuntu-packages.sh
 ADD --checksum=sha256:6bac2a01979e210d9eac1d4d56747ec709ea60654744d66705dc3c36e7629e50 \
