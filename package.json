@@ -51,7 +51,7 @@
     "recharts": "^3.10.1",
     "selfsigned": "^5.5.0",
     "socks-proxy-agent": "^8.0.5",
-    "undici": "^7.30.0",
+    "undici": "^7.30.1",
     "ws": "8.22.0",
     "zustand": "^5.0.15"
   },
