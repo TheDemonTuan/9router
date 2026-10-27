@@ -113,19 +113,6 @@ describe("request details — tab crash-risk cases", () => {
   });
 });
 
-// Mirror of RequestDetailsTab token helpers (component is "use client",
-// helpers are not exported). Keep in sync with the component.
-function getCachedTokens(tokens) {
-  return tokens?.cached_tokens || tokens?.cache_read_input_tokens || 0;
-}
-function getCacheCreationTokens(tokens) {
-  return tokens?.cache_creation_input_tokens || 0;
-}
-function getInputTokens(tokens) {
-  const prompt = tokens?.prompt_tokens || tokens?.input_tokens || 0;
-  const cache = getCachedTokens(tokens);
-  return prompt < cache ? cache : prompt;
-}
 
 describe("backupDbLite — excludes requestDetails, keeps critical data", () => {
   it("backup file omits requestDetails rows but keeps other tables", async () => {
@@ -173,37 +160,6 @@ describe("getDistinctProviders — providers route (no full-row parse)", () => {
   });
 });
 
-describe("token helpers — render-time crash safety", () => {
-  it("undefined/null tokens → 0, no throw", () => {
-    expect(getInputTokens(undefined)).toBe(0);
-    expect(getInputTokens(null)).toBe(0);
-    expect(getCachedTokens(undefined)).toBe(0);
-    expect(getCacheCreationTokens(null)).toBe(0);
-  });
-
-  it("empty object → 0 across all helpers", () => {
-    expect(getInputTokens({})).toBe(0);
-    expect(getCachedTokens({})).toBe(0);
-    expect(getCacheCreationTokens({})).toBe(0);
-  });
-
-  it("prompt_tokens preferred, falls back to input_tokens", () => {
-    expect(getInputTokens({ prompt_tokens: 100 })).toBe(100);
-    expect(getInputTokens({ input_tokens: 50 })).toBe(50);
-  });
-
-  it("legacy Claude row (prompt < cache) → returns cache", () => {
-    expect(getInputTokens({ prompt_tokens: 10, cached_tokens: 200 })).toBe(200);
-  });
-
-  it("cached via cache_read_input_tokens alias", () => {
-    expect(getCachedTokens({ cache_read_input_tokens: 42 })).toBe(42);
-  });
-
-  it("toLocaleString on helper result never throws", () => {
-    expect(() => getInputTokens(undefined).toLocaleString()).not.toThrow();
-  });
-});
 
 describe("API route contract — validation boundary", () => {
   let GET;

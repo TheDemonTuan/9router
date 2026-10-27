@@ -2,7 +2,6 @@
 ARG BUN_IMAGE=oven/bun:1.4.4-alpine@sha256:4cf82f5686b196504fe119db3fcd9185b191f82ece82c40680e597228ec6070a
 FROM ${BUN_IMAGE} AS base
 WORKDIR /app
-ENV NEXT_PUBLIC_CHATGPT_WEB_ENABLED=false
 FROM base AS builder
 COPY package.json bun.lock ./
 RUN --mount=type=cache,target=/root/.bun/install/cache \
@@ -33,7 +32,7 @@ RUN mkdir -p /app/data /app/data-home /home/bun && \
 COPY scripts/docker-entrypoint.sh /entrypoint.sh
 # Explicit --user root retains ownership repair for existing mounted volumes.
 RUN apk upgrade --no-cache && \
-  apk add --no-cache su-exec && \
+  apk add --no-cache su-exec ffmpeg && \
   chmod +x /entrypoint.sh
 USER bun
 

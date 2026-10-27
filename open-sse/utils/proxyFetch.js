@@ -209,12 +209,12 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
         throw new Error(`[ProxyFetch] Proxy required but failed (strictProxy=true): ${proxyError.message}`);
       }
       console.warn(`[ProxyFetch] Proxy failed, falling back to direct: ${proxyError.message}`);
-      return originalFetch(url, { ...options, proxy: false });
+      return options.directFetch ? options.directFetch(url, options) : originalFetch(url, { ...options, proxy: false });
     }
   }
 
 
-  return originalFetch(url, { ...options, proxy: false });
+  return options.directFetch ? options.directFetch(url, options) : originalFetch(url, { ...options, proxy: false });
 }
 
 /**

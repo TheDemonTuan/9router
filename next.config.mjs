@@ -20,8 +20,8 @@ const nextConfig = {
   // letter). That throw happens at module scope, so every consumer of `open` dies on
   // import — including xAI/Grok token refresh, which loads the OAuth service that imports
   // it. Keeping it external preserves the real `import.meta.url` at runtime.
-  // AWS profile/SSO credentials resolve plugins dynamically and read local credential caches.
-  serverExternalPackages: ["open", "selfsigned", "ajv", "@aws-sdk/credential-providers"],
+  // AWS credentials and native TLS bindings resolve files relative to their packages.
+  serverExternalPackages: ["open", "selfsigned", "ajv", "@aws-sdk/credential-providers", "wreq-js"],
   turbopack: {
     root: tracingRoot
   },
@@ -33,6 +33,9 @@ const nextConfig = {
     "./node_modules/ajv/**/*", "./node_modules/fast-deep-equal/**/*",
     "./node_modules/fast-uri/**/*", "./node_modules/json-schema-traverse/**/*",
     "./node_modules/require-from-string/**/*",
+    // Optional web transports load these packages dynamically; retain their native bindings.
+    "./node_modules/playwright-core/**/*", "./node_modules/wreq-js/**/*",
+    "./node_modules/@wreq-js/binding-*/**/*",
   ] },
   outputFileTracingExcludes: {
     "*": [

@@ -7,7 +7,7 @@ import ProviderIcon from "./ProviderIcon";
 import CapacityBadges from "./CapacityBadges";
 import { useModelCaps } from "@/shared/hooks/useModelCaps";
 import { getModelsByProviderId, getModelKind } from "@/shared/constants/models";
-import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, LOCAL_BRIDGE_PROVIDERS, AI_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, getProviderAlias } from "@/shared/constants/providers";
+import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, WEB_COOKIE_PROVIDERS, AI_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, getProviderAlias } from "@/shared/constants/providers";
 import { ANTIGRAVITY_MODEL_CACHE_TTL_MS } from "open-sse/config/antigravityModels.js";
 import { mergeAntigravityModelLists } from "@/lib/providerNormalization";
 import { parseSearchQuery, matchesSearch } from "@/shared/utils/modelSearchFilter";
@@ -18,7 +18,7 @@ const PROVIDER_ORDER = [
   ...Object.keys(OAUTH_PROVIDERS),
   ...Object.keys(FREE_PROVIDERS),
   ...Object.keys(FREE_TIER_PROVIDERS),
-  ...Object.keys(LOCAL_BRIDGE_PROVIDERS),
+  ...Object.keys(WEB_COOKIE_PROVIDERS),
   ...Object.keys(APIKEY_PROVIDERS),
 ];
 
@@ -27,7 +27,7 @@ const NO_AUTH_PROVIDER_IDS = Object.keys(FREE_PROVIDERS).filter(id => FREE_PROVI
 
 // Providers with per-account live catalogs via /api/providers/[id]/models.
 // Static registry stays as fallback when live fetch fails or is empty.
-const LIVE_CATALOG_PROVIDERS = ["codex", "cursor", "cline", "clinepass", "alitp-intl", "chatgpt-web", "zed", "antigravity"];
+const LIVE_CATALOG_PROVIDERS = ["codex", "cursor", "cline", "clinepass", "alitp-intl", "zed", "antigravity"];
 
 // Fetch a provider's account-scoped catalog for every active connection and merge
 // the results. Entries collapse by model id on purpose: two connections of the
@@ -297,7 +297,6 @@ export default function ModelSelectModal({
   const clineConnectionIds = liveConnectionIdsByProvider.cline;
   const clinepassConnectionIds = liveConnectionIdsByProvider.clinepass;
   const alitpConnectionIds = liveConnectionIdsByProvider["alitp-intl"];
-  const chatgptWebConnectionIds = liveConnectionIdsByProvider["chatgpt-web"];
   const zedConnectionIds = liveConnectionIdsByProvider.zed;
   const antigravityConnectionIds = liveConnectionIdsByProvider.antigravity;
 
@@ -306,7 +305,6 @@ export default function ModelSelectModal({
   const { models: clineModels } = useLiveProviderModels(isOpen, clineConnectionIds, "Cline");
   const { models: clinepassModels } = useLiveProviderModels(isOpen, clinepassConnectionIds, "ClinePass");
   const { models: alitpModels } = useLiveProviderModels(isOpen, alitpConnectionIds, "Alibaba Token Plan");
-  const { models: chatgptWebModels } = useLiveProviderModels(isOpen, chatgptWebConnectionIds, "ChatGPT Web");
   const { models: zedModels } = useLiveProviderModels(isOpen, zedConnectionIds, "Zed");
   const {
     models: antigravityModels,
@@ -386,7 +384,7 @@ export default function ModelSelectModal({
     if (isOpen) fetchDisabledModels();
   }, [isOpen]);
 
-  const allProviders = useMemo(() => ({ ...OAUTH_PROVIDERS, ...FREE_PROVIDERS, ...FREE_TIER_PROVIDERS, ...LOCAL_BRIDGE_PROVIDERS, ...APIKEY_PROVIDERS }), []);
+  const allProviders = useMemo(() => ({ ...OAUTH_PROVIDERS, ...FREE_PROVIDERS, ...FREE_TIER_PROVIDERS, ...WEB_COOKIE_PROVIDERS, ...APIKEY_PROVIDERS }), []);
 
   // Group models by provider with priority order
   const groupedModels = useMemo(() => {
@@ -395,7 +393,7 @@ export default function ModelSelectModal({
     // Kinds where the provider IS the model (no per-model selection needed)
     const PROVIDER_AS_MODEL_KINDS = new Set(["webSearch", "webFetch"]);
     // Kinds that map directly to model.type field
-    const TYPED_KINDS = new Set(["image", "tts", "stt", "embedding", "imageToText"]);
+    const TYPED_KINDS = new Set(["image", "tts", "stt", "embedding", "imageToText", "systemone"]);
     // For these kinds, providers without hardcoded models can still be picked (provider-as-model fallback)
     const ALLOW_PROVIDER_FALLBACK_KINDS = new Set(["tts", "image", "webFetch"]);
 
@@ -576,7 +574,6 @@ export default function ModelSelectModal({
           : providerId === "cline" ? clineModels
           : providerId === "clinepass" ? clinepassModels
           : providerId === "alitp-intl" ? alitpModels
-          : providerId === "chatgpt-web" ? chatgptWebModels
           : providerId === "zed" ? zedModels
           : providerId === "antigravity" ? antigravityModels
           : [];
@@ -591,8 +588,6 @@ export default function ModelSelectModal({
               ? antigravityModels
               : getModelsByProviderId("antigravity").filter((m) => m.kind !== "image");
           }
-        } else if (providerId === "chatgpt-web") {
-          hardcodedModels = liveModels;
         } else if (liveModels.length > 0) {
           hardcodedModels = liveModels;
         } else {
@@ -605,7 +600,6 @@ export default function ModelSelectModal({
         const hasHardcoded = hardcodedModels.length > 0;
         const customAliasModels = Object.entries(modelAliases)
           .filter(([aliasName, fullModel]) =>
-            providerId !== "chatgpt-web" &&
             fullModel.startsWith(`${alias}/`) &&
             (hasHardcoded ? aliasName === fullModel.replace(`${alias}/`, "") : true) &&
             !hardcodedIds.has(fullModel.replace(`${alias}/`, ""))
@@ -618,7 +612,7 @@ export default function ModelSelectModal({
         // Custom models registered via /api/models/custom (provider "Add Model" button)
         const customAliasIds = new Set(customAliasModels.map((m) => m.id));
         const customRegisteredModels = customModels
-          .filter((m) => providerId !== "chatgpt-web" && m.providerAlias === alias && !hardcodedIds.has(m.id) && !customAliasIds.has(m.id))
+          .filter((m) => m.providerAlias === alias && !hardcodedIds.has(m.id) && !customAliasIds.has(m.id))
           .map((m) => ({ id: m.id, name: m.name || m.id, value: `${alias}/${m.id}`, isCustom: true }));
 
         const merged = [
@@ -695,7 +689,7 @@ export default function ModelSelectModal({
     });
 
     return groups;
-  }, [filteredActiveProviders, modelAliases, allProviders, providerNodes, customModels, disabledModels, kindFilter, effectiveConnections, deactivatedProviderIds, codexModels, cursorModels, clineModels, clinepassModels, alitpModels, chatgptWebModels, zedModels, antigravityModels, antigravityResolved, antigravityLoading]);
+  }, [filteredActiveProviders, modelAliases, allProviders, providerNodes, customModels, disabledModels, kindFilter, effectiveConnections, deactivatedProviderIds, codexModels, cursorModels, clineModels, clinepassModels, alitpModels, zedModels, antigravityModels, antigravityResolved, antigravityLoading]);
 
   const parsedQuery = useMemo(() => parseSearchQuery(searchQuery), [searchQuery]);
 

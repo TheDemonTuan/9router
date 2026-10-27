@@ -156,8 +156,8 @@ describe("chat (/v1/chat/completions, /v1/messages, /v1/responses all use handle
     expect(res.status).toBe(403);
     expect(mocks.handleChatCore).not.toHaveBeenCalled();
   });
-  it("CGW targets remain restricted before any bridge credential selection", async () => {
-    const response = await chat("cgw/browser-model", "sk-b");
+  it("web-cookie targets remain restricted before credential selection", async () => {
+    const response = await chat("chatgpt-web/browser-model", "sk-b");
     expect(response.status).toBe(403);
     expect(mocks.getProviderCredentials).not.toHaveBeenCalled();
     expect(mocks.handleChatCore).not.toHaveBeenCalled();

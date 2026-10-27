@@ -47,6 +47,28 @@ export function resolveDefaultProfileArn(authMethod) {
 export const KIRO_THINKING_BUDGET_DEFAULT = 16000;
 
 /**
+ * Anthropic date-suffixed snapshot id, e.g. `claude-sonnet-4-5-20250929`.
+ * Kiro's data plane only accepts the dotted alias (`claude-sonnet-4.5`).
+ */
+const ANTHROPIC_SNAPSHOT_SUFFIX = /-\d{8}$/;
+
+/** Normalize equivalent Anthropic aliases without selecting another model version. */
+export function normalizeKiroUpstreamModelId(model) {
+  if (typeof model !== "string" || model === "") return model;
+
+  const id = model.toLowerCase();
+  const anthropic = id.replace(ANTHROPIC_SNAPSHOT_SUFFIX, "")
+    .match(/^claude-(sonnet|opus|haiku|fable)-(\d+)(?:[.-](\d+))?$/);
+  if (anthropic) {
+    const [, family, major, minor] = anthropic;
+    return `claude-${family}-${major}${minor ? `.${minor}` : ""}`;
+  }
+  // The static catalog uses MiniMax casing; this is an equivalent wire alias.
+  if (/^minimax-m2\.(?:1|5)$/.test(id)) return id;
+  return model;
+}
+
+/**
  * Resolve a Kiro model after consuming the generic model(level) suffix.
  * The suffix is a 9router request override, not part of Kiro's upstream model id.
  */
@@ -356,7 +378,7 @@ export function resolveKiroModel(model) {
     thinking = true;
     upstream = stripThinkingSuffix(upstream);
   }
-  return { upstream, agentic, thinking };
+  return { upstream: normalizeKiroUpstreamModelId(upstream), agentic, thinking };
 }
 
 /**

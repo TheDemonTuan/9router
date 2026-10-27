@@ -231,6 +231,27 @@ describe("dashboard guard local-only access", () => {
     mocks.verifyDashboardAuthToken.mockResolvedValue(false);
   });
 
+  it("rejects remote browser-login spawning even with a dashboard session", async () => {
+    mocks.verifyDashboardAuthToken.mockResolvedValue(true);
+    const req = request("/api/providers/web-login", { host: "router.example.com" });
+    req.cookies.get.mockReturnValue({ value: "signed-test-session" });
+
+    const response = await proxy(req);
+
+    expect(response.status).toBe(403);
+  });
+
+  it("allows browser login from the authenticated loopback dashboard", async () => {
+    mocks.verifyDashboardAuthToken.mockResolvedValue(true);
+    const req = localRequest("/api/providers/web-login", {
+      host: "localhost:20128",
+      origin: "http://localhost:20128",
+    });
+    req.cookies.get.mockReturnValue({ value: "signed-test-session" });
+
+    expect(await proxy(req)).toBe(mocks.nextResponse);
+  });
+
   it("rejects local-only route from non-loopback host without CLI token", async () => {
     const response = await proxy(request("/api/mcp/filesystem/sse", {
       host: "router.example.com",
@@ -387,39 +408,5 @@ describe("dashboard guard helpers", () => {
     });
 
     expect(__test__.extractApiKey(apiRequest)).toBe("header-key");
-  });
-});
-
-describe.each(["profiles", "harness/status", "harness/configure", "harness/start", "harness/verify", "harness/activate", "harness/disconnect"])("ChatGPT Web runtime dashboard-only administration: %s", action => {
-  const path = `/api/providers/chatgpt-web/runtime/${action}`;
-  beforeEach(() => {
-    vi.clearAllMocks();
-    delete process.env.API_HOST;
-    mocks.getSettings.mockResolvedValue({ requireLogin: false });
-    mocks.validateApiKey.mockResolvedValue(true);
-    mocks.getConsistentMachineId.mockResolvedValue("cli-token");
-    mocks.verifyDashboardAuthToken.mockResolvedValue(false);
-    mocks.verifyCloudflareAccessJwt.mockResolvedValue(false);
-  });
-  it.each([{}, { authorization: "Bearer valid-api-key" }, { "x-9r-cli-token": "cli-token" }])("rejects non-dashboard credentials even with login disabled: %j", async (headers) => {
-    expect((await proxy(localRequest(path, { host: "localhost:20127", ...headers }))).status).toBe(401);
-  });
-  it("accepts only a verified dashboard session or Access JWT", async () => {
-    const authorized = request(path, { host: "admin.example.com" });
-    authorized.cookies.get.mockImplementation(name => name === "auth_token" ? { value: "session" } : undefined);
-    mocks.verifyDashboardAuthToken.mockResolvedValue(true);
-    expect(await proxy(authorized)).toBe(mocks.nextResponse);
-    mocks.verifyDashboardAuthToken.mockResolvedValue(false);
-    mocks.verifyCloudflareAccessJwt.mockResolvedValue(true);
-    expect(await proxy(request(path, { "cf-access-jwt-assertion": "access-jwt" }))).toBe(mocks.nextResponse);
-  });
-  it("does not trust an unverified Access JWT or an API key combined with that header", async () => {
-    expect((await proxy(request(path, { authorization: "Bearer valid-api-key", "cf-access-jwt-assertion": "unverified-jwt" }))).status).toBe(401);
-    expect(mocks.verifyCloudflareAccessJwt).toHaveBeenCalledWith("unverified-jwt");
-  });
-  it("excludes the public API domain even with valid dashboard authentication", async () => {
-    process.env.API_HOST = "api.example.com";
-    mocks.verifyCloudflareAccessJwt.mockResolvedValue(true);
-    expect((await proxy(request(path, { host: "api.example.com", "cf-access-jwt-assertion": "jwt" }))).status).toBe(404);
   });
 });

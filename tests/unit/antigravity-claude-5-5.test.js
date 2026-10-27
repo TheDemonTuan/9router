@@ -45,6 +45,17 @@ describe("Antigravity Claude 5.5 models (#4555, #4548)", () => {
     expect(stripThinkingSuffix(upstreamHigh)).toBe("claude-sonnet-5-5-high");
   });
 
+  it("selects a requested tier without overriding explicit tiered model IDs", () => {
+    expect(getModelUpstreamId("ag", "claude-sonnet-5-5", { reasoning_effort: "medium" }))
+      .toBe("claude-sonnet-5-5-medium(medium)");
+    expect(getModelUpstreamId("ag", "claude-sonnet-5-5-high", { reasoning_effort: "low" }))
+      .toBe("claude-sonnet-5-5-high(high)");
+    expect(getModelUpstreamId("ag", "claude-sonnet-5-5(low)", { reasoning_effort: "high" }))
+      .toBe("claude-sonnet-5-5-low(low)");
+    expect(getModelUpstreamId("cx", "gpt-6-sol", { reasoning_effort: "low" }))
+      .toBe("gpt-6-sol");
+  });
+
   it("resolves capabilities for Claude 5.5 models", () => {
     for (const id of ["claude-sonnet-5-5", "claude-opus-5-5"]) {
       const caps = getCapabilitiesForModel("ag", id);

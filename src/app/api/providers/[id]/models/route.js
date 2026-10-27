@@ -15,11 +15,7 @@ import { resolveZedModels } from "open-sse/shared/zedAuth.js";
 import { resolveClineModels, resolveClinepassModels } from "open-sse/services/clinepassModels.js";
 import { resolveAntigravityModels } from "open-sse/services/antigravityModels.js";
 import { resolveEffectiveProviderModels } from "open-sse/services/alibabaTokenPlanModels.js";
-import {
-  getChatGptWebCatalog,
-} from "open-sse/services/chatgptWebRuntimeClient.js";
 import { resolveCodexModels } from "open-sse/services/codexModels.js";
-import { mergeChatGptWebPublicModels } from "@/lib/providerNormalization";
 import { NOUS_MODELS_URL, normalizeNousModels } from "open-sse/services/nous.js";
 
 const GEMINI_CLI_MODELS_URL = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
@@ -649,30 +645,6 @@ export async function GET(request, { params }) {
 
     if (!connection) {
       return NextResponse.json({ error: "Connection not found" }, { status: 404 });
-    }
-
-    if (connection.provider === "chatgpt-web") {
-      try {
-        const catalog = await getChatGptWebCatalog(connection, {
-          force: new URL(request.url).searchParams.get("refresh") === "true",
-        });
-        return NextResponse.json({
-          provider: connection.provider,
-          connectionId: connection.id,
-          // A retained catalog is diagnostic evidence only; stale rows must never be advertised.
-          models: mergeChatGptWebPublicModels([catalog]),
-          stale: catalog.stale,
-          profileId: catalog.profileId,
-          profileEpoch: catalog.profileEpoch,
-          revision: catalog.revision,
-          checkedAt: catalog.checkedAt,
-        });
-      } catch (error) {
-        if (isAbortError(error) || request?.signal?.aborted) {
-          return NextResponse.json({ error: "Request cancelled", code: "request_cancelled" }, { status: 499 });
-        }
-        return NextResponse.json({ error: error.message, models: [], stale: false }, { status: 503 });
-      }
     }
 
     if (isOpenAICompatibleProvider(connection.provider)) {

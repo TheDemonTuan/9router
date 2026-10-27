@@ -4,6 +4,25 @@ import { PROVIDER_MEDIA } from "../providers/index.js";
 import { getModelUpstreamId } from "../config/providerModels.js";
 import { generateSessionId } from "../executors/opencode-zen.js";
 
+const OPENCODE_PROVIDERS = new Set(["opencode", "opencode-zen"]);
+
+/**
+ * Resolve the System One URL. A saved host override is joined with the registry
+ * `path` (e.g. "/v1/systemone") without doubling a "/v1" or "/v1/systemone" the
+ * user already included. Without `path`, the override is used as a full URL.
+ */
+export function buildSystemoneUrl(override, cfg) {
+  const base = override?.trim();
+  if (!base) return cfg?.baseUrl;
+  if (!cfg?.path) return base;
+  const host = base.replace(/\/+$/, "");
+  const path = cfg.path.replace(/\/+$/, "");
+  if (host.endsWith(path)) return host;
+  const prefix = path.slice(0, path.lastIndexOf("/"));
+  if (prefix && host.endsWith(prefix)) return host + path.slice(prefix.length);
+  return host + path;
+}
+
 /**
  * Core System One (Jev) handler — native decision payload pass-through.
  * URL/headers come from the registry's systemoneConfig; body and JSON response
@@ -17,10 +36,11 @@ export async function handleSystemoneCore({
   credentials,
   log,
   onRequestSuccess,
+  signal = null,
 }) {
   const { provider, model } = modelInfo;
   const cfg = PROVIDER_MEDIA[provider]?.systemoneConfig;
-  let targetUrl = credentials?.providerSpecificData?.baseUrl || cfg?.baseUrl;
+  let targetUrl = buildSystemoneUrl(credentials?.providerSpecificData?.baseUrl, cfg);
   if (!targetUrl) {
     return createErrorResult(
       HTTP_STATUS.BAD_REQUEST,
@@ -56,25 +76,27 @@ export async function handleSystemoneCore({
     "Content-Type": "application/json",
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
     ...(cfg.headers || {}),
-    // Zen lanes expect the official client session header on every request.
-    "x-opencode-session": generateSessionId(),
+    // Zen lanes expect the official client session header; other providers don't need it.
+    ...(OPENCODE_PROVIDERS.has(provider) ? { "x-opencode-session": generateSessionId() } : {}),
   };
   // Cloudflare validates the body model as a short selector (e.g. "clef-flash"), not the full id.
   const requestBody = { ...body, model: getModelUpstreamId(provider, model) || model };
 
   log?.debug?.("SYSTEMONE", `${provider.toUpperCase()} | ${model}`);
 
+  if (signal?.aborted) throw signal.reason;
+  const timeoutSignal = AbortSignal.timeout(FETCH_CONNECT_TIMEOUT_MS);
+  const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
   let providerResponse;
   try {
     providerResponse = await fetch(targetUrl, {
       method: "POST",
       headers,
       body: JSON.stringify(requestBody),
-      ...(typeof AbortSignal?.timeout === "function"
-        ? { signal: AbortSignal.timeout(FETCH_CONNECT_TIMEOUT_MS) }
-        : {}),
+      signal: requestSignal,
     });
   } catch (error) {
+    if (signal?.aborted) throw signal.reason;
     const errMsg = formatProviderError(error, provider, model, HTTP_STATUS.BAD_GATEWAY);
     log?.debug?.("SYSTEMONE", `Fetch error: ${errMsg}`);
     return createErrorResult(HTTP_STATUS.BAD_GATEWAY, errMsg);
@@ -90,10 +112,12 @@ export async function handleSystemoneCore({
   let responseBody;
   try {
     responseBody = await providerResponse.json();
-  } catch {
+  } catch (error) {
+    if (signal?.aborted) throw signal.reason || error;
     return createErrorResult(HTTP_STATUS.BAD_GATEWAY, `Invalid JSON response from ${provider}`);
   }
 
+  if (signal?.aborted) throw signal.reason;
   if (onRequestSuccess) await onRequestSuccess();
 
   const usage = responseBody?.usage;

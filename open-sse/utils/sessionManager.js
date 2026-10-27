@@ -10,12 +10,10 @@
 
 import crypto from "crypto";
 import { MEMORY_CONFIG } from "../config/runtimeConfig.js";
-import { makeKv } from "../../src/lib/db/helpers/kvStore.js";
 
 // Runtime storage: Key = connectionId, Value = { sessionId, lastUsed }
 const runtimeSessionStore = new Map();
 const continuationStore = new Map();
-const chatGptWebLegacyPinsKv = makeKv("chatgptWebLegacyPins");
 
 // Periodically evict entries that haven't been used within TTL
 const cleanupInterval = setInterval(() => {
@@ -157,7 +155,7 @@ function extractAntigravitySession(body) {
     return m ? normalizeSessionId(m[1]) : null;
 }
 
-function extractClientSessionId(headers, body, scope = "", { includeRequestId = true, includeMetadataUser = true } = {}) {
+function extractClientSessionId(headers, body, scope = "", { includeRequestId = true, includeMetadataUser = true, includePromptCacheKey = true } = {}) {
     // Claude Code sends the session in a header AND in metadata.user_id; the header
     // survives translation to formats that drop metadata (e.g. Responses API).
     const claude = extractClaudeCodeSession(body?.metadata?.user_id)
@@ -170,7 +168,7 @@ function extractClientSessionId(headers, body, scope = "", { includeRequestId = 
         if (v) return v;
     }
     const explicitBodySession =
-        normalizeSessionId(body?.prompt_cache_key) ||
+        (includePromptCacheKey ? normalizeSessionId(body?.prompt_cache_key) : null) ||
         normalizeSessionId(body?.session_id) ||
         normalizeSessionId(body?.conversation_id) ||
         normalizeSessionId(parseCodexTurnMetadata(headers, body)?.thread_id);
@@ -180,25 +178,6 @@ function extractClientSessionId(headers, body, scope = "", { includeRequestId = 
     return includeMetadataUser && scope !== "kiro" ? normalizeSessionId(body?.metadata?.user_id) : null;
 }
 
-/** Computes only the historical migration tombstone key, never routing authority. */
-function legacyChatGptWebConversationKey({ headers, body } = {}) {
-    const session = extractClientSessionId(headers, body, "chatgpt-web", {
-        includeRequestId: false,
-        includeMetadataUser: false,
-    });
-    if (session) return `session:${session}`;
-
-    const turnMetadata = parseCodexTurnMetadata(headers, body);
-    const threadId = normalizeSessionId(turnMetadata?.thread_id)
-        || normalizeSessionId(body?.client_metadata?.thread_id)
-        || normalizeSessionId(body?.metadata?.thread_id)
-        || normalizeSessionId(body?.thread_id)
-        || normalizeSessionId(body?.threadId);
-    if (threadId) return `thread:${threadId}`;
-
-    const previousResponseId = normalizeSessionId(body?.previous_response_id);
-    return previousResponseId ? `previous_response_id:${previousResponseId}` : null;
-}
 
 function requestMessages(body) {
     if (Array.isArray(body?.messages)) return body.messages;
@@ -240,9 +219,14 @@ function assistantTextSessionId(scope, body) {
     return sessionId;
 }
 
-export function resolveSessionIdentity({ headers, body, connectionId, workspaceId, scope = "" } = {}) {
-    const client = extractClientSessionId(headers, body, scope);
+export function resolveSessionIdentity({ headers, body, connectionId, workspaceId, scope = "", explicitOnly = false } = {}) {
+    const client = extractClientSessionId(headers, body, scope, {
+        includeRequestId: !explicitOnly,
+        includeMetadataUser: !explicitOnly,
+        includePromptCacheKey: !explicitOnly,
+    });
     if (client) return { sessionId: client, ephemeral: false };
+    if (explicitOnly) return { sessionId: null, ephemeral: true };
     const fromAssistant = scope === "kiro" ? null : assistantTextSessionId(`${scope}:${connectionId || ""}`, body);
     if (fromAssistant) return { sessionId: fromAssistant, ephemeral: false };
     const ws = normalizeSessionId(workspaceId);
@@ -273,10 +257,6 @@ export function resolveContinuationId({ sessionId, connectionId, scope = "", eph
     return continuationId;
 }
 
-export async function getChatGptWebLegacyConversation(options) {
-    const key = legacyChatGptWebConversationKey(options);
-    return key ? (await chatGptWebLegacyPinsKv.get(key, null))?.status === "legacy_unavailable" : false;
-}
 
 // Capture session id from request body + credentials (envelope still intact here)
 export function captureSessionId(body, credentials, connectionId, scope = "") {

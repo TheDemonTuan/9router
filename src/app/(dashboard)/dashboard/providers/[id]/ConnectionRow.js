@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useLayoutEffect, useRef } from "react";
 import { createPortal } from "react-dom";
-import { getStatusVariant as getConnectionStatusVariant, getChatGptWebRuntimeStatus } from "@/shared/utils/connectionStatus";
+import { getStatusVariant as getConnectionStatusVariant } from "@/shared/utils/connectionStatus";
 import PropTypes from "prop-types";
 import { Badge, Toggle, Tooltip } from "@/shared/components";
 import CooldownTimer from "./CooldownTimer";
@@ -130,13 +130,12 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
   const rowAuthType = connection.authType || (isOAuth ? "oauth" : "apikey");
   const isOAuthConnection = rowAuthType === "oauth";
   const isCookieConnection = rowAuthType === "cookie";
-  const isBrowserConnection = rowAuthType === "bridge" && connection.provider === "chatgpt-web";
-  const authIcon = isBrowserConnection ? "web" : isCookieConnection ? "cookie" : isOAuthConnection ? "lock" : "key";
-  const authLabel = isBrowserConnection ? "Browser Session" : isOAuthConnection ? "OAuth" : isCookieConnection ? "Cookie" : "API Key";
+  const authIcon = isCookieConnection ? "cookie" : isOAuthConnection ? "lock" : "key";
+  const authLabel = isOAuthConnection ? "OAuth" : isCookieConnection ? "Cookie" : "API Key";
   const displayName = connection.name?.trim()
     || connection.email?.trim()
     || connection.displayName?.trim()
-    || (isBrowserConnection ? "ChatGPT Web" : isOAuthConnection ? "OAuth Account" : isCookieConnection ? "Cookie Account" : "API Key");
+    || (isOAuthConnection ? "OAuth Account" : isCookieConnection ? "Cookie Account" : "API Key");
   const secondaryDisplayName = connection.name?.trim() && connection.email?.trim() && connection.name.trim() !== connection.email.trim()
     ? connection.email.trim()
     : connection.name?.trim() && connection.displayName?.trim() && connection.name.trim() !== connection.displayName.trim()
@@ -171,12 +170,9 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
   }, [modelLockUntil]);
 
   // Determine effective status (override unavailable if cooldown expired)
-  const runtimeState = connection.chatGptWebRuntime?.state;
-  const browserStatus = getChatGptWebRuntimeStatus(runtimeState);
-  const effectiveStatus = isBrowserConnection ? browserStatus : (connection.testStatus === "unavailable" && !isCooldown)
+  const effectiveStatus = (connection.testStatus === "unavailable" && !isCooldown)
     ? "active"
     : connection.testStatus;
-  const displayError = isBrowserConnection ? connection.chatGptWebRuntime?.lastError?.message : connection.lastError;
 
   const getStatusVariant = () => getConnectionStatusVariant(connection.isActive, effectiveStatus);
 
@@ -238,9 +234,9 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
               </Badge>
             )}
             {isCooldown && connection.isActive !== false && <CooldownTimer until={modelLockUntil} />}
-            {displayError && connection.isActive !== false && (
-              <span className="max-w-full truncate text-xs text-red-500 sm:max-w-[300px]" title={displayError}>
-                {displayError}
+            {connection.lastError && connection.isActive !== false && (
+              <span className="max-w-full truncate text-xs text-red-500 sm:max-w-[300px]" title={connection.lastError}>
+                {connection.lastError}
               </span>
             )}
             <span className="text-xs text-text-muted" title={`Priority ${connection.priority}`} aria-label={`Priority ${connection.priority}`}>#{connection.priority}</span>

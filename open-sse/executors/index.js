@@ -8,7 +8,7 @@ import { QoderExecutor } from "./qoder.js";
 import { KiroExecutor } from "./kiro.js";
 import { KimchiExecutor } from "./kimchi.js";
 import { CodexExecutor } from "./codex.js";
-import { ChatGPTWebExecutor } from "./chatgpt-web.js";
+import { ChatGptWebExecutor } from "./chatgpt-web.js";
 import { CursorExecutor } from "./cursor.js";
 import { VertexExecutor } from "./vertex.js";
 import { OpenCodeExecutor } from "./opencode.js";
@@ -17,6 +17,11 @@ import { OpenCodeZenExecutor } from "./opencode-zen.js";
 import { GrokWebExecutor } from "./grok-web.js";
 import { GrokCliExecutor } from "./grok-cli.js";
 import { PerplexityWebExecutor } from "./perplexity-web.js";
+import { DeepSeekWebExecutor } from "./deepseek-web.js";
+import { GeminiWebExecutor } from "./gemini-web.js";
+import { MuseWebExecutor } from "./muse-web.js";
+import { VeoAiFreeWebExecutor } from "./veoaifree-web.js";
+import { UcWebExecutor } from "./uc-web.js";
 import { OllamaLocalExecutor } from "./ollama-local.js";
 import { CommandCodeExecutor } from "./commandcode.js";
 import { XiaomiTokenplanExecutor } from "./xiaomi-tokenplan.js";
@@ -42,7 +47,7 @@ const executors = {
   kiro: new KiroExecutor(),
   kimchi: new KimchiExecutor(),
   codex: new CodexExecutor(),
-  "chatgpt-web": new ChatGPTWebExecutor(),
+  "chatgpt-web": new ChatGptWebExecutor(),
   cursor: new CursorExecutor(),
   cu: new CursorExecutor(), // Alias for cursor
   vertex: new VertexExecutor("vertex"),
@@ -55,6 +60,12 @@ const executors = {
   gcli: new GrokCliExecutor(), // Alias
   gb: new GrokCliExecutor(), // Alias (Grok Build)
   "perplexity-web": new PerplexityWebExecutor(),
+  "deepseek-web": new DeepSeekWebExecutor(),
+  "gemini-web": new GeminiWebExecutor(),
+  "muse-web": new MuseWebExecutor(),
+  "veoaifree-web": new VeoAiFreeWebExecutor(),
+  "veo-free": new VeoAiFreeWebExecutor(), // Alias
+  "uc-web": new UcWebExecutor(),
   "ollama-local": new OllamaLocalExecutor(),
   commandcode: new CommandCodeExecutor(),
   "xiaomi-tokenplan": new XiaomiTokenplanExecutor(),
@@ -101,7 +112,7 @@ export { QoderExecutor } from "./qoder.js";
 export { KiroExecutor } from "./kiro.js";
 export { KimchiExecutor } from "./kimchi.js";
 export { CodexExecutor } from "./codex.js";
-export { ChatGPTWebExecutor } from "./chatgpt-web.js";
+export { ChatGptWebExecutor } from "./chatgpt-web.js";
 export { CursorExecutor } from "./cursor.js";
 export { VertexExecutor } from "./vertex.js";
 export { DefaultExecutor } from "./default.js";
@@ -111,6 +122,9 @@ export { OpenCodeZenExecutor } from "./opencode-zen.js";
 export { GrokWebExecutor } from "./grok-web.js";
 export { GrokCliExecutor } from "./grok-cli.js";
 export { PerplexityWebExecutor } from "./perplexity-web.js";
+export { DeepSeekWebExecutor } from "./deepseek-web.js";
+export { GeminiWebExecutor } from "./gemini-web.js";
+export { MuseWebExecutor } from "./muse-web.js";
 export { OllamaLocalExecutor } from "./ollama-local.js";
 export { CommandCodeExecutor } from "./commandcode.js";
 export { XiaomiTokenplanExecutor } from "./xiaomi-tokenplan.js";

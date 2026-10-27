@@ -10,14 +10,13 @@ function ensureAppRuntime() {
   const buildId = fs.readFileSync(path.join(source, ".next-cli-build", "BUILD_ID"), "utf8").trim();
   if (!/^[A-Za-z0-9_-]+$/.test(buildId)) throw new Error("Invalid standalone build identity");
   const identity = createHash("sha256").update(buildId)
-    .update(fs.readFileSync(path.join(source, "custom-server.js")))
-    .update(fs.readFileSync(path.join(source, "chatgpt-web-viewer-proxy.cjs"))).digest("hex");
+    .update(fs.readFileSync(path.join(source, "custom-server.js"))).digest("hex");
   const root = path.join(getRuntimeDir(), "app");
   const target = path.join(root, identity);
   function verify() {
     if (!fs.lstatSync(target).isDirectory()) throw new Error("Cached app must be a regular directory");
     if (fs.readFileSync(path.join(target, ".9router-ready"), "utf8") !== identity) throw new Error("Cached app identity mismatch");
-    for (const name of ["server.js", "custom-server.js", "chatgpt-web-viewer-proxy.cjs", ".next-cli-build/BUILD_ID"]) {
+    for (const name of ["server.js", "custom-server.js", ".next-cli-build/BUILD_ID"]) {
       if (!fs.lstatSync(path.join(target, name)).isFile()) throw new Error(`Missing cached app artifact: ${name}`);
     }
   }

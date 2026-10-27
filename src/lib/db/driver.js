@@ -1,9 +1,24 @@
 import { ensureDirs, DATA_FILE } from "./paths.js";
 import { createBunSqliteAdapter } from "./adapters/bunSqliteAdapter.js";
+import { stripNullBytes } from "./helpers/nullBytes.js";
 
 // Use global to survive Next.js dev hot-reload (module state resets on reload)
 if (!global._dbAdapter) global._dbAdapter = { instance: null, initPromise: null, logged: false };
 const state = global._dbAdapter;
+
+/** Strip embedded NUL characters from bound text without changing binary values. */
+function withNullByteSafeParams(adapter) {
+  const clean = (params) => {
+    if (!Array.isArray(params) || !params.some((value) => typeof value === "string" && value.includes("\0"))) return params;
+    return params.map(stripNullBytes);
+  };
+  return {
+    ...adapter,
+    run: (sql, params = []) => adapter.run(sql, clean(params)),
+    get: (sql, params = []) => adapter.get(sql, clean(params)),
+    all: (sql, params = []) => adapter.all(sql, clean(params)),
+  };
+}
 
 async function initAdapter() {
   ensureDirs();
@@ -12,7 +27,7 @@ async function initAdapter() {
       "[DB] bun:sqlite requires Bun runtime. Please run 9router with Bun (e.g. bun run dev / bun custom-server.js)."
     );
   }
-  const adapter = await createBunSqliteAdapter(DATA_FILE);
+  const adapter = withNullByteSafeParams(await createBunSqliteAdapter(DATA_FILE));
   if (!state.logged) {
     console.log(`[DB] Driver: ${adapter.driver} | file: ${DATA_FILE}`);
     state.logged = true;

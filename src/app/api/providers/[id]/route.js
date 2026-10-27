@@ -5,10 +5,6 @@ import {
   updateProviderConnection,
   deleteProviderConnection,
 } from "@/models";
-import { invalidateChatGptWebCatalog, validateChatGptWebProfileId } from "open-sse/services/chatgptWebRuntimeClient.js";
-import { authorizeChatGptWebRuntimeAdmin } from "@/dashboardGuard";
-import { ensureChatGptWebRuntimeProfile } from "@/lib/chatgptWebProfileProvisioning";
-import { normalizeProviderSpecificData, validateChatGptWebConnectionInput } from "@/lib/providerNormalization";
 import { toProviderConnectionResponse, usesAwsCredentialForm } from "@/lib/providerConnectionResponse";
 
 function normalizeProxyConfig(body = {}) {
@@ -114,29 +110,6 @@ export async function PUT(request, { params }) {
       return NextResponse.json({ error: proxyPoolResult.error }, { status: 400 });
     }
 
-    let normalizedProviderSpecificData = providerSpecificData;
-    let profileChanged = false;
-    if (existing.provider === "chatgpt-web") {
-      try {
-        validateChatGptWebConnectionInput(body);
-        const selector = providerSpecificData === undefined && body.profileId === undefined ? existing.providerSpecificData : normalizeProviderSpecificData(existing.provider, body, providerSpecificData);
-        normalizedProviderSpecificData = { profileId: validateChatGptWebProfileId(selector?.profileId) };
-      } catch (error) {
-        return NextResponse.json({ error: error.message }, { status: 400 });
-      }
-      profileChanged = normalizedProviderSpecificData.profileId !== existing.providerSpecificData?.profileId;
-      if (profileChanged) {
-        if (!await authorizeChatGptWebRuntimeAdmin(request)) {
-          return NextResponse.json({ error: "Dashboard authentication required" }, { status: 401 });
-        }
-        try {
-          await ensureChatGptWebRuntimeProfile(normalizedProviderSpecificData.profileId, request.signal);
-        } catch {
-          return NextResponse.json({ error: "Runtime unavailable or profile creation failed. The connection was not changed; the request was not retried." }, { status: 502 });
-        }
-      }
-    }
-
     const updateData = {};
     if (name !== undefined) updateData.name = name;
     if (priority !== undefined) updateData.priority = priority;
@@ -144,21 +117,19 @@ export async function PUT(request, { params }) {
     if (defaultModel !== undefined) updateData.defaultModel = defaultModel;
     if (isActive !== undefined) updateData.isActive = isActive;
     if (apiKey && existing.authType === "apikey") updateData.apiKey = apiKey;
-    if (existing.provider === "chatgpt-web") {
-      if (profileChanged) updateData.testStatus = "login_required";
-    } else if (testStatus !== undefined) updateData.testStatus = testStatus;
+    if (testStatus !== undefined) updateData.testStatus = testStatus;
     if (lastError !== undefined) updateData.lastError = lastError;
     if (lastErrorAt !== undefined) updateData.lastErrorAt = lastErrorAt;
 
     if (
       shouldMergeProviderSpecificData(
         existing.providerSpecificData,
-        normalizedProviderSpecificData,
+        providerSpecificData,
         proxyConfig.hasAnyProxyField,
         proxyPoolResult.hasProxyPoolField
       )
     ) {
-      const incomingProviderSpecificData = { ...(normalizedProviderSpecificData || {}) };
+      const incomingProviderSpecificData = { ...(providerSpecificData || {}) };
       const isAwsCredential = usesAwsCredentialForm(existing.provider);
       // The edit form cannot read the stored token back. An empty password field means
       // keep the saved credential; null explicitly removes it.
@@ -187,13 +158,8 @@ export async function PUT(request, { params }) {
         }
       }
     }
-    if (existing.provider === "chatgpt-web") updateData.providerSpecificData = normalizedProviderSpecificData;
 
     const updated = await updateProviderConnection(id, updateData);
-    if (existing.provider === "chatgpt-web") {
-      invalidateChatGptWebCatalog(existing.providerSpecificData?.profileId);
-      if (updated.providerSpecificData?.profileId !== existing.providerSpecificData?.profileId) invalidateChatGptWebCatalog(updated.providerSpecificData?.profileId);
-    }
 
     return NextResponse.json({ connection: toProviderConnectionResponse(updated) });
   } catch (error) {
@@ -207,12 +173,10 @@ export async function DELETE(request, { params }) {
   try {
     const { id } = await params;
 
-    const existing = await getProviderConnectionById(id);
     const deleted = await deleteProviderConnection(id);
     if (!deleted) {
       return NextResponse.json({ error: "Connection not found" }, { status: 404 });
     }
-    if (existing?.provider === "chatgpt-web") invalidateChatGptWebCatalog(existing.providerSpecificData?.profileId);
 
     return NextResponse.json({ message: "Connection deleted successfully" });
   } catch (error) {

@@ -65,7 +65,7 @@ it("retains the running build across package replacement and rejects incomplete 
   const app = path.join(root, "app");
   const dist = path.join(app, ".next-cli-build");
   fs.mkdirSync(dist, { recursive: true });
-  for (const name of ["server.js", "custom-server.js", "chatgpt-web-viewer-proxy.cjs"]) fs.writeFileSync(path.join(app, name), "old-build");
+  for (const name of ["server.js", "custom-server.js"]) fs.writeFileSync(path.join(app, name), "old-build");
   fs.writeFileSync(path.join(dist, "BUILD_ID"), "old-build");
   const snapshot = () => execFileSync("node", ["-e", 'console.log(require("./hooks/appRuntime").ensureAppRuntime())'], { cwd: root, env: env(), encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
   const old = snapshot();

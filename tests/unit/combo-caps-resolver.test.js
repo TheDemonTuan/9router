@@ -17,9 +17,12 @@ describe("aggregateComboCapabilities: resolveCaps override", () => {
 
 
   it("uses the fed limits when a resolver supplies them", () => {
-    const resolver = (fullId) => (fullId === "glm-cn/glm-5.3" ? GLM53_FED : null);
+    // Feed a value the local tables don't have, so the assertion proves the override.
+    const fed = { ...GLM53_FED, contextWindow: 640_000 };
+    const resolver = (fullId) => (fullId === "glm-cn/glm-5.3" ? fed : null);
     const caps = aggregateComboCapabilities(models, null, resolver);
-    expect(caps.contextWindow).toBe(1_000_000);
+    expect(aggregateComboCapabilities(models).contextWindow).not.toBe(640_000);
+    expect(caps.contextWindow).toBe(640_000);
   });
 
   it("keeps the fields the override does not carry", () => {
