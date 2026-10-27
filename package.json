@@ -1,6 +1,6 @@
 {
   "name": "9router-app",
-  "version": "0.5.104",
+  "version": "0.5.111",
   "description": "9Router web dashboard",
   "private": true,
   "packageManager": "bun@1.4.4",
@@ -8,10 +8,8 @@
     "format": "bun fmt",
     "format:check": "bun fmt --check",
     "lint": "bun --bun eslint",
-    "typecheck:runtime": "bun run --cwd services/chatgpt-web-runtime typecheck",
-    "prepare:chatgpt-session-export": "bun scripts/build-chatgpt-session-export.mjs",
-    "dev": "bun run prepare:chatgpt-session-export && bun ./node_modules/next/dist/bin/next dev --port 20127",
-    "dev:webpack": "bun run prepare:chatgpt-session-export && bun ./node_modules/next/dist/bin/next dev --webpack --port 20127",
+    "dev": "bun ./node_modules/next/dist/bin/next dev --port 20127",
+    "dev:webpack": "bun ./node_modules/next/dist/bin/next dev --webpack --port 20127",
     "build": "bun --bun next build",
     "build:webpack": "bun --bun next build --webpack",
     "postbuild": "bun scripts/copy-standalone-assets.mjs",
@@ -26,21 +24,19 @@
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
     "@monaco-editor/react": "^4.7.0",
-    "@next/third-parties": "16.4.1",
+    "@next/third-parties": "16.4.2",
     "@node-saml/node-saml": "^5.1.0",
-    "@novnc/novnc": "1.7.0",
     "@xyflow/react": "^12.12.0",
     "ajv": "8.20.0",
     "bcryptjs": "^3.0.3",
     "chalk": "^5.6.2",
     "confbox": "^0.3.1",
     "enquirer": "^2.4.1",
-    "express": "^5.2.1",
     "jose": "^6.2.12",
     "marked": "^18.0.14",
     "material-symbols": "^0.47.5",
     "monaco-editor": "^0.57.0",
-    "next": "16.4.1",
+    "next": "16.4.2",
     "node-machine-id": "^1.1.12",
     "open": "^11.0.4",
     "ora": "^9.4.1",
@@ -52,23 +48,25 @@
     "selfsigned": "^5.5.0",
     "socks-proxy-agent": "^8.0.5",
     "undici": "^7.30.1",
-    "ws": "8.22.0",
     "zustand": "^5.0.15"
   },
   "optionalDependencies": {
-    "@aws-sdk/credential-providers": "^3.1135.0"
+    "@aws-sdk/credential-providers": "^3.1135.0",
+    "playwright-core": "^1.62.1",
+    "wreq-js": "^3.2.0"
   },
   "comment_aws_sdk_credential_providers": "Imported lazily for AWS Bedrock profile/SSO credentials; static access-key connections do not load it.",
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.3",
     "eslint": "^9",
-    "eslint-config-next": "16.4.1",
+    "eslint-config-next": "16.4.2",
     "fflate": "0.8.3",
     "postcss": "^8.5.28",
     "tailwindcss": "^4.3.3"
   },
   "overrides": {
     "dompurify": "^3.4.17",
+    "ip-address": "^10.7.4",
     "sharp": "0.35.5",
     "source-map-js": "1.2.2"
   }

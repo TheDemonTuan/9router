@@ -5,8 +5,8 @@ import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import Image from "next/image";
 import { getProviderIconSrc, markProviderIconMissing } from "@/shared/utils/providerIcon";
-import { Card, Button, Badge, Input, Modal, CardSkeleton, OAuthModal, KiroOAuthWrapper, CursorAuthModal, ZedAuthModal, XiaomiMimoAuthModal, IFlowCookieModal, GitLabAuthModal, Toggle, Select, EditConnectionModal, NoAuthProxyCard, ConfirmModal, AddChatGPTWebRuntimeModal } from "@/shared/components";
-import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, LOCAL_BRIDGE_PROVIDERS, WEB_COOKIE_PROVIDERS, getProviderAlias, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS } from "@/shared/constants/providers";
+import { Card, Button, Badge, Input, Modal, CardSkeleton, OAuthModal, KiroOAuthWrapper, CursorAuthModal, ZedAuthModal, XiaomiMimoAuthModal, IFlowCookieModal, GitLabAuthModal, Toggle, Select, EditConnectionModal, NoAuthProxyCard, ConfirmModal } from "@/shared/components";
+import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, WEB_COOKIE_PROVIDERS, getProviderAlias, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS } from "@/shared/constants/providers";
 import { getModelsByProviderId, getModelKind } from "@/shared/constants/models";
 import { getThinkingLevels } from "open-sse/providers/thinkingLevels.js";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
@@ -27,6 +27,7 @@ import CustomConfigCard from "./CustomConfigCard";
 import { mergeAntigravityModelLists } from "@/lib/providerNormalization";
 import { ANTIGRAVITY_MODEL_CACHE_TTL_MS } from "open-sse/config/antigravityModels.js";
 import AutoPingScheduleModal from "./AutoPingScheduleModal";
+import WebLoginButton, { WEB_LOGIN_PROVIDERS } from "../components/WebLoginButton.js";
 import { getScheduleSlotLabels } from "@/shared/services/quotaPingSchedule";
 
 import { CODEX_MODEL_CACHE_TTL_MS } from "open-sse/config/codexModels.js";
@@ -55,7 +56,6 @@ export default function ProviderDetailPage() {
   const [showXiaomiMimoModal, setShowXiaomiMimoModal] = useState(false);
   const [showIFlowCookieModal, setShowIFlowCookieModal] = useState(false);
   const [showAddApiKeyModal, setShowAddApiKeyModal] = useState(false);
-  const [showRuntimeModal, setShowRuntimeModal] = useState(false);
   const [addConnectionError, setAddConnectionError] = useState("");
   const [showBulkImportCodex, setShowBulkImportCodex] = useState(false);
   const [showBulkImportGrokCli, setShowBulkImportGrokCli] = useState(false);
@@ -140,11 +140,6 @@ export default function ProviderDetailPage() {
   };
 
   const triggerAddConnection = () => {
-    if (providerId === "chatgpt-web") {
-      setSelectedConnection(null);
-      setShowRuntimeModal(true);
-      return;
-    }
     if (isOAuth) {
       triggerOAuthConnection();
       return;
@@ -174,7 +169,7 @@ export default function ProviderDetailPage() {
         baseUrl: providerNode.baseUrl,
         type: providerNode.type,
       }
-    : (OAUTH_PROVIDERS[providerId] || APIKEY_PROVIDERS[providerId] || FREE_PROVIDERS[providerId] || FREE_TIER_PROVIDERS[providerId] || WEB_COOKIE_PROVIDERS[providerId] || LOCAL_BRIDGE_PROVIDERS[providerId]);
+    : (OAUTH_PROVIDERS[providerId] || APIKEY_PROVIDERS[providerId] || FREE_PROVIDERS[providerId] || FREE_TIER_PROVIDERS[providerId] || WEB_COOKIE_PROVIDERS[providerId]);
   const authModes = providerInfo?.authModes || [];
   const isOAuth = !!OAUTH_PROVIDERS[providerId] || !!FREE_PROVIDERS[providerId] || authModes.includes("oauth");
   const supportsApiKeyAuth = !!APIKEY_PROVIDERS[providerId] || authModes.includes("apikey");
@@ -186,7 +181,7 @@ export default function ProviderDetailPage() {
   const activeCodexConnections = providerId === "codex"
     ? connections.filter((item) => item.isActive !== false && item.id)
     : [];
-  const models = providerId === "chatgpt-web" ? liveModels : providerId === "codex"
+  const models = providerId === "codex"
     ? (activeCodexConnections.length > 0 ? (codexCatalogResolved ? liveModels : []) : staticModels)
     : providerId === "antigravity"
       ? (connections.filter((c) => c.isActive !== false && c.id).length > 0 ? liveModels : staticModels)
@@ -528,7 +523,7 @@ export default function ProviderDetailPage() {
   // Personal + Team account exposes the union; its API already falls back to the
   // official edition catalog, so a discovery failure never blanks the picker.
   useEffect(() => {
-    const isLiveCatalog = providerId === "cursor" || providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web";
+    const isLiveCatalog = providerId === "cursor" || providerId === "zed" || providerId === "alitp-intl";
     if (!isLiveCatalog) {
       if (providerId !== "codex" && providerId !== "antigravity") setLiveModels([]);
       return;
@@ -537,14 +532,13 @@ export default function ProviderDetailPage() {
     const activeConnections = connections.filter((item) => item.isActive !== false && item.id);
     if (!activeConnections.length) {
       setLiveModels([]);
-      if (providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web") setLiveModelsError(null);
+      if (providerId === "zed" || providerId === "alitp-intl") setLiveModelsError(null);
       return;
     }
 
     let cancelled = false;
-    if (providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web") setLiveModelsError(null);
-    if (providerId === "chatgpt-web") setLiveModels([]);
-    const catalogConnections = (providerId === "alitp-intl" || providerId === "chatgpt-web") ? activeConnections : [activeConnections[0]];
+    if (providerId === "zed" || providerId === "alitp-intl") setLiveModelsError(null);
+    const catalogConnections = providerId === "alitp-intl" ? activeConnections : [activeConnections[0]];
     Promise.all(catalogConnections.map((connection) =>
       fetch(`/api/providers/${connection.id}/models`, { cache: "no-store" })
         .then(async (res) => ({ ok: res.ok, data: await res.json().catch(() => null) }))
@@ -558,29 +552,14 @@ export default function ProviderDetailPage() {
             if (!model?.id) continue;
             const previous = merged.get(model.id);
             if (!previous) merged.set(model.id, model);
-            else if (providerId === "chatgpt-web") {
-              const efforts = [...new Set([...(previous.supported_reasoning_levels || []), ...(model.supported_reasoning_levels || [])])];
-              const limits = {};
-              for (const key of ["context_window", "auto_compact_token_limit"]) {
-                if (Number.isFinite(previous[key]) && Number.isFinite(model[key])) limits[key] = Math.min(previous[key], model[key]);
-              }
-              merged.set(model.id, { ...previous, ...limits, supported_reasoning_levels: efforts, capabilities: { ...previous.capabilities,
-                generic_responses: previous.capabilities?.generic_responses === true || model.capabilities?.generic_responses === true } });
-            }
           }
         }
       }
       if (merged.size) setLiveModels([...merged.values()]);
       else setLiveModels([]);
-      const warning = results.map((r) => {
-        const error = typeof r.data?.error === "string" ? r.data.error : r.data?.error?.message;
-        return (typeof r.data?.warning === "string" && r.data.warning)
-          || (providerId === "chatgpt-web" && !r.ok && typeof error === "string" && error)
-          || (r.data?.stale ? "A stale runtime catalog is not used for routing; refresh must succeed first." : null);
-      }).find(Boolean);
-      if (providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web") setLiveModelsError(warning || null);
+      const warning = results.map((r) => r.data?.warning).find(Boolean);
+      if (providerId === "zed" || providerId === "alitp-intl") setLiveModelsError(warning || null);
       if (providerId === "zed" && !merged.size) setLiveModelsError(warning || "Zed returned no live models.");
-      if (providerId === "chatgpt-web" && !merged.size) setLiveModelsError(warning || "No verified ChatGPT Web models are available.");
     });
 
     return () => { cancelled = true; };
@@ -1462,8 +1441,7 @@ export default function ProviderDetailPage() {
                 }}
                 onEdit={() => {
                   setSelectedConnection(conn);
-                  if (providerId === "chatgpt-web") setShowRuntimeModal(true);
-                  else setShowEditModal(true);
+                  setShowEditModal(true);
                 }}
                 onDelete={() => handleDelete(conn.id)}
                 oneByOneStatus={oneByOneResults[conn.id] || null}
@@ -1527,10 +1505,6 @@ export default function ProviderDetailPage() {
 
   const handleTestModel = async (modelId) => {
     if (testingModelIds.has(modelId)) return;
-    if (providerId === "chatgpt-web" && liveModels.find(model => model.id === modelId)?.capabilities?.generic_responses !== true) {
-      setModelsTestError("No verified generic text route is available for this model. Verify the saved session and runtime prerequisites before sending a test prompt.");
-      return;
-    }
     setTestingModelIds((prev) => new Set(prev).add(modelId));
     try {
       const res = await fetch("/api/models/test", {
@@ -1539,10 +1513,10 @@ export default function ProviderDetailPage() {
         body: JSON.stringify({ model: `${providerStorageAlias}/${modelId}` }),
       });
       const data = await res.json();
-      setModelTestResults((prev) => ({ ...prev, [modelId]: providerId === "chatgpt-web" ? data : data.ok ? "ok" : "error" }));
+      setModelTestResults((prev) => ({ ...prev, [modelId]: data.ok ? "ok" : "error" }));
       setModelsTestError(data.ok ? "" : (data.error || "Model not reachable"));
     } catch {
-      setModelTestResults((prev) => ({ ...prev, [modelId]: providerId === "chatgpt-web" ? { ok: false } : "error" }));
+      setModelTestResults((prev) => ({ ...prev, [modelId]: "error" }));
       setModelsTestError("Network error");
     } finally {
       setTestingModelIds((prev) => { const n = new Set(prev); n.delete(modelId); return n; });
@@ -1630,14 +1604,12 @@ export default function ProviderDetailPage() {
               onCopy={copy}
               onSetAlias={(alias) => handleSetAlias(model.id, alias, providerStorageAlias)}
               onDeleteAlias={() => handleDeleteAlias(existingAlias)}
-              testStatus={providerId === "chatgpt-web" && modelTestResults[model.id] ? (modelTestResults[model.id].ok ? "ok" : "error") : modelTestResults[model.id]}
-              testConnectionName={providerId === "chatgpt-web" && modelTestResults[model.id]?.connectionId
-                ? (connections.find(connection => connection.id === modelTestResults[model.id].connectionId)?.name || modelTestResults[model.id].connectionId) : undefined}
+              testStatus={modelTestResults[model.id]}
               onTest={connections.length > 0 || isFreeNoAuth ? () => handleTestModel(model.id) : undefined}
               isTesting={testingModelIds.has(model.id)}
               isFree={model.isFree}
               onDisable={() => handleDisableModel(model.id)}
-              caps={(providerId === "codex" || providerId === "chatgpt-web") && model.capabilities ? model.capabilities : getCaps(`${providerId}/${model.id}`)}
+              caps={providerId === "codex" && model.capabilities ? model.capabilities : getCaps(`${providerId}/${model.id}`)}
               thinkingSuffix={resolveThinkingSuffix(model.id)}
             />
           );
@@ -2014,6 +1986,9 @@ export default function ProviderDetailPage() {
                   </>
                 ) : (
                   <>
+                    {!isCompatible && WEB_LOGIN_PROVIDERS.has(providerId) && (
+                      <WebLoginButton providerId={providerId} onConnected={fetchConnections} />
+                    )}
                     {!isCompatible && providerId === "iflow" && (
                       <Button size="sm" icon="cookie" variant="secondary" onClick={() => setShowIFlowCookieModal(true)}>
                         Cookie
@@ -2074,6 +2049,9 @@ export default function ProviderDetailPage() {
               {connectionsList}
               {!isCompatible && (
                 <div className="mt-4 grid grid-cols-1 gap-2 sm:flex">
+                  {WEB_LOGIN_PROVIDERS.has(providerId) && (
+                    <WebLoginButton providerId={providerId} onConnected={fetchConnections} />
+                  )}
                   {providerId === "iflow" && (
                     <Button
                       size="sm"
@@ -2221,11 +2199,8 @@ export default function ProviderDetailPage() {
             })()}
           </div>
         )}
-        {(providerId === "codex" || providerId === "zed" || providerId === "alitp-intl" || providerId === "chatgpt-web") && !!liveModelsError && (
+        {(providerId === "codex" || providerId === "zed" || providerId === "alitp-intl") && !!liveModelsError && (
           <p className={`text-xs mb-3 break-words ${providerId === "alitp-intl" ? "text-text-muted" : "text-red-500"}`}>{liveModelsError}</p>
-        )}
-        {providerId === "chatgpt-web" && connections.some(connection => connection.isActive !== false && connection.chatGptWebRuntime?.mode === "full") && (
-          <p role="status" className="text-xs mb-3 break-words text-amber-500">Full: OpenAI-compatible function handoff requires verified generic tools; Codex native requires the signed companion. API-key text requests remain available on verified routes. Browser sign-in alone does not verify local tool execution.</p>
         )}
         {providerId === "codex" && connections.length > 0 && (
           <div className="mb-3 flex flex-wrap items-center gap-3">
@@ -2390,25 +2365,13 @@ export default function ProviderDetailPage() {
           setShowAddApiKeyModal(false);
         }}
       />
-      <AddChatGPTWebRuntimeModal
-        key={`chatgpt-web-runtime-${showRuntimeModal ? "open" : "closed"}-${selectedConnection?.id || "new"}`}
-        isOpen={showRuntimeModal}
+      <EditConnectionModal
+        isOpen={showEditModal}
         connection={selectedConnection}
-        onSaved={fetchConnections}
-        onClose={() => {
-          setShowRuntimeModal(false);
-          setSelectedConnection(null);
-        }}
+        proxyPools={proxyPools}
+        onSave={handleUpdateConnection}
+        onClose={() => setShowEditModal(false)}
       />
-      {providerId !== "chatgpt-web" && (
-        <EditConnectionModal
-          isOpen={showEditModal}
-          connection={selectedConnection}
-          proxyPools={proxyPools}
-          onSave={handleUpdateConnection}
-          onClose={() => setShowEditModal(false)}
-        />
-      )}
       {isCompatible && (
         <EditCompatibleNodeModal
           isOpen={showEditNodeModal}

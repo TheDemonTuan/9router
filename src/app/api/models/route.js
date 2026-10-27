@@ -7,11 +7,7 @@ import { AI_MODELS } from "@/shared/constants/config";
 import { getProviderAlias, ALIAS_TO_ID } from "@/shared/constants/providers";
 import { getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
 import { isAlitpModelDeprecated, isAlitpModelAvailableForEdition } from "open-sse/providers/alibabaTokenPlanCatalog.js";
-import {
-  getChatGptWebCatalog,
-} from "open-sse/services/chatgptWebRuntimeClient.js";
 import { resolveEffectiveCodexCatalog } from "open-sse/services/codexModels.js";
-import { mergeChatGptWebPublicModels } from "@/lib/providerNormalization";
 import { resolveEffectiveAntigravityCatalog } from "@/lib/antigravityCatalog.js";
 
 // GET /api/models - Get models with aliases
@@ -51,46 +47,6 @@ export async function GET() {
           },
         };
       });
-
-    const runtimeConnections = await getProviderConnections({ provider: "chatgpt-web", isActive: true });
-    const catalogs = await Promise.all(runtimeConnections.map(async (connection) => {
-      try { return await getChatGptWebCatalog(connection); }
-      catch { return null; }
-    }));
-    const runtimeDisabled = disabled.cgw || disabled["chatgpt-web"] || [];
-    for (const model of mergeChatGptWebPublicModels(catalogs)) {
-      if (runtimeDisabled.includes(model.id)) continue;
-      const fullModel = model.id.startsWith("chatgpt-web/")
-        ? model.id
-        : `chatgpt-web/${model.id}`;
-      const routedModel = `cgw/${model.id}`;
-      models.push({
-        provider: "chatgpt-web",
-        model: model.id,
-        name: model.name || model.id,
-        display_name: model.display_name,
-        supported_reasoning_levels: model.supported_reasoning_levels,
-        default_reasoning_level: model.default_reasoning_level,
-        ...(model.model_family ? { model_family: model.model_family } : {}),
-        legacy: model.legacy,
-        context_window: model.context_window,
-        auto_compact_token_limit: model.auto_compact_token_limit,
-        ...(model.max_output !== undefined ? { max_output: model.max_output } : {}),
-        capabilities: model.capabilities,
-        fullModel,
-        routedModel,
-        alias: modelAliases[fullModel] || model.id,
-        caps: {
-          vision: model.capabilities?.vision === true,
-          search: model.capabilities?.search === true,
-          // Unknown live capabilities stay unknown; never infer support from omission.
-          reasoning: model.capabilities?.reasoning === true,
-          contextWindow: model.context_window || null,
-          maxOutput: model.max_output || null,
-          tools: model.capabilities?.tools === true,
-        },
-      });
-    }
 
     const codexConnections = await getProviderConnections({ provider: "codex", isActive: true });
     if (codexConnections.length > 0) {

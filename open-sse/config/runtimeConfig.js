@@ -62,6 +62,11 @@ export const ROUTER_PRE_RESPONSE_BUDGET_MS = envMs("ROUTER_PRE_RESPONSE_BUDGET_M
 // Downstream SSE heartbeat interval (comment : keepalive\n\n) to prevent proxy idle timeouts.
 export const SSE_HEARTBEAT_INTERVAL_MS = envMs("SSE_HEARTBEAT_INTERVAL_MS", 15 * 1000);
 
+// Combo empty-content failover: how long a 2xx stream may be held while waiting for its first
+// content-bearing frame before committing to that model (fail-open on expiry).
+// Env: EMPTY_PEEK_DEADLINE_MS.
+export const EMPTY_PEEK_DEADLINE_MS = envMs("EMPTY_PEEK_DEADLINE_MS", 45 * 1000);
+
 // Fetch connect timeout: abort if upstream doesn't return response headers within this duration
 export const FETCH_CONNECT_TIMEOUT_MS = envMs("FETCH_CONNECT_TIMEOUT_MS", 60 * 1000);
 

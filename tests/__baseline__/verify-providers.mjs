@@ -11,8 +11,11 @@ const baseline = JSON.parse(readFileSync(join(here, "providers-baseline.json"), 
 // Fields intentionally added during refactor (verified by dedicated runtime tests, not byte-baseline).
 // authUrl: removed dead field (qwen/iflow) — no consumer reads config.authUrl (oauth block has authorize/deviceCode)
 const ADDED_FIELDS = new Set(["forceStream", "urlSuffix", "retry", "quirks", "auth", "validateUrl", "usage", "clientId", "clientSecret", "tokenUrl", "cliVersion", "apiClient", "copilot", "authorizeUrl", "authUrl", "regions", "defaultRegion", "reasoningInject", "priority", "hasFree"]);
-// Deliberate additions covered by ChatGPT Web and MiniMax Coding runtime tests.
-const INTENTIONAL_PROVIDER_ADDITIONS = new Set(["chatgpt-web", "minimax-code", "minimax-code-global"]);
+// Deliberate provider additions; existing provider contracts remain checked below.
+const INTENTIONAL_PROVIDER_ADDITIONS = new Set([
+  "chatgpt-web", "minimax-code", "minimax-code-global", "deepseek-web",
+  "gemini-web", "muse-web", "runcrate", "sensenova", "uc-web",
+]);
 
 // Normalize via JSON roundtrip so function/undefined are dropped identically; drop added/removed fields.
 // ADDED_FIELDS are verified by dedicated runtime tests, so drop them from BOTH sides (added or intentionally removed).
@@ -20,6 +23,16 @@ const current = JSON.parse(JSON.stringify(PROVIDERS));
 for (const f of ADDED_FIELDS) {
   for (const id of Object.keys(current)) delete current[id][f];
   for (const id of Object.keys(baseline)) delete baseline[id][f];
+}
+
+// Upstream now declares the Responses effort wire format on these transports.
+// Check that exact addition before comparing the historical transport contract.
+for (const id of ["opencode-go", "muse"]) {
+  const transport = current[id].transports.find((entry) => entry.format === "openai-responses");
+  if (transport?.thinkingFormat !== "openai-responses") {
+    throw new Error(`Invalid Responses thinking format for ${id}`);
+  }
+  delete transport.thinkingFormat;
 }
 
 const diffs = [];

@@ -529,7 +529,7 @@ describe("Responses Structured Outputs & Multi-hop Translation", () => {
   describe("OpenAI-compatible Agent Request Translation", () => {
     it("preserves function tool declarations, tool_choice, and parallel_tool_calls in openaiToOpenAIResponsesRequest", () => {
       const chatReq = {
-        model: "cgw/chatgpt-web/gpt-5.6-sol",
+        model: "cx/gpt-5.5",
         messages: [
           { role: "system", content: "You are an agent." },
           { role: "user", content: "Check the file." },
@@ -562,15 +562,15 @@ describe("Responses Structured Outputs & Multi-hop Translation", () => {
       };
 
       const responsesReq = openaiToOpenAIResponsesRequest(
-        "chatgpt-web/gpt-5.6-sol",
+        "gpt-5.5",
         chatReq,
-        true,
-        { chatGptWebRequestMode: "agent" }
+        true
       );
 
-      expect(responsesReq.model).toBe("chatgpt-web/gpt-5.6-sol");
+      expect(responsesReq.model).toBe("gpt-5.5");
       expect(responsesReq.tool_choice).toBe("auto");
       expect(responsesReq.parallel_tool_calls).toBe(true);
+      expect(responsesReq.instructions).toBe("You are an agent.");
       expect(responsesReq.tools).toEqual([
         {
           type: "function",
@@ -581,10 +581,6 @@ describe("Responses Structured Outputs & Multi-hop Translation", () => {
         },
       ]);
       expect(responsesReq.input).toEqual([
-        {
-          role: "system",
-          content: "You are an agent.",
-        },
         {
           type: "message",
           role: "user",

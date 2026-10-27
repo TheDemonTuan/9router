@@ -4,12 +4,6 @@ import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLock
 import { MAX_RATE_LIMIT_COOLDOWN_MS, HARD_QUOTA_UNKNOWN_RESET_MS } from "open-sse/config/errorConfig.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
 import { isAlitpModelAvailableForEdition } from "open-sse/providers/alibabaTokenPlanCatalog.js";
-import {
-  getChatGptWebCatalog,
-  hasChatGptWebModel,
-  chatGptWebModelSupportsCapabilities,
-  requestChatGptWebRuntime,
-} from "open-sse/services/chatgptWebRuntimeClient.js";
 import { resolveAntigravityModels, isAntigravityModelAvailable } from "open-sse/services/antigravityModels.js";
 import { getModelsByProviderId } from "open-sse/config/providerModels.js";
 import * as log from "../utils/logger.js";
@@ -59,7 +53,7 @@ function getUnavailabilityReason(connections, lockedConns, model) {
  * @param {string} provider - Provider name
  * @param {Set<string>|string|null} excludeConnectionIds - Connection ID(s) to exclude (for retry with next account)
  * @param {string|null} model - Model name for per-model rate limit filtering
- * @param {{ preferredConnectionId?: string, pinConnectionId?: string, requiredCapabilities?: Set<string>|string[], bridgeCapability?: "native_responses"|"generic_responses" }} options
+ * @param {{ preferredConnectionId?: string, pinConnectionId?: string, requestedModel?: string }} options
  */
 export async function getProviderCredentials(provider, excludeConnectionIds = null, model = null, options = {}) {
   // Normalize to Set for consistent handling
@@ -68,18 +62,11 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     : (excludeConnectionIds ? new Set([excludeConnectionIds]) : new Set());
   const preferredConnectionId = options?.preferredConnectionId || null;
   const pinConnectionId = options?.pinConnectionId || null;
-  const bridgeCapability = options?.bridgeCapability === "generic_responses" || options?.bridgeCapability === "generic_tools"
-    ? options.bridgeCapability
-    : "native_responses";
-  const requiredCapabilities = options?.requiredCapabilities instanceof Set
-    ? options.requiredCapabilities
-    : new Set(Array.isArray(options?.requiredCapabilities) ? options.requiredCapabilities : []);
   const providerId = resolveProviderId(provider);
-  const usesMutex = providerId !== "chatgpt-web";
-  const previous = usesMutex ? selectionMutexes.get(providerId) || Promise.resolve() : Promise.resolve();
+  const previous = selectionMutexes.get(providerId) || Promise.resolve();
   let release;
   const current = new Promise(resolve => { release = resolve; });
-  if (usesMutex) selectionMutexes.set(providerId, current);
+  selectionMutexes.set(providerId, current);
   const requestedModel = options?.requestedModel || model;
 
   try {
@@ -117,11 +104,6 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     log.debug("AUTH", `${provider} | total connections: ${connections.length}, excludeIds: ${excludeSet.size > 0 ? [...excludeSet].join(",") : "none"}, model: ${model || "any"}`);
 
     if (connections.length === 0) {
-      if (providerId === "chatgpt-web" && options.chatGptWebAuthority) {
-        const response = await requestChatGptWebRuntime(null, "/v1/thread-bindings/resolve", { method: "POST", signal: options.signal, headers: { "content-type": "application/json" },
-          body: JSON.stringify({ clientId: options.chatGptWebAuthority.clientId, threadId: options.chatGptWebAuthority.threadId, candidateProfileIds: [] }) }, { timeoutMs: 5000 });
-        return { chatGptWebBindingError: response };
-      }
       log.warn("AUTH", `No credentials for ${provider}`);
       return pinConnectionId
         ? { pinnedConnectionUnavailable: true, connectionId: pinConnectionId }
@@ -129,29 +111,6 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     }
 
 
-    const bridgeEligible = new Set();
-    const bridgeEpochs = new Map();
-    const bridgeEffortRejected = new Set();
-    if (providerId === "chatgpt-web" && model) {
-      await Promise.all(connections.map(async (connection) => {
-        try {
-          const catalog = await getChatGptWebCatalog(connection);
-          const liveModel = catalog.models?.find((entry) => entry.id === model);
-          const effort = options.chatGptWebReasoning ?? liveModel?.default_reasoning_level;
-          if (!catalog.stale && hasChatGptWebModel(catalog, model)
-            && liveModel?.capabilities?.[bridgeCapability] === true
-            && (bridgeCapability !== "generic_tools" || liveModel.capabilities.generic_responses === true)
-            && chatGptWebModelSupportsCapabilities(liveModel, requiredCapabilities)) {
-            if (liveModel?.supported_reasoning_levels?.includes(effort) !== true) {
-              bridgeEffortRejected.add(connection.id);
-              return;
-            }
-            bridgeEligible.add(connection.id);
-            bridgeEpochs.set(connection.id, catalog.profileEpoch);
-          }
-        } catch { /* Offline/unknown bridges are not dispatch candidates. */ }
-      }));
-    }
     const antigravityEligible = new Set();
     if (providerId === "antigravity" && model) {
       await Promise.all(connections.map(async (connection) => {
@@ -188,8 +147,10 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     // Filter out model-locked, excluded, and capability-ineligible connections.
     const availableConnections = connections.filter(c => {
       if (excludeSet.has(c.id)) return false;
-      if (pinConnectionId && (providerId !== "chatgpt-web" || bridgeCapability === "generic_responses" || bridgeCapability === "generic_tools") && c.id !== pinConnectionId) return false;
-      if (providerId === "chatgpt-web" && model && !bridgeEligible.has(c.id)) return false;
+      if (pinConnectionId && c.id !== pinConnectionId) return false;
+      // Saved bridge profiles are historical data, not upstream cookie credentials.
+      if (providerId === "chatgpt-web" && (c.authType !== "cookie"
+        || typeof c.apiKey !== "string" || !c.apiKey.trim())) return false;
       if (isModelLockActive(c, model)) return false;
       if (providerId === "antigravity" && model && !antigravityEligible.has(c.id)) return false;
       // Alibaba Token Plan: Team-only models require a Team Edition connection
@@ -214,16 +175,6 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     });
 
     if (availableConnections.length === 0) {
-      if (providerId === "chatgpt-web" && (bridgeCapability === "generic_responses" || bridgeCapability === "generic_tools")
-        && connections.some(row => !excludeSet.has(row.id) && (!pinConnectionId || row.id === pinConnectionId) && bridgeEffortRejected.has(row.id))) {
-        return { chatGptWebBindingError: Response.json({ error: { type: "runtime_error", code: "model_version_unavailable",
-          message: "Requested reasoning effort is not verified for the selected Browser-only model", retryable: false, submission_state: "not_sent" } }, { status: 400 }) };
-      }
-      if (providerId === "chatgpt-web" && options.chatGptWebAuthority) {
-        const response = await requestChatGptWebRuntime(null, "/v1/thread-bindings/resolve", { method: "POST", signal: options.signal, headers: { "content-type": "application/json" },
-          body: JSON.stringify({ clientId: options.chatGptWebAuthority.clientId, threadId: options.chatGptWebAuthority.threadId, candidateProfileIds: [] }) }, { timeoutMs: 5000 });
-        return { chatGptWebBindingError: response };
-      }
       if (pinConnectionId) return { pinnedConnectionUnavailable: true, connectionId: pinConnectionId };
       // Classify only persisted, future-dated model locks.
       const lockedConns = connections.filter(c => isModelLockActive(c, model));
@@ -311,27 +262,9 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       connection = availableConnections[0];
     }
 
-    let profileBinding;
-    if (providerId === "chatgpt-web" && options.chatGptWebAuthority) {
-      const authority = options.chatGptWebAuthority;
-      if (!authority?.threadId || !authority?.turnId) return { chatGptWebBindingError: Response.json({ error: { code: "codex_authority_required" } }, { status: 400 }) };
-      const requested = pinConnectionId ? connections.find(row => row.id === pinConnectionId)?.providerSpecificData?.profileId : undefined;
-      if (pinConnectionId && !requested) return { pinnedConnectionUnavailable: true, connectionId: pinConnectionId };
-      const ordered = [connection, ...availableConnections.filter(row => row.id !== connection.id)];
-      const response = await requestChatGptWebRuntime(null, "/v1/thread-bindings/resolve", { method: "POST", signal: options.signal, headers: { "content-type": "application/json" },
-        body: JSON.stringify({ clientId: authority.clientId, threadId: authority.threadId,
-          candidateProfileIds: [...new Set(ordered.map(row => row.providerSpecificData?.profileId).filter(Boolean))], ...(requested ? { requestedProfileId: requested } : {}) }) }, { timeoutMs: 5000 });
-      if (!response.ok) return { chatGptWebBindingError: response };
-      profileBinding = await response.json();
-      connection = ordered.find(row => row.providerSpecificData?.profileId === profileBinding.profileId);
-      if (!connection) return { chatGptWebBindingError: Response.json({ error: { code: "profile_unavailable" } }, { status: 409 }) };
-    }
     const resolvedProxy = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
 
     return {
-      ...(profileBinding ? { chatGptWebProfileEpoch: profileBinding.profileEpoch } : {}),
-      ...(providerId === "chatgpt-web" && (bridgeCapability === "generic_responses" || bridgeCapability === "generic_tools") && !options.chatGptWebAuthority
-        ? { chatGptWebRequestMode: options.chatGptWebRequestMode || (bridgeCapability === "generic_tools" ? "agent" : "browser"), chatGptWebProfileEpoch: bridgeEpochs.get(connection.id) } : {}),
       authType: connection.authType,
       apiKey: connection.apiKey,
       accessToken: connection.accessToken,

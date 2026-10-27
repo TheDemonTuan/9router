@@ -209,7 +209,8 @@ export function buildTransformStream({ provider, sourceFormat, targetFormat, res
     return createSSETransformStreamWithLogger(targetFormat, sourceFormat, provider, reqLogger, toolNameMap, model, connectionId, body, onStreamComplete, apiKey, customToolNames, credentials, responseSchemaValidation, releasePending, toolArgumentValidation, signal);
   }
 
-  return createPassthroughStreamWithLogger(provider, reqLogger, model, connectionId, body, onStreamComplete, apiKey, releasePending);
+  // Passthrough still restores fingerprint tool names and releases request accounting.
+  return createPassthroughStreamWithLogger(provider, reqLogger, model, connectionId, body, onStreamComplete, apiKey, toolNameMap, releasePending);
 }
 
 /**

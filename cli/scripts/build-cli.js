@@ -170,7 +170,6 @@ function buildCliPackage() {
         APPDATA: path.join(buildHomeDir, "AppData", "Roaming"),
         LOCALAPPDATA: path.join(buildHomeDir, "AppData", "Local"),
         DATA_DIR: path.join(buildHomeDir, "data"),
-        CGW_DATA_DIR: path.join(buildHomeDir, "cgw"),
         PATH: [path.dirname(bunPath), process.env.PATH].filter(Boolean).join(path.delimiter),
         NEXT_DIST_DIR: buildDistDirName,
         NEXT_TRACING_ROOT_MODE: "workspace",
@@ -213,9 +212,6 @@ function buildCliPackage() {
     process.exit(1);
   }
 
-  const viewerSource = path.join(appDir, "chatgpt-web-viewer-proxy.cjs");
-  if (!fs.statSync(viewerSource).isFile()) throw new Error("Missing viewer proxy module");
-  fs.copyFileSync(viewerSource, path.join(cliAppDir, "chatgpt-web-viewer-proxy.cjs"));
 
   // Ensure external packages are available in the standalone bundle.
   function ensureModuleInBundle(pkg) {

@@ -442,16 +442,9 @@ export function openaiToOpenAIResponsesRequest(model, body, stream, credentials)
   const messages = body.messages || [];
 
   for (const msg of messages) {
-    if (credentials?.chatGptWebRequestMode === "agent" && (msg.role === ROLE.SYSTEM || msg.role === ROLE.DEVELOPER)) {
-      result.input.push({ role: msg.role, content: extractInstructionsText(msg.content) });
-      continue;
-    }
     if (msg.role === ROLE.SYSTEM || msg.role === ROLE.DEVELOPER) {
       const instruction = extractInstructionsText(msg.content);
-      if (credentials?.chatGptWebRequestMode === "browser") {
-        result.instructions = hasSystemMessage ? `${result.instructions}\n\n${instruction}` : instruction;
-        hasSystemMessage = true;
-      } else if (!hasSystemMessage && result.input.length === 0) {
+      if (!hasSystemMessage && result.input.length === 0) {
         result.instructions = instruction;
         hasSystemMessage = true;
       } else if (instruction) {
@@ -578,7 +571,6 @@ export function openaiToOpenAIResponsesRequest(model, body, stream, credentials)
   if (body.parallel_tool_calls !== undefined) result.parallel_tool_calls = body.parallel_tool_calls;
   const text = chatResponseFormatToResponsesText(body.response_format);
   if (text) result.text = text;
-  if ((credentials?.chatGptWebRequestMode === "browser" || credentials?.chatGptWebRequestMode === "agent") && body.text) result.text = { ...result.text, ...body.text };
 
   return result;
 }

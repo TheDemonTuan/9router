@@ -28,13 +28,8 @@ import {
   KIMCHI_CONFIG,
 } from "@/lib/oauth/constants/oauth";
 import { buildClineHeaders } from "@/shared/utils/clineAuth";
-import {
-  getChatGptWebCatalog,
-  getChatGptWebHealth,
-} from "open-sse/services/chatgptWebRuntimeClient.js";
+import { hasWebIdentityProbe, fetchWebIdentity } from "open-sse/services/webIdentity.js";
 
-import { mergeChatGptWebPublicModels } from "@/lib/providerNormalization";
-import { getChatGptWebProfileStates, applyChatGptWebProfileState, chatGptWebUnavailableProfileState, chatGptWebConnectionStatusUpdate } from "@/lib/chatgptWebConnectionState";
 // OAuth provider test endpoints
 const OAUTH_TEST_CONFIG = {
   claude: { checkExpiry: true, refreshable: true },
@@ -243,7 +238,7 @@ function parseProviderErrorMessage(bodyText, fallback) {
 
 async function probeCloudCodeAssistAccess(connection, accessToken, effectiveProxy = null) {
   const userAgent = connection.provider === "antigravity"
-    ? "google-api-nodejs-client/9.15.1 vscode-antigravity/1.107.0"
+    ? (ANTIGRAVITY_CONFIG.loadCodeAssistUserAgent || "antigravity/hub/2.24.0 darwin/arm64")
     : "google-api-nodejs-client/9.15.1 gemini-cli/0.34.0";
 
   const res = await fetchWithConnectionProxy(CLOUD_CODE_ASSIST_TEST_URL, {
@@ -580,8 +575,40 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
     }
   }
 
+  // Web-cookie providers: a session probe (identity/lightweight endpoint) is the
+  // only meaningful test — the generic key probes have no way to read a cookie
+  // header. An inconclusive probe keeps the connection active so a network
+  // hiccup cannot mark a healthy session as broken.
+  if (hasWebIdentityProbe(connection.provider)) {
+    const identity = await fetchWebIdentity(connection.provider, connection.apiKey || "");
+    if (identity.status === "valid") return { valid: true, error: null };
+    if (identity.status === "invalid") return { valid: false, error: identity.error };
+    return { valid: true, error: `Could not verify the session: ${identity.error}` };
+  }
+
   try {
     switch (connection.provider) {
+      case "commandcode": {
+        const res = await fetchWithConnectionProxy(
+          "https://api.commandcode.ai/alpha/whoami?limits=1",
+          {
+            headers: {
+              Authorization: `Bearer ${connection.apiKey}`,
+              Accept: "application/json",
+            },
+          },
+          effectiveProxy,
+        );
+        const valid = res.ok;
+        return {
+          valid,
+          error: valid
+            ? null
+            : res.status === 401 || res.status === 403
+              ? "Invalid API key"
+              : `Command Code API error (${res.status})`,
+        };
+      }
       case "cloudflare-ai": {
         const psd = connection.providerSpecificData || {};
         const accountId = psd.accountId;
@@ -771,7 +798,8 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
       case "atria":
       case "agnes":
       case "bai":
-      case "muse": {
+      case "muse":
+      case "runcrate": {
         const cfg = PROVIDERS[connection.provider];
         const res = await fetchWithConnectionProxy(cfg.validateUrl, { headers: { Authorization: `Bearer ${connection.apiKey}` } }, effectiveProxy);
         return { valid: res.ok, error: res.ok ? null : "Invalid API key" };
@@ -900,6 +928,23 @@ case "llm7": {
         }, effectiveProxy);
         return { valid: res.ok, error: res.ok ? null : "Invalid API key or base URL" };
       }
+      case "sensenova": {
+        const validateUrl = PROVIDERS.sensenova?.validateUrl || "https://token.sensenova.cn/v1/models";
+        const res = await fetchWithConnectionProxy(validateUrl, {
+          method: "GET",
+          headers: {
+            Authorization: "Bearer " + connection.apiKey,
+            Accept: "application/json",
+          },
+        }, effectiveProxy);
+        const valid = res.ok;
+        return {
+          valid,
+          error: valid ? null : res.status === 401 || res.status === 403
+            ? "Invalid API key"
+            : `SenseNova API error (${res.status})`,
+        };
+      }
       case "kimchi": {
         // Dual-auth: same validation endpoint as the OAuth flow — the token (API key
         // or OAuth access token) is sent as Authorization: Bearer.
@@ -928,31 +973,6 @@ case "llm7": {
 export async function testSingleConnection(id) {
   const connection = await getProviderConnectionById(id);
   if (!connection) return { valid: false, error: "Connection not found", latencyMs: 0, testedAt: new Date().toISOString() };
-  if (connection.provider === "chatgpt-web") {
-    const start = Date.now();
-    let profile; let health; let models = []; let stale = false;
-    try {
-      const states = await getChatGptWebProfileStates();
-      profile = states.get(connection.providerSpecificData?.profileId);
-      if (applyChatGptWebProfileState(connection, profile).testStatus === "active") {
-        const [runtimeHealth, catalog] = await Promise.all([
-          getChatGptWebHealth(connection), getChatGptWebCatalog(connection, { force: true }),
-        ]);
-        health = runtimeHealth;
-        stale = catalog.stale === true;
-        models = catalog.stale ? [] : mergeChatGptWebPublicModels([catalog]);
-        if (health.draining) profile = { ...profile, state: "draining" };
-        else if (!models.length) profile = { ...profile, models: [] };
-      }
-    } catch { profile = chatGptWebUnavailableProfileState(); }
-    const mapped = applyChatGptWebProfileState(connection, profile);
-    await updateProviderConnection(id, current => chatGptWebConnectionStatusUpdate(current, connection, profile), { resetHealth: false });
-    return {
-      valid: mapped.testStatus === "active", error: mapped.lastError, code: mapped.chatGptWebRuntime.lastError?.code || null,
-      refreshed: false, latencyMs: Date.now() - start, testedAt: new Date().toISOString(),
-      health, models: mapped.testStatus === "active" ? models : [], stale, chatGptWebRuntime: mapped.chatGptWebRuntime,
-    };
-  }
 
   const effectiveProxy = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
 

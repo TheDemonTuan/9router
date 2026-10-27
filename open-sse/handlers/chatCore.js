@@ -26,6 +26,7 @@ import { dedupeTools } from "../utils/toolDeduper.js";
 import { takeRenamedToolNames } from "../utils/opencodeFingerprint.js";
 import { injectCaveman } from "../rtk/caveman.js";
 import { injectPonytail } from "../rtk/ponytail.js";
+import { injectCustomPrompt } from "../rtk/customPrompt.js";
 import { compressMessages, formatRtkLog } from "../rtk/index.js";
 import { compressWithPxpipe } from "../rtk/pxpipe.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
@@ -72,7 +73,7 @@ export function stripContinuityFields(body) {
   return body;
 }
 
-export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, sessionDedupMode = "off", cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, providerOverrides = null, clientSignal, preResponse = null, routeContext: inputRouteContext = null, routeReason = "direct", effectiveModel = null, timingContext = null }) {
+export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, sessionDedupMode = "off", cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, customPromptEnabled, customPrompt, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking, providerOverrides = null, clientSignal, preResponse = null, routeContext: inputRouteContext = null, routeReason = "direct", effectiveModel = null, timingContext = null }) {
   const { provider, model } = modelInfo;
   const coreEnteredAt = Date.now();
   if (timingContext) timingContext.mark("coreEntered", coreEnteredAt);
@@ -138,7 +139,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   }
   const stripList = getModelStrip(alias, model);
   const registryModel = model;
-  const configuredUpstreamModel = getModelUpstreamId(alias, model);
+  const configuredUpstreamModel = getModelUpstreamId(alias, model, body);
   const wireModel = stripThinkingSuffix(configuredUpstreamModel);
   const upstreamModel = configuredUpstreamModel;
 
@@ -164,9 +165,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   }
   log?.debug?.("MODEL", `${model} · wire=${wireModel}`);
   const detectedClientTool = detectClientTool(clientRawRequest?.headers || {}, body);
-  const isChatGptWebCompact = provider === "chatgpt-web" && body?._compact === true;
-  const nativePassthrough = provider === "chatgpt-web" ? !!credentials?.chatGptWebAuthority
-    : isNativePassthrough(detectedClientTool, provider) || isChatGptWebCompact;
+  const nativePassthrough = isNativePassthrough(detectedClientTool, provider);
   const sameWireCodex = !nativePassthrough
     && provider === "codex"
     && sourceFormat === FORMATS.OPENAI_RESPONSES
@@ -214,8 +213,8 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   }
 
   const clientRequestedStreaming = body.stream === true || sourceFormat === FORMATS.ANTIGRAVITY || sourceFormat === FORMATS.GEMINI || sourceFormat === FORMATS.GEMINI_CLI;
-  const providerRequiresStreaming = PROVIDERS[provider]?.forceStream === true && !isChatGptWebCompact;
-  let stream = isChatGptWebCompact ? false : (providerRequiresStreaming ? true : (body.stream !== false));
+  const providerRequiresStreaming = PROVIDERS[provider]?.forceStream === true;
+  let stream = providerRequiresStreaming ? true : (body.stream !== false);
 
   // Image generation models require non-streaming (Google v1internal:generateContent)
   const modelType = getModelType(alias, model);
@@ -302,9 +301,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const rtkLine = formatRtkLog(rtkStats);
   if (rtkLine) console.log(rtkLine);
 
-  reqLogger = await createRequestLogger(sourceFormat, targetFormat, model, {
-    redactPayloads: provider === "chatgpt-web",
-  });
+  reqLogger = await createRequestLogger(sourceFormat, targetFormat, model);
   if (clientRawRequest) reqLogger.logClientRawRequest(clientRawRequest.endpoint, clientRawRequest.body, clientRawRequest.headers);
   reqLogger.logRawRequest(body);
   const fmtStr = nativePassthrough ? `FMT: ${sourceFormat} · NATIVE`
@@ -565,6 +562,11 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   if (!postSaversBlocked && ponytailEnabled && ponytailLevel) {
     injectPonytail(translatedBody, finalFormat, ponytailLevel);
     xf.push(`PONYTAIL:${ponytailLevel}`);
+  }
+
+  // Custom prompt: user-authored instruction, independent of the savers above
+  if (customPromptEnabled && injectCustomPrompt(translatedBody, finalFormat, customPrompt)) {
+    xf.push(`CUSTOMPROMPT:${customPrompt.trim().length}c`);
   }
 
   // PXPIPE: image bulky context (Claude-format bodies only), last saver before dispatch

@@ -48,6 +48,24 @@ if (process.argv[2] === "--snapshot") {
 }
 if (!existsSync(snapPath)) { console.error("No baseline. Run --snapshot first."); process.exit(1); }
 const baseline = JSON.parse(readFileSync(snapPath, "utf8"));
+// Approved upstream catalog additions; verify both alias directions, then compare
+// every historical alias and model key without replacing the baseline snapshot.
+const addedAliases = {
+  "deepseek-web": "deepseek-web", "gemini-web": "gemini-web",
+  "muse-web": "muse-web", runcrate: "runcrate", sensenova: "sensenova",
+  "uc-web": "uc", "veoaifree-web": "veo-free",
+};
+for (const [id, alias] of Object.entries(addedAliases)) {
+  if (current.idToAlias[id] !== alias || resolveProviderAlias(alias) !== id || !current.modelKeys.includes(alias)) {
+    throw new Error(`Invalid upstream alias: ${alias} -> ${id}`);
+  }
+  delete current.idToAlias[id];
+}
+const addedModelKeys = new Set([...Object.values(addedAliases), "ollama-local", "ollama-local-tts-models", "ollama-local-tts-voices"]);
+for (const key of addedModelKeys) {
+  if (!current.modelKeys.includes(key)) throw new Error(`Missing upstream catalog: ${key}`);
+}
+current.modelKeys = current.modelKeys.filter((key) => !addedModelKeys.has(key));
 // Check the approved public additions explicitly as well as preserving the full map.
 for (const [id, alias] of [["minimax-code", "mm"], ["minimax-code-global", "mmg"], ["nous", "nous"]]) {
   if (current.idToAlias[id] !== alias || resolveProviderAlias(alias) !== id || !current.modelKeys.includes(alias)) {

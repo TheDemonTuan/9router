@@ -10,6 +10,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+
+vi.mock("node:dns/promises", () => ({ lookup: async () => [{ address: "93.184.216.34", family: 4 }] }));
+vi.mock("undici/index.js", async (importOriginal) => ({
+  ...await importOriginal(),
+  fetch: (...args) => globalThis.fetch(...args),
+}));
 import { handleImageGenerationCore } from "../../open-sse/handlers/imageGenerationCore.js";
 import { CODEX_CLI_VERSION } from "../../open-sse/config/appConstants.js";
 
@@ -317,7 +323,7 @@ describe("handleImageGenerationCore", () => {
     expect(responseBody.data[0].b64_json).toBeTruthy();
   });
 
-  it.each(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])("generates image with Codex %s-image using current Codex version header", async (model) => {
+  it.each(["gpt-6-sol"])("generates image with Codex %s-image using current Codex version header", async (model) => {
     global.fetch.mockResolvedValueOnce(
       new Response(
         [
@@ -409,7 +415,7 @@ describe("handleImageGenerationCore", () => {
     expect(result.success).toBe(true);
     const fetchCall = global.fetch.mock.calls[0];
     const requestBody = JSON.parse(fetchCall[1].body);
-    expect(requestBody.model).toBe("gpt-5.6-sol");
+    expect(requestBody.model).toBe("gpt-6-sol");
     expect(requestBody.tools).toEqual([
       { type: "image_generation", output_format: "png", size: "1024x1024", action: "generate", model: "gpt-image-2.5" },
     ]);
@@ -524,8 +530,8 @@ describe("handleImageGenerationCore", () => {
     });
 
     expect(result.success).toBe(true);
-    expect(global.fetch).toHaveBeenNthCalledWith(1, "https://example.com/source.png");
-    expect(global.fetch).toHaveBeenNthCalledWith(2, "https://example.com/mask.png");
+    expect(global.fetch).toHaveBeenNthCalledWith(1, "https://example.com/source.png", expect.objectContaining({ redirect: "manual" }));
+    expect(global.fetch).toHaveBeenNthCalledWith(2, "https://example.com/mask.png", expect.objectContaining({ redirect: "manual" }));
 
     const providerCall = global.fetch.mock.calls[2];
     expect(providerCall[0]).toBe("https://api.cloudflare.com/client/v4/accounts/cf-account/ai/run/@cf/runwayml/stable-diffusion-v1-5-inpainting");

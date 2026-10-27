@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from "vitest";
-import { detectRequiredCapabilities, reorderByCapabilities, handleComboChat } from "../../open-sse/services/combo.js";
+import { describe, it, expect } from "vitest";
+import { detectRequiredCapabilities, reorderByCapabilities } from "../../open-sse/services/combo.js";
 
 describe("detectRequiredCapabilities", () => {
   it("text-only -> empty", () => {
@@ -71,36 +71,9 @@ describe("reorderByCapabilities", () => {
     expect(out).toBe(models);
   });
 
-  it("uses verified live cgw capabilities for combo ordering", () => {
-    const models = ["deepseek/deepseek-chat", "cgw/chatgpt-web/high"];
-    const liveCapabilities = new Map([
-      ["cgw/chatgpt-web/high", { vision: true, tools: true }],
-    ]);
-    const out = reorderByCapabilities(models, new Set(["vision"]), liveCapabilities);
-    expect(out[0]).toBe("cgw/chatgpt-web/high");
-  });
-
-  it("keeps unknown cgw capability evidence unsupported", () => {
-    const models = ["cgw/chatgpt-web/high", "anthropic/claude-sonnet-4.6"];
-    const out = reorderByCapabilities(models, new Set(["vision"]));
-    expect(out[0]).toBe("anthropic/claude-sonnet-4.6");
-  });
 
   it("single model -> unchanged", () => {
     const models = ["a/x"];
     expect(reorderByCapabilities(models, new Set(["vision"]))).toBe(models);
-  });
-});
-
-describe("combo live capability dispatch", () => {
-  it("dispatches to the live-eligible vision account before text-only fallback", async () => {
-    const handleSingleModel = vi.fn(async () => new Response("ok"));
-    await handleComboChat({
-      body: { messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "synthetic" } }] }] },
-      models: ["deepseek/deepseek-chat", "cgw/chatgpt-web/high"],
-      liveCapabilities: new Map([["cgw/chatgpt-web/high", { vision: true }]]),
-      handleSingleModel, log: { info: vi.fn(), warn: vi.fn() },
-    });
-    expect(handleSingleModel.mock.calls[0][1]).toBe("cgw/chatgpt-web/high");
   });
 });

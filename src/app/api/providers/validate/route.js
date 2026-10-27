@@ -5,19 +5,13 @@ import { getDefaultModel } from "open-sse/config/providerModels.js";
 import { resolveOllamaLocalHost, resolveXiaomiTokenplanBaseUrl, PROVIDERS } from "open-sse/config/providers.js";
 import { openaiToCommandCodeRequest } from "open-sse/translator/request/openai-to-commandcode.js";
 import { resolveQoderCredentials, resolveQoderModels } from "open-sse/services/qoderModels.js";
-import { normalizeProviderId, normalizeProviderSpecificData, mergeChatGptWebPublicModels, validateChatGptWebConnectionInput } from "@/lib/providerNormalization";
-import {
-  getChatGptWebCatalog,
-  getChatGptWebHealth,
-  validateChatGptWebProfileId,
-  requestChatGptWebRuntime,
-} from "open-sse/services/chatgptWebRuntimeClient.js";
 import { probeBedrockCredentials } from "open-sse/executors/bedrock.js";
 import {
   createNousApiKeyProbe,
   getNousApiKeyValidationError,
   isNousApiKeyAccepted,
 } from "open-sse/services/nous.js";
+import { normalizeProviderId } from "@/lib/providerNormalization";
 
 // Probe a webSearch/webFetch provider using its searchConfig/fetchConfig.
 // Returns true if API key is accepted (status !== 401 && !== 403).
@@ -99,35 +93,6 @@ export async function POST(request) {
     const body = await request.json();
     const provider = normalizeProviderId(body.provider);
     const { apiKey, providerSpecificData } = body;
-
-    if (provider === "chatgpt-web") {
-      try {
-        validateChatGptWebConnectionInput(body);
-        const selector = normalizeProviderSpecificData(provider, body, providerSpecificData);
-        const profileId = validateChatGptWebProfileId(selector?.profileId);
-        const connection = { provider, providerSpecificData: { profileId } };
-        const [health, catalog, readiness] = await Promise.all([
-          getChatGptWebHealth(connection),
-          getChatGptWebCatalog(connection, { force: true }),
-          requestChatGptWebRuntime(connection, "/readyz", {}, { timeoutMs: 3000 }).then(async response => {
-            await response.body?.cancel();
-            return { ok: response.ok };
-          }),
-        ]);
-        const usableModels = mergeChatGptWebPublicModels([catalog]);
-        const valid = health.service === "9router-cgw-runtime" && health.protocolVersion === 1
-          && health.draining === false && readiness.ok && !catalog.stale && usableModels.length > 0;
-        return NextResponse.json({
-          valid,
-          error: valid ? null : health.draining ? "Runtime is draining; wait for the operator to resume admission" : catalog.stale ? "Runtime catalog is stale; refresh profile readiness" : usableModels.length === 0 ? "Profile has no verified usable models; complete login and probe the profile" : "Profile is not ready; check login, session and Full connector readiness in the runtime panel",
-          health,
-          models: usableModels,
-          stale: catalog.stale,
-        });
-      } catch (error) {
-        return NextResponse.json({ valid: false, error: error.message }, { status: 400 });
-      }
-    }
 
     const isNoAuth = AI_PROVIDERS[provider]?.noAuth === true;
     // Same exemption as the create route: a provider can name a providerSpecificData field
@@ -433,6 +398,7 @@ export async function POST(request) {
         case "assemblyai":
         case "nanobanana":
         case "chutes":
+        case "runcrate":
         case "xiaomi-mimo":
         case "xiaomi-tokenplan":
         case "nvidia": {

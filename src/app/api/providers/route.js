@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import {
   getProviderConnections,
@@ -8,12 +7,8 @@ import {
   getProxyPoolById,
 } from "@/models";
 import { APIKEY_PROVIDERS } from "@/shared/constants/config";
-import { AI_PROVIDERS, FREE_TIER_PROVIDERS, LOCAL_BRIDGE_PROVIDERS, WEB_COOKIE_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isCustomEmbeddingProvider } from "@/shared/constants/providers";
-import { normalizeProviderId, normalizeProviderSpecificData, validateChatGptWebConnectionInput } from "@/lib/providerNormalization";
-import { validateChatGptWebProfileId } from "open-sse/services/chatgptWebRuntimeClient.js";
-import { authorizeChatGptWebRuntimeAdmin } from "@/dashboardGuard";
-import { ensureChatGptWebRuntimeProfile } from "@/lib/chatgptWebProfileProvisioning";
-import { getChatGptWebProfileStates, applyChatGptWebProfileState, chatGptWebUnavailableProfileState } from "@/lib/chatgptWebConnectionState";
+import { AI_PROVIDERS, FREE_TIER_PROVIDERS, WEB_COOKIE_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, isCustomEmbeddingProvider } from "@/shared/constants/providers";
+import { normalizeProviderId, normalizeProviderSpecificData } from "@/lib/providerNormalization";
 import { toProviderConnectionResponse } from "@/lib/providerConnectionResponse";
 
 export const dynamic = "force-dynamic";
@@ -53,15 +48,9 @@ async function normalizeProxyPoolId(proxyPoolId) {
 }
 
 // GET /api/providers - List all connections
-export async function GET(request) {
+export async function GET() {
   try {
     const connections = await getProviderConnections();
-    let profileStates;
-    let runtimeUnavailable = false;
-    if (connections.some(connection => connection.provider === "chatgpt-web")) {
-      try { profileStates = await getChatGptWebProfileStates({ signal: request?.signal }); }
-      catch { runtimeUnavailable = true; }
-    }
 
     // Build nodeNameMap for compatible providers (id → name)
     let nodeNameMap = {};
@@ -78,16 +67,10 @@ export async function GET(request) {
       const name = isCompatible
         ? (c.name || nodeNameMap[c.provider] || c.providerSpecificData?.nodeName || c.provider)
         : c.name;
-      const safe = {
+      return {
         ...toProviderConnectionResponse(c),
         name,
       };
-      if (c.provider === "chatgpt-web") {
-        Object.assign(safe, applyChatGptWebProfileState(safe, runtimeUnavailable
-          ? chatGptWebUnavailableProfileState()
-          : profileStates.get(c.providerSpecificData?.profileId)));
-      }
-      return safe;
     });
 
     return NextResponse.json({ connections: safeConnections });
@@ -103,13 +86,6 @@ export async function POST(request) {
     const body = await request.json();
     const provider = normalizeProviderId(body.provider);
     const { apiKey, name, displayName, priority, globalPriority, defaultModel, testStatus } = body;
-    if (provider === "chatgpt-web") {
-      if (!await authorizeChatGptWebRuntimeAdmin(request)) {
-        return NextResponse.json({ error: "Dashboard authentication required" }, { status: 401 });
-      }
-      try { validateChatGptWebConnectionInput(body); }
-      catch (error) { return NextResponse.json({ error: error.message }, { status: 400 }); }
-    }
     const proxyConfig = normalizeProxyConfig(body);
     if (proxyConfig.error) {
       return NextResponse.json({ error: proxyConfig.error }, { status: 400 });
@@ -123,7 +99,6 @@ export async function POST(request) {
 
     // Validation
     const isWebCookieProvider = !!WEB_COOKIE_PROVIDERS[provider];
-    const isLocalBridgeProvider = !!LOCAL_BRIDGE_PROVIDERS[provider];
     // Dual-auth providers (e.g. codebuddy-cn, xai) live under category "oauth" but also
     // accept an API key via authModes — they aren't in APIKEY_PROVIDERS, so allow them here.
     const supportsApiKeyMode = !!AI_PROVIDERS[provider]?.authModes?.includes("apikey");
@@ -131,7 +106,6 @@ export async function POST(request) {
       FREE_TIER_PROVIDERS[provider] ||
       supportsApiKeyMode ||
       isWebCookieProvider ||
-      isLocalBridgeProvider ||
       isOpenAICompatibleProvider(provider) ||
       isAnthropicCompatibleProvider(provider) ||
       isCustomEmbeddingProvider(provider);
@@ -139,10 +113,12 @@ export async function POST(request) {
     if (!provider || !isValidProvider) {
       return NextResponse.json({ error: "Invalid provider" }, { status: 400 });
     }
-    // Bedrock can use a local AWS profile instead of a pasted API key.
+    // A provider may declare a providerSpecificData field that stands in for an API key — e.g.
+    // Bedrock's `profile`, where the credential lives in the local AWS config and there is no
+    // key to paste. Without this, following such a provider's own setup notice returns 400.
     const apiKeySubstitute = AI_PROVIDERS[provider]?.apiKeyOptionalWith;
     const hasApiKeySubstitute = !!(apiKeySubstitute && body.providerSpecificData?.[apiKeySubstitute]);
-    if (!apiKey && provider !== "ollama-local" && !isLocalBridgeProvider && !hasApiKeySubstitute) {
+    if (!apiKey && provider !== "ollama-local" && !hasApiKeySubstitute) {
       return NextResponse.json({ error: `${isWebCookieProvider ? "Cookie value" : "API Key"} is required` }, { status: 400 });
     }
     const connectionName = name || displayName || AI_PROVIDERS[provider]?.name;
@@ -151,14 +127,6 @@ export async function POST(request) {
     }
 
     let providerSpecificData = normalizeProviderSpecificData(provider, body, body.providerSpecificData);
-    if (isLocalBridgeProvider) {
-      try {
-        const selector = providerSpecificData?.profileId;
-        providerSpecificData = { profileId: validateChatGptWebProfileId(selector === undefined ? `cgw-${randomUUID()}` : selector) };
-      } catch (error) {
-        return NextResponse.json({ error: error.message }, { status: 400 });
-      }
-    }
 
     // Compatible LLM nodes support multiple API-key connections (key pool); runtime
     // rotates/fails over via getProviderCredentials. Embedding nodes stay single-connection.
@@ -195,7 +163,7 @@ export async function POST(request) {
       };
     }
 
-    const mergedProviderSpecificData = provider === "chatgpt-web" ? providerSpecificData : {
+    const mergedProviderSpecificData = {
       ...(providerSpecificData || {}),
       connectionProxyEnabled: proxyConfig.connectionProxyEnabled,
       connectionProxyUrl: proxyConfig.connectionProxyUrl,
@@ -205,23 +173,10 @@ export async function POST(request) {
     if (proxyPoolId !== null) {
       mergedProviderSpecificData.proxyPoolId = proxyPoolId;
     }
-    if (provider === "chatgpt-web") {
-      // Bridge connections are not name-deduplicated by the repository. Refuse
-      // an accidental duplicate before allocating a persistent browser profile.
-      const existing = (await getProviderConnections({ provider })).find(item => item.name === connectionName);
-      if (existing) {
-        return NextResponse.json({ error: `A ChatGPT Web connection named "${connectionName}" already exists. Edit the existing connection instead.`, code: "PROVIDER_NAME_CONFLICT", existingId: existing.id, existingName: existing.name }, { status: 409 });
-      }
-      try {
-        await ensureChatGptWebRuntimeProfile(providerSpecificData.profileId, request.signal);
-      } catch {
-        return NextResponse.json({ error: "Runtime unavailable or profile creation failed. No connection was saved; the request was not retried." }, { status: 502 });
-      }
-    }
 
     const newConnection = await createProviderConnection({
       provider,
-      authType: isLocalBridgeProvider ? "bridge" : isWebCookieProvider ? "cookie" : "apikey",
+      authType: isWebCookieProvider ? "cookie" : "apikey",
       name: connectionName,
       apiKey: apiKey || "",
       priority: priority || 1,
@@ -229,7 +184,7 @@ export async function POST(request) {
       defaultModel: defaultModel || null,
       providerSpecificData: mergedProviderSpecificData,
       isActive: true,
-      testStatus: provider === "chatgpt-web" ? "login_required" : testStatus || "unknown",
+      testStatus: testStatus || "unknown",
       // POST with an id is an explicit edit of that connection; without one, a
       // name collision is refused rather than silently overwriting a key. #4311
       allowOverwrite: body.id ? true : (body.allowOverwrite === true || body.overwrite === true),

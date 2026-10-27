@@ -8,7 +8,7 @@ import {
   isValidApiKey,
 } from "../services/auth.js";
 import { handleAntigravityQuotaError, clearAntigravityStrikes } from "../services/antigravityQuota.js";
-import { getSettings, getProviderConnections } from "@/lib/localDb";
+import { getSettings } from "@/lib/localDb";
 import { getModelInfo, getComboModels } from "../services/model.js";
 import { handleChatCore } from "open-sse/handlers/chatCore.js";
 import { createDeadlineError } from "open-sse/utils/preResponseBudget.js";
@@ -26,10 +26,6 @@ import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { createTimingContext } from "../utils/timingContext.js";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy.js";
-import { assertChatGptWebAuthorityHeaderSize, chatGptWebAuthorityErrorResponse, chatGptWebAuthorityRequiredResponse, loadChatGptWebClientKeys, redactChatGptWebInternalHeaders, verifyChatGptWebAuthority } from "@/lib/chatgptWebAuthority.js";
-import { validateBrowserChatRequest, validateBrowserResponsesRequest } from "../../../services/chatgpt-web-runtime/browser-request.js";
-import { validateAgentChatRequest, validateAgentResponsesRequest } from "../../../services/chatgpt-web-runtime/agent-request.js";
-import { AUTHORITY_HEADER } from "../../../services/chatgpt-web-runtime/protocol.js";
 
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
 import {
@@ -38,136 +34,14 @@ import {
   isCodexFallbackModel,
 } from "open-sse/services/codexModels.js";
 import { stripModelContextMarker } from "open-sse/utils/modelMarkers.js";
-import {
-  getChatGptWebCatalog,
-} from "open-sse/services/chatgptWebRuntimeClient.js";
-import { getChatGptWebLegacyConversation } from "open-sse/utils/sessionManager.js";
 import { getKeyAccessContext, enforceKeyAccess, filterAdapterModels } from "../services/keyAccess.js";
-
-function readHeader(headers, name) {
-  if (!headers || typeof headers !== "object") return null;
-  const target = name.toLowerCase();
-  const entry = Object.entries(headers).find(([key]) => key.toLowerCase() === target);
-  return typeof entry?.[1] === "string" && entry[1].trim() ? entry[1].trim() : null;
-}
-
-function getChatGptWebExplicitConnectionId(clientRawRequest) {
-  return readHeader(clientRawRequest?.headers, "x-connection-id")
-    || readHeader(clientRawRequest?.headers, "x-9router-connection-id");
-}
-
+import { resolveSmartChoice, getSmartComboSessionId } from "../services/systemoneRouter.js";
 
 function withConnectionHeader(response, connectionId) {
   if (!response || !connectionId) return response;
   const headers = new Headers(response.headers);
   headers.set("x-9router-connection-id", String(connectionId));
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
-}
-
-function withChatGptWebNoFallback(response) {
-  const headers = new Headers(response.headers);
-  headers.set("x-9router-no-fallback", "true");
-  headers.set("x-should-retry", "false");
-  return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
-}
-
-function bridgeContinuationError(connectionId) {
-  return new Response(JSON.stringify({
-    error: {
-      type: "bridge_error",
-      code: "bridge_connection_unavailable",
-      message: `Pinned ChatGPT Web bridge connection is unavailable: ${connectionId}`,
-    },
-  }), {
-    status: 409,
-    headers: {
-      "content-type": "application/json",
-      "x-9router-no-fallback": "true",
-      "x-should-retry": "false",
-      "x-9router-error-code": "bridge_connection_unavailable",
-      "x-9router-connection-id": String(connectionId),
-    },
-  });
-}
-
-/**
- * Resolve account-scoped cgw capabilities before combo ordering. Unknown or stale rows stay
- * unsupported; a capability is usable when at least one verified active bridge can provide it.
- */
-function hasAgentToolSignal(body) {
-  if (!body || typeof body !== "object") return false;
-  if (Array.isArray(body.tools) && body.tools.length > 0) return true;
-  if (body.tool_choice !== undefined && body.tool_choice !== "none") return true;
-  if (Array.isArray(body.messages) && body.messages.some(m => m?.role === "tool" || (Array.isArray(m?.tool_calls) && m.tool_calls.length > 0))) return true;
-  if (Array.isArray(body.input) && body.input.some(item => item?.type === "function_call" || item?.type === "function_call_output")) return true;
-  return false;
-}
-
-function bridgeCapabilityForRequest(authority, body = null) {
-  if (authority) return "native_responses";
-  return hasAgentToolSignal(body) ? "generic_tools" : "generic_responses";
-}
-
-function browserRequestErrorResponse(error) {
-  return withChatGptWebNoFallback(Response.json({ error: { type: "runtime_error", code: error.code || "unsupported_browser_request",
-    message: error.message, retryable: false, submission_state: "not_sent" } }, { status: error.status || 400 }));
-}
-
-function validateBrowserPublicRequest(body, endpoint) {
-  if (body?._compact === true || Object.keys(body || {}).some(key => key.startsWith("_chatgpt")
-    || ["client_metadata", "authority", "cwd", "roots", "environment", "pathFlavor", "clientId", "nativeThreadId", "nativeTurnId"].includes(key))
-    || body?.input?.some?.(item => item?.type === "compaction_trigger")) return chatGptWebAuthorityRequiredResponse();
-  const isAgent = hasAgentToolSignal(body);
-  try {
-    if (["/v1/chat/completions", "/api/v1/chat/completions"].includes(endpoint)) {
-      if (isAgent) validateAgentChatRequest(body);
-      else validateBrowserChatRequest(body);
-    } else if (["/v1/responses", "/api/v1/responses"].includes(endpoint)) {
-      if (isAgent) validateAgentResponsesRequest(body);
-      else validateBrowserResponsesRequest(body);
-    } else return chatGptWebAuthorityRequiredResponse();
-  } catch (error) { return browserRequestErrorResponse(error); }
-  return null;
-}
-
-async function loadChatGptWebComboCapabilities(models, bridgeCapability = "generic_responses") {
-  const resolved = await Promise.all((Array.isArray(models) ? models : []).filter(value => typeof value === "string")
-    .map(async candidate => ({ candidate, info: await getModelInfo(candidate) })));
-  const bridgeModels = resolved.filter(({ info }) => info.provider === "chatgpt-web");
-  if (bridgeModels.length === 0) return null;
-
-  const capabilities = new Map();
-  let connections;
-  try {
-    connections = await getProviderConnections({ provider: "chatgpt-web", isActive: true });
-  } catch {
-    return capabilities;
-  }
-
-  await Promise.all(connections.map(async (connection) => {
-    try {
-      const catalog = await getChatGptWebCatalog(connection);
-      if (catalog.stale) return;
-      for (const { candidate, info } of bridgeModels) {
-        const rowId = info.model;
-        const row = catalog.models?.find((entry) => entry.id === rowId);
-        if (row?.capabilities?.[bridgeCapability] !== true) continue;
-        if (bridgeCapability === "generic_tools" && row.capabilities.generic_responses !== true) continue;
-        if (!row?.capabilities || typeof row.capabilities !== "object") continue;
-        const merged = capabilities.get(candidate) || {};
-        for (const [key, value] of Object.entries(row.capabilities)) {
-          if ((bridgeCapability === "generic_responses" || bridgeCapability === "generic_tools") && !["text", "generic_responses", "generic_tools"].includes(key)) continue;
-          if (value === true) merged[key] = true;
-          else if (!(key in merged) && value === false) merged[key] = false;
-        }
-        if (bridgeCapability === "generic_tools") merged.tools = row.capabilities.generic_tools === true && row.capabilities.generic_responses === true;
-        capabilities.set(candidate, merged);
-      }
-    } catch {
-      // Offline/unknown bridges contribute no capability evidence.
-    }
-  }));
-  return capabilities;
 }
 
 /**
@@ -180,36 +54,15 @@ export async function handleChat(request, clientRawRequest = null, options = {})
   const timingContext = options?.timingContext || options?.timing || request?.timingContext || createTimingContext();
   if (request && !request.timingContext) request.timingContext = timingContext;
   let body;
-  let rawBody;
-  let chatGptWebAuthority = null;
   try {
-    rawBody = new Uint8Array(await request.arrayBuffer());
-    body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(rawBody));
+    body = await request.json();
     timingContext.mark("bodyParsed");
-  } catch (error) {
-    if (error?.status === 431) return chatGptWebAuthorityErrorResponse(error);
+  } catch {
     log.warn("CHAT", "Invalid JSON body");
     return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid JSON body");
   }
-
-  const cgwRequest = typeof body?.model === "string" && (body.model.startsWith("cgw/")
-    || body.model.startsWith("chatgpt-web/") || (await getModelInfo(body.model)).provider === "chatgpt-web");
-  if (cgwRequest || request.headers.has(AUTHORITY_HEADER)) {
-    const key = extractApiKey(request);
-    if (!key || !await isValidApiKey(key)) return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Valid API key required for ChatGPT Web");
-    if (request.headers.has(AUTHORITY_HEADER)) {
-      try {
-        assertChatGptWebAuthorityHeaderSize(request.headers);
-        chatGptWebAuthority = verifyChatGptWebAuthority({ rawBody, method: request.method,
-          path: new URL(request.url).pathname, headers: request.headers, clientKeys: await loadChatGptWebClientKeys() });
-      } catch (error) { return chatGptWebAuthorityErrorResponse(error); }
-    } else {
-      if (options.operation === "compact") return chatGptWebAuthorityRequiredResponse();
-      const invalid = validateBrowserPublicRequest(body, new URL(request.url).pathname);
-      if (invalid) return invalid;
-    }
-  }
   if (options.operation === "compact") body = { ...body, _compact: true };
+
 
   // Build clientRawRequest for logging (if not provided)
   if (!clientRawRequest) {
@@ -217,14 +70,14 @@ export async function handleChat(request, clientRawRequest = null, options = {})
     clientRawRequest = {
       endpoint: url.pathname,
       body,
-      headers: redactChatGptWebInternalHeaders(request.headers)
+      headers: Object.fromEntries(request.headers.entries())
     };
   }
-  clientRawRequest = { ...clientRawRequest, headers: redactChatGptWebInternalHeaders(clientRawRequest.headers) };
   // Preserve the requested context marker for account eligibility; strip only for resolution/wire.
   const requestedModelStr = body.model;
   const { model: modelStr, contextMarker } = stripModelContextMarker(body.model);
   if (contextMarker) body.model = modelStr;
+
 
   // Request summary is emitted as the unified "▶" line in chatCore (has fmt/thinking/account)
 
@@ -267,29 +120,20 @@ export async function handleChat(request, clientRawRequest = null, options = {})
 
   // Bypass naming/warmup requests before combo rotation to avoid wasting rotation slots
   const userAgent = request?.headers?.get("user-agent") || "";
-  const bypassResponse = cgwRequest || chatGptWebAuthority ? null : handleBypassRequest(body, modelStr, userAgent, !!settings.ccFilterNaming);
+  const bypassResponse = handleBypassRequest(body, modelStr, userAgent, !!settings.ccFilterNaming);
   if (bypassResponse) return bypassResponse.response || bypassResponse;
 
   const requiredCapabilities = detectRequiredCapabilities(body);
-  const bridgeCapability = bridgeCapabilityForRequest(chatGptWebAuthority, body);
 
   // Check if model is a combo (has multiple models with fallback)
   const comboModels = await getComboModels(modelStr);
   if (comboModels) {
-    if (chatGptWebAuthority) return chatGptWebAuthorityRequiredResponse();
-    if ((await Promise.all(comboModels.map(model => getModelInfo(model)))).some(info => info.provider === "chatgpt-web")) {
-      if (!apiKey || !await isValidApiKey(apiKey)) return withChatGptWebNoFallback(errorResponse(401, "Valid API key required for ChatGPT Web"));
-      const invalid = validateBrowserPublicRequest(body, new URL(request.url).pathname);
-      if (invalid) return invalid;
-      if ((settings.comboStrategies?.[modelStr]?.fallbackStrategy || settings.comboStrategy) === "fusion") return browserRequestErrorResponse({ code: "unsupported_browser_request", status: 400, message: "ChatGPT Web does not support fusion requests" });
-    }
     // Check for combo-specific strategy first, fallback to global
     const comboStrategies = settings.comboStrategies || {};
     const comboSpecificStrategy = comboStrategies[modelStr]?.fallbackStrategy;
     const comboStrategy = comboSpecificStrategy || settings.comboStrategy || "fallback";
     const augmentedModels = await filterAdapterModels(keyAccess, augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, settings), comboModels);
     const adapterAdded = augmentedModels.filter((m) => !comboModels.includes(m));
-    const liveCapabilities = await loadChatGptWebComboCapabilities(augmentedModels, bridgeCapability);
 
     if (comboStrategy === "fusion") {
       log.info("CHAT", `Combo "${modelStr}" with ${comboModels.length} models (strategy: fusion)`);
@@ -302,7 +146,7 @@ export async function handleChat(request, clientRawRequest = null, options = {})
             const { tools, tool_choice, ...cleanBody } = clientRawRequest.body || {};
             cleanRawReq = { ...clientRawRequest, body: cleanBody };
           }
-          return handleSingleModelChat(b, m, cleanRawReq, request, apiKey, { chatGptWebAuthority, preResponse,
+          return handleSingleModelChat(b, m, cleanRawReq, request, apiKey, { preResponse,
           clientModel: modelStr,
           effectiveModel: m,
           routeReason: "combo",
@@ -318,12 +162,14 @@ export async function handleChat(request, clientRawRequest = null, options = {})
     }
 
     const comboStickyLimit = settings.comboStickyRoundRobinLimit;
+    const sessionId = getSmartComboSessionId(request, clientRawRequest?.headers, body);
+    const comboCfg = comboStrategies[modelStr] || {};
     log.info("CHAT", `Combo "${modelStr}" with ${augmentedModels.length} models (strategy: ${comboStrategy}, sticky: ${comboStickyLimit})`);
     return handleComboChat({
       body,
       models: augmentedModels,
       handleSingleModel: withCapacityAdapterStripping(
-        (b, m, meta = {}) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, { chatGptWebAuthority, preResponse,
+        (b, m, meta = {}) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, { preResponse,
         clientModel: modelStr,
         effectiveModel: m,
         routeReason: "combo",
@@ -335,18 +181,24 @@ export async function handleChat(request, clientRawRequest = null, options = {})
       comboName: modelStr,
       comboStrategy,
       comboStickyLimit,
-      liveCapabilities,
       preResponse,
+      sessionId,
+      smartPolicy: comboCfg.smartPolicy || "smart",
+      sessionSticky: comboCfg.sessionSticky !== false,
+      confidenceThreshold: typeof comboCfg.confidenceThreshold === "number" ? comboCfg.confidenceThreshold : 0.8,
+      resolveSmartChoice: comboStrategy === "smart"
+        ? (b, m) => resolveSmartChoice({
+            body: b,
+            models: m,
+            routerModel: comboCfg.routerModel,
+            log,
+            preResponse,
+            keyAccess,
+          })
+        : null,
     });
   }
 
-  if (cgwRequest || chatGptWebAuthority) {
-    // Both Web lanes require the exact provider; capacity adapters must not substitute.
-    return handleSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, {
-      preResponse, chatGptWebAuthority, clientModel: modelStr, effectiveModel: modelStr, routeReason: "direct",
-      timingContext,
-    });
-  }
   // Single model request — may still switch to a capacity-adapter model if the
   // target lacks a capability the request needs (e.g. no vision, request has an image).
   const soloAugmented = await filterAdapterModels(keyAccess, augmentModelsWithCapacityAdapter([modelStr], requiredCapabilities, settings), [modelStr]);
@@ -357,7 +209,7 @@ export async function handleChat(request, clientRawRequest = null, options = {})
       body,
       models: soloAugmented,
       handleSingleModel: withCapacityAdapterStripping(
-        (b, m, meta = {}) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, { chatGptWebAuthority, preResponse,
+        (b, m, meta = {}) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, { preResponse,
         clientModel: modelStr,
         effectiveModel: m,
         routeReason: m !== modelStr ? "capacity-adapter" : "direct",
@@ -371,7 +223,7 @@ export async function handleChat(request, clientRawRequest = null, options = {})
     });
   }
 
-  return handleSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, { chatGptWebAuthority, preResponse,
+  return handleSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, { preResponse,
     clientModel: modelStr, effectiveModel: modelStr, requestedModel: requestedModelStr,
     routeReason: "direct", timingContext });
 }
@@ -379,7 +231,7 @@ export async function handleChat(request, clientRawRequest = null, options = {})
 /**
  * Handle single model chat request
  */
-async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, { preResponse = null, clientModel = null, effectiveModel = null, routeReason = "direct", routeContext = null, chatGptWebAuthority = null, requestedModel = null, timingContext = null } = {}) {
+async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, { preResponse = null, clientModel = null, effectiveModel = null, routeReason = "direct", routeContext = null, requestedModel = null, timingContext = null } = {}) {
   timingContext = timingContext || request?.timingContext || createTimingContext();
   requestedModel = (requestedModel || modelStr).split("/").slice(-1)[0];
   const modelInfo = await getModelInfo(modelStr);
@@ -393,20 +245,11 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       const comboStrategies = chatSettings.comboStrategies || {};
       const comboSpecificStrategy = comboStrategies[modelStr]?.fallbackStrategy;
       const comboStrategy = comboSpecificStrategy || chatSettings.comboStrategy || "fallback";
-      if (chatGptWebAuthority) return chatGptWebAuthorityRequiredResponse();
-      if ((await Promise.all(comboModels.map(model => getModelInfo(model)))).some(info => info.provider === "chatgpt-web")) {
-        if (!apiKey || !await isValidApiKey(apiKey)) return withChatGptWebNoFallback(errorResponse(401, "Valid API key required for ChatGPT Web"));
-        const invalid = validateBrowserPublicRequest(clientRawRequest?.body || body, new URL(request.url).pathname);
-        if (invalid) return invalid;
-        if (comboStrategy === "fusion") return browserRequestErrorResponse({ code: "unsupported_browser_request", status: 400, message: "ChatGPT Web does not support fusion requests" });
-      }
       const requiredCapabilities = detectRequiredCapabilities(body);
-      const bridgeCapability = bridgeCapabilityForRequest(chatGptWebAuthority, body);
       // The outer combo grants its members, not gateway-injected adapter targets.
       const keyAccess = await getKeyAccessContext(request);
       const augmentedModels = await filterAdapterModels(keyAccess, augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, chatSettings), comboModels);
       const adapterAdded = augmentedModels.filter((m) => !comboModels.includes(m));
-      const liveCapabilities = await loadChatGptWebComboCapabilities(augmentedModels, bridgeCapability);
 
       if (comboStrategy === "fusion") {
         log.info("CHAT", `Combo "${modelStr}" with ${comboModels.length} models (strategy: fusion)`);
@@ -419,7 +262,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
               const { tools, tool_choice, ...cleanBody } = clientRawRequest.body || {};
               cleanRawReq = { ...clientRawRequest, body: cleanBody };
             }
-            return handleSingleModelChat(b, m, cleanRawReq, request, apiKey, { chatGptWebAuthority, preResponse,
+            return handleSingleModelChat(b, m, cleanRawReq, request, apiKey, { preResponse,
             clientModel: modelStr,
             effectiveModel: m,
             routeReason: "combo",
@@ -434,12 +277,14 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       }
 
       const comboStickyLimit = chatSettings.comboStickyRoundRobinLimit;
+      const comboCfg = comboStrategies[modelStr] || {};
+      const nestedSessionId = getSmartComboSessionId(request, clientRawRequest?.headers, body);
       log.info("CHAT", `Combo "${modelStr}" with ${augmentedModels.length} models (strategy: ${comboStrategy}, sticky: ${comboStickyLimit})`);
       return handleComboChat({
         body,
         models: augmentedModels,
         handleSingleModel: withCapacityAdapterStripping(
-        (b, m, meta = {}) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, { chatGptWebAuthority, preResponse,
+        (b, m, meta = {}) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, { preResponse,
         clientModel: modelStr,
         effectiveModel: m,
         routeReason: "combo",
@@ -450,8 +295,21 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         comboName: modelStr,
         comboStrategy,
         comboStickyLimit,
-        liveCapabilities,
         preResponse,
+        sessionId: nestedSessionId,
+        smartPolicy: comboCfg.smartPolicy || "smart",
+        sessionSticky: comboCfg.sessionSticky !== false,
+        confidenceThreshold: typeof comboCfg.confidenceThreshold === "number" ? comboCfg.confidenceThreshold : 0.8,
+        resolveSmartChoice: comboStrategy === "smart"
+          ? (b, m) => resolveSmartChoice({
+              body: b,
+              models: m,
+              routerModel: comboCfg.routerModel,
+              log,
+              preResponse,
+              keyAccess,
+            })
+          : null,
       });
     }
     log.warn("CHAT", "Invalid model format", { model: modelStr });
@@ -459,15 +317,6 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   }
 
   const { provider, model } = modelInfo;
-  if (provider === "chatgpt-web") {
-    if (!apiKey || !await isValidApiKey(apiKey)) return withChatGptWebNoFallback(errorResponse(401, "Valid API key required for ChatGPT Web"));
-    if (!chatGptWebAuthority) {
-      const invalid = validateBrowserPublicRequest(clientRawRequest?.body || body, new URL(request.url).pathname);
-      if (invalid) return invalid;
-    } else if (modelStr !== chatGptWebAuthority.originalModel && modelStr !== clientRawRequest?.body?.model) {
-      return chatGptWebAuthorityRequiredResponse();
-    }
-  }
 
   // Routing shown in the unified "▶" line (client model → provider/model)
 
@@ -477,20 +326,6 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   // Try with available accounts (fallback on errors)
   const excludeConnectionIds = new Set();
   const requiredCapabilities = detectRequiredCapabilities(body);
-  let nativeMetadata = body?.client_metadata?.["x-codex-turn-metadata"];
-  if (typeof nativeMetadata === "string") { try { nativeMetadata = JSON.parse(nativeMetadata); } catch { nativeMetadata = null; } }
-  const cgwCompaction = body?._compact === true || nativeMetadata?.request_kind === "compaction"
-    || (Array.isArray(body?.input) && body.input.some(item => item?.type === "compaction_trigger"));
-  if (provider === "chatgpt-web" && !cgwCompaction && Array.isArray(body?.tools) && body.tools.length) requiredCapabilities.add("tools");
-  const bridgeCapability = bridgeCapabilityForRequest(chatGptWebAuthority, body);
-  if (provider === "chatgpt-web" && await getChatGptWebLegacyConversation({ headers: clientRawRequest?.headers, body })) {
-    return new Response(JSON.stringify({ error: { type: "runtime_error", code: "legacy_conversation_unavailable", message: "Start a new canonical task after profile login; legacy socket conversations cannot resume", retryable: false } }),
-      { status: 409, headers: { "content-type": "application/json", "x-9router-no-fallback": "true" } });
-  }
-  const explicitConnectionId = provider === "chatgpt-web"
-    ? getChatGptWebExplicitConnectionId(clientRawRequest)
-    : null;
-  let pinnedConnectionId = explicitConnectionId;
   let lastError = null;
   let lastStatus = null;
   const codexCapabilityReasons = new Set();
@@ -500,24 +335,11 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     if (preResponse && (preResponse.remainingMs() <= 0 || preResponse.signal?.aborted)) {
       throw (preResponse.signal?.reason || createDeadlineError());
     }
-    let credentials;
-    try {
-      credentials = await getProviderCredentials(provider, excludeConnectionIds, model, {
-        requestedModel,
-        requiredCapabilities,
-        ...(explicitConnectionId ? { pinConnectionId: explicitConnectionId } : {}),
-        ...(provider === "chatgpt-web" ? { bridgeCapability, chatGptWebAuthority, chatGptWebReasoning: body.reasoning?.effort ?? body.reasoning_effort,
-          chatGptWebRequestMode: bridgeCapability === "generic_tools" ? "agent" : "browser",
-          signal: preResponse?.signal || request?.signal } : {}),
-      });
-      timingContext.mark("accountSelected");
-    } catch (error) {
-      if (provider !== "chatgpt-web") throw error;
-      return withChatGptWebNoFallback(Response.json({ error: { type: "runtime_error", code: "runtime_unavailable", message: "Durable ChatGPT Web profile binding is unavailable", retryable: false, submission_state: "not_sent" } }, { status: 503 }));
-    }
-    if (credentials?.chatGptWebBindingError) return withChatGptWebNoFallback(credentials.chatGptWebBindingError);
-
-    if (credentials?.pinnedConnectionUnavailable) return bridgeContinuationError(pinnedConnectionId);
+    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, {
+      requestedModel,
+      requiredCapabilities,
+    });
+    timingContext.mark("accountSelected");
 
     // All accounts unavailable
     if (!credentials || credentials.allRateLimited) {
@@ -529,10 +351,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       }
       if (excludeConnectionIds.size === 0) {
         log.warn("AUTH", `No active credentials for provider: ${provider}`);
-        const unavailable = provider === "chatgpt-web" && !chatGptWebAuthority
-          ? Response.json({ error: { type: "runtime_error", code: bridgeCapability === "generic_tools" ? "agent_tools_unavailable" : "generic_model_unavailable", message: bridgeCapability === "generic_tools" ? "OpenAI-compatible agent tools capability is not verified for the selected model" : "No verified generic text model is available. Verify the saved session and runtime prerequisites, or upgrade the runtime.", retryable: false, submission_state: "not_sent" } }, { status: 503 })
-          : errorResponse(HTTP_STATUS.NOT_FOUND, `No active credentials for provider: ${provider}`);
-        return provider === "chatgpt-web" ? withChatGptWebNoFallback(unavailable) : unavailable;
+        return errorResponse(HTTP_STATUS.NOT_FOUND, `No active credentials for provider: ${provider}`);
       }
       log.warn("CHAT", "No more accounts available", { provider });
       if (provider === "codex" && codexCapabilityReasons.size > 0) {
@@ -551,8 +370,6 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     // Account selection shown in the unified "▶" line (acc:...)
     const refreshedCredentials = await checkAndRefreshToken(provider, credentials);
     timingContext.mark("tokenRefreshed");
-    if (provider === "chatgpt-web") refreshedCredentials.chatGptWebAuthority = chatGptWebAuthority;
-    if (provider === "chatgpt-web") refreshedCredentials.chatGptWebOriginalModel = clientRawRequest?.body?.model;
 
     // Ensure real project ID is available for providers that need it (P0 fix: cold miss)
     if ((provider === "antigravity" || provider === "gemini-cli") && !refreshedCredentials.projectId) {
@@ -654,6 +471,8 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       cavemanLevel: chatSettings.cavemanLevel || "full",
       ponytailEnabled: !!chatSettings.ponytailEnabled,
       ponytailLevel: chatSettings.ponytailLevel || "full",
+      customPromptEnabled: !!chatSettings.customPromptEnabled,
+      customPrompt: chatSettings.customPrompt || "",
       pxpipeEnabled: !!chatSettings.pxpipeEnabled,
       pxpipeMinChars: chatSettings.pxpipeMinChars,
       pxpipeTimeoutMs: chatSettings.pxpipeTimeoutMs,
@@ -680,26 +499,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       }
     });
 
-    if (result.success) return withConnectionHeader(result.response, credentials.connectionId);
-
-    const isBridgeCooldown = provider === "chatgpt-web"
-      && (result.errorClass === "quota_exhausted" || result.errorClass === "rate_limited");
-    if (isBridgeCooldown) {
-      try {
-        await markAccountUnavailable(
-          credentials.connectionId,
-          result.status,
-          result.error,
-          provider,
-          model,
-          result.resetsAtMs,
-          result.errorClass,
-        );
-      } catch (error) {
-        log.warn("AUTH", `Failed to record ChatGPT Web cooldown: ${error.message}`);
-      }
-    }
-    if (result.terminalNoFallback) return withConnectionHeader(result.response, credentials.connectionId);
+    if (result.success || result.terminalNoFallback) return withConnectionHeader(result.response, credentials.connectionId);
 
     // Antigravity quota/breaker evidence is persisted before account exclusion.
     let resetsAtMs = result.resetsAtMs;
@@ -740,8 +540,6 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       continue;
     }
 
-    return provider === "chatgpt-web"
-      ? withConnectionHeader(result.response, credentials.connectionId)
-      : result.response;
+    return result.response;
   }
 }

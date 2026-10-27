@@ -546,6 +546,9 @@ Environment variables actively used by code:
 2. `/api/v1/route.js` returns a static model list and is not the main models source used by `/v1/models`.
 3. Request logger writes full headers/body when enabled; treat log directory as sensitive.
 4. Cloud behavior depends on correct `NEXT_PUBLIC_BASE_URL` and cloud endpoint reachability.
+5. The OpenCode free-tier fingerprint in `open-sse/utils/opencodeFingerprint.js` rewrites `tools` before the upstream call: a caller tool that already uses a fingerprint name (`read`/`shell`) adopts OpenCode's definition when its parameters can carry them, otherwise it is aliased and restored on the response side. The definitions are a frozen capture of the OpenCode CLI, so `shell`'s description embeds the capture platform (`Linux`/`bash`) and is rewritten for clients on any other platform.
+6. ChatGPT Web uses the upstream cookie/browser executor and image adapter inside the app. The fork CGW service, signed companion, native tool broker, runtime admin API and embedded viewer are removed. Historical profile-only connections need fresh cookie/browser authentication; stored user profiles and databases are not deleted or converted. The upstream v0.5.111 registry exposes image service only.
+7. Optional Playwright/native TLS dependencies are packaged in advance. Requests never install npm packages. Public media downloads reuse DNS-pinned, redirect-validated, size-bounded transport; browser-login process spawning remains restricted to the existing trusted-local/CLI boundary.
 
 ## Operational Verification Checklist
 

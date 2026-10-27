@@ -2,7 +2,6 @@ const http = require("http");
 const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
-const { createViewerUpgradeHandler } = require("./chatgpt-web-viewer-proxy.cjs");
 
 const origCreate = http.createServer.bind(http);
 
@@ -85,7 +84,6 @@ http.createServer = (...args) => {
       ...options,
       shouldUpgradeCallback(req) {
         if (String(req.headers.upgrade || "").toLowerCase() === "h2c") return false;
-        if (String(req.headers.upgrade || "").toLowerCase() === "websocket" && req.url?.split("?")[0] === "/api/providers/chatgpt-web/runtime/login/viewer") return true;
         if (callerShouldUpgradeCallback) return callerShouldUpgradeCallback.call(this, req);
         return this.listenerCount("upgrade") > 0;
       },
@@ -95,11 +93,9 @@ http.createServer = (...args) => {
 
   server ||= origCreate(...rest, wrapped);
   const origEmit = server.emit;
-  const viewerUpgrade = createViewerUpgradeHandler();
   // Node-only h2c replay for runtimes without Bun's native shouldUpgradeCallback handling.
   server.emit = function (event, ...eventArgs) {
     const [req, socket, head] = eventArgs;
-    if (event === "upgrade" && viewerUpgrade(req, socket, head)) return true;
     if (event !== "upgrade" || process.versions.bun || String(req.headers.upgrade || "").toLowerCase() !== "h2c") {
       return origEmit.call(this, event, ...eventArgs);
     }

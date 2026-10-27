@@ -5,23 +5,6 @@ export function getStatusVariant(isActive, effectiveStatus) {
   return "default";
 }
 
-export function isChatGptWebProfileReady(profile) {
-  return profile?.state === "ready" && Array.isArray(profile.models) && profile.models.length > 0;
-}
-
-export function getChatGptWebProfileNotice(profile) {
-  if (isChatGptWebProfileReady(profile)) return "Connected and ready.";
-  if (profile?.lastError?.message) return profile.lastError.message;
-  if (profile?.state === "ready") return "No verified models are available. Open Browser, check the model picker, then choose Finish Sign In again.";
-  return profile ? `Session is ${profile.state.replaceAll("_", " ")}. Check Advanced for diagnostics.`
-    : "The runtime profile is unavailable. Refresh or contact the operator.";
-}
-
-export function getChatGptWebRuntimeStatus(state) {
-  if (["ready", "waiting_for_chatgpt_tool_approval"].includes(state)) return "active";
-  return state === "unconfigured" ? "login_required" : state || "error";
-}
-
 /**
  * Identify providers that have connections configured, but ALL of them are deactivated (isActive === false).
  * Providers with 0 connections (e.g. keyless local nodes) are NOT considered deactivated.

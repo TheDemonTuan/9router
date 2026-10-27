@@ -427,7 +427,7 @@ function openBrowser(url) {
   });
 }
 
-// The standalone app must enter through the socket-IP/viewer trust wrapper.
+// The standalone app must enter through the socket-IP trust wrapper.
 const standaloneDir = path.join(__dirname, "app");
 const serverPath = path.join(standaloneDir, "custom-server.js");
 

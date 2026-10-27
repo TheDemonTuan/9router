@@ -12,8 +12,6 @@ export function toProviderConnectionResponse(connection) {
 
   return {
     ...safe,
-    providerSpecificData: connection.provider === "chatgpt-web"
-      ? { profileId: connection.providerSpecificData.profileId }
-      : sanitizeProviderSpecificData(connection.providerSpecificData),
+    providerSpecificData: sanitizeProviderSpecificData(connection.providerSpecificData),
   };
 }

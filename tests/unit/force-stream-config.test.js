@@ -128,7 +128,10 @@ function makeOptions(bodyStream) {
   };
 }
 
-describe("forceStream provider config", () => {
+// The first test pays for importing chatCore's module graph (3s+ under full-suite
+// load); a test that times out keeps running and its late fetch call leaks into the
+// next test's mock counts, so give the file room instead of cascading failures.
+describe("forceStream provider config", { timeout: 20_000 }, () => {
   beforeEach(() => {
     executeMock.mockReset();
     executeMock.mockRejectedValue(new Error("boom"));
@@ -154,34 +157,4 @@ describe("forceStream provider config", () => {
     expect(executeMock.mock.calls[0][0].stream).toBe(true);
   });
 
-  it("keeps ChatGPT Web compact on the unary JSON path", async () => {
-    const { handleChatCore } = await import("../../open-sse/handlers/chatCore.js");
-    const body = { model: "chatgpt-web/high", _compact: true, stream: true, input: [] };
-    const compactBody = { output: [{ type: "message", role: "assistant", content: [] }] };
-    executeMock.mockResolvedValue({
-      response: new Response(JSON.stringify(compactBody), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-      url: "http://bridge/v1/responses/compact",
-      headers: {},
-      transformedBody: body,
-      responseFormat: "openai-responses",
-    });
-
-    const result = await handleChatCore({
-      body,
-      modelInfo: { provider: "chatgpt-web", model: "chatgpt-web/high" },
-      credentials: { providerSpecificData: { bridgeId: "personal" } },
-      clientRawRequest: { endpoint: "/v1/responses/compact", body, headers: { accept: "application/json" } },
-      connectionId: "compact-connection",
-      sourceFormatOverride: "openai-responses",
-      log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn() },
-    });
-
-    expect(result.success).toBe(true);
-    expect(await result.response.json()).toEqual(compactBody);
-    expect(executeMock).toHaveBeenCalledTimes(1);
-    expect(executeMock.mock.calls[0][0].stream).toBe(false);
-  });
 });

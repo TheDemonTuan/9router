@@ -22,7 +22,7 @@ export async function OPTIONS() {
 
 /**
  * POST /v1/responses/compact - Compact conversation context
- * Preserves exact raw bytes for signature verification; compact is an internal operation option.
+ * Compact is an internal operation option passed to the normal chat pipeline.
  */
 export async function POST(request) {
   await ensureInitialized();

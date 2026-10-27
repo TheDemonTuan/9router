@@ -6,12 +6,9 @@ mkdir -p "$HOME" "$DATA_DIR"
 (
   cd tests
   mapfile -t response_tests < <(find unit translator -type f -name '*responses*.test.js' ! -path '*/real/*' | sort)
-  mapfile -t chatgpt_web_tests < <(find unit integration -type f -name '*chatgpt*.test.js' ! -path '*/real/*' | sort)
   printf 'Responses regression gate:\n'; printf '%s\n' "${response_tests[@]}"
-  printf 'ChatGPT Web regression gate:\n'; printf '%s\n' "${chatgpt_web_tests[@]}"
   bun x --no-install --bun vitest run --config vitest.config.js \
     "${response_tests[@]}" \
-    "${chatgpt_web_tests[@]}" \
     unit/codex-tool-normalization.test.js \
     unit/codex-native-passthrough-thinking.test.js \
     unit/codex-same-wire.test.js \
