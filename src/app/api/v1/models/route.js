@@ -21,7 +21,7 @@ import { resolveZedModels } from "open-sse/shared/zedAuth.js";
 import { updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { capabilitiesFromServiceKind, getCapabilitiesForModel, aggregateComboCapabilities } from "open-sse/providers/capabilities.js";
-import { getAdvertisedThinkingLevels } from "open-sse/providers/thinkingLevels.js";
+import { getAdvertisedThinkingLevels, getPublicReasoningLevels, getDefaultReasoningLevel } from "open-sse/providers/thinkingLevels.js";
 import { projectPublicModel } from "open-sse/providers/publicModel.js";
 import { resolveEffectiveProviderModels } from "open-sse/services/alibabaTokenPlanModels.js";
 import {
@@ -510,11 +510,18 @@ export async function buildModelsList(kindFilter, options = {}) {
         };
         if (model.name) entry.name = model.name;
         if (model.description) entry.description = model.description;
-        if (Array.isArray(model.supportedReasoningLevels)) {
-          entry.supported_reasoning_levels = model.supportedReasoningLevels;
+        const reasoningMetadata = model.supportedReasoningLevels || model.supported_reasoning_levels ? model : null;
+        const supportedLevels = (modelKind(model) === LLM_KIND || modelKind(model) === "imageToText")
+          ? getPublicReasoningLevels(providerId, model.id, reasoningMetadata)
+          : null;
+        if (supportedLevels) {
+          entry.supported_reasoning_levels = supportedLevels;
         }
-        if (model.defaultReasoningLevel && (!model.supportedReasoningLevels || model.supportedReasoningLevels.includes(model.defaultReasoningLevel))) {
-          entry.default_reasoning_level = model.defaultReasoningLevel;
+        const defaultEffort = (modelKind(model) === LLM_KIND || modelKind(model) === "imageToText")
+          ? getDefaultReasoningLevel(providerId, model.id, supportedLevels, model)
+          : null;
+        if (defaultEffort) {
+          entry.default_reasoning_level = defaultEffort;
         }
         const caps = { ...(staticCaps || {}) };
         const contextWindow = model.contextLength || caps.contextWindow;
@@ -757,19 +764,25 @@ export async function buildModelsList(kindFilter, options = {}) {
         }
         if (liveMetadata?.name || staticModel?.name) model.name = liveMetadata?.name || staticModel?.name;
         if (liveMetadata?.description || staticModel?.description) model.description = liveMetadata?.description || staticModel?.description;
-        const supportedLevels = Array.isArray(liveMetadata?.supportedReasoningLevels)
-          ? liveMetadata.supportedReasoningLevels
-          : Array.isArray(staticModel?.supportedReasoningLevels)
-            ? staticModel.supportedReasoningLevels
-            : null;
+        const reasoningMetadata = (liveMetadata?.supportedReasoningLevels || liveMetadata?.supported_reasoning_levels)
+          ? liveMetadata
+          : staticModel;
+        const supportedLevels = (kind === LLM_KIND || allowAsLlm)
+          ? getPublicReasoningLevels(providerId, modelId, reasoningMetadata)
+          : null;
         if (supportedLevels) {
           model.supported_reasoning_levels = supportedLevels;
         }
-        const rawDefaultEffort = liveMetadata?.defaultReasoningLevel
-          || liveMetadata?.default_reasoning_level
-          || staticModel?.defaultReasoningLevel;
-        if (rawDefaultEffort && (!supportedLevels || supportedLevels.includes(rawDefaultEffort))) {
-          model.default_reasoning_level = rawDefaultEffort;
+        const defaultEffort = (kind === LLM_KIND || allowAsLlm)
+          ? getDefaultReasoningLevel(
+            providerId,
+            modelId,
+            supportedLevels,
+            liveMetadata?.defaultReasoningLevel || liveMetadata?.default_reasoning_level ? liveMetadata : staticModel,
+          )
+          : null;
+        if (defaultEffort) {
+          model.default_reasoning_level = defaultEffort;
         }
 
         // Live-catalog resolvers mostly only return partial capability data.

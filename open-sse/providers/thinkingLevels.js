@@ -165,3 +165,30 @@ export function getAdvertisedThinkingLevels(provider, model, metadata = null) {
   }
   return getThinkingLevels(provider, model);
 }
+
+const EFFORT_LEVEL_SET = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
+const TIERED_MODEL_SUFFIX_RE = /-(?:minimal|low|medium|high|xhigh|max|ultra)$/i;
+
+export function getPublicReasoningLevels(provider, model, metadata = null) {
+  const explicit = getCatalogThinkingLevels(metadata);
+  if (explicit) return explicit.length > 0 ? explicit : null;
+  if (typeof model !== "string" || !model || model.includes("(")) return null;
+  if (provider === "antigravity" || TIERED_MODEL_SUFFIX_RE.test(model)) return null;
+  const advertised = getAdvertisedThinkingLevels(provider, model, metadata);
+  if (!Array.isArray(advertised) || advertised.length === 0) return null;
+  if (!advertised.every((level) => EFFORT_LEVEL_SET.has(level))) return null;
+  if (!advertised.some((level) => level !== "none")) return null;
+  return advertised;
+}
+
+export function getDefaultReasoningLevel(provider, model, supportedLevels = null, metadata = null) {
+  const rawDefault = metadata?.defaultReasoningLevel ?? metadata?.default_reasoning_level;
+  if (typeof rawDefault === "string" && rawDefault) {
+    return !Array.isArray(supportedLevels) || supportedLevels.includes(rawDefault) ? rawDefault : null;
+  }
+  const caps = getCapabilitiesForModel(provider, model);
+  if (caps?.thinkingFormat === "claude-adaptive" && (!Array.isArray(supportedLevels) || supportedLevels.includes("high"))) {
+    return "high";
+  }
+  return null;
+}

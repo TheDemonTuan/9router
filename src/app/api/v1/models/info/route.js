@@ -6,7 +6,7 @@ import { getDisabledModels } from "@/lib/disabledModelsDb";
 import { updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { resolveEffectiveCodexCatalog } from "open-sse/services/codexModels.js";
-import { getAdvertisedThinkingLevels } from "open-sse/providers/thinkingLevels.js";
+import { getAdvertisedThinkingLevels, getPublicReasoningLevels, getDefaultReasoningLevel } from "open-sse/providers/thinkingLevels.js";
 
 const KIND_ENDPOINT = {
   llm: "/v1/chat/completions",
@@ -56,8 +56,16 @@ function buildInfo({ alias, providerId, model, kind, providerInfo, variantSuffix
     out.maxOutput = maxOutput;
     out.max_completion_tokens = maxOutput;
   }
-  if (model.defaultReasoningLevel) out.defaultReasoningLevel = model.defaultReasoningLevel;
-  if (model.supportedReasoningLevels) out.supportedReasoningLevels = model.supportedReasoningLevels;
+  const reasoningMetadata = (model?.supportedReasoningLevels || model?.supported_reasoning_levels) ? model : null;
+  const supportedLevels = (!variantSuffix && (kind === "llm" || kind === "imageToText"))
+    ? getPublicReasoningLevels(providerId, model.id, reasoningMetadata)
+    : (model.supportedReasoningLevels || null);
+  if (supportedLevels) out.supportedReasoningLevels = supportedLevels;
+
+  const defaultEffort = (!variantSuffix && (kind === "llm" || kind === "imageToText"))
+    ? getDefaultReasoningLevel(providerId, model.id, supportedLevels, model)
+    : (model.defaultReasoningLevel || null);
+  if (defaultEffort) out.defaultReasoningLevel = defaultEffort;
   if (kind === "tts" && TTS_VOICES_API.has(providerId)) {
     out.voicesUrl = `/v1/audio/voices?provider=${providerId}`;
   }
