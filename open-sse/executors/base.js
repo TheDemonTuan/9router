@@ -99,6 +99,11 @@ export class BaseExecutor {
     return { status: response.status, message: bodyText || `HTTP ${response.status}` };
   }
 
+  // Final wire serialization; providers that sign the exact body bytes override it.
+  serializeBody(body, credentials) {
+    return JSON.stringify(body);
+  }
+
   async execute({ model, body, stream, credentials, signal, log, proxyOptions = null, preResponse = null, providerOverrides = null, directFetch = null }) {
     const fallbackCount = this.getFallbackCount();
     let lastError = null;
@@ -204,7 +209,7 @@ export class BaseExecutor {
         if (preResponseListener) preResponse.signal.removeEventListener("abort", preResponseListener);
       };
       try {
-        const bodyStr = JSON.stringify(transformedBody);
+        const bodyStr = this.serializeBody(transformedBody, credentials);
         const fetchPromise = mergedSignal.aborted ? Promise.reject(mergedSignal.reason) : proxyAwareFetch(url, {
           method: "POST",
           headers,
