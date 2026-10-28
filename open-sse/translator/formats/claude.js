@@ -549,6 +549,13 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
         body.thinking.budget_tokens = Math.max(1024, body.max_tokens - 1024);
       }
     }
+    // Anthropic rejects top_p below 0.95 while thinking runs (always, for models
+    // that cannot disable it). Report it rather than silently changing sampling.
+    const thinkingActive = body.thinking?.type === "enabled" || body.thinking?.type === "adaptive"
+      || (modelCaps.reasoning && modelCaps.thinkingCanDisable === false);
+    if (thinkingActive && typeof body.top_p === "number" && body.top_p < 0.95) {
+      throw Object.assign(new Error("top_p must be at least 0.95 while Claude thinking is active"), { status: 400, code: "invalid_request_error", param: "top_p" });
+    }
     if (provider !== "claude" && !provider?.startsWith("anthropic-compatible") && body.messages?.some(message =>
       Array.isArray(message.content) && message.content.some(block => block.type === CLAUDE_BLOCK.TOOL_RESULT && Array.isArray(block.content) && block.content.some(part => part.type === CLAUDE_BLOCK.IMAGE)))) {
       throw Object.assign(new Error("This provider cannot preserve images inside tool results"), { status: 400, code: "unsupported_parameter", param: "input" });
@@ -591,7 +598,7 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
     }
     if (isAnthropicServing && apiKey?.includes("sk-ant-oat")) {
       const sid = sessionId || resolveSessionId({ headers: rawHeaders, body, connectionId, scope: "claude" });
-      return applyCloaking(body, apiKey, sid);
+      return applyCloaking(body, apiKey, sid, connectionId);
     }
     return body;
   }
@@ -819,7 +826,7 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
   // session_id in user_id must match X-Claude-Code-Session-Id for fingerprint consistency
   if ((provider === "claude" || provider?.startsWith("anthropic-compatible")) && apiKey) {
     const sid = sessionId || resolveSessionId({ headers: rawHeaders, body, connectionId, scope: "claude" });
-    body = applyCloaking(body, apiKey, sid);
+    body = applyCloaking(body, apiKey, sid, connectionId);
   }
 
   return body;

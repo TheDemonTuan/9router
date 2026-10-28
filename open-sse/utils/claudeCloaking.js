@@ -1,33 +1,69 @@
 import { createHash, randomBytes, randomUUID } from "crypto";
 import { CLAUDE_TOOL_SUFFIX, CC_DEFAULT_TOOLS } from "../config/appConstants.js";
 import { CLAUDE_CLI_VERSION } from "../providers/shared.js";
+import { resolveSessionId } from "./sessionManager.js";
 
 const CC_ENTRYPOINT = "sdk-cli";
+const BILLING_PREFIX = "x-anthropic-billing-header:";
 
-// Generate the billing header expected from current Claude Code clients.
-// x-anthropic-billing-header: cc_version=<ver>.<build>; cc_entrypoint=sdk-cli; cch=<hash>;
-function generateBillingHeader(payload) {
-  const content = JSON.stringify(payload);
-  const cch = createHash("sha256").update(content).digest("hex").slice(0, 5);
-  const buildHash = randomBytes(2).toString("hex").slice(0, 3);
-  return `x-anthropic-billing-header: cc_version=${CLAUDE_CLI_VERSION}.${buildHash}; cc_entrypoint=${CC_ENTRYPOINT}; cch=${cch};`;
+// Claude Code wire constants, ported from CLIProxyAPI (claude_executor_cloaking.go,
+// claude_signing.go — Claude Code 2.1.220+ parity).
+const FINGERPRINT_SALT = "59cf53e54c78";
+const CCH_SEED = 0x4D659218E32A3268n;
+const CCH_PLACEHOLDER = "00000";
+const CCH_DIGITS_RE = /cch=[0-9a-f]{5};/;
+const CURRENT_DATE_REMINDER_PREFIX = "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is ";
+
+export function isClaudeOAuthToken(token) {
+  return typeof token === "string" && token.includes("sk-ant-oat");
 }
 
-// Derive a deterministic UUID-v4-shaped string from a seed (stable per account)
-function deriveUuid(seed) {
-  const h = createHash("sha256").update(seed).digest("hex");
-  return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-${((parseInt(h[16], 16) & 0x3) | 0x8).toString(16)}${h.slice(17, 20)}-${h.slice(20, 32)}`;
+// Text of the first user message that Claude Code samples for its build fingerprint
+// (reminder blocks it injects itself are skipped).
+function fingerprintMessageText(body) {
+  const first = Array.isArray(body?.messages) ? body.messages.find((m) => m?.role === "user") : null;
+  const content = first?.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  for (const part of content) {
+    if (part?.type !== "text") continue;
+    const text = typeof part.text === "string" ? part.text : "";
+    if (text.startsWith(CURRENT_DATE_REMINDER_PREFIX)) continue;
+    if (text.startsWith("<system-reminder>") && text.includes("</system-reminder>")) continue;
+    return text;
+  }
+  return "";
 }
 
-// Generate fake user ID in the current Claude Code JSON format:
-// {"device_id":"<64hex>","account_uuid":"<uuid>","session_id":"<uuid>"}
-// device_id/account_uuid derive from apiKey (stable per account), session_id per-conversation
-function generateFakeUserID(sessionId, apiKey) {
-  const deviceId = apiKey ? createHash("sha256").update(`device:${apiKey}`).digest("hex") : randomBytes(32).toString("hex");
-  const accountUuid = apiKey ? deriveUuid(`account:${apiKey}`) : randomUUID();
+// cc_version build suffix: sha256(salt + text[4] + text[7] + text[20] + version)[:3],
+// indexing UTF-16 code units like the JS client ("0" past the end).
+function computeFingerprint(text, version) {
+  const sampled = [4, 7, 20].map((i) => (i < text.length ? text[i] : "0")).join("");
+  return createHash("sha256").update(FINGERPRINT_SALT + sampled + version).digest("hex").slice(0, 3);
+}
+
+// Billing header with the cch placeholder; signClaudeBody fills it from the final body.
+function generateBillingHeader(body) {
+  const fingerprint = computeFingerprint(fingerprintMessageText(body), CLAUDE_CLI_VERSION);
+  return `${BILLING_PREFIX} cc_version=${CLAUDE_CLI_VERSION}.${fingerprint}; cc_entrypoint=${CC_ENTRYPOINT}; cch=${CCH_PLACEHOLDER};`;
+}
+
+// Generate a user ID in the current Claude Code JSON format:
+// {"device_id":"<64hex>","account_uuid":"","session_id":"<uuid>"}
+// device_id derives from the account seed, session_id is per-conversation.
+// account_uuid stays empty, as Claude Code sends it while the OAuth profile is
+// unresolved: a derived UUID could never match the token's real account.
+function generateFakeUserID(sessionId, seed) {
+  const deviceId = seed ? createHash("sha256").update(`device:${seed}`).digest("hex") : randomBytes(32).toString("hex");
   const cleanSessionId = typeof sessionId === "string" ? sessionId.replace(/^claude:/i, "").trim() : null;
   const sessionUuid = cleanSessionId || randomUUID();
-  return `{"device_id":"${deviceId}","account_uuid":"${accountUuid}","session_id":"${sessionUuid}"}`;
+  return `{"device_id":"${deviceId}","account_uuid":"","session_id":"${sessionUuid}"}`;
+}
+
+// Identity seed for one routed OAuth account: the connection survives token
+// refreshes, the token is the fallback when no connection is known.
+function identitySeed(token, connectionId) {
+  return connectionId ? `connection:${connectionId}` : token;
 }
 
 export function extractClaudeSessionIdFromUserId(userId) {
@@ -187,15 +223,17 @@ const CC_DECOY_TOOLS = [
 /**
  * Apply Claude cloaking to request body:
  * 1. Inject billing header as first system block
- * 2. Inject fake user ID into metadata (JSON format, session_id aligned with X-Claude-Code-Session-Id)
+ * 2. Inject a user ID into metadata when the client sent none (JSON format,
+ *    session_id aligned with X-Claude-Code-Session-Id)
  * Only applies when using OAuth token (sk-ant-oat).
  * @param {object} body - Claude API request body
  * @param {string} apiKey - API key or OAuth token
  * @param {string} [sessionId] - Session ID to align with X-Claude-Code-Session-Id header
+ * @param {string} [connectionId] - Routed connection, the stable identity seed
  * @returns {object} Modified body
  */
-export function applyCloaking(body, apiKey, sessionId) {
-  if (!apiKey || !apiKey.includes("sk-ant-oat")) return body;
+export function applyCloaking(body, apiKey, sessionId, connectionId = null) {
+  if (!isClaudeOAuthToken(apiKey)) return body;
 
   const result = { ...body };
 
@@ -205,7 +243,7 @@ export function applyCloaking(body, apiKey, sessionId) {
 
   if (Array.isArray(result.system)) {
     // Skip if already injected
-    if (!result.system[0]?.text?.startsWith("x-anthropic-billing-header:")) {
+    if (!result.system[0]?.text?.startsWith(BILLING_PREFIX)) {
       result.system = [billingBlock, ...result.system];
     }
   } else if (typeof result.system === "string") {
@@ -214,11 +252,199 @@ export function applyCloaking(body, apiKey, sessionId) {
     result.system = [billingBlock];
   }
 
-  // Inject fake user ID into metadata (session_id must match X-Claude-Code-Session-Id)
+  // Fill a missing user ID; a client-supplied one is forwarded unchanged.
   const existingUserId = result.metadata?.user_id;
   if (!existingUserId) {
-    result.metadata = { ...result.metadata, user_id: generateFakeUserID(sessionId, apiKey) };
+    result.metadata = { ...result.metadata, user_id: generateFakeUserID(sessionId, identitySeed(apiKey, connectionId)) };
   }
 
   return result;
+}
+
+/**
+ * Ensure an OAuth request carries metadata.user_id on every Claude path
+ * (translated and native passthrough). A client-supplied user_id and its
+ * session are forwarded unchanged; a missing one is filled from the routed
+ * connection and the resolved conversation session.
+ * Copy-on-write: the input body is reused across retry attempts.
+ */
+export function ensureClaudeOAuthIdentity(body, token, connectionId = null, rawHeaders = null) {
+  if (!isClaudeOAuthToken(token) || !body || typeof body !== "object" || !Array.isArray(body.messages)) return body;
+  if (typeof body.metadata?.user_id === "string" && body.metadata.user_id) return body;
+  const sessionId = resolveSessionId({ headers: rawHeaders, body, connectionId, scope: "claude" });
+  const metadata = body.metadata && typeof body.metadata === "object" ? body.metadata : {};
+  return { ...body, metadata: { ...metadata, user_id: generateFakeUserID(sessionId, identitySeed(token, connectionId)) } };
+}
+
+// Claude Code pointed at a non-first-party base URL omits cch; the OAuth hop
+// restores it, so a billing header without digits gets the placeholder.
+export function ensureBillingCchPlaceholder(body) {
+  const first = Array.isArray(body?.system) ? body.system[0] : null;
+  const text = first?.text;
+  if (typeof text !== "string" || !text.startsWith(BILLING_PREFIX) || CCH_DIGITS_RE.test(text)) return body;
+  const entrypoint = text.indexOf("cc_entrypoint=");
+  const end = entrypoint < 0 ? -1 : text.indexOf(";", entrypoint);
+  if (end < 0) return body;
+  const withPlaceholder = `${text.slice(0, end + 1)} cch=${CCH_PLACEHOLDER};${text.slice(end + 1)}`;
+  return { ...body, system: [{ ...first, text: withPlaceholder }, ...body.system.slice(1)] };
+}
+
+const CCH_EXCLUDED_KEYS = new Set(['"max_tokens"', '"fallbacks"', '"fallback_credit_token"']);
+
+// Single pass over serialized JSON: records the hash-view edits (model string
+// values emptied, dispatch-only members removed) and the system[0].text range.
+class CchScanner {
+  constructor(json) {
+    this.json = json;
+    this.pos = 0;
+    this.edits = [];
+    this.billing = null;
+  }
+
+  ws() {
+    const s = this.json;
+    while (this.pos < s.length) {
+      const c = s.charCodeAt(this.pos);
+      if (c !== 32 && c !== 9 && c !== 10 && c !== 13) return;
+      this.pos++;
+    }
+  }
+
+  consume(ch) {
+    if (this.json[this.pos] !== ch) return false;
+    this.pos++;
+    return true;
+  }
+
+  // Jump between quotes natively; a quote preceded by an odd backslash run is escaped.
+  string() {
+    const s = this.json;
+    if (s.charCodeAt(this.pos) !== 34) throw new Error(`missing JSON string at ${this.pos}`);
+    const start = this.pos;
+    let from = start + 1;
+    for (;;) {
+      const quote = s.indexOf('"', from);
+      if (quote < 0) throw new Error(`unterminated JSON string at ${start}`);
+      let slashes = 0;
+      while (s.charCodeAt(quote - 1 - slashes) === 92) slashes++;
+      if ((slashes & 1) === 0) {
+        this.pos = quote + 1;
+        return [start, this.pos];
+      }
+      from = quote + 1;
+    }
+  }
+
+  // target: "top" (root), "system" (top-level system), "system0" (system[0])
+  value(collect, target = null) {
+    this.ws();
+    const c = this.json[this.pos];
+    if (c === "{") return this.object(collect, target);
+    if (c === "[") return this.array(collect, target);
+    if (c === '"') return this.string();
+    const start = this.pos;
+    for (const s = this.json; this.pos < s.length; this.pos++) {
+      const ch = s.charCodeAt(this.pos);
+      if (ch === 44 || ch === 125 || ch === 93 || ch === 32 || ch === 9 || ch === 13 || ch === 10) break;
+    }
+    if (this.pos === start) throw new Error(`missing JSON value at ${start}`);
+  }
+
+  array(collect, target) {
+    this.pos++;
+    this.ws();
+    if (this.consume("]")) return;
+    for (let index = 0; ; index++) {
+      this.value(collect, target === "system" && index === 0 ? "system0" : null);
+      this.ws();
+      if (this.consume(",")) continue;
+      if (!this.consume("]")) throw new Error(`missing array end at ${this.pos}`);
+      return;
+    }
+  }
+
+  object(collect, target) {
+    this.pos++;
+    this.ws();
+    if (this.consume("}")) return;
+    const members = [];
+    let commaBefore = -1;
+    for (;;) {
+      this.ws();
+      const memberStart = this.pos;
+      const [keyStart, keyEnd] = this.string();
+      this.ws();
+      if (!this.consume(":")) throw new Error(`missing object colon at ${this.pos}`);
+      this.ws();
+      const key = this.json.slice(keyStart, keyEnd);
+      const excluded = collect && CCH_EXCLUDED_KEYS.has(key);
+      if (collect && key === '"model"' && this.json[this.pos] === '"') {
+        const [valueStart, valueEnd] = this.string();
+        if (valueEnd - valueStart > 2) this.edits.push([valueStart + 1, valueEnd - 1]);
+      } else if (target === "system0" && key === '"text"' && this.json[this.pos] === '"') {
+        this.billing = this.string();
+      } else {
+        this.value(collect && !excluded, target === "top" && key === '"system"' ? "system" : null);
+      }
+      const memberEnd = this.pos;
+      this.ws();
+      const commaAfter = this.consume(",") ? this.pos - 1 : -1;
+      members.push({ start: memberStart, end: memberEnd, commaBefore, commaAfter, excluded });
+      if (commaAfter >= 0) { commaBefore = commaAfter; continue; }
+      if (!this.consume("}")) throw new Error(`missing object end at ${this.pos}`);
+      break;
+    }
+    if (collect) this.excludeMembers(members);
+  }
+
+  excludeMembers(members) {
+    for (let start = 0; start < members.length;) {
+      if (!members[start].excluded) { start++; continue; }
+      let end = start;
+      while (end + 1 < members.length && members[end + 1].excluded) end++;
+      if (end + 1 < members.length) this.edits.push([members[start].start, members[end].commaAfter + 1]);
+      // Claude Code leaves the preceding comma when an object ends with
+      // several consecutive dispatch members.
+      else if (start > 0 && end > start) this.edits.push([members[start].start, members[end].end]);
+      else if (start > 0) this.edits.push([members[start].commaBefore, members[end].end]);
+      else this.edits.push([members[start].start, members[end].end]);
+      start = end + 1;
+    }
+  }
+}
+
+/**
+ * Fill the billing header's cch with Claude Code's final-body integrity token:
+ * xxHash64(seed) of the serialized body with cch=00000, model values emptied and
+ * max_tokens/fallbacks/fallback_credit_token members removed, masked to 20 bits.
+ * Changes only the five digits; any body without a signable header is returned as-is.
+ */
+export function signClaudeBody(json) {
+  if (typeof json !== "string" || !json.includes(BILLING_PREFIX)) return json;
+  const scanner = new CchScanner(json);
+  try {
+    scanner.value(true, "top");
+  } catch {
+    return json;
+  }
+  if (!scanner.billing) return json;
+  const [rawStart, rawEnd] = scanner.billing;
+  if (!json.startsWith(BILLING_PREFIX, rawStart + 1)) return json;
+  const raw = json.slice(rawStart, rawEnd);
+  const match = CCH_DIGITS_RE.exec(raw);
+  if (!match) return json;
+  const offset = rawStart + match.index + "cch=".length;
+  const unsigned = `${json.slice(0, offset)}${CCH_PLACEHOLDER}${json.slice(offset + CCH_PLACEHOLDER.length)}`;
+
+  const edits = scanner.edits.sort((a, b) => a[0] - b[0]);
+  const parts = [];
+  let last = 0;
+  for (const [start, end] of edits) {
+    if (start < last) return json;
+    parts.push(unsigned.slice(last, start));
+    last = end;
+  }
+  parts.push(unsigned.slice(last));
+  const cch = (Bun.hash.xxHash64(parts.join(""), CCH_SEED) & 0xFFFFFn).toString(16).padStart(5, "0");
+  return `${json.slice(0, offset)}${cch}${json.slice(offset + CCH_PLACEHOLDER.length)}`;
 }
