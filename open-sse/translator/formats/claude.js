@@ -4,7 +4,7 @@ import { ROLE, CLAUDE_BLOCK } from "../schema/index.js";
 import { adjustMaxTokens } from "./maxTokens.js";
 import { applyCloaking } from "../../utils/claudeCloaking.js";
 import { resolveSessionId } from "../../utils/sessionManager.js";
-import { isValidClaudeSignature } from "../../utils/claudeSignature.js";
+import { isValidClaudeSignature, isVersionedClaudeSignature } from "../../utils/claudeSignature.js";
 import { PROVIDERS } from "../../providers/index.js";
 import { getCapabilitiesForModel } from "../../providers/capabilities.js";
 import { isDeepSeekModel } from "../../providers/models/helpers.js";
@@ -288,7 +288,14 @@ export function normalizeClaudePassthrough(body, model = "") {
       let hasKeptThinking = false;
       const kept = [];
       for (const block of msg.content) {
-        if (block.type === CLAUDE_BLOCK.THINKING || block.type === CLAUDE_BLOCK.REDACTED_THINKING) {
+        if (block.type === CLAUDE_BLOCK.REDACTED_THINKING) {
+          if (typeof block.data === "string" && block.data.trim().length > 0) {
+            hasKeptThinking = true;
+            kept.push(block);
+          }
+          continue;
+        }
+        if (block.type === CLAUDE_BLOCK.THINKING) {
           if (isValidClaudeSignature(block.signature)) {
             hasKeptThinking = true;
             kept.push(block);
@@ -337,7 +344,9 @@ export function normalizeClaudePassthrough(body, model = "") {
       if (!Array.isArray(msg.content)) return true;
       msg.content = msg.content.filter(block =>
         !(block?.type === CLAUDE_BLOCK.TEXT && !String(block.text ?? "").trim())
-        && !(block?.type === CLAUDE_BLOCK.THINKING && !String(block.thinking ?? "").trim()));
+        && !(block?.type === CLAUDE_BLOCK.THINKING
+          && !String(block.thinking ?? "").trim()
+          && !isVersionedClaudeSignature(block.signature)));
       return msg.content.length > 0;
     });
     body.messages = ensureTrailingUserTurn(body.messages, originalLastRole);
@@ -723,18 +732,26 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
           const isClaudeNative = provider === "claude";
           const kept = [];
           for (const block of msg.content) {
-            const isThinking = block.type === CLAUDE_BLOCK.THINKING || block.type === CLAUDE_BLOCK.REDACTED_THINKING;
-            if (isThinking) {
-              if (!String(block.thinking ?? "").trim()) continue;
+            if (block.type === CLAUDE_BLOCK.REDACTED_THINKING) {
+              if ((isClaudeNative || deepSeekServed) && typeof block.data === "string" && block.data.trim().length > 0) {
+                hasKeptThinking = true;
+                kept.push(block);
+              }
+              continue;
+            }
+            if (block.type === CLAUDE_BLOCK.THINKING) {
+              const hasText = Boolean(String(block.thinking ?? "").trim());
               if (isClaudeNative) {
-                if (isValidClaudeSignature(block.signature)) {
+                if (isValidClaudeSignature(block.signature) && (hasText || isVersionedClaudeSignature(block.signature))) {
                   hasKeptThinking = true;
                   kept.push(block);
                 }
               } else if (deepSeekServed) {
-                hasKeptThinking = true;
-                kept.push(block);
-              } else {
+                if (hasText) {
+                  hasKeptThinking = true;
+                  kept.push(block);
+                }
+              } else if (hasText) {
                 block.signature = DEFAULT_THINKING_CLAUDE_SIGNATURE;
                 hasKeptThinking = true;
                 kept.push(block);

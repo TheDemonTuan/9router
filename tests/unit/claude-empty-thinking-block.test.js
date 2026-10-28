@@ -14,7 +14,13 @@
 // by the signature check, which would mask the text check under test.
 import { describe, it, expect } from "vitest";
 import { normalizeClaudePassthrough, prepareClaudeRequest } from "../../open-sse/translator/formats/claude.js";
-import { DEFAULT_THINKING_CLAUDE_SIGNATURE } from "../../open-sse/config/defaultThinkingSignature.js";
+import { DEFAULT_THINKING_CLAUDE_SIGNATURE, DEFAULT_THINKING_GEMINI_CLI_SIGNATURE } from "../../open-sse/config/defaultThinkingSignature.js";
+import { isValidClaudeSignature, isVersionedClaudeSignature } from "../../open-sse/utils/claudeSignature.js";
+
+// Protobuf outer {1: 4 (v4), 2: envelope {1: header "hdr"}} -> base64 "CAQSBQoDaGRy"
+const V4_CLAUDE_SIGNATURE = "CAQSBQoDaGRy";
+// Protobuf outer {1: 2 (v2), 2: envelope {1: header "hdr"}} -> base64 "CAISBQoDaGRy"
+const V2_CLAUDE_SIGNATURE = "CAISBQoDaGRy";
 
 const assistant = (blocks) => ({ role: "assistant", content: blocks });
 const thinking = (text) => ({ type: "thinking", thinking: text, signature: DEFAULT_THINKING_CLAUDE_SIGNATURE });
@@ -107,5 +113,50 @@ describe("prepareClaudeRequest — blank thinking blocks (deepSeekServed via ope
     const asst = out.messages.find(m => m.role === "assistant");
     expect(asst.content.map(b => b.type)).toEqual(["text"]);
     expect(asst.content[0].text).toBe("kept");
+  });
+});
+
+describe("versioned Claude signatures (v2 CAIS / v4 CAQS) and redacted_thinking", () => {
+  it("validates v2 and v4 protobuf signatures and rejects non-Claude signatures", () => {
+    expect(isValidClaudeSignature(DEFAULT_THINKING_CLAUDE_SIGNATURE)).toBe(true);
+    expect(isVersionedClaudeSignature(DEFAULT_THINKING_CLAUDE_SIGNATURE)).toBe(false);
+    expect(isValidClaudeSignature(V2_CLAUDE_SIGNATURE)).toBe(true);
+    expect(isVersionedClaudeSignature(V2_CLAUDE_SIGNATURE)).toBe(true);
+    expect(isValidClaudeSignature(V4_CLAUDE_SIGNATURE)).toBe(true);
+    expect(isVersionedClaudeSignature(V4_CLAUDE_SIGNATURE)).toBe(true);
+    expect(isValidClaudeSignature(DEFAULT_THINKING_GEMINI_CLI_SIGNATURE)).toBe(false);
+    expect(isValidClaudeSignature("rs_0d2abc123")).toBe(false);
+    expect(isValidClaudeSignature("CAnotvalid")).toBe(false);
+  });
+
+  it("preserves v4 CAQS omitted-display (empty thinking text) and summarized blocks on native Claude", () => {
+    const omittedBlock = { type: "thinking", thinking: "", signature: V4_CLAUDE_SIGNATURE };
+    const summarizedBlock = { type: "thinking", thinking: "step 1", signature: V4_CLAUDE_SIGNATURE };
+    const redactedBlock = { type: "redacted_thinking", data: "encrypted-payload" };
+
+    const passthroughOut = normalizeClaudePassthrough({
+      model: "claude-opus-5-5",
+      messages: [
+        { role: "user", content: "hi" },
+        assistant([omittedBlock, summarizedBlock, redactedBlock, { type: "text", text: "done" }]),
+      ],
+    }, "claude-opus-5-5");
+    expect(passthroughOut.messages[1].content).toEqual([
+      omittedBlock,
+      summarizedBlock,
+      redactedBlock,
+      { type: "text", text: "done" },
+    ]);
+
+    const preparedOut = prepareClaudeRequest({
+      model: "claude-opus-5-5",
+      max_tokens: 4096,
+      messages: [
+        { role: "user", content: "hi" },
+        assistant([omittedBlock, redactedBlock, { type: "tool_use", id: "toolu_1", name: "read", input: {} }]),
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "ok" }] },
+      ],
+    }, "claude");
+    expect(preparedOut.messages[1].content.slice(0, 2)).toEqual([omittedBlock, redactedBlock]);
   });
 });
