@@ -8,7 +8,7 @@ import { buildClineHeaders } from "../shared/clineAuth.js";
 import { proxyAwareFetch } from "../utils/proxyFetch.js";
 import { injectReasoningContent } from "../utils/reasoningContentInjector.js";
 import { stripUnsupportedParams } from "../translator/concerns/paramSupport.js";
-import { extractClaudeSessionIdFromUserId } from "../utils/claudeCloaking.js";
+import { extractClaudeSessionIdFromUserId, isClaudeOAuthToken, bindClaudeOAuthIdentity, ensureBillingCchPlaceholder, signClaudeBody } from "../utils/claudeCloaking.js";
 
 // Auth header descriptors — derived from registry transport.auth, fallback to hardcoded defaults.
 const BEARER = { combined: true, header: "Authorization", scheme: "bearer" };
@@ -75,13 +75,17 @@ const REFRESH_GRANTS = Object.fromEntries(
     })
 );
 
+function claudeToken(credentials) {
+  return credentials?.accessToken || credentials?.apiKey || "";
+}
+
 export class DefaultExecutor extends BaseExecutor {
   constructor(provider) {
     super(provider, PROVIDERS[provider] || PROVIDERS.openai);
   }
 
   transformRequest(model, body, stream, credentials) {
-    const transformed = this.applyJsonSchemaFallback(this.applyNousAttribution(model, body, stream, credentials));
+    let transformed = this.applyJsonSchemaFallback(this.applyNousAttribution(model, body, stream, credentials));
 
     if (transformed && typeof transformed === "object") {
       // quirk: some openai-compatible providers reject Anthropic's client_metadata field
@@ -89,9 +93,20 @@ export class DefaultExecutor extends BaseExecutor {
         delete transformed.client_metadata;
       }
       stripUnsupportedParams(this.provider, model, transformed);
+      // Claude OAuth (translated and native passthrough): per-account identity and
+      // a billing header ready for final-body CCH signing in serializeBody.
+      const token = claudeToken(credentials);
+      if (isClaudeOAuthToken(token)) {
+        transformed = ensureBillingCchPlaceholder(bindClaudeOAuthIdentity(transformed, token, credentials?.connectionId));
+      }
     }
 
     return injectReasoningContent({ provider: this.provider, model, body: transformed });
+  }
+
+  serializeBody(body, credentials) {
+    const json = super.serializeBody(body, credentials);
+    return isClaudeOAuthToken(claudeToken(credentials)) ? signClaudeBody(json) : json;
   }
 
   applyNousAttribution(model, body, stream, credentials) {
