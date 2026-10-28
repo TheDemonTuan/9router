@@ -54,6 +54,12 @@ export function parseSuffix(model) {
 export function extractThinking(body) {
   if (!body || typeof body !== "object") return null;
 
+  // Explicit Claude thinking-off switches (disabled or Sonnet 5.5's between_tools)
+  // take precedence over a companion output_config.effort (e.g. between_tools + medium).
+  if (body.thinking?.type === "disabled" || body.thinking?.type === "between_tools") {
+    return { mode: "none" };
+  }
+
   // Claude output_config.effort (explicit) — priority over adaptive thinking
   const oc = body.output_config?.effort;
   if (typeof oc === "string" && oc) {
@@ -62,7 +68,6 @@ export function extractThinking(body) {
     if (e === "auto") return { mode: "auto" };
     return { mode: "level", level: e };
   }
-
   // OpenAI chat / Responses shape — check effort first (zai sends both thinking object and reasoning.effort)
   const effort = body.reasoning_effort ?? (typeof body.reasoning === "object" ? body.reasoning?.effort : null);
   if (typeof effort === "string" && effort) {
@@ -75,7 +80,7 @@ export function extractThinking(body) {
   // Claude shape
   const t = body.thinking;
   if (t && typeof t === "object") {
-    if (t.type === "disabled") return { mode: "none" };
+    if (t.type === "disabled" || t.type === "between_tools") return { mode: "none" };
     if (t.type === "adaptive" || t.type === "enabled") {
       const budget = Number(t.budget_tokens);
       if (Number.isFinite(budget) && budget > 0) return { mode: "budget", budget };
@@ -112,9 +117,20 @@ export function extractThinking(body) {
 // OpenAI has no equivalent for, so the intent cannot survive translation on its own.
 export function captureThinking(body) {
   const cfg = extractThinking(body);
-  if (!cfg || cfg.mode === "none") return cfg;
-  const display = openAIThinkingDisplay(body);
-  return display ? { ...cfg, display } : cfg;
+  if (!cfg) return cfg;
+  const display = typeof body.thinking?.display === "string" ? body.thinking.display : openAIThinkingDisplay(body);
+  const blockBinding = body.thinking?.block_binding && typeof body.thinking.block_binding === "object"
+    ? body.thinking.block_binding
+    : undefined;
+  const betweenToolsEffort = body.thinking?.type === "between_tools" && typeof body.output_config?.effort === "string"
+    ? body.output_config.effort
+    : undefined;
+  return {
+    ...cfg,
+    ...(cfg.mode !== "none" && display ? { display } : {}),
+    ...(cfg.mode !== "none" && blockBinding ? { blockBinding } : {}),
+    ...(cfg.mode === "none" && betweenToolsEffort ? { betweenToolsEffort } : {}),
+  };
 }
 
 function openAIThinkingDisplay(body) {
@@ -279,7 +295,7 @@ function stripAll(body, targetFormat) {
 }
 
 // Apply unified thinking config to body in the resolved provider-native format.
-function applyFormat(fmt, body, cfg, caps, supportedLevels, display, strictCatalogLevels = false) {
+function applyFormat(fmt, body, cfg, caps, supportedLevels, display, strictCatalogLevels = false, blockBinding = undefined) {
   const none = cfg.mode === "none";
   const canDisable = caps.thinkingCanDisable !== false;
   // Model cannot disable thinking → clamp "none" to minimal effort instead.
@@ -309,13 +325,26 @@ function applyFormat(fmt, body, cfg, caps, supportedLevels, display, strictCatal
       break;
     }
     case "claude-adaptive": {
-      if (none && canDisable) { body.thinking = { type: "disabled" }; break; }
+      if (none && canDisable) {
+        body.thinking = { type: "disabled" };
+        if (cfg.betweenToolsEffort) {
+          body.output_config = { ...body.output_config, effort: cfg.betweenToolsEffort };
+        }
+        break;
+      }
       // Models that can disable thinking need the explicit adaptive switch.
       // Permanently adaptive models such as Opus 5.5 / Fable 5.1 accept effort
-      // directly; they still need the switch to carry a display request, or
-      // redact-thinking stays on and thinking returns signature-only.
-      if (canDisable || display) body.thinking = { type: "adaptive", ...(display ? { display } : {}) };
-      else delete body.thinking;
+      // directly; they still need the switch to carry a display or block_binding
+      // request, or redact-thinking stays on and thinking returns signature-only.
+      if (canDisable || display || blockBinding) {
+        body.thinking = {
+          type: "adaptive",
+          ...(display ? { display } : {}),
+          ...(blockBinding ? { block_binding: blockBinding } : {}),
+        };
+      } else {
+        delete body.thinking;
+      }
       const level = toLevel(eff);
       // xhigh is model-gated (Opus/Sonnet 4.6 reject it) — clamp when not advertised.
       // Claude effort has no "minimal" (always-on models clamp "none" to it).
@@ -327,7 +356,13 @@ function applyFormat(fmt, body, cfg, caps, supportedLevels, display, strictCatal
     case "claude-budget": {
       if (none && canDisable) { body.thinking = { type: "disabled" }; break; }
       const budget = toBudget(eff, caps.thinkingRange);
-      body.thinking = budget === -1 ? { type: "enabled", ...(display ? { display } : {}) } : { type: "enabled", budget_tokens: budget || 8192, ...(display ? { display } : {}) };
+      const extras = {
+        ...(display ? { display } : {}),
+        ...(blockBinding ? { block_binding: blockBinding } : {}),
+      };
+      body.thinking = budget === -1
+        ? { type: "enabled", ...extras }
+        : { type: "enabled", budget_tokens: budget || 8192, ...extras };
       break;
     }
     case "gemini-level": {
@@ -509,7 +544,14 @@ export function applyThinking(targetFormat, model, body, provider = null, intent
   // comes back at all; keep what the client asked for instead of resetting it.
   // An OpenAI-shaped client's ask arrives via the captured intent instead.
   const display = typeof body.thinking?.display === "string" ? body.thinking.display : intent?.display;
+  const blockBinding = body.thinking?.block_binding && typeof body.thinking.block_binding === "object"
+    ? body.thinking.block_binding
+    : intent?.blockBinding;
+  const betweenToolsEffort = body.thinking?.type === "between_tools" && typeof body.output_config?.effort === "string"
+    ? body.output_config.effort
+    : intent?.betweenToolsEffort;
+  const effectiveCfg = betweenToolsEffort && cfg.mode === "none" ? { ...cfg, betweenToolsEffort } : cfg;
   stripAll(body, targetFormat);
-  applyFormat(fmt, body, cfg, caps, supportedLevels, display, hasExplicitCatalogLevels);
+  applyFormat(fmt, body, effectiveCfg, caps, supportedLevels, display, hasExplicitCatalogLevels, blockBinding);
   return body;
 }

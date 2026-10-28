@@ -116,4 +116,34 @@ describe("permanently adaptive models keep the display request", () => {
     expect(out.thinking).toEqual({ type: "adaptive", display: "summarized" });
     expect(out.output_config).toEqual({ effort: "max" });
   });
+
+  it("preserves thinking.block_binding on Opus 5.5", () => {
+    const out = toClaude(FORMATS.CLAUDE, {
+      model: "claude-opus-5-5", max_tokens: 4096,
+      thinking: {
+        type: "adaptive",
+        display: "summarized",
+        block_binding: { prefix_mismatch_behavior: "drop_block" },
+      },
+      output_config: { effort: "high" },
+      messages: [{ role: "user", content: "Is 391 prime?" }],
+    }, "claude-opus-5-5");
+    expect(out.thinking).toEqual({
+      type: "adaptive",
+      display: "summarized",
+      block_binding: { prefix_mismatch_behavior: "drop_block" },
+    });
+    expect(selectAnthropicBeta("claude-opus-5-5", out)).not.toContain(REDACT);
+  });
+
+  it("preserves Sonnet 5.5 between_tools thinking-off mode alongside companion effort", () => {
+    const out = toClaude(FORMATS.CLAUDE, {
+      model: "claude-sonnet-5-5", max_tokens: 4096,
+      thinking: { type: "between_tools" },
+      output_config: { effort: "medium" },
+      messages: [{ role: "user", content: "Is 391 prime?" }],
+    }, "claude-sonnet-5-5");
+    expect(out.thinking).toEqual({ type: "between_tools" });
+    expect(out.output_config).toEqual({ effort: "medium" });
+  });
 });

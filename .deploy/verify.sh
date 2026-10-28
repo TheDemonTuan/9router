@@ -59,6 +59,9 @@ mkdir -p "$HOME" "$DATA_DIR"
     unit/alibaba-token-plan-provider.test.js \
     unit/codex-v1-models.test.js \
     unit/claude-v1-models-reasoning.test.js \
+    unit/claude-empty-thinking-block.test.js \
+    unit/claude-oauth-wire.test.js \
+    translator/openai-thinking-display.test.js \
     unit/system-inject.test.js \
     unit/token-saver-policy.test.js \
     translator/alibaba-token-plan-pipeline.test.js
