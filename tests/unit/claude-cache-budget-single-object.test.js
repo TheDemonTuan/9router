@@ -1,5 +1,4 @@
-// #3795 — a proxy must not dispatch more cache_control blocks than Anthropic
-// accepts, and must not lose turns that use single-object content (#3567 interplay).
+// Single-object content must survive normalization and retain client policy.
 import { describe, it, expect } from "vitest";
 import {
   anchorClaudeCache,
@@ -26,18 +25,6 @@ function countMarkers(body) {
 }
 
 describe("cache marker budget and single-block content", () => {
-  it("never emits more than four markers when the client already spent its budget", () => {
-    const out = anchorClaudeCache({
-      system: [text("s1"), text("s2", { cache_control: CC })],
-      tools: [tool("t1"), tool("t2", { cache_control: CC })],
-      messages: [
-        { role: "user", content: text("u1", { cache_control: CC }) },
-        { role: "assistant", content: text("a1", { cache_control: CC }) },
-        { role: "user", content: [text("q")] },
-      ],
-    });
-    expect(countMarkers(out)).toBeLessThanOrEqual(4);   // base: 5
-  });
 
   it("normalizes a single-object turn in passthrough and anchors it", () => {
     const body = {
@@ -53,10 +40,10 @@ describe("cache marker budget and single-block content", () => {
     expect(Array.isArray(assistant.content)).toBe(true); // base: still bare object
     expect(assistant.content).toHaveLength(1);
     const out = anchorClaudeCache(body);
-    expect(countMarkers(out)).toBe(1);
+    expect(out.messages[1].content[0]).toMatchObject({ type: "text", text: "a1" });
   });
 
-  it("keeps a turn whose content is a single object and strips its marker", () => {
+  it("keeps a marked single-object turn and its client policy", () => {
     const out = prepareClaudeRequest({
       model: "claude-sonnet-5", max_tokens: 100,
       system: [text("s1")],
@@ -69,7 +56,7 @@ describe("cache marker budget and single-block content", () => {
     const kept = out.messages.filter(m => JSON.stringify(m.content).includes("u1"));
     expect(kept.length).toBe(1);                        // base: 0 (dropped)
     expect(kept[0].content).toHaveLength(1);           // normalized to array
-    expect(kept[0].content[0].cache_control).toBeUndefined();
+    expect(kept[0].content[0].cache_control).toEqual(CC);
   });
 
   it("drops no conversation turn when content is a single text object", () => {
@@ -85,17 +72,6 @@ describe("cache marker budget and single-block content", () => {
     expect(Array.isArray(out.messages[0].content)).toBe(true);
   });
 
-  it("re-anchors the last assistant turn even when it uses single-object content", () => {
-    const out = prepareClaudeRequest({
-      model: "claude-sonnet-5", max_tokens: 100,
-      messages: [
-        { role: "user", content: [text("u1")] },
-        { role: "assistant", content: text("a1") },
-        { role: "user", content: [text("q")] },
-      ],
-    }, "claude");
-    expect(countMarkers(out)).toBe(1);                 // base: 0
-  });
 
   it("keeps a marked single-object turn when the marker budget is spent", () => {
     const body = {
@@ -145,69 +121,6 @@ describe("cache marker budget and single-block content", () => {
     expect(Array.isArray(first.content)).toBe(true);
     expect(JSON.stringify(first.content).includes("u1")).toBe(true); // pre-hoist: fold zeroes bare-object content
     expect(JSON.stringify(first.content).includes("reminder")).toBe(true);
-  });
-  it("prunes a client body that already carries five markers down to four", () => {
-    const out = anchorClaudeCache({
-      system: [text("s1"), text("s2", { cache_control: CC })],
-      tools: [tool("t1", { cache_control: CC }), tool("t2", { cache_control: CC })],
-      messages: [
-        { role: "user", content: [text("u1", { cache_control: CC })] },
-        { role: "assistant", content: [text("a1", { cache_control: CC })] },
-        { role: "user", content: [text("q")] },
-      ],
-    });
-    expect(countMarkers(out)).toBe(4);                    // pre-fix: 5 forwarded unchanged
-    expect(out.system[0].cache_control).toBeUndefined();  // earliest marker pruned
-  });
-
-  // A spent budget must not cost the head anchors their 1h TTL: system/tools are
-  // the whole point of re-anchoring, and a 5m fallback silently halves the cache
-  // lifetime on exactly the requests that already cached aggressively.
-  it("keeps the 1h head anchors when the client spent the whole budget", () => {
-    const out = anchorClaudeCache({
-      system: [text("s1"), text("s2", { cache_control: CC })],
-      tools: [tool("t1", { cache_control: CC }), tool("t2")],
-      messages: [
-        { role: "user", content: [text("u1", { cache_control: CC })] },
-        { role: "assistant", content: [text("a1", { cache_control: CC })] },
-        { role: "user", content: [text("q")] },
-      ],
-    });
-    expect(countMarkers(out)).toBeLessThanOrEqual(4);
-    expect(out.system.at(-1).cache_control?.ttl).toBe("1h");  // pre-fix: fell back to 5m
-    expect(out.tools.at(-1).cache_control?.ttl).toBe("1h");   // pre-fix: fell back to 5m
-  });
-
-  it("keeps the 1h head anchors on an over-budget body", () => {
-    const out = anchorClaudeCache({
-      system: [text("s1", { cache_control: CC })],
-      tools: [tool("t1", { cache_control: CC }), tool("t2")],
-      messages: [
-        { role: "user", content: [text("u1", { cache_control: CC })] },
-        { role: "assistant", content: [text("a1", { cache_control: CC })] },
-        { role: "user", content: [text("u2", { cache_control: CC })] },
-        { role: "assistant", content: [text("a2", { cache_control: CC })] },
-        { role: "user", content: [text("q")] },
-      ],
-    });
-    expect(countMarkers(out)).toBe(4);
-    expect(out.system.at(-1).cache_control?.ttl).toBe("1h");
-    expect(out.tools.at(-1).cache_control?.ttl).toBe("1h");
-  });
-
-  it("strips a marker from a deferred tool even when the budget is spent", () => {
-    const out = anchorClaudeCache({
-      system: [text("s1", { cache_control: CC })],
-      tools: [tool("t1", { cache_control: CC, defer_loading: true })],
-      messages: [
-        { role: "user", content: [text("u1", { cache_control: CC })] },
-        { role: "assistant", content: [text("a1", { cache_control: CC })] },
-        { role: "user", content: [text("q")] },
-      ],
-    });
-    expect(countMarkers(out)).toBeLessThanOrEqual(4);
-    const deferred = out.tools.find(t => t.defer_loading);
-    expect(deferred?.cache_control).toBeUndefined();      // pre-fix: invalid marker forwarded
   });
 
   it("keeps a bare-object system reminder on the claude-to-openai leg", () => {

@@ -74,7 +74,7 @@ export function filterUsageForFormat(usage, targetFormat) {
   const formatFields = {
     [FORMATS.CLAUDE]: [
       'input_tokens', 'output_tokens', 
-      'cache_read_input_tokens', 'cache_creation_input_tokens',
+      'cache_read_input_tokens', 'cache_creation_input_tokens', 'cache_creation',
       'estimated'
     ],
     [FORMATS.GEMINI]: [
@@ -111,6 +111,20 @@ export function filterUsageForFormat(usage, targetFormat) {
   return pickFields(fields);
 }
 
+const CACHE_CREATION_FIELDS = ["ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"];
+
+// Missing components stay missing; any declared invalid component invalidates the split.
+export function normalizeCacheCreation(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const result = {};
+  for (const field of CACHE_CREATION_FIELDS) {
+    if (!Object.hasOwn(value, field)) continue;
+    if (typeof value[field] !== "number" || !Number.isFinite(value[field]) || value[field] < 0) return null;
+    result[field] = value[field];
+  }
+  return Object.keys(result).length ? result : null;
+}
+
 /**
  * Normalize usage object - ensure all values are valid numbers
  */
@@ -131,6 +145,8 @@ export function normalizeUsage(usage) {
   assignNumber("cache_creation_input_tokens", usage?.cache_creation_input_tokens);
   assignNumber("cached_tokens", usage?.cached_tokens);
   assignNumber("reasoning_tokens", usage?.reasoning_tokens);
+  const cacheCreation = normalizeCacheCreation(usage.cache_creation);
+  if (cacheCreation) normalized.cache_creation = cacheCreation;
 
   // Preserve nested details objects for OpenAI format forwarding
   if (usage?.prompt_tokens_details && typeof usage.prompt_tokens_details === "object") {
@@ -206,6 +222,8 @@ export function canonicalizeUsage(usage) {
     cache_creation_input_tokens: cacheCreation,
   };
   if (reasoning > 0) result.reasoning_tokens = reasoning;
+  const breakdown = normalizeCacheCreation(usage.cache_creation);
+  if (breakdown) result.cache_creation = breakdown;
   return result;
 }
 
@@ -221,7 +239,8 @@ export function hasValidUsage(usage) {
   const tokenFields = [
     "prompt_tokens", "completion_tokens", "total_tokens",  // OpenAI
     "input_tokens", "output_tokens",                        // Claude
-    "promptTokenCount", "candidatesTokenCount"              // Gemini
+    "promptTokenCount", "candidatesTokenCount",             // Gemini
+    "cache_read_input_tokens", "cache_creation_input_tokens", "cached_tokens"
   ];
 
   for (const field of tokenFields) {
@@ -248,7 +267,8 @@ export function extractUsage(chunk) {
       prompt_tokens: u.input_tokens || 0,
       completion_tokens: u.output_tokens || 0,
       cache_read_input_tokens: u.cache_read_input_tokens,
-      cache_creation_input_tokens: u.cache_creation_input_tokens
+      cache_creation_input_tokens: u.cache_creation_input_tokens,
+      cache_creation: u.cache_creation
     });
   }
 
@@ -258,7 +278,8 @@ export function extractUsage(chunk) {
       prompt_tokens: chunk.usage.input_tokens || 0,
       completion_tokens: chunk.usage.output_tokens || 0,
       cache_read_input_tokens: chunk.usage.cache_read_input_tokens,
-      cache_creation_input_tokens: chunk.usage.cache_creation_input_tokens
+      cache_creation_input_tokens: chunk.usage.cache_creation_input_tokens,
+      cache_creation: chunk.usage.cache_creation
     });
   }
 
@@ -326,6 +347,16 @@ export function mergeUsage(prev, next) {
   if (!next) return prev;
   const merged = { ...prev };
   for (const [k, v] of Object.entries(next)) {
+    if (k === "cache_creation") {
+      const nextSplit = normalizeCacheCreation(v);
+      if (!nextSplit) { delete merged.cache_creation; continue; }
+      const split = { ...normalizeCacheCreation(prev.cache_creation) };
+      for (const field of CACHE_CREATION_FIELDS) {
+        if (nextSplit[field] !== undefined) split[field] = Math.max(split[field] ?? 0, nextSplit[field]);
+      }
+      merged.cache_creation = split;
+      continue;
+    }
     // typeof NaN === "number" — guard with Number.isFinite so one malformed
     // chunk can't poison the whole accumulation (Math.max(x, NaN) is NaN).
     if (typeof v === "number" && Number.isFinite(v)) {

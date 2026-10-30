@@ -5,6 +5,7 @@ import { initState, translateResponse } from "../../open-sse/translator/index.js
 import { claudeToResponsesResponse, convertClaudeResponseToResponses, failClaudeResponses } from "../../open-sse/translator/response/claude-to-responses.js";
 import { unsealClaudeReasoning } from "../../open-sse/translator/concerns/claudeContinuation.js";
 import { ClaudeCustomInputDecoder } from "../../open-sse/translator/concerns/claudeCustomInput.js";
+import { canonicalizeUsage } from "../../open-sse/utils/usageTracking.js";
 
 const CONTEXT = { provider: "anthropic", model: "model-fixture" };
 const CREDENTIALS = { apiKey: "fixture-secret", connectionId: "fixture-account", _responsesClaudeContext: CONTEXT };
@@ -24,6 +25,18 @@ const types = (events) => events.map((event) => event.event);
 const terminals = (events) => events.filter((event) => ["response.completed", "response.incomplete", "response.failed"].includes(event.event));
 
 describe("direct Claude to Responses response translation", () => {
+  it("retains provider TTL accounting while projecting only standard Responses usage", () => {
+    const split = { ephemeral_5m_input_tokens: 10, ephemeral_1h_input_tokens: 20 };
+    const { state, response } = run([
+      { ...START, message: { ...START.message, usage: { input_tokens: 100, cache_read_input_tokens: 200, cache_creation_input_tokens: 30, cache_creation: split, output_tokens: 0 } } },
+      blockStart(0, { type: "text", text: "answer" }), stopBlock(0),
+      { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 50 } }, { type: "message_stop" },
+    ]);
+    expect(response.usage).toEqual({ input_tokens: 330, output_tokens: 50, total_tokens: 380, input_tokens_details: { cached_tokens: 200 } });
+    const canonical = canonicalizeUsage(state.usage);
+    expect(canonical).toMatchObject({ prompt_tokens: 330, cached_tokens: 200, cache_creation_input_tokens: 30, cache_creation: split });
+    expect(canonicalizeUsage(canonical)).toEqual(canonical);
+  });
   it("uses the direct registry route with stable indexes, IDs and ordered text lifecycle", () => {
     const { events, response, state } = run([START, blockStart(4, { type: "text", text: "initial" }), text(4, " delta"), stopBlock(4), ...finish(), null, ...finish()]);
     expect(types(events)).toEqual([

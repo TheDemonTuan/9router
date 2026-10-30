@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { getModelsByProviderId } from "../../open-sse/config/providerModels.js";
 import { getCapabilitiesForModel } from "../../open-sse/providers/capabilities.js";
-import { getPricingForModel } from "../../open-sse/providers/pricing.js";
+import { calculateCostFromTokens, getPricingForModel } from "../../open-sse/providers/pricing.js";
 import { prepareClaudeRequest } from "../../open-sse/translator/formats/claude.js";
 import { translateRequest } from "../../open-sse/translator/index.js";
 import { FORMATS } from "../../open-sse/translator/formats.js";
@@ -25,8 +25,9 @@ describe("Claude Sonnet 5.5", () => {
     });
   });
 
-  it.each(["claude-sonnet-5-5", "claude-sonnet-5"])("prices %s at Sonnet 5 rates", (model) => {
-    expect(getPricingForModel("claude", model)).toEqual({ input: 2, output: 10, cached: 0.2, reasoning: 10, cache_creation: 2.5 });
+  it.each(["claude-sonnet-5-5", "claude-sonnet-5"])("bills cached continuation and 1h writes at Sonnet 5 prices for %s", model => {
+    const cost = calculateCostFromTokens({ prompt_tokens: 330, completion_tokens: 50, cached_tokens: 200, cache_creation_input_tokens: 30, cache_creation: { ephemeral_5m_input_tokens: 10, ephemeral_1h_input_tokens: 20 } }, getPricingForModel("claude", model));
+    expect(cost).toBeCloseTo((100 * 2 + 200 * 0.2 + 10 * 2.5 + 20 * 4 + 50 * 10) / 1e6, 12);
   });
 });
 

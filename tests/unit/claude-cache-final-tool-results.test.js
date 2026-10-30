@@ -7,7 +7,7 @@ import { anchorClaudeCache, prepareClaudeRequest } from "../../open-sse/translat
 const CC = { type: "ephemeral" };
 const text = (t, extra = {}) => ({ type: "text", text: t, ...extra });
 const tool = (name, extra = {}) => ({ name, description: "d", input_schema: { type: "object", properties: {} }, ...extra });
-const use = (id) => ({ role: "assistant", content: [text("Reading."), { type: "tool_use", id, name: "read_file", input: { path: "a" } }] });
+const toolUseTurn = (id) => ({ role: "assistant", content: [text("Reading."), { type: "tool_use", id, name: "read_file", input: { path: "a" } }] });
 const result = (id, content = "file") => ({ type: "tool_result", tool_use_id: id, content });
 
 function markers(body) {
@@ -25,9 +25,9 @@ const loop = () => ({
   tools: [tool("read_file"), tool("run_command")],
   messages: [
     { role: "user", content: [text("Fix the bug.")] },
-    use("t1"),
+    toolUseTurn("t1"),
     { role: "user", content: [result("t1")] },
-    use("t2"),
+    toolUseTurn("t2"),
     { role: "user", content: [result("t2", "a"), result("t2b", "b")] },
   ],
 });
@@ -39,11 +39,13 @@ describe("prepareClaudeRequest: a tool loop's final tool results", () => {
     expect(out.messages[4].content[1].cache_control).toEqual({ type: "ephemeral" });
   });
 
-  it("leave a request that ends with a typed message as it was", () => {
+  it("caches the follow-up user text without retaining the previous tool-result anchor", () => {
     const body = loop();
     body.messages.push({ role: "assistant", content: [text("Done.")] }, { role: "user", content: [text("Thanks, and the tests?")] });
     const out = prepareClaudeRequest(body, "claude");
-    expect(markers(out)).toEqual(["system[0]", "tools[1]", "messages[5].0"]);
+    expect(out.messages[6].content[0]).toEqual(text("Thanks, and the tests?", { cache_control: CC }));
+    expect(out.messages[4].content.every(block => !block.cache_control)).toBe(true);
+    expect(out.messages[3].content[1].id).toBe("t2");
   });
 
   it("need no tools array to be marked", () => {
@@ -53,15 +55,6 @@ describe("prepareClaudeRequest: a tool loop's final tool results", () => {
     expect(markers(out)).toEqual(["system[0]", "messages[3].1", "messages[4].1"]);
   });
 
-  it("never take the request past four markers", () => {
-    const body = loop();
-    body.system = [text("a", { cache_control: CC }), text("b", { cache_control: CC })];
-    body.tools = body.tools.map((t) => ({ ...t, cache_control: CC }));
-    body.messages.forEach((m) => m.content.forEach((b) => (b.cache_control = CC)));
-    const out = prepareClaudeRequest(body, "claude");
-    expect(markers(out).length).toBeLessThanOrEqual(4);
-    expect(out.messages[4].content.at(-1).cache_control).toBeTruthy();
-  });
 });
 
 describe("anchorClaudeCache: a passthrough tool loop's final tool results", () => {

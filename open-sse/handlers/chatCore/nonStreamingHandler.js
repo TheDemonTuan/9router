@@ -3,6 +3,7 @@ import { initState, needsTranslation, translateResponse } from "../../translator
 import { openAICompletionToClaudeMessage } from "../../translator/concerns/claudeMessage.js";
 import { ollamaBodyToOpenAI } from "../../translator/response/ollama-to-openai.js";
 import { addBufferToUsage, filterUsageForFormat } from "../../utils/usageTracking.js";
+import { toOpenAIUsage } from "../../translator/concerns/usage.js";
 import { createErrorResult } from "../../utils/error.js";
 import { upstreamResponseHeaders } from "../../utils/upstreamHeaders.js";
 import { HTTP_STATUS } from "../../config/runtimeConfig.js";
@@ -172,11 +173,7 @@ export function translateNonStreamingResponse(responseBody, targetFormat, source
     };
 
     if (responseBody.usage) {
-      result.usage = {
-        prompt_tokens: responseBody.usage.input_tokens || 0,
-        completion_tokens: responseBody.usage.output_tokens || 0,
-        total_tokens: (responseBody.usage.input_tokens || 0) + (responseBody.usage.output_tokens || 0)
-      };
+      result.usage = toOpenAIUsage(responseBody.usage, FORMATS.CLAUDE);
     }
     return result;
   }
@@ -195,6 +192,7 @@ export function translateNonStreamingResponse(responseBody, targetFormat, source
 export async function handleNonStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, body, stream, translatedBody, finalBody, responseSchemaValidation, toolArgumentValidation = null, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, trackDone, appendLog, pxpipe, reqTag, log, routeContext, preResponse = null, credentials = null }) {
   const contentType = providerResponse.headers.get("content-type") || "";
   let responseBody;
+  let providerUsage = null;
   let validatedClientResponse = null;
   let validatedSSE = false;
 
@@ -225,6 +223,7 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
       parser.write(sseText);
       parser.end();
       observe(translateResponse(targetFormat, sourceFormat, null, state));
+      providerUsage = state.claudeResponses?.usage || null;
       parsed = validatedClientResponse;
     } else if (toolArgumentValidation) {
       try {
@@ -292,7 +291,7 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
     console.error("[ChatCore] onRequestSuccess failed:", err?.message || err);
   });
 
-  const usage = extractUsageFromResponse(responseBody);
+  const usage = extractUsageFromResponse(providerUsage ? { usage: providerUsage } : responseBody);
   appendLog({ tokens: usage, status: failed ? "FAILED 502" : "200 OK" });
   saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, silent: true });
   if (log?.line) log.line(reqTag, "📊", formatDoneLine({ usage, latency: { total: Date.now() - requestStartTime } }));
@@ -339,7 +338,7 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
     }
   }
 
-  if (translatedResponse?.usage && !(targetFormat === FORMATS.CLAUDE && sourceFormat === FORMATS.OPENAI_RESPONSES)) {
+  if (translatedResponse?.usage && targetFormat !== FORMATS.CLAUDE) {
     translatedResponse.usage = filterUsageForFormat(addBufferToUsage(translatedResponse.usage), sourceFormat);
   }
 

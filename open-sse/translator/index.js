@@ -1,6 +1,6 @@
 import { FORMATS } from "./formats.js";
 import { ensureToolCallIds, fixMissingToolResponses } from "./concerns/toolCall.js";
-import { prepareClaudeRequest, ensureTrailingUserTurn } from "./formats/claude.js";
+import { prepareClaudeRequest, ensureTrailingUserTurn, hasClaudeCacheControl } from "./formats/claude.js";
 import { cloakClaudeTools, decloakStreamChunk } from "../utils/claudeCloaking.js";
 import { restoreToolNames } from "../utils/opencodeFingerprint.js";
 import { filterToOpenAIFormat } from "./formats/openai.js";
@@ -69,6 +69,7 @@ function detectClientLastRole(body) {
 // Translate request: source -> openai -> target
 export function translateRequest(sourceFormat, targetFormat, model, body, stream = true, credentials = null, provider = null, reqLogger = null, stripList = [], connectionId = null, clientTool = null, sessionSourceBody = null) {
   ensureInitialized();
+  const preserveClientCache = sourceFormat === FORMATS.CLAUDE && hasClaudeCacheControl(body);
   let result = body;
   const directClaudeResponses = sourceFormat === FORMATS.OPENAI_RESPONSES && targetFormat === FORMATS.CLAUDE;
   if (directClaudeResponses && credentials) credentials._responsesClaudeContext = { provider, model, connectionId, clientScope: credentials._responsesClaudeContext?.clientScope || null };
@@ -186,7 +187,7 @@ export function translateRequest(sourceFormat, targetFormat, model, body, stream
   // Final step: prepare request for Claude format endpoints
   if (targetFormat === FORMATS.CLAUDE) {
     const apiKey = credentials?.accessToken || credentials?.apiKey || null;
-    result = prepareClaudeRequest(result, provider, apiKey, connectionId, credentials?.rawHeaders, clientSessionId);
+    result = prepareClaudeRequest(result, provider, apiKey, connectionId, credentials?.rawHeaders, clientSessionId, { preserveClientCache });
     if (!directClaudeResponses && Array.isArray(result?.messages)) result.messages = ensureTrailingUserTurn(result.messages, clientLastRole);
     delete result._directResponsesToClaude;
     delete result._explicitMaxOutputTokens;
