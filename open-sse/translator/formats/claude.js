@@ -2,7 +2,7 @@
 import { DEFAULT_THINKING_CLAUDE_SIGNATURE } from "../../config/defaultThinkingSignature.js";
 import { ROLE, CLAUDE_BLOCK } from "../schema/index.js";
 import { adjustMaxTokens } from "./maxTokens.js";
-import { applyCloaking } from "../../utils/claudeCloaking.js";
+import { applyCloaking, isClaudeOAuthToken } from "../../utils/claudeCloaking.js";
 import { resolveSessionId } from "../../utils/sessionManager.js";
 import { isValidClaudeSignature, isVersionedClaudeSignature } from "../../utils/claudeSignature.js";
 import { PROVIDERS } from "../../providers/index.js";
@@ -13,6 +13,19 @@ import { CLAUDE_SYSTEM_PROMPT } from "../../config/appConstants.js";
 
 const CACHE_CONTROL_5M = { type: "ephemeral" };
 const CACHE_CONTROL_1H = { type: "ephemeral", ttl: "1h" };
+
+// Presence, not validity: client policies must reach upstream without silent repair.
+export function hasClaudeCacheControl(body) {
+  const has = value => value !== null && typeof value === "object" && Object.hasOwn(value, "cache_control");
+  const blocksHave = value => Array.isArray(value) ? value.some(has) : has(value);
+  return has(body) || blocksHave(body?.system) || blocksHave(body?.tools)
+    || (Array.isArray(body?.messages) && body.messages.some(message => blocksHave(message?.content)));
+}
+
+const CACHEABLE_BLOCKS = new Set([
+  CLAUDE_BLOCK.TEXT, CLAUDE_BLOCK.IMAGE, CLAUDE_BLOCK.DOCUMENT,
+  CLAUDE_BLOCK.TOOL_USE, CLAUDE_BLOCK.TOOL_RESULT,
+]);
 
 // Anthropic rejects a tool carrying BOTH defer_loading:true and cache_control
 // ("Tools defer_loading cannot use prompt caching", #3567). MCP clients put
@@ -56,14 +69,11 @@ export function hasValidContent(msg) {
   }
   return false;
 }
-// Content may arrive as a single content block object (spec allows string | array;
-// some clients send the bare object). Wrap it as a one-block array and strip any
-// client-placed cache_control: a bare-object marker must never survive
-// normalization, on any path, guard or no guard.
-function normalizeMessageContent(msg) {
+// Some clients send a bare content block instead of a one-block array.
+function normalizeMessageContent(msg, preserveClientCache = false) {
   const c = msg?.content;
   if (c && typeof c === "object" && !Array.isArray(c)) {
-    delete c.cache_control;
+    if (!preserveClientCache) delete c.cache_control;
     msg.content = [c];
   }
   return msg;
@@ -219,7 +229,7 @@ function hasForeignServerToolUseId(block) {
 // 3. bare content-block objects (content: {block} instead of [{block}]) → wrapped first
 // 4. role "system" messages (mid-conversation-system beta) → only top-level system is allowed
 // 5. server_tool_use blocks carrying a foreign (non-srvtoolu_) id → rejected outright
-export function normalizeClaudePassthrough(body, model = "") {
+export function normalizeClaudePassthrough(body, model = "", { preserveClientCache = false } = {}) {
   if (!body || typeof body !== "object") return body;
 
   // 1. Downgrade adaptive thinking for models that don't support it
@@ -240,7 +250,7 @@ export function normalizeClaudePassthrough(body, model = "") {
   // mid-conversation-system fold below assumes the array shape, so it must
   // run first — a bare-object neighbor would otherwise be zeroed to [].
   if (Array.isArray(body.messages)) {
-    for (const msg of body.messages) normalizeMessageContent(msg);
+    for (const msg of body.messages) normalizeMessageContent(msg, preserveClientCache);
   }
 
   // 4. Fold mid-conversation system messages into the neighbouring turn.
@@ -254,25 +264,23 @@ export function normalizeClaudePassthrough(body, model = "") {
         messages.push(msg);
         continue;
       }
-      const text = typeof msg.content === "string"
-        ? msg.content
-        : Array.isArray(msg.content)
-          ? msg.content.map(b => (typeof b === "string" ? b : b?.text || "")).join("\n")
-          : "";
-      if (!text.trim()) continue;
+      const blocks = preserveClientCache && Array.isArray(msg.content)
+        ? msg.content.map(block => typeof block === "string" ? { type: CLAUDE_BLOCK.TEXT, text: block } : block)
+        : [{ type: CLAUDE_BLOCK.TEXT, text: typeof msg.content === "string"
+          ? msg.content
+          : Array.isArray(msg.content) ? msg.content.map(b => typeof b === "string" ? b : b?.text || "").join("\n") : "" }];
+      if (!blocks.length || blocks.every(block => block?.type === CLAUDE_BLOCK.TEXT && !block.text?.trim())) continue;
 
-      // Copy-on-write: the caller's body is reused across account-fallback
-      // attempts, so folding must never mutate the original message.
-      const block = { type: CLAUDE_BLOCK.TEXT, text };
+      // Copy-on-write: account fallback can reuse the original messages.
       const prev = messages[messages.length - 1];
       if (prev?.role === ROLE.USER) {
         const content = typeof prev.content === "string"
           ? [{ type: CLAUDE_BLOCK.TEXT, text: prev.content }]
           : Array.isArray(prev.content) ? [...prev.content] : [];
-        messages[messages.length - 1] = { ...prev, content: [...content, block] };
+        messages[messages.length - 1] = { ...prev, content: [...content, ...blocks] };
         continue;
       }
-      messages.push({ role: ROLE.USER, content: [block] });
+      messages.push({ role: ROLE.USER, content: blocks });
     }
     body.messages = messages;
   }
@@ -397,13 +405,47 @@ function markFinalToolResults(body) {
   return markLastCacheableBlock(last);
 }
 
-// Re-anchor cache breakpoints on a Claude passthrough body (same policy as
-// prepareClaudeRequest): last tool + last system block at 1h, last assistant at 5m.
-// The client's own markers point at pre-normalization offsets, so they are dropped.
-// Must run LAST, after every step that can reshape system/tools/messages
-// (normalize, tool dedupe, token savers) — otherwise the anchor drifts off the tail.
-export function anchorClaudeCache(body) {
+// Finalize only gateway-owned anchors, after all payload transformations.
+export function anchorClaudeCache(body, { provider = "claude", apiKey = null, preserveClientCache = hasClaudeCacheControl(body) } = {}) {
   if (!body || typeof body !== "object") return body;
+  if (provider === "claude" || provider === "anthropic") {
+    if (preserveClientCache) return body;
+    const control = isClaudeOAuthToken(apiKey) ? CACHE_CONTROL_1H : CACHE_CONTROL_5M;
+    delete body.cache_control;
+    if (typeof body.system === "string" && body.system.trim()) body.system = [{ type: CLAUDE_BLOCK.TEXT, text: body.system }];
+    if (Array.isArray(body.system)) {
+      for (const block of body.system) if (block && typeof block === "object") delete block.cache_control;
+      for (let i = body.system.length - 1; i >= 0; i--) {
+        if (body.system[i]?.type !== CLAUDE_BLOCK.TEXT) continue;
+        body.system[i].cache_control = { ...control };
+        break;
+      }
+    }
+    if (Array.isArray(body.tools)) {
+      for (const tool of body.tools) if (tool && typeof tool === "object") delete tool.cache_control;
+      const index = lastCacheableToolIndex(body.tools);
+      if (index >= 0) body.tools[index].cache_control = { ...control };
+    }
+    if (Array.isArray(body.messages)) {
+      for (const message of body.messages) {
+        if (typeof message.content === "string" && message.content.trim()) message.content = [{ type: CLAUDE_BLOCK.TEXT, text: message.content }];
+        normalizeMessageContent(message);
+        if (Array.isArray(message.content)) for (const block of message.content) if (block && typeof block === "object") delete block.cache_control;
+      }
+      let remaining = 2;
+      for (let i = body.messages.length - 1; i >= 0 && remaining; i--) {
+        const content = body.messages[i].content;
+        if (!Array.isArray(content)) continue;
+        for (let j = content.length - 1; j >= 0; j--) {
+          if (!CACHEABLE_BLOCKS.has(content[j]?.type)) continue;
+          content[j].cache_control = { ...control };
+          remaining--;
+          break;
+        }
+      }
+    }
+    return body;
+  }
   if (Array.isArray(body.messages)) {
     for (const msg of body.messages) normalizeMessageContent(msg);
   }
@@ -502,7 +544,10 @@ export function hoistToolResultImages(body) {
   return touched ? { ...body, messages } : body;
 }
 
-export function prepareClaudeRequest(body, provider = null, apiKey = null, connectionId = null, rawHeaders = null, sessionId = null) {
+export function prepareClaudeRequest(body, provider = null, apiKey = null, connectionId = null, rawHeaders = null, sessionId = null, cacheOptions = {}) {
+  if (!body || typeof body !== "object") return body;
+  const official = provider === "claude" || provider === "anthropic";
+  const preserveClientCache = official && (cacheOptions.preserveClientCache ?? hasClaudeCacheControl(body));
   // quirk: MiniMax's Claude-compatible endpoint rejects Anthropic's output_config (400 invalid params)
   if (PROVIDERS[provider]?.quirks?.dropOutputConfig) {
     if (body._directResponsesToClaude && body.output_config?.format) {
@@ -516,7 +561,7 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
   // answer 400 "context_management: Extra inputs are not permitted". Same-format
   // claude→claude requests skip body rebuilding in the translator, so the field
   // rides through to every non-Anthropic provider on the Claude transport.
-  const isAnthropicServing = provider === "claude" || provider?.startsWith?.("anthropic-compatible-");
+  const isAnthropicServing = official || provider?.startsWith?.("anthropic-compatible-");
   if (!isAnthropicServing) {
     delete body.context_management;
   }
@@ -565,7 +610,7 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
     if (thinkingActive && typeof body.top_p === "number" && body.top_p < 0.95) {
       throw Object.assign(new Error("top_p must be at least 0.95 while Claude thinking is active"), { status: 400, code: "invalid_request_error", param: "top_p" });
     }
-    if (provider !== "claude" && !provider?.startsWith("anthropic-compatible") && body.messages?.some(message =>
+    if (!official && !provider?.startsWith("anthropic-compatible") && body.messages?.some(message =>
       Array.isArray(message.content) && message.content.some(block => block.type === CLAUDE_BLOCK.TOOL_RESULT && Array.isArray(block.content) && block.content.some(part => part.type === CLAUDE_BLOCK.IMAGE)))) {
       throw Object.assign(new Error("This provider cannot preserve images inside tool results"), { status: 400, code: "unsupported_parameter", param: "input" });
     }
@@ -576,40 +621,11 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
         body.system = [claudeCodeBlock, ...existing];
       }
     }
-    if (Array.isArray(body.system) && body.system.length > 0) {
-      body.system = body.system.map((block, i) => {
-        const { cache_control, ...rest } = block;
-        return i === body.system.length - 1 ? { ...rest, cache_control: { type: "ephemeral", ttl: "1h" } } : rest;
-      });
-    }
-    if (Array.isArray(body.messages)) {
-      for (let i = body.messages.length - 1; i >= 0; i--) {
-        const msg = body.messages[i];
-        if (msg.role === "assistant" && Array.isArray(msg.content) && msg.content.length > 0) {
-          for (let j = msg.content.length - 1; j >= 0; j--) {
-            const block = msg.content[j];
-            if (block.type !== CLAUDE_BLOCK.THINKING && block.type !== CLAUDE_BLOCK.REDACTED_THINKING) {
-              block.cache_control = { type: "ephemeral" };
-              break;
-            }
-          }
-          break;
-        }
-      }
-      markFinalToolResults(body);
-    }
-    if (Array.isArray(body.tools) && body.tools.length > 0) {
-      const lastCacheable = lastCacheableToolIndex(body.tools);
-      body.tools = body.tools.map((tool, i) => {
-        const { cache_control, ...rest } = tool;
-        return i === lastCacheable ? { ...rest, cache_control: { type: "ephemeral", ttl: "1h" } } : rest;
-      });
-    }
     if (isAnthropicServing && apiKey?.includes("sk-ant-oat")) {
       const sid = sessionId || resolveSessionId({ headers: rawHeaders, body, connectionId, scope: "claude" });
-      return applyCloaking(body, apiKey, sid, connectionId);
+      body = applyCloaking(body, apiKey, sid, connectionId);
     }
-    return body;
+    return anchorClaudeCache(body, { provider, apiKey, preserveClientCache });
   }
 
   // Clamp max_tokens to the model's real output ceiling. Models whose caps
@@ -635,21 +651,13 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
     }
   }
 
-  // 1. System: remove Claude Code prompt for non-Claude compatible providers, then add 1h cache_control to last block
-  if (body.system && Array.isArray(body.system)) {
+  // Third-party transports strip the Claude Code identity prompt.
+  if (!official && body.system && Array.isArray(body.system)) {
     if (provider && provider !== "claude" && provider !== "anthropic") {
       body.system = body.system.filter(block => !block?.text || !block.text.includes("You are Claude Code"));
     }
     if (body.system.length === 0) {
       delete body.system;
-    } else {
-      body.system = body.system.map((block, i) => {
-        const { cache_control, ...rest } = block;
-        if (i === body.system.length - 1) {
-          return { ...rest, cache_control: { type: "ephemeral", ttl: "1h" } };
-        }
-        return rest;
-      });
     }
   }
 
@@ -662,10 +670,10 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
     // Pass 1: remove cache_control + filter empty messages
     for (let i = 0; i < len; i++) {
       const msg = body.messages[i];
-      normalizeMessageContent(msg);
+      normalizeMessageContent(msg, preserveClientCache);
 
       // Remove cache_control from content blocks
-      if (Array.isArray(msg.content)) {
+      if (!preserveClientCache && Array.isArray(msg.content)) {
         for (const block of msg.content) {
           delete block.cache_control;
         }
@@ -698,24 +706,11 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
       provider === "deepseek" ||
       (provider === "opencode-go" && isDeepSeekModel(body?.model));
 
-    // Pass 2 (reverse): add cache_control to last assistant + handle thinking for Anthropic
-    let lastAssistantProcessed = false;
+    // Pass 2: handle thinking for Anthropic-compatible transports.
     for (let i = filtered.length - 1; i >= 0; i--) {
       const msg = filtered[i];
 
       if (msg.role === "assistant" && Array.isArray(msg.content)) {
-        // Add cache_control to last non-thinking block of first (from end) assistant with content
-        // thinking/redacted_thinking blocks do not support cache_control
-        if (!lastAssistantProcessed && msg.content.length > 0) {
-          for (let j = msg.content.length - 1; j >= 0; j--) {
-            const block = msg.content[j];
-            if (block.type !== CLAUDE_BLOCK.THINKING && block.type !== CLAUDE_BLOCK.REDACTED_THINKING) {
-              block.cache_control = { type: "ephemeral" };
-              break;
-            }
-          }
-          lastAssistantProcessed = true;
-        }
 
         // Handle thinking blocks for Anthropic-compatible endpoints.
         if (handlesThinkingBlocks(provider) || deepSeekServed) {
@@ -776,7 +771,7 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
   if (body.tools && Array.isArray(body.tools)) {
     // Strip built-in tools (e.g. web_search_20250305) and normalize to Anthropic-native shape
     // (drop `type` field, fold `function.{name,description,parameters}`) for non-Anthropic providers
-    if (provider !== "claude") {
+    if (!official) {
       // Provider-specific whitelist of Anthropic tool `type` values that the
       // upstream actually accepts. When the provider declares it
       // (e.g. DeepSeek — only web_search_*), keep only listed types; otherwise
@@ -812,14 +807,6 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
         });
     }
 
-    const lastCacheable = lastCacheableToolIndex(body.tools);
-    body.tools = body.tools.map((tool, i) => {
-      const { cache_control, ...rest } = tool;
-      if (i === lastCacheable) {
-        return { ...rest, cache_control: { type: "ephemeral", ttl: "1h" } };
-      }
-      return rest;
-    });
 
     // Remove tools array and tool_choice if empty after filtering
     if (body.tools.length === 0) {
@@ -832,19 +819,17 @@ export function prepareClaudeRequest(body, provider = null, apiKey = null, conne
   // endpoints (OpenCode Go, Kimi, DeepSeek, GLM, MiniMax) accept image blocks
   // only as user content and silently drop them inside a tool result. Move a
   // tool's screenshot out of the result and into the same user turn.
-  if (provider !== "claude" && !provider?.startsWith("anthropic-compatible")) {
+  if (!official && !provider?.startsWith("anthropic-compatible")) {
     body = hoistToolResultImages(body);
   }
 
-  // A tool loop's final tool results: cached now, so the next step reads them.
-  markFinalToolResults(body);
 
   // Apply cloaking for OAuth tokens (billing header + fake user ID)
   // session_id in user_id must match X-Claude-Code-Session-Id for fingerprint consistency
-  if ((provider === "claude" || provider?.startsWith("anthropic-compatible")) && apiKey) {
+  if ((official || provider?.startsWith("anthropic-compatible")) && apiKey) {
     const sid = sessionId || resolveSessionId({ headers: rawHeaders, body, connectionId, scope: "claude" });
     body = applyCloaking(body, apiKey, sid, connectionId);
   }
 
-  return body;
+  return anchorClaudeCache(body, { provider, apiKey, preserveClientCache });
 }

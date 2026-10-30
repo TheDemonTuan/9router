@@ -6,6 +6,7 @@ import { ClaudeCustomInputDecoder } from "../concerns/claudeCustomInput.js";
 import { hasClaudeContinuationScope, sealClaudeReasoning } from "../concerns/claudeContinuation.js";
 import { stripCloakSuffix } from "../../utils/claudeCloaking.js";
 import { buildResponseSnapshot, normalizeResponseId } from "../../transformer/responsesBuilder.js";
+import { mergeUsage, normalizeCacheCreation } from "../../utils/usageTracking.js";
 
 function emitter(state, events) {
   return (type, data) => {
@@ -27,8 +28,10 @@ function start(state, emit, message = {}) {
 
 function usage(state, raw) {
   if (!raw || typeof raw !== "object") return;
-  Object.assign(state.claudeResponses.usage, raw);
+  state.claudeResponses.usage = mergeUsage(state.claudeResponses.usage, raw);
   state.usage = toOpenAIUsage(state.claudeResponses.usage, FORMATS.CLAUDE);
+  const breakdown = normalizeCacheCreation(state.claudeResponses.usage.cache_creation);
+  if (breakdown) state.usage.cache_creation = breakdown;
 }
 
 function context(state) {

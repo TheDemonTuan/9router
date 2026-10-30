@@ -110,7 +110,7 @@ export function cloakClaudeTools(body) {
   }
 
   // Client tools first, then CC decoy tools (no overlap: client tools all have _cc suffix)
-  const allTools = [...clientDeclarations, ...CC_DECOY_TOOLS];
+  const allTools = [...clientDeclarations, ...CC_DECOY_TOOLS.map(tool => ({ ...tool }))];
 
   // Rename tool_use in message history (all client tools get suffix)
   const renamedMessages = body.messages?.map(msg => {

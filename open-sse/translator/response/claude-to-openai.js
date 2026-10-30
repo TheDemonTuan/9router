@@ -5,6 +5,7 @@ import { buildChunk } from "../concerns/chunk.js";
 import { toOpenAIUsage } from "../concerns/usage.js";
 import { reasoningDelta } from "../concerns/reasoning.js";
 import { toOpenAIFinish } from "../concerns/finishReason.js";
+import { mergeUsage, normalizeCacheCreation } from "../../utils/usageTracking.js";
 
 // Create OpenAI chunk helper
 function createChunk(state, delta, finishReason = null) {
@@ -38,6 +39,7 @@ export function claudeToOpenAIResponse(chunk, state) {
         const promptTokens = inputTokens + cacheReadTokens + cacheCreationTokens;
         state.usage = {
           prompt_tokens: promptTokens,
+          cached_tokens: cacheReadTokens,
           completion_tokens: 0,
           total_tokens: promptTokens,
           input_tokens: inputTokens,
@@ -45,6 +47,8 @@ export function claudeToOpenAIResponse(chunk, state) {
         };
         if (cacheReadTokens > 0) state.usage.cache_read_input_tokens = cacheReadTokens;
         if (cacheCreationTokens > 0) state.usage.cache_creation_input_tokens = cacheCreationTokens;
+        const breakdown = normalizeCacheCreation(startUsage.cache_creation);
+        if (breakdown) state.usage.cache_creation = breakdown;
       }
       results.push(createChunk(state, { role: ROLE.ASSISTANT }));
       break;
@@ -131,6 +135,7 @@ export function claudeToOpenAIResponse(chunk, state) {
 
         state.usage = {
           prompt_tokens: promptTokens,
+          cached_tokens: cacheReadTokens,
           completion_tokens: outputTokens,
           total_tokens: promptTokens + outputTokens,
           input_tokens: inputTokens,
@@ -139,6 +144,8 @@ export function claudeToOpenAIResponse(chunk, state) {
 
         if (cacheReadTokens > 0) state.usage.cache_read_input_tokens = cacheReadTokens;
         if (cacheCreationTokens > 0) state.usage.cache_creation_input_tokens = cacheCreationTokens;
+        const breakdown = mergeUsage(prev, chunk.usage)?.cache_creation;
+        if (breakdown) state.usage.cache_creation = breakdown;
       }
 
       if (chunk.delta?.stop_reason) {

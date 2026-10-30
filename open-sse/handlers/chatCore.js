@@ -2,7 +2,7 @@ import { detectFormat, getTargetFormat, resolveTransport, normalizeThinkingConfi
 import { translateRequest } from "../translator/index.js";
 import { applyThinking, captureThinking, extractThinking, stripThinkingSuffix } from "../translator/concerns/thinkingUnified.js";
 import { FORMATS } from "../translator/formats.js";
-import { normalizeClaudePassthrough, anchorClaudeCache } from "../translator/formats/claude.js";
+import { normalizeClaudePassthrough, anchorClaudeCache, hasClaudeCacheControl } from "../translator/formats/claude.js";
 import { createStreamController } from "../utils/streamHandler.js";
 import { refreshWithRetry } from "../services/tokenRefresh.js";
 import { createRequestLogger } from "../utils/requestLogger.js";
@@ -89,6 +89,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const reqTag = log?.tagForSession ? log.tagForSession(sessionSeed) : (log?.nextTag ? log.nextTag() : "");
 
   const sourceFormat = sourceFormatOverride || detectFormat(body);
+  const preserveClientCache = sourceFormat === FORMATS.CLAUDE && hasClaudeCacheControl(body);
 
   // Check for bypass patterns (warmup, skip, cc naming)
   const bypassResponse = handleBypassRequest(body, model, userAgent, ccFilterNaming);
@@ -358,7 +359,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       }
     }
     // Normalize newer Cowork/CC beta shapes (adaptive thinking, mid-conversation system) the API rejects
-    if (clientTool === "claude") normalizeClaudePassthrough(translatedBody, translatedBody.model);
+    if (clientTool === "claude") normalizeClaudePassthrough(translatedBody, translatedBody.model, { preserveClientCache: (provider === "claude" || provider === "anthropic") && preserveClientCache });
   } else if (sameWireCodex) {
     translatedBody = { ...sourceBody, model: wireModel };
     try {
@@ -590,7 +591,9 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   // Pin cache breakpoints to the final body — every saver above can reshape
   // system/tools/messages, and a stale anchor costs a full prefix rewrite.
-  if (passthrough && clientTool === "claude") anchorClaudeCache(translatedBody);
+  if (finalFormat === FORMATS.CLAUDE && (provider === "claude" || provider === "anthropic" || (passthrough && clientTool === "claude"))) {
+    anchorClaudeCache(translatedBody, { provider, apiKey: credentials?.accessToken || credentials?.apiKey || null, preserveClientCache });
+  }
   } catch (error) {
     saverReason = rtkSignal?.aborted ? "cancelled" : "failed";
     throw error;

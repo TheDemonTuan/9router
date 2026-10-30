@@ -2,13 +2,15 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("@/lib/usageDb.js", () => ({
   trackPendingRequest: vi.fn(), appendRequestLog: vi.fn(async () => {}),
   saveRequestDetail: vi.fn(async () => {}), saveUsageHistory: vi.fn(async () => {}),
-  saveUsageStats: vi.fn(async () => {}),
+  saveUsageStats: vi.fn(async () => {}), saveRequestUsage: vi.fn(async () => {}),
 }));
 import "../translator/registerAll.js";
 import { FORMATS } from "../../open-sse/translator/formats.js";
 import { createSSEStream } from "../../open-sse/utils/stream.js";
-import { translateNonStreamingResponse } from "../../open-sse/handlers/chatCore/nonStreamingHandler.js";
+import { translateNonStreamingResponse, handleNonStreamingResponse } from "../../open-sse/handlers/chatCore/nonStreamingHandler.js";
 import { createStreamController, pipeWithDisconnect } from "../../open-sse/utils/streamHandler.js";
+import { canonicalizeUsage } from "../../open-sse/utils/usageTracking.js";
+import { saveRequestUsage } from "@/lib/usageDb.js";
 
 const encoder = new TextEncoder();
 const start = { type: "message_start", message: { id: "msg_pipeline", model: "claude-test", role: "assistant", content: [], usage: { input_tokens: 8, cache_read_input_tokens: 12, output_tokens: 0 } } };
@@ -28,6 +30,57 @@ async function run(bytes, fragment = bytes.length) {
   return parse(await new Response(source.pipeThrough(transform())).text());
 }
 const terminal = events => events.filter(e => ["response.completed", "response.incomplete", "response.failed"].includes(e.type));
+
+const providerUsageFixture = { input_tokens: 100, cache_read_input_tokens: 200, cache_creation_input_tokens: 30, cache_creation: { ephemeral_5m_input_tokens: 10, ephemeral_1h_input_tokens: 20 }, output_tokens: 50 };
+const usageEvents = () => textEvents.map(event => event.type === "message_start"
+  ? { ...event, message: { ...event.message, usage: { ...providerUsageFixture, output_tokens: 0 } } }
+  : event.type === "message_delta" ? { ...event, usage: { output_tokens: 50 } } : event);
+
+describe("Claude provider usage fidelity", () => {
+  it.each(["cache_read_input_tokens", "cache_creation_input_tokens"])("never estimates a cache-only %s response", async field => {
+    const complete = vi.fn();
+    const input = usageEvents().map(event => event.type === "message_start"
+      ? { ...event, message: { ...event.message, usage: { input_tokens: 0, output_tokens: 0, [field]: 30 } } }
+      : event.type === "message_delta" ? { ...event, usage: { output_tokens: 0 } } : event);
+    const stream = new ReadableStream({ start(c) { c.enqueue(wire(input)); c.close(); } }).pipeThrough(createSSEStream({ targetFormat: FORMATS.CLAUDE, sourceFormat: FORMATS.OPENAI, provider: "claude", model: "claude-sonnet-4-6", onStreamComplete: complete }));
+    const output = parse(await new Response(stream).text()).find(event => event.usage).usage;
+    expect(output).toMatchObject({ prompt_tokens: 30, completion_tokens: 0, total_tokens: 30 });
+    expect(output.estimated).toBeUndefined();
+    const accounting = canonicalizeUsage(complete.mock.calls[0][1]);
+    expect(accounting.prompt_tokens).toBe(30);
+    expect(accounting[field === "cache_read_input_tokens" ? "cached_tokens" : field]).toBe(30);
+  });
+  it.each([FORMATS.OPENAI, FORMATS.OPENAI_RESPONSES])("keeps canonical TTL accounting after streaming translation to %s", async sourceFormat => {
+    const complete = vi.fn();
+    const stream = new ReadableStream({ start(c) { c.enqueue(wire(usageEvents())); c.close(); } }).pipeThrough(createSSEStream({ targetFormat: FORMATS.CLAUDE, sourceFormat, provider: "claude", model: "claude-sonnet-4-6", onStreamComplete: complete }));
+    await new Response(stream).text();
+    expect(canonicalizeUsage(complete.mock.calls[0][1])).toMatchObject({ prompt_tokens: 330, completion_tokens: 50, total_tokens: 380, cached_tokens: 200, cache_creation_input_tokens: 30, cache_creation: providerUsageFixture.cache_creation });
+  });
+  it("keeps raw TTL accounting before forced Claude SSE becomes Responses JSON", async () => {
+    saveRequestUsage.mockClear();
+    const result = await handleNonStreamingResponse({ providerResponse: new Response(wire(usageEvents()), { headers: { "content-type": "text/event-stream" } }), provider: "claude", model: "claude-sonnet-4-6", sourceFormat: FORMATS.OPENAI_RESPONSES, targetFormat: FORMATS.CLAUDE, body: {}, requestStartTime: Date.now(), trackDone() {}, appendLog() {} });
+    const output = await result.response.json();
+    expect(output.usage).toEqual({ input_tokens: 330, output_tokens: 50, total_tokens: 380, input_tokens_details: { cached_tokens: 200 } });
+    expect(saveRequestUsage.mock.calls[0][0].tokens).toMatchObject({ prompt_tokens: 330, cached_tokens: 200, cache_creation_input_tokens: 30, cache_creation: providerUsageFixture.cache_creation });
+  });
+  it.each([FORMATS.CLAUDE, FORMATS.OPENAI, FORMATS.OPENAI_RESPONSES])("projects JSON usage without a buffer for %s", async sourceFormat => {
+    const message = { id: "msg_usage", type: "message", role: "assistant", model: "claude-sonnet-4-6", stop_reason: "end_turn", content: [{ type: "text", text: "answer" }], usage: structuredClone(providerUsageFixture) };
+    const result = await handleNonStreamingResponse({ providerResponse: Response.json(message), provider: "claude", model: message.model, sourceFormat, targetFormat: FORMATS.CLAUDE, body: {}, requestStartTime: Date.now(), trackDone() {}, appendLog() {} });
+    const output = await result.response.json();
+    if (sourceFormat === FORMATS.CLAUDE) expect(output.usage).toEqual(providerUsageFixture);
+    else if (sourceFormat === FORMATS.OPENAI) expect(output.usage).toMatchObject({ prompt_tokens: 330, completion_tokens: 50, total_tokens: 380, prompt_tokens_details: { cached_tokens: 200, cache_creation_tokens: 30 } });
+    else expect(output.usage).toEqual({ input_tokens: 330, output_tokens: 50, total_tokens: 380, input_tokens_details: { cached_tokens: 200 } });
+  });
+  it.each([FORMATS.CLAUDE, FORMATS.OPENAI, FORMATS.OPENAI_RESPONSES])("preserves provider SSE counters for %s", async sourceFormat => {
+    const stream = new ReadableStream({ start(c) { c.enqueue(wire(usageEvents())); c.close(); } }).pipeThrough(createSSEStream({ targetFormat: FORMATS.CLAUDE, sourceFormat, provider: "claude", model: "claude-sonnet-4-6" }));
+    const events = parse(await new Response(stream).text());
+    if (sourceFormat === FORMATS.CLAUDE) {
+      expect(events.find(e => e.type === "message_start").message.usage).toEqual({ ...providerUsageFixture, output_tokens: 0 });
+      expect(events.find(e => e.type === "message_delta").usage).toEqual({ output_tokens: 50 });
+    } else if (sourceFormat === FORMATS.OPENAI) expect(events.find(e => e.usage)?.usage).toMatchObject({ prompt_tokens: 330, completion_tokens: 50, total_tokens: 380, prompt_tokens_details: { cached_tokens: 200, cache_creation_tokens: 30 } });
+    else expect(terminal(events)[0].response.usage).toEqual({ input_tokens: 330, output_tokens: 50, total_tokens: 380, input_tokens_details: { cached_tokens: 200 } });
+  });
+});
 
 describe("Responses client through actual Claude SSE pipeline", () => {
   it("turns an upstream SSE error after HTTP 200 into exactly one failure", async () => {

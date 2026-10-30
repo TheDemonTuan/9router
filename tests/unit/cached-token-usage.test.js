@@ -1,8 +1,43 @@
 import { describe, it, expect } from "vitest";
-import { canonicalizeUsage, extractUsage, mergeUsage } from "../../open-sse/utils/usageTracking.js";
-import { calculateCostFromTokens } from "../../open-sse/providers/pricing.js";
+import { canonicalizeUsage, extractUsage, mergeUsage, normalizeUsage, hasValidUsage } from "../../open-sse/utils/usageTracking.js";
+import { calculateCostFromTokens, getPricingForModel } from "../../open-sse/providers/pricing.js";
 import { buildUsage, toOpenAIUsage } from "../../open-sse/translator/concerns/usage.js";
 
+const split = { ephemeral_5m_input_tokens: 10, ephemeral_1h_input_tokens: 20 };
+const raw = { input_tokens: 100, cache_read_input_tokens: 200, cache_creation_input_tokens: 30, cache_creation: split, output_tokens: 50 };
+describe("Claude TTL accounting", () => {
+  it("retains TTL counters through output-only and partial deltas without double-folding", () => {
+    const start = extractUsage({ type: "message_start", message: { usage: raw } });
+    const delta = extractUsage({ type: "message_delta", usage: { output_tokens: 50 } });
+    const merged = mergeUsage(start, delta);
+    expect(merged.cache_creation).toEqual(split);
+    expect(mergeUsage(merged, { cache_creation: { ephemeral_5m_input_tokens: 5 } }).cache_creation).toEqual(split);
+    const canonical = canonicalizeUsage(merged);
+    expect(canonical).toMatchObject({ prompt_tokens: 330, completion_tokens: 50, total_tokens: 380, cached_tokens: 200, cache_creation_input_tokens: 30, cache_creation: split });
+    expect(canonicalizeUsage(canonical)).toEqual(canonical);
+    expect(calculateCostFromTokens(canonical, getPricingForModel("claude", "claude-sonnet-4-6"))).toBeCloseTo(0.0012675, 12);
+  });
+  it.each([["claude-sonnet-4-6", 0.6], ["claude-opus-5-5", 0.8]])("prices pure 1h writes for %s", (model, expected) => {
+    expect(calculateCostFromTokens({ prompt_tokens: 100000, cache_creation_input_tokens: 100000, cache_creation: { ephemeral_1h_input_tokens: 100000 } }, getPricingForModel("claude", model))).toBeCloseTo(expected, 12);
+  });
+  it.each([null, {}, { ephemeral_1h_input_tokens: -1 }, { ephemeral_1h_input_tokens: Infinity }, { ephemeral_1h_input_tokens: "bad" }])("does not invent a split for absent/invalid data %j", cache_creation => {
+    expect(normalizeUsage({ ...raw, cache_creation }).cache_creation).toBeUndefined();
+    expect(canonicalizeUsage({ ...raw, cache_creation }).cache_creation).toBeUndefined();
+  });
+  it("uses aggregate fallback for invalid/over-budget splits, remainder and optional rates", () => {
+    const pricing = { input: 3, output: 15, cached: 0.3, cache_creation: 3.75, cache_creation_1h: 6 };
+    const tokens = { prompt_tokens: 30, cache_creation_input_tokens: 30 };
+    for (const cache_creation of [undefined, {}, { ephemeral_1h_input_tokens: 31 }, { ephemeral_1h_input_tokens: -1 }, { ephemeral_5m_input_tokens: NaN, ephemeral_1h_input_tokens: 20 }]) {
+      expect(calculateCostFromTokens({ ...tokens, cache_creation }, pricing)).toBeCloseTo(30 * 3.75 / 1e6, 12);
+    }
+    expect(calculateCostFromTokens({ ...tokens, cache_creation: { ephemeral_1h_input_tokens: 20 } }, pricing)).toBeCloseTo((20 * 6 + 10 * 3.75) / 1e6, 12);
+    expect(calculateCostFromTokens({ ...tokens, cache_creation: split }, { input: 3, output: 15, cache_creation: 0, cache_creation_1h: 0 })).toBe(0);
+    expect(calculateCostFromTokens({ ...tokens, cache_creation: split }, { input: 3, output: 15, cache_creation: 3.75 })).toBeCloseTo(30 * 3.75 / 1e6, 12);
+  });
+  it.each(["cache_read_input_tokens", "cache_creation_input_tokens"])("recognizes cache-only %s as authoritative", field => {
+    expect(hasValidUsage({ input_tokens: 0, output_tokens: 0, [field]: 30 })).toBe(true);
+  });
+});
 // Canonical convention (single source of truth for storage + cost):
 //   prompt_tokens             = total input INCLUDING cache read + cache creation
 //   cached_tokens             = cache-read portion (subset of prompt_tokens)

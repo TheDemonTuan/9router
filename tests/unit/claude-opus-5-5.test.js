@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { getModelsByProviderId } from "../../open-sse/config/providerModels.js";
 import { getCapabilitiesForModel } from "../../open-sse/providers/capabilities.js";
-import { getPricingForModel } from "../../open-sse/providers/pricing.js";
+import { calculateCostFromTokens, getPricingForModel } from "../../open-sse/providers/pricing.js";
 import { getThinkingLevels } from "../../open-sse/providers/thinkingLevels.js";
 import { applyThinking } from "../../open-sse/translator/concerns/thinkingUnified.js";
 import { prepareClaudeRequest } from "../../open-sse/translator/formats/claude.js";
@@ -34,8 +34,9 @@ describe("Claude Opus 5.5", () => {
     expect(getThinkingLevels("claude", "claude-opus-5-5")).not.toContain("none");
   });
 
-  it.each(OPUS_55_IDS)("prices %s at Opus 5.5 rates", (model) => {
-    expect(getPricingForModel("claude", model)).toEqual({ input: 4, output: 20, cached: 0.2, reasoning: 20, cache_creation: 5 });
+  it.each(OPUS_55_IDS)("bills cached continuation and 1h writes at Opus prices for %s", model => {
+    const cost = calculateCostFromTokens({ prompt_tokens: 330, completion_tokens: 50, cached_tokens: 200, cache_creation_input_tokens: 30, cache_creation: { ephemeral_5m_input_tokens: 10, ephemeral_1h_input_tokens: 20 } }, getPricingForModel("claude", model));
+    expect(cost).toBeCloseTo((100 * 4 + 200 * 0.2 + 10 * 5 + 20 * 8 + 50 * 20) / 1e6, 12);
   });
 });
 
